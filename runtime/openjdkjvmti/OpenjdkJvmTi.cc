@@ -49,6 +49,7 @@
 #include "thread-inl.h"
 #include "thread_list.h"
 #include "ti_class.h"
+#include "ti_dump.h"
 #include "ti_field.h"
 #include "ti_heap.h"
 #include "ti_jni.h"
@@ -137,6 +138,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError SuspendThread(jvmtiEnv* env, jthread thread) {
+    ENSURE_HAS_CAP(env, can_suspend);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -144,10 +146,12 @@ class JvmtiFunctions {
                                       jint request_count,
                                       const jthread* request_list,
                                       jvmtiError* results) {
+    ENSURE_HAS_CAP(env, can_suspend);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ResumeThread(jvmtiEnv* env, jthread thread) {
+    ENSURE_HAS_CAP(env, can_suspend);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -155,14 +159,17 @@ class JvmtiFunctions {
                                      jint request_count,
                                      const jthread* request_list,
                                      jvmtiError* results) {
+    ENSURE_HAS_CAP(env, can_suspend);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError StopThread(jvmtiEnv* env, jthread thread, jobject exception) {
+    ENSURE_HAS_CAP(env, can_signal_thread);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError InterruptThread(jvmtiEnv* env, jthread thread) {
+    ENSURE_HAS_CAP(env, can_signal_thread);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -174,6 +181,7 @@ class JvmtiFunctions {
                                         jthread thread,
                                         jint* owned_monitor_count_ptr,
                                         jobject** owned_monitors_ptr) {
+    ENSURE_HAS_CAP(env, can_get_owned_monitor_info);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -181,12 +189,14 @@ class JvmtiFunctions {
                                                   jthread thread,
                                                   jint* monitor_info_count_ptr,
                                                   jvmtiMonitorStackDepthInfo** monitor_info_ptr) {
+    ENSURE_HAS_CAP(env, can_get_owned_monitor_stack_depth_info);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError GetCurrentContendedMonitor(jvmtiEnv* env,
                                                jthread thread,
                                                jobject* monitor_ptr) {
+    ENSURE_HAS_CAP(env, can_get_current_contended_monitor);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -270,6 +280,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError PopFrame(jvmtiEnv* env, jthread thread) {
+    ENSURE_HAS_CAP(env, can_pop_frame);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -282,30 +293,37 @@ class JvmtiFunctions {
   }
 
   static jvmtiError NotifyFramePop(jvmtiEnv* env, jthread thread, jint depth) {
+    ENSURE_HAS_CAP(env, can_generate_frame_pop_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnObject(jvmtiEnv* env, jthread thread, jobject value) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnInt(jvmtiEnv* env, jthread thread, jint value) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnLong(jvmtiEnv* env, jthread thread, jlong value) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnFloat(jvmtiEnv* env, jthread thread, jfloat value) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnDouble(jvmtiEnv* env, jthread thread, jdouble value) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ForceEarlyReturnVoid(jvmtiEnv* env, jthread thread) {
+    ENSURE_HAS_CAP(env, can_force_early_return);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -315,6 +333,7 @@ class JvmtiFunctions {
                                      jobject initial_object,
                                      const jvmtiHeapCallbacks* callbacks,
                                      const void* user_data) {
+    ENSURE_HAS_CAP(env, can_tag_objects);
     HeapUtil heap_util(&gObjectTagTable);
     return heap_util.FollowReferences(env,
                                       heap_filter,
@@ -401,6 +420,7 @@ class JvmtiFunctions {
       jobject object,
       jvmtiObjectReferenceCallback object_reference_callback,
       const void* user_data) {
+    ENSURE_HAS_CAP(env, can_tag_objects);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -409,6 +429,7 @@ class JvmtiFunctions {
                                                 jvmtiStackReferenceCallback stack_ref_callback,
                                                 jvmtiObjectReferenceCallback object_ref_callback,
                                                 const void* user_data) {
+    ENSURE_HAS_CAP(env, can_tag_objects);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -416,6 +437,7 @@ class JvmtiFunctions {
                                     jvmtiHeapObjectFilter object_filter,
                                     jvmtiHeapObjectCallback heap_object_callback,
                                     const void* user_data) {
+    ENSURE_HAS_CAP(env, can_tag_objects);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -424,6 +446,7 @@ class JvmtiFunctions {
                                                 jvmtiHeapObjectFilter object_filter,
                                                 jvmtiHeapObjectCallback heap_object_callback,
                                                 const void* user_data) {
+    ENSURE_HAS_CAP(env, can_tag_objects);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -432,6 +455,7 @@ class JvmtiFunctions {
                                    jint depth,
                                    jint slot,
                                    jobject* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -439,6 +463,7 @@ class JvmtiFunctions {
                                      jthread thread,
                                      jint depth,
                                      jobject* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -447,6 +472,7 @@ class JvmtiFunctions {
                                 jint depth,
                                 jint slot,
                                 jint* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -455,6 +481,7 @@ class JvmtiFunctions {
                                  jint depth,
                                  jint slot,
                                  jlong* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -463,6 +490,7 @@ class JvmtiFunctions {
                                   jint depth,
                                   jint slot,
                                   jfloat* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -471,6 +499,7 @@ class JvmtiFunctions {
                                    jint depth,
                                    jint slot,
                                    jdouble* value_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -479,6 +508,7 @@ class JvmtiFunctions {
                                    jint depth,
                                    jint slot,
                                    jobject value) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -487,6 +517,7 @@ class JvmtiFunctions {
                                 jint depth,
                                 jint slot,
                                 jint value) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -495,6 +526,7 @@ class JvmtiFunctions {
                                  jint depth,
                                  jint slot,
                                  jlong value) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -503,6 +535,7 @@ class JvmtiFunctions {
                                   jint depth,
                                   jint slot,
                                   jfloat value) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -511,30 +544,37 @@ class JvmtiFunctions {
                                    jint depth,
                                    jint slot,
                                    jdouble value) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError SetBreakpoint(jvmtiEnv* env, jmethodID method, jlocation location) {
+    ENSURE_HAS_CAP(env, can_generate_breakpoint_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ClearBreakpoint(jvmtiEnv* env, jmethodID method, jlocation location) {
+    ENSURE_HAS_CAP(env, can_generate_breakpoint_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError SetFieldAccessWatch(jvmtiEnv* env, jclass klass, jfieldID field) {
+    ENSURE_HAS_CAP(env, can_generate_field_access_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ClearFieldAccessWatch(jvmtiEnv* env, jclass klass, jfieldID field) {
+    ENSURE_HAS_CAP(env, can_generate_field_access_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError SetFieldModificationWatch(jvmtiEnv* env, jclass klass, jfieldID field) {
+    ENSURE_HAS_CAP(env, can_generate_field_modification_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError ClearFieldModificationWatch(jvmtiEnv* env, jclass klass, jfieldID field) {
+    ENSURE_HAS_CAP(env, can_generate_field_modification_events);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -562,6 +602,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetSourceFileName(jvmtiEnv* env, jclass klass, char** source_name_ptr) {
+    ENSURE_HAS_CAP(env, can_get_source_file_name);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -602,6 +643,7 @@ class JvmtiFunctions {
                                     jint* constant_pool_count_ptr,
                                     jint* constant_pool_byte_count_ptr,
                                     unsigned char** constant_pool_bytes_ptr) {
+    ENSURE_HAS_CAP(env, can_get_constant_pool);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -628,10 +670,12 @@ class JvmtiFunctions {
   static jvmtiError GetSourceDebugExtension(jvmtiEnv* env,
                                             jclass klass,
                                             char** source_debug_extension_ptr) {
+    ENSURE_HAS_CAP(env, can_get_source_debug_extension);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError RetransformClasses(jvmtiEnv* env, jint class_count, const jclass* classes) {
+    ENSURE_HAS_CAP(env, can_retransform_classes);
     std::string error_msg;
     jvmtiError res = Transformer::RetransformClasses(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                                      art::Runtime::Current(),
@@ -648,6 +692,7 @@ class JvmtiFunctions {
   static jvmtiError RedefineClasses(jvmtiEnv* env,
                                     jint class_count,
                                     const jvmtiClassDefinition* class_definitions) {
+    ENSURE_HAS_CAP(env, can_redefine_classes);
     std::string error_msg;
     jvmtiError res = Redefiner::RedefineClasses(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                                 art::Runtime::Current(),
@@ -672,6 +717,7 @@ class JvmtiFunctions {
   static jvmtiError GetObjectMonitorUsage(jvmtiEnv* env,
                                           jobject object,
                                           jvmtiMonitorUsage* info_ptr) {
+    ENSURE_HAS_CAP(env, can_get_monitor_info);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -702,6 +748,7 @@ class JvmtiFunctions {
                                      jclass klass,
                                      jfieldID field,
                                      jboolean* is_synthetic_ptr) {
+    ENSURE_HAS_CAP(env, can_get_synthetic_attribute);
     return FieldUtil::IsFieldSynthetic(env, klass, field, is_synthetic_ptr);
   }
 
@@ -741,6 +788,7 @@ class JvmtiFunctions {
                                        jmethodID method,
                                        jint* entry_count_ptr,
                                        jvmtiLineNumberEntry** table_ptr) {
+    ENSURE_HAS_CAP(env, can_get_line_numbers);
     return MethodUtil::GetLineNumberTable(env, method, entry_count_ptr, table_ptr);
   }
 
@@ -755,6 +803,7 @@ class JvmtiFunctions {
                                           jmethodID method,
                                           jint* entry_count_ptr,
                                           jvmtiLocalVariableEntry** table_ptr) {
+    ENSURE_HAS_CAP(env, can_access_local_variables);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -762,6 +811,7 @@ class JvmtiFunctions {
                                  jmethodID method,
                                  jint* bytecode_count_ptr,
                                  unsigned char** bytecodes_ptr) {
+    ENSURE_HAS_CAP(env, can_get_bytecodes);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -770,6 +820,7 @@ class JvmtiFunctions {
   }
 
   static jvmtiError IsMethodSynthetic(jvmtiEnv* env, jmethodID method, jboolean* is_synthetic_ptr) {
+    ENSURE_HAS_CAP(env, can_get_synthetic_attribute);
     return MethodUtil::IsMethodSynthetic(env, method, is_synthetic_ptr);
   }
 
@@ -778,10 +829,12 @@ class JvmtiFunctions {
   }
 
   static jvmtiError SetNativeMethodPrefix(jvmtiEnv* env, const char* prefix) {
+    ENSURE_HAS_CAP(env, can_set_native_method_prefix);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError SetNativeMethodPrefixes(jvmtiEnv* env, jint prefix_count, char** prefixes) {
+    ENSURE_HAS_CAP(env, can_set_native_method_prefix);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -854,7 +907,6 @@ class JvmtiFunctions {
                                              jthread event_thread,
                                              ...) {
     ENSURE_VALID_ENV(env);
-    // TODO: Check for capabilities.
     art::Thread* art_thread = nullptr;
     if (event_thread != nullptr) {
       // TODO: Need non-aborting call here, to return JVMTI_ERROR_INVALID_THREAD.
@@ -1052,18 +1104,22 @@ class JvmtiFunctions {
   }
 
   static jvmtiError GetCurrentThreadCpuTimerInfo(jvmtiEnv* env, jvmtiTimerInfo* info_ptr) {
+    ENSURE_HAS_CAP(env, can_get_current_thread_cpu_time);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError GetCurrentThreadCpuTime(jvmtiEnv* env, jlong* nanos_ptr) {
+    ENSURE_HAS_CAP(env, can_get_current_thread_cpu_time);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError GetThreadCpuTimerInfo(jvmtiEnv* env, jvmtiTimerInfo* info_ptr) {
+    ENSURE_HAS_CAP(env, can_get_thread_cpu_time);
     return ERR(NOT_IMPLEMENTED);
   }
 
   static jvmtiError GetThreadCpuTime(jvmtiEnv* env, jthread thread, jlong* nanos_ptr) {
+    ENSURE_HAS_CAP(env, can_get_thread_cpu_time);
     return ERR(NOT_IMPLEMENTED);
   }
 
@@ -1309,9 +1365,23 @@ extern "C" bool ArtPlugin_Initialize() {
     PhaseUtil::SetToOnLoad();
   }
   PhaseUtil::Register(&gEventHandler);
+  ThreadUtil::Register(&gEventHandler);
+  ClassUtil::Register(&gEventHandler);
+  DumpUtil::Register(&gEventHandler);
+  SearchUtil::Register();
 
   runtime->GetJavaVM()->AddEnvironmentHook(GetEnvHandler);
   runtime->AddSystemWeakHolder(&gObjectTagTable);
+
+  return true;
+}
+
+extern "C" bool ArtPlugin_Deinitialize() {
+  PhaseUtil::Unregister();
+  ThreadUtil::Unregister();
+  ClassUtil::Unregister();
+  DumpUtil::Unregister();
+  SearchUtil::Unregister();
 
   return true;
 }

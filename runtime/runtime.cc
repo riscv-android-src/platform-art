@@ -114,6 +114,7 @@
 #include "native/java_lang_Thread.h"
 #include "native/java_lang_Throwable.h"
 #include "native/java_lang_VMClassLoader.h"
+#include "native/java_lang_invoke_MethodHandleImpl.h"
 #include "native/java_lang_ref_FinalizerReference.h"
 #include "native/java_lang_ref_Reference.h"
 #include "native/java_lang_reflect_Array.h"
@@ -735,6 +736,13 @@ bool Runtime::Start() {
                             GetInstructionSetString(kRuntimeISA));
   }
 
+  // Send the initialized phase event. Send it before starting daemons, as otherwise
+  // sending thread events becomes complicated.
+  {
+    ScopedObjectAccess soa(self);
+    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
+  }
+
   StartDaemonThreads();
 
   {
@@ -754,12 +762,6 @@ bool Runtime::Start() {
                  trace_config_->trace_output_mode,
                  trace_config_->trace_mode,
                  0);
-  }
-
-  // Send the initialized phase event.
-  {
-    ScopedObjectAccess soa(self);
-    callbacks_->NextRuntimePhase(RuntimePhaseCallback::RuntimePhase::kInit);
   }
 
   return true;
@@ -1068,16 +1070,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   experimental_flags_ = runtime_options.GetOrDefault(Opt::Experimental);
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
 
-  if (experimental_flags_ & ExperimentalFlags::kRuntimePlugins) {
-    plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
-  }
-  if (experimental_flags_ & ExperimentalFlags::kAgents) {
-    agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
-    // TODO Add back in -agentlib
-    // for (auto lib : runtime_options.ReleaseOrDefault(Opt::AgentLib)) {
-    //   agents_.push_back(lib);
-    // }
-  }
+  plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
+  agents_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
+  // TODO Add back in -agentlib
+  // for (auto lib : runtime_options.ReleaseOrDefault(Opt::AgentLib)) {
+  //   agents_.push_back(lib);
+  // }
+
   XGcOption xgc_option = runtime_options.GetOrDefault(Opt::GcOption);
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
@@ -1538,6 +1537,7 @@ void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_java_lang_Class(env);
   register_java_lang_DexCache(env);
   register_java_lang_Object(env);
+  register_java_lang_invoke_MethodHandleImpl(env);
   register_java_lang_ref_FinalizerReference(env);
   register_java_lang_reflect_Array(env);
   register_java_lang_reflect_Constructor(env);

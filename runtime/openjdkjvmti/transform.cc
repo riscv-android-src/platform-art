@@ -68,19 +68,17 @@ jvmtiError Transformer::RetransformClassesDirect(
   for (ArtClassDefinition& def : *definitions) {
     jint new_len = -1;
     unsigned char* new_data = nullptr;
-    // Static casts are so that we get the right template initialization for the special event
-    // handling code required by the ClassFileLoadHooks.
-    gEventHandler.DispatchEvent(self,
-                                ArtJvmtiEvent::kClassFileLoadHookRetransformable,
-                                GetJniEnv(env),
-                                static_cast<jclass>(def.klass),
-                                static_cast<jobject>(def.loader),
-                                static_cast<const char*>(def.name.c_str()),
-                                static_cast<jobject>(def.protection_domain),
-                                static_cast<jint>(def.dex_len),
-                                static_cast<const unsigned char*>(def.dex_data.get()),
-                                static_cast<jint*>(&new_len),
-                                static_cast<unsigned char**>(&new_data));
+    gEventHandler.DispatchEvent<ArtJvmtiEvent::kClassFileLoadHookRetransformable>(
+        self,
+        GetJniEnv(env),
+        def.klass,
+        def.loader,
+        def.name.c_str(),
+        def.protection_domain,
+        def.dex_len,
+        static_cast<const unsigned char*>(def.dex_data.get()),
+        &new_len,
+        &new_data);
     def.SetNewDexData(env, new_len, new_data);
   }
   return OK;
@@ -139,20 +137,6 @@ jvmtiError GetClassLocation(ArtJvmTiEnv* env, jclass klass, /*out*/std::string* 
   return OK;
 }
 
-static jvmtiError CopyDataIntoJvmtiBuffer(ArtJvmTiEnv* env,
-                                          const unsigned char* source,
-                                          jint len,
-                                          /*out*/unsigned char** dest) {
-  jvmtiError res = env->Allocate(len, dest);
-  if (res != OK) {
-    return res;
-  }
-  memcpy(reinterpret_cast<void*>(*dest),
-         reinterpret_cast<const void*>(source),
-         len);
-  return OK;
-}
-
 jvmtiError Transformer::GetDexDataForRetransformation(ArtJvmTiEnv* env,
                                                       art::Handle<art::mirror::Class> klass,
                                                       /*out*/jint* dex_data_len,
@@ -195,7 +179,9 @@ jvmtiError Transformer::FillInTransformationData(ArtJvmTiEnv* env,
   }
   def->klass = klass;
   def->loader = soa.AddLocalReference<jobject>(hs_klass->GetClassLoader());
-  def->name = art::mirror::Class::ComputeName(hs_klass)->ToModifiedUtf8();
+  std::string descriptor_store;
+  std::string descriptor(hs_klass->GetDescriptor(&descriptor_store));
+  def->name = descriptor.substr(1, descriptor.size() - 2);
   // TODO is this always null?
   def->protection_domain = nullptr;
   if (def->dex_data.get() == nullptr) {

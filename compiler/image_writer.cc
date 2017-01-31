@@ -756,7 +756,7 @@ bool ImageWriter::PruneAppImageClassInternal(
   bool my_early_exit = false;  // Only for ourselves, ignore caller.
   // Remove classes that failed to verify since we don't want to have java.lang.VerifyError in the
   // app image.
-  if (klass->GetStatus() == mirror::Class::kStatusError) {
+  if (klass->IsErroneous()) {
     result = true;
   } else {
     ObjPtr<mirror::ClassExt> ext(klass->GetExtData());
@@ -777,8 +777,8 @@ bool ImageWriter::PruneAppImageClassInternal(
                                                   visited);
   }
   // Check static fields and their classes.
-  size_t num_static_fields = klass->NumReferenceStaticFields();
-  if (num_static_fields != 0 && klass->IsResolved()) {
+  if (klass->IsResolved() && klass->NumReferenceStaticFields() != 0) {
+    size_t num_static_fields = klass->NumReferenceStaticFields();
     // Presumably GC can happen when we are cross compiling, it should not cause performance
     // problems to do pointer size logic.
     MemberOffset field_offset = klass->GetFirstReferenceStaticFieldOffset(
@@ -1154,7 +1154,7 @@ mirror::Object* ImageWriter::TryAssignBinSlot(WorkStack& work_stack,
       // Visit and assign offsets for fields and field arrays.
       mirror::Class* as_klass = obj->AsClass();
       mirror::DexCache* dex_cache = as_klass->GetDexCache();
-      DCHECK_NE(as_klass->GetStatus(), mirror::Class::kStatusError);
+      DCHECK(!as_klass->IsErroneous()) << as_klass->GetStatus();
       if (compile_app_image_) {
         // Extra sanity, no boot loader classes should be left!
         CHECK(!IsBootClassLoaderClass(as_klass)) << as_klass->PrettyClass();
@@ -1166,9 +1166,9 @@ mirror::Object* ImageWriter::TryAssignBinSlot(WorkStack& work_stack,
       // belongs.
       oat_index = GetOatIndexForDexCache(dex_cache);
       ImageInfo& image_info = GetImageInfo(oat_index);
-      {
-        // Note: This table is only accessed from the image writer, avoid locking to prevent lock
-        // order violations from root visiting.
+      if (!compile_app_image_) {
+        // Note: Avoid locking to prevent lock order violations from root visiting;
+        // image_info.class_table_ is only accessed from the image writer.
         image_info.class_table_->InsertWithoutLocks(as_klass);
       }
       for (LengthPrefixedArray<ArtField>* cur_fields : fields) {
@@ -1265,7 +1265,14 @@ mirror::Object* ImageWriter::TryAssignBinSlot(WorkStack& work_stack,
       // class loader.
       mirror::ClassLoader* class_loader = obj->AsClassLoader();
       if (class_loader->GetClassTable() != nullptr) {
+        DCHECK(compile_app_image_);
+        DCHECK(class_loaders_.empty());
         class_loaders_.insert(class_loader);
+        ImageInfo& image_info = GetImageInfo(oat_index);
+        // Note: Avoid locking to prevent lock order violations from root visiting;
+        // image_info.class_table_ table is only accessed from the image writer
+        // and class_loader->GetClassTable() is iterated but not modified.
+        image_info.class_table_->CopyWithoutLocks(*class_loader->GetClassTable());
       }
     }
     AssignImageBinSlot(obj, oat_index);
@@ -2341,6 +2348,16 @@ const uint8_t* ImageWriter::GetQuickCode(ArtMethod* method,
 void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
                                      ArtMethod* copy,
                                      const ImageInfo& image_info) {
+  if (orig->IsAbstract()) {
+    // Ignore the single-implementation info for abstract method.
+    // Do this on orig instead of copy, otherwise there is a crash due to methods
+    // are copied before classes.
+    // TODO: handle fixup of single-implementation method for abstract method.
+    orig->SetHasSingleImplementation(false);
+    orig->SetSingleImplementation(
+        nullptr, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
+  }
+
   memcpy(copy, orig, ArtMethod::Size(target_ptr_size_));
 
   copy->SetDeclaringClass(GetImageAddress(orig->GetDeclaringClassUnchecked()));

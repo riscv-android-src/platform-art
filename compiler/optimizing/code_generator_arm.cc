@@ -3332,7 +3332,7 @@ void LocationsBuilderARM::VisitDiv(HDiv* div) {
         InvokeRuntimeCallingConvention calling_convention;
         locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
         locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        // Note: divmod will compute both the quotient and the remainder as the pair R0 and R1, but
         //       we only need the former.
         locations->SetOut(Location::RegisterLocation(R0));
       }
@@ -3459,7 +3459,7 @@ void LocationsBuilderARM::VisitRem(HRem* rem) {
         InvokeRuntimeCallingConvention calling_convention;
         locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
         locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-        // Note: divrem will compute both the quotient and the remainder as the pair R0 and R1, but
+        // Note: divmod will compute both the quotient and the remainder as the pair R0 and R1, but
         //       we only need the latter.
         locations->SetOut(Location::RegisterLocation(R1));
       }
@@ -7151,18 +7151,7 @@ void CodeGeneratorARM::GenerateReadBarrierForRootSlow(HInstruction* instruction,
 HInvokeStaticOrDirect::DispatchInfo CodeGeneratorARM::GetSupportedInvokeStaticOrDirectDispatch(
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       HInvokeStaticOrDirect* invoke ATTRIBUTE_UNUSED) {
-  HInvokeStaticOrDirect::DispatchInfo dispatch_info = desired_dispatch_info;
-  // We disable pc-relative load when there is an irreducible loop, as the optimization
-  // is incompatible with it.
-  // TODO: Create as many ArmDexCacheArraysBase instructions as needed for methods
-  // with irreducible loops.
-  if (GetGraph()->HasIrreducibleLoops() &&
-      (dispatch_info.method_load_kind ==
-          HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative)) {
-    dispatch_info.method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod;
-  }
-
-  return dispatch_info;
+  return desired_dispatch_info;
 }
 
 Register CodeGeneratorARM::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke,
@@ -7182,8 +7171,7 @@ Register CodeGeneratorARM::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOr
   // save one load. However, since this is just an intrinsic slow path we prefer this
   // simple and more robust approach rather that trying to determine if that's the case.
   SlowPathCode* slow_path = GetCurrentSlowPath();
-  DCHECK(slow_path != nullptr);  // For intrinsified invokes the call is emitted on the slow path.
-  if (slow_path->IsCoreRegisterSaved(location.AsRegister<Register>())) {
+  if (slow_path != nullptr && slow_path->IsCoreRegisterSaved(location.AsRegister<Register>())) {
     int stack_offset = slow_path->GetStackOffsetOfCoreRegister(location.AsRegister<Register>());
     __ LoadFromOffset(kLoadWord, temp, SP, stack_offset);
     return temp;
@@ -7191,7 +7179,8 @@ Register CodeGeneratorARM::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOr
   return location.AsRegister<Register>();
 }
 
-void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
+Location CodeGeneratorARM::GenerateCalleeMethodStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
+                                                                  Location temp) {
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
   switch (invoke->GetMethodLoadKind()) {
     case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
@@ -7240,6 +7229,11 @@ void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke,
       break;
     }
   }
+  return callee_method;
+}
+
+void CodeGeneratorARM::GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) {
+  Location callee_method = GenerateCalleeMethodStaticOrDirectCall(invoke, temp);
 
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:

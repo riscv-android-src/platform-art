@@ -2663,6 +2663,10 @@ void Thread::DumpThreadOffset(std::ostream& os, uint32_t offset) {
       return; \
     }
   QUICK_ENTRY_POINT_INFO(pAllocArrayResolved)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved8)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved16)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved32)
+  QUICK_ENTRY_POINT_INFO(pAllocArrayResolved64)
   QUICK_ENTRY_POINT_INFO(pAllocObjectResolved)
   QUICK_ENTRY_POINT_INFO(pAllocObjectInitialized)
   QUICK_ENTRY_POINT_INFO(pAllocObjectWithChecks)
@@ -3031,7 +3035,7 @@ class ReferenceMapVisitor : public StackVisitor {
       T vreg_info(m, code_info, encoding, map, visitor_);
 
       // Visit stack entries that hold pointers.
-      size_t number_of_bits = map.GetNumberOfStackMaskBits(encoding.stack_map_encoding);
+      size_t number_of_bits = code_info.GetNumberOfStackMaskBits(encoding);
       for (size_t i = 0; i < number_of_bits; ++i) {
         if (map.GetStackMaskBit(encoding.stack_map_encoding, i)) {
           auto* ref_addr = vreg_base + i;

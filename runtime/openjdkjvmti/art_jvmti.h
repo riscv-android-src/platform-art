@@ -114,6 +114,21 @@ static inline JvmtiUniquePtr MakeJvmtiUniquePtr(jvmtiEnv* env, T* mem) {
 }
 
 ALWAYS_INLINE
+static inline jvmtiError CopyDataIntoJvmtiBuffer(ArtJvmTiEnv* env,
+                                                 const unsigned char* source,
+                                                 jint len,
+                                                 /*out*/unsigned char** dest) {
+  jvmtiError res = env->Allocate(len, dest);
+  if (res != OK) {
+    return res;
+  }
+  memcpy(reinterpret_cast<void*>(*dest),
+         reinterpret_cast<const void*>(source),
+         len);
+  return OK;
+}
+
+ALWAYS_INLINE
 static inline jvmtiError CopyString(jvmtiEnv* env, const char* src, unsigned char** copy) {
   size_t len = strlen(src) + 1;
   unsigned char* buf;
@@ -131,7 +146,7 @@ const jvmtiCapabilities kPotentialCapabilities = {
     .can_generate_field_modification_events          = 0,
     .can_generate_field_access_events                = 0,
     .can_get_bytecodes                               = 0,
-    .can_get_synthetic_attribute                     = 0,
+    .can_get_synthetic_attribute                     = 1,
     .can_get_owned_monitor_info                      = 0,
     .can_get_current_contended_monitor               = 0,
     .can_get_monitor_info                            = 0,
@@ -139,7 +154,7 @@ const jvmtiCapabilities kPotentialCapabilities = {
     .can_redefine_classes                            = 1,
     .can_signal_thread                               = 0,
     .can_get_source_file_name                        = 0,
-    .can_get_line_numbers                            = 0,
+    .can_get_line_numbers                            = 1,
     .can_get_source_debug_extension                  = 0,
     .can_access_local_variables                      = 0,
     .can_maintain_original_method_order              = 0,
@@ -156,10 +171,10 @@ const jvmtiCapabilities kPotentialCapabilities = {
     .can_generate_all_class_hook_events              = 0,
     .can_generate_compiled_method_load_events        = 0,
     .can_generate_monitor_events                     = 0,
-    .can_generate_vm_object_alloc_events             = 0,
+    .can_generate_vm_object_alloc_events             = 1,
     .can_generate_native_method_bind_events          = 0,
-    .can_generate_garbage_collection_events          = 0,
-    .can_generate_object_free_events                 = 0,
+    .can_generate_garbage_collection_events          = 1,
+    .can_generate_object_free_events                 = 1,
     .can_force_early_return                          = 0,
     .can_get_owned_monitor_stack_depth_info          = 0,
     .can_get_constant_pool                           = 0,

@@ -96,6 +96,11 @@ class Redefiner {
 
   static jvmtiError IsModifiableClass(jvmtiEnv* env, jclass klass, jboolean* is_redefinable);
 
+  static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
+                                                       jint data_len,
+                                                       const unsigned char* dex_data,
+                                                       std::string* error_msg);
+
  private:
   class ClassRedefinition {
    public:
@@ -122,16 +127,7 @@ class Redefiner {
     art::mirror::Class* GetMirrorClass() REQUIRES_SHARED(art::Locks::mutator_lock_);
     art::mirror::ClassLoader* GetClassLoader() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    // This finds the java.lang.DexFile we will add the native DexFile to as part of the classpath.
-    // TODO Make sure the DexFile object returned is the one that the klass_ actually comes from.
-    art::mirror::Object* FindSourceDexFileObject(art::Handle<art::mirror::ClassLoader> loader)
-        REQUIRES_SHARED(art::Locks::mutator_lock_);
-
     art::mirror::DexCache* CreateNewDexCache(art::Handle<art::mirror::ClassLoader> loader)
-        REQUIRES_SHARED(art::Locks::mutator_lock_);
-
-    // Allocates and fills the new DexFileCookie
-    art::mirror::LongArray* AllocateDexFileCookie(art::Handle<art::mirror::Object> j_dex_file_obj)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     // This may return nullptr with a OOME pending if allocation fails.
@@ -233,11 +229,6 @@ class Redefiner {
   static jvmtiError GetClassRedefinitionError(art::Handle<art::mirror::Class> klass,
                                               /*out*/std::string* error_msg)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
-
-  static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
-                                                       jint data_len,
-                                                       const unsigned char* dex_data,
-                                                       std::string* error_msg);
 
   // TODO Put on all the lock qualifiers.
   jvmtiError Run() REQUIRES_SHARED(art::Locks::mutator_lock_);

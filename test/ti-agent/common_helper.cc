@@ -301,11 +301,36 @@ static void DoClassRetransformation(jvmtiEnv* jvmti_env, JNIEnv* env, jobjectArr
   }
 }
 
-// TODO Write something useful.
 extern "C" JNIEXPORT void JNICALL Java_Main_doCommonClassRetransformation(JNIEnv* env,
                                                                           jclass,
                                                                           jobjectArray targets) {
-  DoClassRetransformation(jvmti_env, env, targets);
+  jvmtiCapabilities caps;
+  jvmtiError caps_err = jvmti_env->GetCapabilities(&caps);
+  if (caps_err != JVMTI_ERROR_NONE) {
+    env->ThrowNew(env->FindClass("java/lang/Exception"),
+                  "Unable to get current jvmtiEnv capabilities");
+    return;
+  }
+
+  // Allocate a new environment if we don't have the can_retransform_classes capability needed to
+  // call the RetransformClasses function.
+  jvmtiEnv* real_env = nullptr;
+  if (caps.can_retransform_classes != 1) {
+    JavaVM* vm = nullptr;
+    if (env->GetJavaVM(&vm) != 0 ||
+        vm->GetEnv(reinterpret_cast<void**>(&real_env), JVMTI_VERSION_1_0) != 0) {
+      env->ThrowNew(env->FindClass("java/lang/Exception"),
+                    "Unable to create temporary jvmtiEnv for RetransformClasses call.");
+      return;
+    }
+    SetAllCapabilities(real_env);
+  } else {
+    real_env = jvmti_env;
+  }
+  DoClassRetransformation(real_env, env, targets);
+  if (caps.can_retransform_classes != 1) {
+    real_env->DisposeEnvironment();
+  }
 }
 
 // Get all capabilities except those related to retransformation.
@@ -329,6 +354,38 @@ jint OnLoad(JavaVM* vm,
 
 }  // namespace common_retransform
 
+namespace common_transform {
+
+using art::common_retransform::CommonClassFileLoadHookRetransformable;
+
+// Get all capabilities except those related to retransformation.
+jint OnLoad(JavaVM* vm,
+            char* options ATTRIBUTE_UNUSED,
+            void* reserved ATTRIBUTE_UNUSED) {
+  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0)) {
+    printf("Unable to get jvmti env!\n");
+    return 1;
+  }
+  // Don't set the retransform caps
+  jvmtiCapabilities caps;
+  jvmti_env->GetPotentialCapabilities(&caps);
+  caps.can_retransform_classes = 0;
+  caps.can_retransform_any_class = 0;
+  jvmti_env->AddCapabilities(&caps);
+
+  // Use the same callback as the retransform test.
+  jvmtiEventCallbacks cb;
+  memset(&cb, 0, sizeof(cb));
+  cb.ClassFileLoadHook = CommonClassFileLoadHookRetransformable;
+  if (jvmti_env->SetEventCallbacks(&cb, sizeof(cb)) != JVMTI_ERROR_NONE) {
+    printf("Unable to set class file load hook cb!\n");
+    return 1;
+  }
+  return 0;
+}
+
+}  // namespace common_transform
+
 static void BindMethod(jvmtiEnv* jenv,
                        JNIEnv* env,
                        jclass klass,
@@ -340,16 +397,30 @@ static void BindMethod(jvmtiEnv* jenv,
     LOG(FATAL) << "Could not get methods";
   }
 
-  ArtMethod* m = jni::DecodeArtMethod(method);
-
   std::string names[2];
-  {
+  if (IsJVM()) {
+    // TODO Get the JNI long name
+    char* klass_name;
+    jvmtiError klass_result = jenv->GetClassSignature(klass, &klass_name, nullptr);
+    if (klass_result == JVMTI_ERROR_NONE) {
+      std::string name_str(name);
+      std::string klass_str(klass_name);
+      names[0] = GetJniShortName(klass_str, name_str);
+      jenv->Deallocate(reinterpret_cast<unsigned char*>(klass_name));
+    } else {
+      LOG(FATAL) << "Could not get class name!";
+    }
+  } else {
     ScopedObjectAccess soa(Thread::Current());
+    ArtMethod* m = jni::DecodeArtMethod(method);
     names[0] = m->JniShortName();
     names[1] = m->JniLongName();
   }
   for (const std::string& mangled_name : names) {
-    void* sym = dlsym(nullptr, mangled_name.c_str());
+    if (mangled_name == "") {
+      continue;
+    }
+    void* sym = dlsym(RTLD_DEFAULT, mangled_name.c_str());
     if (sym == nullptr) {
       continue;
     }

@@ -54,6 +54,7 @@
 #include "object_lock.h"
 #include "runtime.h"
 #include "ScopedLocalRef.h"
+#include "ti_class_loader.h"
 #include "transform.h"
 
 namespace openjdkjvmti {
@@ -386,85 +387,6 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
   return OK;
 }
 
-// TODO *MAJOR* This should return the actual source java.lang.DexFile object for the klass.
-// TODO Make mirror of DexFile and associated types to make this less hellish.
-// TODO Make mirror of BaseDexClassLoader and associated types to make this less hellish.
-art::mirror::Object* Redefiner::ClassRedefinition::FindSourceDexFileObject(
-    art::Handle<art::mirror::ClassLoader> loader) {
-  const char* dex_path_list_element_array_name = "[Ldalvik/system/DexPathList$Element;";
-  const char* dex_path_list_element_name = "Ldalvik/system/DexPathList$Element;";
-  const char* dex_file_name = "Ldalvik/system/DexFile;";
-  const char* dex_path_list_name = "Ldalvik/system/DexPathList;";
-  const char* dex_class_loader_name = "Ldalvik/system/BaseDexClassLoader;";
-
-  CHECK(!driver_->self_->IsExceptionPending());
-  art::StackHandleScope<11> hs(driver_->self_);
-  art::ClassLinker* class_linker = driver_->runtime_->GetClassLinker();
-
-  art::Handle<art::mirror::ClassLoader> null_loader(hs.NewHandle<art::mirror::ClassLoader>(
-      nullptr));
-  art::Handle<art::mirror::Class> base_dex_loader_class(hs.NewHandle(class_linker->FindClass(
-      driver_->self_, dex_class_loader_name, null_loader)));
-
-  // Get all the ArtFields so we can look in the BaseDexClassLoader
-  art::ArtField* path_list_field = base_dex_loader_class->FindDeclaredInstanceField(
-      "pathList", dex_path_list_name);
-  CHECK(path_list_field != nullptr);
-
-  art::ArtField* dex_path_list_element_field =
-      class_linker->FindClass(driver_->self_, dex_path_list_name, null_loader)
-        ->FindDeclaredInstanceField("dexElements", dex_path_list_element_array_name);
-  CHECK(dex_path_list_element_field != nullptr);
-
-  art::ArtField* element_dex_file_field =
-      class_linker->FindClass(driver_->self_, dex_path_list_element_name, null_loader)
-        ->FindDeclaredInstanceField("dexFile", dex_file_name);
-  CHECK(element_dex_file_field != nullptr);
-
-  // Check if loader is a BaseDexClassLoader
-  art::Handle<art::mirror::Class> loader_class(hs.NewHandle(loader->GetClass()));
-  if (!loader_class->IsSubClass(base_dex_loader_class.Get())) {
-    LOG(ERROR) << "The classloader is not a BaseDexClassLoader which is currently the only "
-               << "supported class loader type!";
-    return nullptr;
-  }
-  // Start navigating the fields of the loader (now known to be a BaseDexClassLoader derivative)
-  art::Handle<art::mirror::Object> path_list(
-      hs.NewHandle(path_list_field->GetObject(loader.Get())));
-  CHECK(path_list.Get() != nullptr);
-  CHECK(!driver_->self_->IsExceptionPending());
-  art::Handle<art::mirror::ObjectArray<art::mirror::Object>> dex_elements_list(hs.NewHandle(
-      dex_path_list_element_field->GetObject(path_list.Get())->
-      AsObjectArray<art::mirror::Object>()));
-  CHECK(!driver_->self_->IsExceptionPending());
-  CHECK(dex_elements_list.Get() != nullptr);
-  size_t num_elements = dex_elements_list->GetLength();
-  art::MutableHandle<art::mirror::Object> current_element(
-      hs.NewHandle<art::mirror::Object>(nullptr));
-  art::MutableHandle<art::mirror::Object> first_dex_file(
-      hs.NewHandle<art::mirror::Object>(nullptr));
-  // Iterate over the DexPathList$Element to find the right one
-  // TODO Or not ATM just return the first one.
-  for (size_t i = 0; i < num_elements; i++) {
-    current_element.Assign(dex_elements_list->Get(i));
-    CHECK(current_element.Get() != nullptr);
-    CHECK(!driver_->self_->IsExceptionPending());
-    CHECK(dex_elements_list.Get() != nullptr);
-    CHECK_EQ(current_element->GetClass(), class_linker->FindClass(driver_->self_,
-                                                                  dex_path_list_element_name,
-                                                                  null_loader));
-    // TODO It would be cleaner to put the art::DexFile into the dalvik.system.DexFile the class
-    // comes from but it is more annoying because we would need to find this class. It is not
-    // necessary for proper function since we just need to be in front of the classes old dex file
-    // in the path.
-    first_dex_file.Assign(element_dex_file_field->GetObject(current_element.Get()));
-    if (first_dex_file.Get() != nullptr) {
-      return first_dex_file.Get();
-    }
-  }
-  return nullptr;
-}
-
 art::mirror::Class* Redefiner::ClassRedefinition::GetMirrorClass() {
   return driver_->self_->DecodeJObject(klass_)->AsClass();
 }
@@ -478,39 +400,6 @@ art::mirror::DexCache* Redefiner::ClassRedefinition::CreateNewDexCache(
   return driver_->runtime_->GetClassLinker()->RegisterDexFile(*dex_file_, loader.Get());
 }
 
-// TODO Really wishing I had that mirror of java.lang.DexFile now.
-art::mirror::LongArray* Redefiner::ClassRedefinition::AllocateDexFileCookie(
-    art::Handle<art::mirror::Object> java_dex_file_obj) {
-  art::StackHandleScope<2> hs(driver_->self_);
-  // mCookie is nulled out if the DexFile has been closed but mInternalCookie sticks around until
-  // the object is finalized. Since they always point to the same array if mCookie is not null we
-  // just use the mInternalCookie field. We will update one or both of these fields later.
-  // TODO Should I get the class from the classloader or directly?
-  art::ArtField* internal_cookie_field = java_dex_file_obj->GetClass()->FindDeclaredInstanceField(
-      "mInternalCookie", "Ljava/lang/Object;");
-  // TODO Add check that mCookie is either null or same as mInternalCookie
-  CHECK(internal_cookie_field != nullptr);
-  art::Handle<art::mirror::LongArray> cookie(
-      hs.NewHandle(internal_cookie_field->GetObject(java_dex_file_obj.Get())->AsLongArray()));
-  // TODO Maybe make these non-fatal.
-  CHECK(cookie.Get() != nullptr);
-  CHECK_GE(cookie->GetLength(), 1);
-  art::Handle<art::mirror::LongArray> new_cookie(
-      hs.NewHandle(art::mirror::LongArray::Alloc(driver_->self_, cookie->GetLength() + 1)));
-  if (new_cookie.Get() == nullptr) {
-    driver_->self_->AssertPendingOOMException();
-    return nullptr;
-  }
-  // Copy the oat-dex field at the start.
-  // TODO Should I clear this field?
-  // TODO This is a really crappy thing here with the first element being different.
-  new_cookie->SetWithoutChecks<false>(0, cookie->GetWithoutChecks(0));
-  new_cookie->SetWithoutChecks<false>(
-      1, static_cast<int64_t>(reinterpret_cast<intptr_t>(dex_file_.get())));
-  new_cookie->Memcpy(2, cookie.Get(), 1, cookie->GetLength() - 1);
-  return new_cookie.Get();
-}
-
 void Redefiner::RecordFailure(jvmtiError result,
                               const std::string& class_sig,
                               const std::string& error_msg) {
@@ -520,28 +409,13 @@ void Redefiner::RecordFailure(jvmtiError result,
   result_ = result;
 }
 
-// Allocates a ByteArray big enough to store the given number of bytes and copies them from the
-// bytes pointer.
-static art::mirror::ByteArray* AllocateAndFillBytes(art::Thread* self,
-                                                    const uint8_t* bytes,
-                                                    int32_t num_bytes)
-    REQUIRES_SHARED(art::Locks::mutator_lock_) {
-  art::StackHandleScope<1> hs(self);
-  art::Handle<art::mirror::ByteArray> arr(hs.NewHandle(
-      art::mirror::ByteArray::Alloc(self, num_bytes)));
-  if (!arr.IsNull()) {
-    // Copy it in. Just skip if it's null
-    memcpy(arr->GetData(), bytes, num_bytes);
-  }
-  return arr.Get();
-}
-
 art::mirror::ByteArray* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFileBytes() {
   // If we have been specifically given a new set of bytes use that
   if (original_dex_file_.size() != 0) {
-    return AllocateAndFillBytes(driver_->self_,
-                                &original_dex_file_.At(0),
-                                original_dex_file_.size());
+    return art::mirror::ByteArray::AllocateAndFill(
+        driver_->self_,
+        reinterpret_cast<const signed char*>(&original_dex_file_.At(0)),
+        original_dex_file_.size());
   }
 
   // See if we already have one set.
@@ -561,7 +435,10 @@ art::mirror::ByteArray* Redefiner::ClassRedefinition::AllocateOrGetOriginalDexFi
     LOG(WARNING) << "Current dex file has more than one class in it. Calling RetransformClasses "
                  << "on this class might fail if no transformations are applied to it!";
   }
-  return AllocateAndFillBytes(driver_->self_, current_dex_file.Begin(), current_dex_file.Size());
+  return art::mirror::ByteArray::AllocateAndFill(
+      driver_->self_,
+      reinterpret_cast<const signed char*>(current_dex_file.Begin()),
+      current_dex_file.Size());
 }
 
 struct CallbackCtx {
@@ -866,14 +743,18 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
     RecordFailure(ERR(INTERNAL), "Unable to find class loader!");
     return false;
   }
-  art::Handle<art::mirror::Object> dex_file_obj(hs.NewHandle(FindSourceDexFileObject(loader)));
+  art::Handle<art::mirror::Object> dex_file_obj(hs.NewHandle(
+      ClassLoaderHelper::FindSourceDexFileObject(driver_->self_, loader)));
   holder->SetJavaDexFile(klass_index, dex_file_obj.Get());
   if (dex_file_obj.Get() == nullptr) {
     // TODO Better error msg.
     RecordFailure(ERR(INTERNAL), "Unable to find class loader!");
     return false;
   }
-  holder->SetNewDexFileCookie(klass_index, AllocateDexFileCookie(dex_file_obj));
+  holder->SetNewDexFileCookie(klass_index,
+                              ClassLoaderHelper::AllocateNewDexFileCookie(driver_->self_,
+                                                                          dex_file_obj,
+                                                                          dex_file_.get()).Ptr());
   if (holder->GetNewDexFileCookie(klass_index) == nullptr) {
     driver_->self_->AssertPendingOOMException();
     driver_->self_->ClearException();
@@ -985,8 +866,10 @@ jvmtiError Redefiner::Run() {
   // TODO We need to decide on & implement semantics for JNI jmethodids when we redefine methods.
   int32_t cnt = 0;
   for (Redefiner::ClassRedefinition& redef : redefinitions_) {
+    art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
     art::mirror::Class* klass = holder.GetMirrorClass(cnt);
-    redef.UpdateJavaDexFile(holder.GetJavaDexFile(cnt), holder.GetNewDexFileCookie(cnt));
+    ClassLoaderHelper::UpdateJavaDexFile(holder.GetJavaDexFile(cnt),
+                                         holder.GetNewDexFileCookie(cnt));
     // TODO Rewrite so we don't do a stack walk for each and every class.
     redef.FindAndAllocateObsoleteMethods(klass);
     redef.UpdateClass(klass, holder.GetNewDexCache(cnt), holder.GetOriginalDexFileBytes(cnt));
@@ -1100,24 +983,6 @@ void Redefiner::ClassRedefinition::UpdateClass(
   art::ObjPtr<art::mirror::ClassExt> ext(mclass->GetExtData());
   CHECK(!ext.IsNull());
   ext->SetOriginalDexFileBytes(original_dex_file);
-}
-
-void Redefiner::ClassRedefinition::UpdateJavaDexFile(
-    art::ObjPtr<art::mirror::Object> java_dex_file,
-    art::ObjPtr<art::mirror::LongArray> new_cookie) {
-  art::ArtField* internal_cookie_field = java_dex_file->GetClass()->FindDeclaredInstanceField(
-      "mInternalCookie", "Ljava/lang/Object;");
-  art::ArtField* cookie_field = java_dex_file->GetClass()->FindDeclaredInstanceField(
-      "mCookie", "Ljava/lang/Object;");
-  CHECK(internal_cookie_field != nullptr);
-  art::ObjPtr<art::mirror::LongArray> orig_internal_cookie(
-      internal_cookie_field->GetObject(java_dex_file)->AsLongArray());
-  art::ObjPtr<art::mirror::LongArray> orig_cookie(
-      cookie_field->GetObject(java_dex_file)->AsLongArray());
-  internal_cookie_field->SetObject<false>(java_dex_file, new_cookie);
-  if (!orig_cookie.IsNull()) {
-    cookie_field->SetObject<false>(java_dex_file, new_cookie);
-  }
 }
 
 // This function does all (java) allocations we need to do for the Class being redefined.

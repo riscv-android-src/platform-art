@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <deque>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <queue>
 #include <string>
@@ -1340,7 +1341,7 @@ bool ClassLinker::UpdateAppImageClassLoadersAndDexCaches(
           // The image space is not yet added to the heap, avoid read barriers.
           ObjPtr<mirror::Class> klass = types[j].Read();
           if (space->HasAddress(klass.Ptr())) {
-            DCHECK_NE(klass->GetStatus(), mirror::Class::kStatusError);
+            DCHECK(!klass->IsErroneous()) << klass->GetStatus();
             auto it = new_class_set->Find(ClassTable::TableSlot(klass));
             DCHECK(it != new_class_set->end());
             DCHECK_EQ(it->Read(), klass);
@@ -1398,7 +1399,11 @@ class UpdateClassLoaderVisitor {
         class_loader_(class_loader) {}
 
   bool operator()(ObjPtr<mirror::Class> klass) const REQUIRES_SHARED(Locks::mutator_lock_) {
-    klass->SetClassLoader(class_loader_);
+    // Do not update class loader for boot image classes where the app image
+    // class loader is only the initiating loader but not the defining loader.
+    if (klass->GetClassLoader() != nullptr) {
+      klass->SetClassLoader(class_loader_);
+    }
     return true;
   }
 
@@ -1699,7 +1704,7 @@ bool ClassLinker::AddImageSpace(
       for (int32_t j = 0, num_types = h_dex_cache->NumResolvedTypes(); j < num_types; j++) {
         ObjPtr<mirror::Class> klass = types[j].Read();
         if (klass != nullptr) {
-          DCHECK_NE(klass->GetStatus(), mirror::Class::kStatusError);
+          DCHECK(!klass->IsErroneous()) << klass->GetStatus();
         }
       }
     } else {
@@ -2228,7 +2233,7 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self,
   // For temporary classes we must wait for them to be retired.
   if (init_done_ && klass->IsTemp()) {
     CHECK(!klass->IsResolved());
-    if (klass->IsErroneous()) {
+    if (klass->IsErroneousUnresolved()) {
       ThrowEarlierClassFailure(klass);
       return nullptr;
     }
@@ -2236,10 +2241,10 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self,
     Handle<mirror::Class> h_class(hs.NewHandle(klass));
     ObjectLock<mirror::Class> lock(self, h_class);
     // Loop and wait for the resolving thread to retire this class.
-    while (!h_class->IsRetired() && !h_class->IsErroneous()) {
+    while (!h_class->IsRetired() && !h_class->IsErroneousUnresolved()) {
       lock.WaitIgnoringInterrupts();
     }
-    if (h_class->IsErroneous()) {
+    if (h_class->IsErroneousUnresolved()) {
       ThrowEarlierClassFailure(h_class.Get());
       return nullptr;
     }
@@ -2254,7 +2259,7 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self,
   static const size_t kNumYieldIterations = 1000;
   // How long each sleep is in us.
   static const size_t kSleepDurationUS = 1000;  // 1 ms.
-  while (!klass->IsResolved() && !klass->IsErroneous()) {
+  while (!klass->IsResolved() && !klass->IsErroneousUnresolved()) {
     StackHandleScope<1> hs(self);
     HandleWrapperObjPtr<mirror::Class> h_class(hs.NewHandleWrapper(&klass));
     {
@@ -2265,7 +2270,7 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self,
         // Check for circular dependencies between classes, the lock is required for SetStatus.
         if (!h_class->IsResolved() && h_class->GetClinitThreadId() == self->GetTid()) {
           ThrowClassCircularityError(h_class.Get());
-          mirror::Class::SetStatus(h_class, mirror::Class::kStatusError, self);
+          mirror::Class::SetStatus(h_class, mirror::Class::kStatusErrorUnresolved, self);
           return nullptr;
         }
       }
@@ -2282,7 +2287,7 @@ mirror::Class* ClassLinker::EnsureResolved(Thread* self,
     ++index;
   }
 
-  if (klass->IsErroneous()) {
+  if (klass->IsErroneousUnresolved()) {
     ThrowEarlierClassFailure(klass);
     return nullptr;
   }
@@ -2458,10 +2463,8 @@ mirror::Class* ClassLinker::FindClass(Thread* self,
     return EnsureResolved(self, descriptor, klass);
   }
   // Class is not yet loaded.
-  if (descriptor[0] == '[') {
-    return CreateArrayClass(self, descriptor, hash, class_loader);
-  } else if (class_loader.Get() == nullptr) {
-    // The boot class loader, search the boot class path.
+  if (descriptor[0] != '[' && class_loader.Get() == nullptr) {
+    // Non-array class and the boot class loader, search the boot class path.
     ClassPathEntry pair = FindInClassPath(descriptor, hash, boot_class_path_);
     if (pair.second != nullptr) {
       return DefineClass(self,
@@ -2474,14 +2477,21 @@ mirror::Class* ClassLinker::FindClass(Thread* self,
       // The boot class loader is searched ahead of the application class loader, failures are
       // expected and will be wrapped in a ClassNotFoundException. Use the pre-allocated error to
       // trigger the chaining with a proper stack trace.
-      ObjPtr<mirror::Throwable> pre_allocated = Runtime::Current()->GetPreAllocatedNoClassDefFoundError();
+      ObjPtr<mirror::Throwable> pre_allocated =
+          Runtime::Current()->GetPreAllocatedNoClassDefFoundError();
       self->SetException(pre_allocated);
       return nullptr;
     }
+  }
+  ObjPtr<mirror::Class> result_ptr;
+  bool descriptor_equals;
+  if (descriptor[0] == '[') {
+    result_ptr = CreateArrayClass(self, descriptor, hash, class_loader);
+    DCHECK_EQ(result_ptr == nullptr, self->IsExceptionPending());
+    DCHECK(result_ptr == nullptr || result_ptr->DescriptorEquals(descriptor));
+    descriptor_equals = true;
   } else {
     ScopedObjectAccessUnchecked soa(self);
-    ObjPtr<mirror::Class> result_ptr;
-    bool descriptor_equals;
     bool known_hierarchy =
         FindClassInBaseDexClassLoader(soa, self, descriptor, hash, class_loader, &result_ptr);
     if (result_ptr != nullptr) {
@@ -2525,16 +2535,7 @@ mirror::Class* ClassLinker::FindClass(Thread* self,
                                                  WellKnownClasses::java_lang_ClassLoader_loadClass,
                                                  class_name_object.get()));
       }
-      if (self->IsExceptionPending()) {
-        // If the ClassLoader threw, pass that exception up.
-        // However, to comply with the RI behavior, first check if another thread succeeded.
-        result_ptr = LookupClass(self, descriptor, hash, class_loader.Get());
-        if (result_ptr != nullptr && !result_ptr->IsErroneous()) {
-          self->ClearException();
-          return EnsureResolved(self, descriptor, result_ptr);
-        }
-        return nullptr;
-      } else if (result.get() == nullptr) {
+      if (result.get() == nullptr && !self->IsExceptionPending()) {
         // broken loader - throw NPE to be compatible with Dalvik
         ThrowNullPointerException(StringPrintf("ClassLoader.loadClass returned null for %s",
                                                class_name_string.c_str()).c_str());
@@ -2542,50 +2543,60 @@ mirror::Class* ClassLinker::FindClass(Thread* self,
       }
       result_ptr = soa.Decode<mirror::Class>(result.get());
       // Check the name of the returned class.
-      descriptor_equals = result_ptr->DescriptorEquals(descriptor);
+      descriptor_equals = (result_ptr != nullptr) && result_ptr->DescriptorEquals(descriptor);
     }
-
-    // Try to insert the class to the class table, checking for mismatch.
-    ObjPtr<mirror::Class> old;
-    {
-      WriterMutexLock mu(self, *Locks::classlinker_classes_lock_);
-      ClassTable* const class_table = InsertClassTableForClassLoader(class_loader.Get());
-      old = class_table->Lookup(descriptor, hash);
-      if (old == nullptr) {
-        old = result_ptr;  // For the comparison below, after releasing the lock.
-        if (descriptor_equals) {
-          class_table->InsertWithHash(result_ptr.Ptr(), hash);
-          Runtime::Current()->GetHeap()->WriteBarrierEveryFieldOf(class_loader.Get());
-        }  // else throw below, after releasing the lock.
-      }
-    }
-    if (UNLIKELY(old != result_ptr)) {
-      // Return `old` (even if `!descriptor_equals`) to mimic the RI behavior for parallel
-      // capable class loaders.  (All class loaders are considered parallel capable on Android.)
-      mirror::Class* loader_class = class_loader->GetClass();
-      const char* loader_class_name =
-          loader_class->GetDexFile().StringByTypeIdx(loader_class->GetDexTypeIndex());
-      LOG(WARNING) << "Initiating class loader of type " << DescriptorToDot(loader_class_name)
-          << " is not well-behaved; it returned a different Class for racing loadClass(\""
-          << DescriptorToDot(descriptor) << "\").";
-      return EnsureResolved(self, descriptor, old);
-    }
-    if (UNLIKELY(!descriptor_equals)) {
-      std::string result_storage;
-      const char* result_name = result_ptr->GetDescriptor(&result_storage);
-      std::string loader_storage;
-      const char* loader_class_name = class_loader->GetClass()->GetDescriptor(&loader_storage);
-      ThrowNoClassDefFoundError(
-          "Initiating class loader of type %s returned class %s instead of %s.",
-          DescriptorToDot(loader_class_name).c_str(),
-          DescriptorToDot(result_name).c_str(),
-          DescriptorToDot(descriptor).c_str());
-      return nullptr;
-    }
-    // success, return mirror::Class*
-    return result_ptr.Ptr();
   }
-  UNREACHABLE();
+
+  if (self->IsExceptionPending()) {
+    // If the ClassLoader threw or array class allocation failed, pass that exception up.
+    // However, to comply with the RI behavior, first check if another thread succeeded.
+    result_ptr = LookupClass(self, descriptor, hash, class_loader.Get());
+    if (result_ptr != nullptr && !result_ptr->IsErroneous()) {
+      self->ClearException();
+      return EnsureResolved(self, descriptor, result_ptr);
+    }
+    return nullptr;
+  }
+
+  // Try to insert the class to the class table, checking for mismatch.
+  ObjPtr<mirror::Class> old;
+  {
+    WriterMutexLock mu(self, *Locks::classlinker_classes_lock_);
+    ClassTable* const class_table = InsertClassTableForClassLoader(class_loader.Get());
+    old = class_table->Lookup(descriptor, hash);
+    if (old == nullptr) {
+      old = result_ptr;  // For the comparison below, after releasing the lock.
+      if (descriptor_equals) {
+        class_table->InsertWithHash(result_ptr.Ptr(), hash);
+        Runtime::Current()->GetHeap()->WriteBarrierEveryFieldOf(class_loader.Get());
+      }  // else throw below, after releasing the lock.
+    }
+  }
+  if (UNLIKELY(old != result_ptr)) {
+    // Return `old` (even if `!descriptor_equals`) to mimic the RI behavior for parallel
+    // capable class loaders.  (All class loaders are considered parallel capable on Android.)
+    mirror::Class* loader_class = class_loader->GetClass();
+    const char* loader_class_name =
+        loader_class->GetDexFile().StringByTypeIdx(loader_class->GetDexTypeIndex());
+    LOG(WARNING) << "Initiating class loader of type " << DescriptorToDot(loader_class_name)
+        << " is not well-behaved; it returned a different Class for racing loadClass(\""
+        << DescriptorToDot(descriptor) << "\").";
+    return EnsureResolved(self, descriptor, old);
+  }
+  if (UNLIKELY(!descriptor_equals)) {
+    std::string result_storage;
+    const char* result_name = result_ptr->GetDescriptor(&result_storage);
+    std::string loader_storage;
+    const char* loader_class_name = class_loader->GetClass()->GetDescriptor(&loader_storage);
+    ThrowNoClassDefFoundError(
+        "Initiating class loader of type %s returned class %s instead of %s.",
+        DescriptorToDot(loader_class_name).c_str(),
+        DescriptorToDot(result_name).c_str(),
+        DescriptorToDot(descriptor).c_str());
+    return nullptr;
+  }
+  // success, return mirror::Class*
+  return result_ptr.Ptr();
 }
 
 mirror::Class* ClassLinker::DefineClass(Thread* self,
@@ -2626,13 +2637,30 @@ mirror::Class* ClassLinker::DefineClass(Thread* self,
     self->AssertPendingOOMException();
     return nullptr;
   }
-  ObjPtr<mirror::DexCache> dex_cache = RegisterDexFile(dex_file, class_loader.Get());
+  // Get the real dex file. This will return the input if there aren't any callbacks or they do
+  // nothing.
+  DexFile const* new_dex_file = nullptr;
+  DexFile::ClassDef const* new_class_def = nullptr;
+  // TODO We should ideally figure out some way to move this after we get a lock on the klass so it
+  // will only be called once.
+  Runtime::Current()->GetRuntimeCallbacks()->ClassPreDefine(descriptor,
+                                                            klass,
+                                                            class_loader,
+                                                            dex_file,
+                                                            dex_class_def,
+                                                            &new_dex_file,
+                                                            &new_class_def);
+  // Check to see if an exception happened during runtime callbacks. Return if so.
+  if (self->IsExceptionPending()) {
+    return nullptr;
+  }
+  ObjPtr<mirror::DexCache> dex_cache = RegisterDexFile(*new_dex_file, class_loader.Get());
   if (dex_cache == nullptr) {
     self->AssertPendingOOMException();
     return nullptr;
   }
   klass->SetDexCache(dex_cache);
-  SetupClass(dex_file, dex_class_def, klass, class_loader.Get());
+  SetupClass(*new_dex_file, *new_class_def, klass, class_loader.Get());
 
   // Mark the string class by setting its access flag.
   if (UNLIKELY(!init_done_)) {
@@ -2658,23 +2686,23 @@ mirror::Class* ClassLinker::DefineClass(Thread* self,
   // end up allocating unfree-able linear alloc resources and then lose the race condition. The
   // other reason is that the field roots are only visited from the class table. So we need to be
   // inserted before we allocate / fill in these fields.
-  LoadClass(self, dex_file, dex_class_def, klass);
+  LoadClass(self, *new_dex_file, *new_class_def, klass);
   if (self->IsExceptionPending()) {
     VLOG(class_linker) << self->GetException()->Dump();
     // An exception occured during load, set status to erroneous while holding klass' lock in case
     // notification is necessary.
     if (!klass->IsErroneous()) {
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorUnresolved, self);
     }
     return nullptr;
   }
 
   // Finish loading (if necessary) by finding parents
   CHECK(!klass->IsLoaded());
-  if (!LoadSuperAndInterfaces(klass, dex_file)) {
+  if (!LoadSuperAndInterfaces(klass, *new_dex_file)) {
     // Loading failed.
     if (!klass->IsErroneous()) {
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorUnresolved, self);
     }
     return nullptr;
   }
@@ -2693,13 +2721,13 @@ mirror::Class* ClassLinker::DefineClass(Thread* self,
   if (!LinkClass(self, descriptor, klass, interfaces, &h_new_class)) {
     // Linking failed.
     if (!klass->IsErroneous()) {
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorUnresolved, self);
     }
     return nullptr;
   }
   self->AssertNoPendingException();
   CHECK(h_new_class.Get() != nullptr) << descriptor;
-  CHECK(h_new_class->IsResolved()) << descriptor;
+  CHECK(h_new_class->IsResolved() && !h_new_class->IsErroneousResolved()) << descriptor;
 
   // Instrumentation may have updated entrypoints for all methods of all
   // classes. However it could not update methods of this class while we
@@ -3494,7 +3522,8 @@ mirror::Class* ClassLinker::CreateArrayClass(Thread* self, const char* descripto
   // class to the hash table --- necessary because of possible races with
   // other threads.)
   if (class_loader.Get() != component_type->GetClassLoader()) {
-    ObjPtr<mirror::Class> new_class = LookupClass(self, descriptor, hash, component_type->GetClassLoader());
+    ObjPtr<mirror::Class> new_class =
+        LookupClass(self, descriptor, hash, component_type->GetClassLoader());
     if (new_class != nullptr) {
       return new_class.Ptr();
     }
@@ -3793,7 +3822,7 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   }
   // Need to grab the lock to change status.
   ObjectLock<mirror::Class> super_lock(self, klass);
-  mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+  mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
   return false;
 }
 
@@ -3915,8 +3944,8 @@ verifier::MethodVerifier::FailureKind ClassLinker::VerifyClass(
   bool preverified = VerifyClassUsingOatFile(dex_file, klass.Get(), oat_file_class_status);
   // If the oat file says the class had an error, re-run the verifier. That way we will get a
   // precise error message. To ensure a rerun, test:
-  //     oat_file_class_status == mirror::Class::kStatusError => !preverified
-  DCHECK(!(oat_file_class_status == mirror::Class::kStatusError) || !preverified);
+  //     mirror::Class::IsErroneous(oat_file_class_status) => !preverified
+  DCHECK(!mirror::Class::IsErroneous(oat_file_class_status) || !preverified);
 
   std::string error_msg;
   verifier::MethodVerifier::FailureKind verifier_failure = verifier::MethodVerifier::kNoFailure;
@@ -3974,7 +4003,7 @@ verifier::MethodVerifier::FailureKind ClassLinker::VerifyClass(
                   << " because: " << error_msg;
     self->AssertNoPendingException();
     ThrowVerifyError(klass.Get(), "%s", error_msg.c_str());
-    mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+    mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
   }
   if (preverified || verifier_failure == verifier::MethodVerifier::kNoFailure) {
     // Class is verified so we don't need to do any access check on its methods.
@@ -4065,7 +4094,7 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
     // at compile time).
     return false;
   }
-  if (oat_file_class_status == mirror::Class::kStatusError) {
+  if (mirror::Class::IsErroneous(oat_file_class_status)) {
     // Compile time verification failed with a hard error. This is caused by invalid instructions
     // in the class. These errors are unrecoverable.
     return false;
@@ -4224,7 +4253,7 @@ mirror::Class* ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRunnable& 
     Handle<mirror::ObjectArray<mirror::Class>> h_interfaces(
         hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Class>>(interfaces)));
     if (!LinkClass(self, descriptor.c_str(), klass, h_interfaces, &new_class)) {
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorUnresolved, self);
       return nullptr;
     }
   }
@@ -4439,7 +4468,8 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       return false;
     }
 
-    CHECK(klass->IsResolved()) << klass->PrettyClass() << ": state=" << klass->GetStatus();
+    CHECK(klass->IsResolved() && !klass->IsErroneousResolved())
+        << klass->PrettyClass() << ": state=" << klass->GetStatus();
 
     if (!klass->IsVerified()) {
       VerifyClass(self, klass);
@@ -4474,7 +4504,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       // A separate thread could have moved us all the way to initialized. A "simple" example
       // involves a subclass of the current class being initialized at the same time (which
       // will implicitly initialize the superclass, if scheduled that way). b/28254258
-      DCHECK_NE(mirror::Class::kStatusError, klass->GetStatus());
+      DCHECK(!klass->IsErroneous()) << klass->GetStatus();
       if (klass->IsInitialized()) {
         return true;
       }
@@ -4501,7 +4531,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     }
 
     if (!ValidateSuperClassDescriptors(klass)) {
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
       return false;
     }
     self->AllowThreadSuspension();
@@ -4537,7 +4567,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
             << (self->GetException() != nullptr ? self->GetException()->Dump() : "");
         ObjectLock<mirror::Class> lock(self, klass);
         // Initialization failed because the super-class is erroneous.
-        mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+        mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
         return false;
       }
     }
@@ -4568,7 +4598,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         if (!iface_initialized) {
           ObjectLock<mirror::Class> lock(self, klass);
           // Initialization failed because one of our interfaces with default methods is erroneous.
-          mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+          mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
           return false;
         }
       }
@@ -4641,7 +4671,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
 
     if (self->IsExceptionPending()) {
       WrapExceptionInInitializer(klass);
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
       success = false;
     } else if (Runtime::Current()->IsTransactionAborted()) {
       // The exception thrown when the transaction aborted has been caught and cleared
@@ -4650,7 +4680,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
                      << mirror::Class::PrettyDescriptor(klass.Get())
                      << " without exception while transaction was aborted: re-throw it now.";
       Runtime::Current()->ThrowTransactionAbortError(self);
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
       success = false;
     } else {
       RuntimeStats* global_stats = Runtime::Current()->GetStats();
@@ -4734,7 +4764,7 @@ bool ClassLinker::WaitForInitializeClass(Handle<mirror::Class> klass,
     // we were not using WaitIgnoringInterrupts), bail out.
     if (self->IsExceptionPending()) {
       WrapExceptionInInitializer(klass);
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorResolved, self);
       return false;
     }
     // Spurious wakeup? Go back to waiting.
@@ -5145,7 +5175,7 @@ bool ClassLinker::LinkClass(Thread* self,
     klass->SetIFieldsPtrUnchecked(nullptr);
     if (UNLIKELY(h_new_class.Get() == nullptr)) {
       self->AssertPendingOOMException();
-      mirror::Class::SetStatus(klass, mirror::Class::kStatusError, self);
+      mirror::Class::SetStatus(klass, mirror::Class::kStatusErrorUnresolved, self);
       return false;
     }
 
@@ -7712,7 +7742,7 @@ ObjPtr<mirror::Class> ClassLinker::LookupResolvedType(const DexFile& dex_file,
       type = LookupClass(self, descriptor, hash, class_loader.Ptr());
     }
   }
-  if (type != nullptr || type->IsResolved()) {
+  if (type != nullptr && type->IsResolved()) {
     return type.Ptr();
   }
   return nullptr;
@@ -7757,7 +7787,7 @@ mirror::Class* ClassLinker::ResolveType(const DexFile& dex_file,
       }
     }
   }
-  DCHECK((resolved == nullptr) || resolved->IsResolved() || resolved->IsErroneous())
+  DCHECK((resolved == nullptr) || resolved->IsResolved())
       << resolved->PrettyDescriptor() << " " << resolved->GetStatus();
   return resolved.Ptr();
 }
@@ -8454,6 +8484,81 @@ void ClassLinker::CleanupClassLoaders() {
   }
 }
 
+class GetResolvedClassesVisitor : public ClassVisitor {
+ public:
+  GetResolvedClassesVisitor(std::set<DexCacheResolvedClasses>* result, bool ignore_boot_classes)
+      : result_(result),
+        ignore_boot_classes_(ignore_boot_classes),
+        last_resolved_classes_(result->end()),
+        last_dex_file_(nullptr),
+        vlog_is_on_(VLOG_IS_ON(class_linker)),
+        extra_stats_(),
+        last_extra_stats_(extra_stats_.end()) { }
+
+  bool operator()(ObjPtr<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (!klass->IsProxyClass() &&
+        !klass->IsArrayClass() &&
+        klass->IsResolved() &&
+        !klass->IsErroneousResolved() &&
+        (!ignore_boot_classes_ || klass->GetClassLoader() != nullptr)) {
+      const DexFile& dex_file = klass->GetDexFile();
+      if (&dex_file != last_dex_file_) {
+        last_dex_file_ = &dex_file;
+        DexCacheResolvedClasses resolved_classes(dex_file.GetLocation(),
+                                                 dex_file.GetBaseLocation(),
+                                                 dex_file.GetLocationChecksum());
+        last_resolved_classes_ = result_->find(resolved_classes);
+        if (last_resolved_classes_ == result_->end()) {
+          last_resolved_classes_ = result_->insert(resolved_classes).first;
+        }
+      }
+      bool added = last_resolved_classes_->AddClass(klass->GetDexTypeIndex());
+      if (UNLIKELY(vlog_is_on_) && added) {
+        const DexCacheResolvedClasses* resolved_classes = std::addressof(*last_resolved_classes_);
+        if (last_extra_stats_ == extra_stats_.end() ||
+            last_extra_stats_->first != resolved_classes) {
+          last_extra_stats_ = extra_stats_.find(resolved_classes);
+          if (last_extra_stats_ == extra_stats_.end()) {
+            last_extra_stats_ =
+                extra_stats_.emplace(resolved_classes, ExtraStats(dex_file.NumClassDefs())).first;
+          }
+        }
+      }
+    }
+    return true;
+  }
+
+  void PrintStatistics() const {
+    if (vlog_is_on_) {
+      for (const DexCacheResolvedClasses& resolved_classes : *result_) {
+        auto it = extra_stats_.find(std::addressof(resolved_classes));
+        DCHECK(it != extra_stats_.end());
+        const ExtraStats& extra_stats = it->second;
+        LOG(INFO) << "Dex location " << resolved_classes.GetDexLocation()
+                  << " has " << resolved_classes.GetClasses().size() << " / "
+                  << extra_stats.number_of_class_defs_ << " resolved classes";
+      }
+    }
+  }
+
+ private:
+  struct ExtraStats {
+    explicit ExtraStats(uint32_t number_of_class_defs)
+        : number_of_class_defs_(number_of_class_defs) {}
+    uint32_t number_of_class_defs_;
+  };
+
+  std::set<DexCacheResolvedClasses>* result_;
+  bool ignore_boot_classes_;
+  std::set<DexCacheResolvedClasses>::iterator last_resolved_classes_;
+  const DexFile* last_dex_file_;
+
+  // Statistics.
+  bool vlog_is_on_;
+  std::map<const DexCacheResolvedClasses*, ExtraStats> extra_stats_;
+  std::map<const DexCacheResolvedClasses*, ExtraStats>::iterator last_extra_stats_;
+};
+
 std::set<DexCacheResolvedClasses> ClassLinker::GetResolvedClasses(bool ignore_boot_classes) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
   ScopedObjectAccess soa(Thread::Current());
@@ -8461,64 +8566,12 @@ std::set<DexCacheResolvedClasses> ClassLinker::GetResolvedClasses(bool ignore_bo
   std::set<DexCacheResolvedClasses> ret;
   VLOG(class_linker) << "Collecting resolved classes";
   const uint64_t start_time = NanoTime();
-  ReaderMutexLock mu(soa.Self(), *Locks::dex_lock_);
-  // Loop through all the dex caches and inspect resolved classes.
-  for (const ClassLinker::DexCacheData& data : GetDexCachesData()) {
-    if (soa.Self()->IsJWeakCleared(data.weak_root)) {
-      continue;
-    }
-    ObjPtr<mirror::DexCache> dex_cache = soa.Decode<mirror::DexCache>(data.weak_root);
-    if (dex_cache == nullptr) {
-      continue;
-    }
-    const DexFile* dex_file = dex_cache->GetDexFile();
-    const std::string& location = dex_file->GetLocation();
-    const size_t num_class_defs = dex_file->NumClassDefs();
-    // Use the resolved types, this will miss array classes.
-    const size_t num_types = dex_file->NumTypeIds();
-    VLOG(class_linker) << "Collecting class profile for dex file " << location
-                       << " types=" << num_types << " class_defs=" << num_class_defs;
-    DexCacheResolvedClasses resolved_classes(dex_file->GetLocation(),
-                                             dex_file->GetBaseLocation(),
-                                             dex_file->GetLocationChecksum());
-    size_t num_resolved = 0;
-    std::unordered_set<dex::TypeIndex> class_set;
-    CHECK_EQ(num_types, dex_cache->NumResolvedTypes());
-    for (size_t i = 0; i < num_types; ++i) {
-      ObjPtr<mirror::Class> klass = dex_cache->GetResolvedType(dex::TypeIndex(i));
-      // Filter out null class loader since that is the boot class loader.
-      if (klass == nullptr || (ignore_boot_classes && klass->GetClassLoader() == nullptr)) {
-        continue;
-      }
-      ++num_resolved;
-      DCHECK(!klass->IsProxyClass());
-      if (!klass->IsResolved()) {
-        DCHECK(klass->IsErroneous());
-        continue;
-      }
-      ObjPtr<mirror::DexCache> klass_dex_cache = klass->GetDexCache();
-      if (klass_dex_cache == dex_cache) {
-        DCHECK(klass->IsResolved());
-        CHECK_LT(klass->GetDexClassDefIndex(), num_class_defs);
-        class_set.insert(klass->GetDexTypeIndex());
-      }
-    }
-
-    if (!class_set.empty()) {
-      auto it = ret.find(resolved_classes);
-      if (it != ret.end()) {
-        // Already have the key, union the class type indexes.
-        it->AddClasses(class_set.begin(), class_set.end());
-      } else {
-        resolved_classes.AddClasses(class_set.begin(), class_set.end());
-        ret.insert(resolved_classes);
-      }
-    }
-
-    VLOG(class_linker) << "Dex location " << location << " has " << num_resolved << " / "
-                       << num_class_defs << " resolved classes";
+  GetResolvedClassesVisitor visitor(&ret, ignore_boot_classes);
+  VisitClasses(&visitor);
+  if (VLOG_IS_ON(class_linker)) {
+    visitor.PrintStatistics();
+    LOG(INFO) << "Collecting class profile took " << PrettyDuration(NanoTime() - start_time);
   }
-  VLOG(class_linker) << "Collecting class profile took " << PrettyDuration(NanoTime() - start_time);
   return ret;
 }
 
