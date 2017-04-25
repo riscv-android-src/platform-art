@@ -22,8 +22,10 @@
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "debugger.h"
+#include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/heap_bitmap-inl.h"
 #include "gc/accounting/mod_union_table-inl.h"
+#include "gc/accounting/read_barrier_table.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/gc_pause_listener.h"
 #include "gc/reference_processor.h"
@@ -376,8 +378,15 @@ class ConcurrentCopying::FlipCallback : public Closure {
         cc->VerifyGrayImmuneObjects();
       }
     }
-    cc->java_lang_Object_ = down_cast<mirror::Class*>(cc->Mark(
-        WellKnownClasses::ToClass(WellKnownClasses::java_lang_Object).Ptr()));
+    // May be null during runtime creation, in this case leave java_lang_Object null.
+    // This is safe since single threaded behavior should mean FillDummyObject does not
+    // happen when java_lang_Object_ is null.
+    if (WellKnownClasses::java_lang_Object != nullptr) {
+      cc->java_lang_Object_ = down_cast<mirror::Class*>(cc->Mark(
+          WellKnownClasses::ToClass(WellKnownClasses::java_lang_Object).Ptr()));
+    } else {
+      cc->java_lang_Object_ = nullptr;
+    }
   }
 
  private:
@@ -2071,6 +2080,7 @@ void ConcurrentCopying::FillWithDummyObject(mirror::Object* dummy_obj, size_t by
   size_t data_offset = mirror::Array::DataOffset(component_size).SizeValue();
   if (data_offset > byte_size) {
     // An int array is too big. Use java.lang.Object.
+    CHECK(java_lang_Object_ != nullptr);
     AssertToSpaceInvariant(nullptr, MemberOffset(0), java_lang_Object_);
     CHECK_EQ(byte_size, (java_lang_Object_->GetObjectSize<kVerifyNone, kWithoutReadBarrier>()));
     dummy_obj->SetClass(java_lang_Object_);
