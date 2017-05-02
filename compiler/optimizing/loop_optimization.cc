@@ -733,12 +733,6 @@ bool HLoopOptimization::VectorizeUse(LoopNode* node,
     }
     return true;
   } else if (instruction->IsArrayGet()) {
-    // Strings are different, with a different offset to the actual data
-    // and some compressed to save memory. For now, all cases are rejected
-    // to avoid the complexity.
-    if (instruction->AsArrayGet()->IsStringCharAt()) {
-      return false;
-    }
     // Accept a right-hand-side array base[index] for
     // (1) exact matching vector type,
     // (2) loop-invariant base,
@@ -1001,8 +995,9 @@ void HLoopOptimization::GenerateVecMem(HInstruction* org,
       vector = new (global_allocator_) HVecStore(
           global_allocator_, org->InputAt(0), opa, opb, type, vector_length_);
     } else  {
+      bool is_string_char_at = org->AsArrayGet()->IsStringCharAt();
       vector = new (global_allocator_) HVecLoad(
-          global_allocator_, org->InputAt(0), opa, type, vector_length_);
+          global_allocator_, org->InputAt(0), opa, type, vector_length_, is_string_char_at);
     }
   } else {
     // Scalar store or load.
@@ -1010,7 +1005,9 @@ void HLoopOptimization::GenerateVecMem(HInstruction* org,
     if (opb != nullptr) {
       vector = new (global_allocator_) HArraySet(org->InputAt(0), opa, opb, type, kNoDexPc);
     } else  {
-      vector = new (global_allocator_) HArrayGet(org->InputAt(0), opa, type, kNoDexPc);
+      bool is_string_char_at = org->AsArrayGet()->IsStringCharAt();
+      vector = new (global_allocator_) HArrayGet(
+          org->InputAt(0), opa, type, kNoDexPc, is_string_char_at);
     }
   }
   vector_map_->Put(org, vector);
