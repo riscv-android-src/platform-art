@@ -817,7 +817,17 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
   }
 
   const DexFile& caller_dex_file = *caller_compilation_unit_.GetDexFile();
-  bool is_referrer = (klass.Get() == outermost_graph_->GetArtMethod()->GetDeclaringClass());
+  bool is_referrer;
+  ArtMethod* outermost_art_method = outermost_graph_->GetArtMethod();
+  if (outermost_art_method == nullptr) {
+    DCHECK(Runtime::Current()->IsAotCompiler());
+    // We are in AOT mode and we don't have an ART method to determine
+    // if the inlined method belongs to the referrer. Assume it doesn't.
+    is_referrer = false;
+  } else {
+    is_referrer = klass.Get() == outermost_art_method->GetDeclaringClass();
+  }
+
   // Note that we will just compare the classes, so we don't need Java semantics access checks.
   // Note that the type index and the dex file are relative to the method this type guard is
   // inlined into.
@@ -1470,8 +1480,13 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
         }
       }
       if (needs_constructor_barrier) {
-        HMemoryBarrier* barrier = new (graph_->GetArena()) HMemoryBarrier(kStoreStore, kNoDexPc);
-        invoke_instruction->GetBlock()->InsertInstructionBefore(barrier, invoke_instruction);
+        // See CompilerDriver::RequiresConstructorBarrier for more details.
+        DCHECK(obj != nullptr) << "only non-static methods can have a constructor fence";
+
+        HConstructorFence* constructor_fence =
+            new (graph_->GetArena()) HConstructorFence(obj, kNoDexPc, graph_->GetArena());
+        invoke_instruction->GetBlock()->InsertInstructionBefore(constructor_fence,
+                                                                invoke_instruction);
       }
       *return_replacement = nullptr;
       break;
