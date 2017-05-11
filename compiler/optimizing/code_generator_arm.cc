@@ -90,11 +90,15 @@ static inline void CheckLastTempIsBakerCcEntrypointRegister(HInstruction* instru
 }
 
 static inline void EmitPlaceholderBne(CodeGeneratorARM* codegen, Label* bne_label) {
-  DCHECK(down_cast<Thumb2Assembler*>(codegen->GetAssembler())->IsForced32Bit());
+  ScopedForce32Bit force_32bit(down_cast<Thumb2Assembler*>(codegen->GetAssembler()));
   __ BindTrackedLabel(bne_label);
   Label placeholder_label;
   __ b(&placeholder_label, NE);  // Placeholder, patched at link-time.
   __ Bind(&placeholder_label);
+}
+
+static inline bool CanEmitNarrowLdr(Register rt, Register rn, uint32_t offset) {
+  return ArmAssembler::IsLowRegister(rt) && ArmAssembler::IsLowRegister(rn) && offset < 32u;
 }
 
 static constexpr int kRegListThreshold = 4;
@@ -618,8 +622,13 @@ class DeoptimizationSlowPathARM : public SlowPathCodeARM {
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
     CodeGeneratorARM* arm_codegen = down_cast<CodeGeneratorARM*>(codegen);
     __ Bind(GetEntryLabel());
+    LocationSummary* locations = instruction_->GetLocations();
+    SaveLiveRegisters(codegen, locations);
+    InvokeRuntimeCallingConvention calling_convention;
+    __ LoadImmediate(calling_convention.GetRegisterAt(0),
+                     static_cast<uint32_t>(instruction_->AsDeoptimize()->GetDeoptimizationKind()));
     arm_codegen->InvokeRuntime(kQuickDeoptimize, instruction_, instruction_->GetDexPc(), this);
-    CheckEntrypointTypes<kQuickDeoptimize, void, void>();
+    CheckEntrypointTypes<kQuickDeoptimize, void, DeoptimizationKind>();
   }
 
   const char* GetDescription() const OVERRIDE { return "DeoptimizationSlowPathARM"; }
@@ -1647,34 +1656,6 @@ static void GenerateVcmp(HInstruction* instruction, CodeGeneratorARM* codegen) {
   }
 }
 
-static int64_t AdjustConstantForCondition(int64_t value,
-                                          IfCondition* condition,
-                                          IfCondition* opposite) {
-  if (value == 1) {
-    if (*condition == kCondB) {
-      value = 0;
-      *condition = kCondEQ;
-      *opposite = kCondNE;
-    } else if (*condition == kCondAE) {
-      value = 0;
-      *condition = kCondNE;
-      *opposite = kCondEQ;
-    }
-  } else if (value == -1) {
-    if (*condition == kCondGT) {
-      value = 0;
-      *condition = kCondGE;
-      *opposite = kCondLT;
-    } else if (*condition == kCondLE) {
-      value = 0;
-      *condition = kCondLT;
-      *opposite = kCondGE;
-    }
-  }
-
-  return value;
-}
-
 static std::pair<Condition, Condition> GenerateLongTestConstant(HCondition* condition,
                                                                 bool invert,
                                                                 CodeGeneratorARM* codegen) {
@@ -1688,7 +1669,7 @@ static std::pair<Condition, Condition> GenerateLongTestConstant(HCondition* cond
     std::swap(cond, opposite);
   }
 
-  std::pair<Condition, Condition> ret(EQ, NE);
+  std::pair<Condition, Condition> ret;
   const Location left = locations->InAt(0);
   const Location right = locations->InAt(1);
 
@@ -1696,38 +1677,7 @@ static std::pair<Condition, Condition> GenerateLongTestConstant(HCondition* cond
 
   const Register left_high = left.AsRegisterPairHigh<Register>();
   const Register left_low = left.AsRegisterPairLow<Register>();
-  int64_t value = AdjustConstantForCondition(right.GetConstant()->AsLongConstant()->GetValue(),
-                                             &cond,
-                                             &opposite);
-
-  // Comparisons against 0 are common enough to deserve special attention.
-  if (value == 0) {
-    switch (cond) {
-      case kCondNE:
-      // x > 0 iff x != 0 when the comparison is unsigned.
-      case kCondA:
-        ret = std::make_pair(NE, EQ);
-        FALLTHROUGH_INTENDED;
-      case kCondEQ:
-      // x <= 0 iff x == 0 when the comparison is unsigned.
-      case kCondBE:
-        __ orrs(IP, left_low, ShifterOperand(left_high));
-        return ret;
-      case kCondLT:
-      case kCondGE:
-        __ cmp(left_high, ShifterOperand(0));
-        return std::make_pair(ARMCondition(cond), ARMCondition(opposite));
-      // Trivially true or false.
-      case kCondB:
-        ret = std::make_pair(NE, EQ);
-        FALLTHROUGH_INTENDED;
-      case kCondAE:
-        __ cmp(left_low, ShifterOperand(left_low));
-        return ret;
-      default:
-        break;
-    }
-  }
+  int64_t value = right.GetConstant()->AsLongConstant()->GetValue();
 
   switch (cond) {
     case kCondEQ:
@@ -1887,14 +1837,10 @@ static std::pair<Condition, Condition> GenerateTest(HCondition* condition,
 static bool CanGenerateTest(HCondition* condition, ArmAssembler* assembler) {
   if (condition->GetLeft()->GetType() == Primitive::kPrimLong) {
     const LocationSummary* const locations = condition->GetLocations();
+    const IfCondition c = condition->GetCondition();
 
     if (locations->InAt(1).IsConstant()) {
-      IfCondition c = condition->GetCondition();
-      IfCondition opposite = condition->GetOppositeCondition();
-      const int64_t value = AdjustConstantForCondition(
-          Int64FromConstant(locations->InAt(1).GetConstant()),
-          &c,
-          &opposite);
+      const int64_t value = locations->InAt(1).GetConstant()->AsLongConstant()->GetValue();
       ShifterOperand so;
 
       if (c < kCondLT || c > kCondGE) {
@@ -1902,11 +1848,9 @@ static bool CanGenerateTest(HCondition* condition, ArmAssembler* assembler) {
         // we check that the least significant half of the first input to be compared
         // is in a low register (the other half is read outside an IT block), and
         // the constant fits in an 8-bit unsigned integer, so that a 16-bit CMP
-        // encoding can be used; 0 is always handled, no matter what registers are
-        // used by the first input.
-        if (value != 0 &&
-            (!ArmAssembler::IsLowRegister(locations->InAt(0).AsRegisterPairLow<Register>()) ||
-             !IsUint<8>(Low32Bits(value)))) {
+        // encoding can be used.
+        if (!ArmAssembler::IsLowRegister(locations->InAt(0).AsRegisterPairLow<Register>()) ||
+            !IsUint<8>(Low32Bits(value))) {
           return false;
         }
       } else if (c == kCondLE || c == kCondGT) {
@@ -1931,329 +1875,6 @@ static bool CanGenerateTest(HCondition* condition, ArmAssembler* assembler) {
   }
 
   return true;
-}
-
-static void GenerateConditionGeneric(HCondition* cond, CodeGeneratorARM* codegen) {
-  DCHECK(CanGenerateTest(cond, codegen->GetAssembler()));
-
-  const Register out = cond->GetLocations()->Out().AsRegister<Register>();
-  const auto condition = GenerateTest(cond, false, codegen);
-
-  __ mov(out, ShifterOperand(0), AL, kCcKeep);
-
-  if (ArmAssembler::IsLowRegister(out)) {
-    __ it(condition.first);
-    __ mov(out, ShifterOperand(1), condition.first);
-  } else {
-    Label done_label;
-    Label* const final_label = codegen->GetFinalLabel(cond, &done_label);
-
-    __ b(final_label, condition.second);
-    __ LoadImmediate(out, 1);
-
-    if (done_label.IsLinked()) {
-      __ Bind(&done_label);
-    }
-  }
-}
-
-static void GenerateEqualLong(HCondition* cond, CodeGeneratorARM* codegen) {
-  DCHECK_EQ(cond->GetLeft()->GetType(), Primitive::kPrimLong);
-
-  const LocationSummary* const locations = cond->GetLocations();
-  IfCondition condition = cond->GetCondition();
-  const Register out = locations->Out().AsRegister<Register>();
-  const Location left = locations->InAt(0);
-  const Location right = locations->InAt(1);
-  Register left_high = left.AsRegisterPairHigh<Register>();
-  Register left_low = left.AsRegisterPairLow<Register>();
-
-  if (right.IsConstant()) {
-    IfCondition opposite = cond->GetOppositeCondition();
-    const int64_t value = AdjustConstantForCondition(Int64FromConstant(right.GetConstant()),
-                                                     &condition,
-                                                     &opposite);
-    int32_t value_high = -High32Bits(value);
-    int32_t value_low = -Low32Bits(value);
-
-    // The output uses Location::kNoOutputOverlap.
-    if (out == left_high) {
-      std::swap(left_low, left_high);
-      std::swap(value_low, value_high);
-    }
-
-    __ AddConstant(out, left_low, value_low);
-    __ AddConstant(IP, left_high, value_high);
-  } else {
-    DCHECK(right.IsRegisterPair());
-    __ sub(IP, left_high, ShifterOperand(right.AsRegisterPairHigh<Register>()));
-    __ sub(out, left_low, ShifterOperand(right.AsRegisterPairLow<Register>()));
-  }
-
-  // Need to check after calling AdjustConstantForCondition().
-  DCHECK(condition == kCondEQ || condition == kCondNE) << condition;
-
-  if (condition == kCondNE && ArmAssembler::IsLowRegister(out)) {
-    __ orrs(out, out, ShifterOperand(IP));
-    __ it(NE);
-    __ mov(out, ShifterOperand(1), NE);
-  } else {
-    __ orr(out, out, ShifterOperand(IP));
-    codegen->GenerateConditionWithZero(condition, out, out, IP);
-  }
-}
-
-static void GenerateLongComparesAndJumps(HCondition* cond,
-                                         Label* true_label,
-                                         Label* false_label,
-                                         CodeGeneratorARM* codegen) {
-  LocationSummary* locations = cond->GetLocations();
-  Location left = locations->InAt(0);
-  Location right = locations->InAt(1);
-  IfCondition if_cond = cond->GetCondition();
-
-  Register left_high = left.AsRegisterPairHigh<Register>();
-  Register left_low = left.AsRegisterPairLow<Register>();
-  IfCondition true_high_cond = if_cond;
-  IfCondition false_high_cond = cond->GetOppositeCondition();
-  Condition final_condition = ARMUnsignedCondition(if_cond);  // unsigned on lower part
-
-  // Set the conditions for the test, remembering that == needs to be
-  // decided using the low words.
-  switch (if_cond) {
-    case kCondEQ:
-    case kCondNE:
-      // Nothing to do.
-      break;
-    case kCondLT:
-      false_high_cond = kCondGT;
-      break;
-    case kCondLE:
-      true_high_cond = kCondLT;
-      break;
-    case kCondGT:
-      false_high_cond = kCondLT;
-      break;
-    case kCondGE:
-      true_high_cond = kCondGT;
-      break;
-    case kCondB:
-      false_high_cond = kCondA;
-      break;
-    case kCondBE:
-      true_high_cond = kCondB;
-      break;
-    case kCondA:
-      false_high_cond = kCondB;
-      break;
-    case kCondAE:
-      true_high_cond = kCondA;
-      break;
-  }
-  if (right.IsConstant()) {
-    int64_t value = right.GetConstant()->AsLongConstant()->GetValue();
-    int32_t val_low = Low32Bits(value);
-    int32_t val_high = High32Bits(value);
-
-    __ CmpConstant(left_high, val_high);
-    if (if_cond == kCondNE) {
-      __ b(true_label, ARMCondition(true_high_cond));
-    } else if (if_cond == kCondEQ) {
-      __ b(false_label, ARMCondition(false_high_cond));
-    } else {
-      __ b(true_label, ARMCondition(true_high_cond));
-      __ b(false_label, ARMCondition(false_high_cond));
-    }
-    // Must be equal high, so compare the lows.
-    __ CmpConstant(left_low, val_low);
-  } else {
-    Register right_high = right.AsRegisterPairHigh<Register>();
-    Register right_low = right.AsRegisterPairLow<Register>();
-
-    __ cmp(left_high, ShifterOperand(right_high));
-    if (if_cond == kCondNE) {
-      __ b(true_label, ARMCondition(true_high_cond));
-    } else if (if_cond == kCondEQ) {
-      __ b(false_label, ARMCondition(false_high_cond));
-    } else {
-      __ b(true_label, ARMCondition(true_high_cond));
-      __ b(false_label, ARMCondition(false_high_cond));
-    }
-    // Must be equal high, so compare the lows.
-    __ cmp(left_low, ShifterOperand(right_low));
-  }
-  // The last comparison might be unsigned.
-  // TODO: optimize cases where this is always true/false
-  __ b(true_label, final_condition);
-}
-
-static void GenerateConditionLong(HCondition* cond, CodeGeneratorARM* codegen) {
-  DCHECK_EQ(cond->GetLeft()->GetType(), Primitive::kPrimLong);
-
-  const LocationSummary* const locations = cond->GetLocations();
-  IfCondition condition = cond->GetCondition();
-  const Register out = locations->Out().AsRegister<Register>();
-  const Location left = locations->InAt(0);
-  const Location right = locations->InAt(1);
-
-  if (right.IsConstant()) {
-    IfCondition opposite = cond->GetOppositeCondition();
-
-    // Comparisons against 0 are common enough to deserve special attention.
-    if (AdjustConstantForCondition(Int64FromConstant(right.GetConstant()),
-                                   &condition,
-                                   &opposite) == 0) {
-      switch (condition) {
-        case kCondNE:
-        case kCondA:
-          if (ArmAssembler::IsLowRegister(out)) {
-            // We only care if both input registers are 0 or not.
-            __ orrs(out,
-                    left.AsRegisterPairLow<Register>(),
-                    ShifterOperand(left.AsRegisterPairHigh<Register>()));
-            __ it(NE);
-            __ mov(out, ShifterOperand(1), NE);
-            return;
-          }
-
-          FALLTHROUGH_INTENDED;
-        case kCondEQ:
-        case kCondBE:
-          // We only care if both input registers are 0 or not.
-          __ orr(out,
-                 left.AsRegisterPairLow<Register>(),
-                 ShifterOperand(left.AsRegisterPairHigh<Register>()));
-          codegen->GenerateConditionWithZero(condition, out, out);
-          return;
-        case kCondLT:
-        case kCondGE:
-          // We only care about the sign bit.
-          FALLTHROUGH_INTENDED;
-        case kCondAE:
-        case kCondB:
-          codegen->GenerateConditionWithZero(condition, out, left.AsRegisterPairHigh<Register>());
-          return;
-        case kCondLE:
-        case kCondGT:
-        default:
-          break;
-      }
-    }
-  }
-
-  if ((condition == kCondEQ || condition == kCondNE) &&
-      // If `out` is a low register, then the GenerateConditionGeneric()
-      // function generates a shorter code sequence that is still branchless.
-      (!ArmAssembler::IsLowRegister(out) || !CanGenerateTest(cond, codegen->GetAssembler()))) {
-    GenerateEqualLong(cond, codegen);
-    return;
-  }
-
-  if (CanGenerateTest(cond, codegen->GetAssembler())) {
-    GenerateConditionGeneric(cond, codegen);
-    return;
-  }
-
-  // Convert the jumps into the result.
-  Label done_label;
-  Label* const final_label = codegen->GetFinalLabel(cond, &done_label);
-  Label true_label, false_label;
-
-  GenerateLongComparesAndJumps(cond, &true_label, &false_label, codegen);
-
-  // False case: result = 0.
-  __ Bind(&false_label);
-  __ mov(out, ShifterOperand(0));
-  __ b(final_label);
-
-  // True case: result = 1.
-  __ Bind(&true_label);
-  __ mov(out, ShifterOperand(1));
-
-  if (done_label.IsLinked()) {
-    __ Bind(&done_label);
-  }
-}
-
-static void GenerateConditionIntegralOrNonPrimitive(HCondition* cond, CodeGeneratorARM* codegen) {
-  const Primitive::Type type = cond->GetLeft()->GetType();
-
-  DCHECK(Primitive::IsIntegralType(type) || type == Primitive::kPrimNot) << type;
-
-  if (type == Primitive::kPrimLong) {
-    GenerateConditionLong(cond, codegen);
-    return;
-  }
-
-  const LocationSummary* const locations = cond->GetLocations();
-  IfCondition condition = cond->GetCondition();
-  Register in = locations->InAt(0).AsRegister<Register>();
-  const Register out = locations->Out().AsRegister<Register>();
-  const Location right = cond->GetLocations()->InAt(1);
-  int64_t value;
-
-  if (right.IsConstant()) {
-    IfCondition opposite = cond->GetOppositeCondition();
-
-    value = AdjustConstantForCondition(Int64FromConstant(right.GetConstant()),
-                                       &condition,
-                                       &opposite);
-
-    // Comparisons against 0 are common enough to deserve special attention.
-    if (value == 0) {
-      switch (condition) {
-        case kCondNE:
-        case kCondA:
-          if (ArmAssembler::IsLowRegister(out) && out == in) {
-            __ cmp(out, ShifterOperand(0));
-            __ it(NE);
-            __ mov(out, ShifterOperand(1), NE);
-            return;
-          }
-
-          FALLTHROUGH_INTENDED;
-        case kCondEQ:
-        case kCondBE:
-        case kCondLT:
-        case kCondGE:
-        case kCondAE:
-        case kCondB:
-          codegen->GenerateConditionWithZero(condition, out, in);
-          return;
-        case kCondLE:
-        case kCondGT:
-        default:
-          break;
-      }
-    }
-  }
-
-  if (condition == kCondEQ || condition == kCondNE) {
-    ShifterOperand operand;
-
-    if (right.IsConstant()) {
-      operand = ShifterOperand(value);
-    } else if (out == right.AsRegister<Register>()) {
-      // Avoid 32-bit instructions if possible.
-      operand = ShifterOperand(in);
-      in = right.AsRegister<Register>();
-    } else {
-      operand = ShifterOperand(right.AsRegister<Register>());
-    }
-
-    if (condition == kCondNE && ArmAssembler::IsLowRegister(out)) {
-      __ subs(out, in, operand);
-      __ it(NE);
-      __ mov(out, ShifterOperand(1), NE);
-    } else {
-      __ sub(out, in, operand);
-      codegen->GenerateConditionWithZero(condition, out, out);
-    }
-
-    return;
-  }
-
-  GenerateConditionGeneric(cond, codegen);
 }
 
 static bool CanEncodeConstantAs8BitImmediate(HConstant* constant) {
@@ -2862,6 +2483,89 @@ void LocationsBuilderARM::VisitExit(HExit* exit) {
 void InstructionCodeGeneratorARM::VisitExit(HExit* exit ATTRIBUTE_UNUSED) {
 }
 
+void InstructionCodeGeneratorARM::GenerateLongComparesAndJumps(HCondition* cond,
+                                                               Label* true_label,
+                                                               Label* false_label) {
+  LocationSummary* locations = cond->GetLocations();
+  Location left = locations->InAt(0);
+  Location right = locations->InAt(1);
+  IfCondition if_cond = cond->GetCondition();
+
+  Register left_high = left.AsRegisterPairHigh<Register>();
+  Register left_low = left.AsRegisterPairLow<Register>();
+  IfCondition true_high_cond = if_cond;
+  IfCondition false_high_cond = cond->GetOppositeCondition();
+  Condition final_condition = ARMUnsignedCondition(if_cond);  // unsigned on lower part
+
+  // Set the conditions for the test, remembering that == needs to be
+  // decided using the low words.
+  switch (if_cond) {
+    case kCondEQ:
+    case kCondNE:
+      // Nothing to do.
+      break;
+    case kCondLT:
+      false_high_cond = kCondGT;
+      break;
+    case kCondLE:
+      true_high_cond = kCondLT;
+      break;
+    case kCondGT:
+      false_high_cond = kCondLT;
+      break;
+    case kCondGE:
+      true_high_cond = kCondGT;
+      break;
+    case kCondB:
+      false_high_cond = kCondA;
+      break;
+    case kCondBE:
+      true_high_cond = kCondB;
+      break;
+    case kCondA:
+      false_high_cond = kCondB;
+      break;
+    case kCondAE:
+      true_high_cond = kCondA;
+      break;
+  }
+  if (right.IsConstant()) {
+    int64_t value = right.GetConstant()->AsLongConstant()->GetValue();
+    int32_t val_low = Low32Bits(value);
+    int32_t val_high = High32Bits(value);
+
+    __ CmpConstant(left_high, val_high);
+    if (if_cond == kCondNE) {
+      __ b(true_label, ARMCondition(true_high_cond));
+    } else if (if_cond == kCondEQ) {
+      __ b(false_label, ARMCondition(false_high_cond));
+    } else {
+      __ b(true_label, ARMCondition(true_high_cond));
+      __ b(false_label, ARMCondition(false_high_cond));
+    }
+    // Must be equal high, so compare the lows.
+    __ CmpConstant(left_low, val_low);
+  } else {
+    Register right_high = right.AsRegisterPairHigh<Register>();
+    Register right_low = right.AsRegisterPairLow<Register>();
+
+    __ cmp(left_high, ShifterOperand(right_high));
+    if (if_cond == kCondNE) {
+      __ b(true_label, ARMCondition(true_high_cond));
+    } else if (if_cond == kCondEQ) {
+      __ b(false_label, ARMCondition(false_high_cond));
+    } else {
+      __ b(true_label, ARMCondition(true_high_cond));
+      __ b(false_label, ARMCondition(false_high_cond));
+    }
+    // Must be equal high, so compare the lows.
+    __ cmp(left_low, ShifterOperand(right_low));
+  }
+  // The last comparison might be unsigned.
+  // TODO: optimize cases where this is always true/false
+  __ b(true_label, final_condition);
+}
+
 void InstructionCodeGeneratorARM::GenerateCompareTestAndBranch(HCondition* condition,
                                                                Label* true_target_in,
                                                                Label* false_target_in) {
@@ -2896,7 +2600,7 @@ void InstructionCodeGeneratorARM::GenerateCompareTestAndBranch(HCondition* condi
   Label* false_target = false_target_in == nullptr ? &fallthrough_target : false_target_in;
 
   DCHECK_EQ(condition->InputAt(0)->GetType(), Primitive::kPrimLong);
-  GenerateLongComparesAndJumps(condition, true_target, false_target, codegen_);
+  GenerateLongComparesAndJumps(condition, true_target, false_target);
 
   if (false_target != &fallthrough_target) {
     __ b(false_target);
@@ -3023,7 +2727,10 @@ void InstructionCodeGeneratorARM::VisitIf(HIf* if_instr) {
 void LocationsBuilderARM::VisitDeoptimize(HDeoptimize* deoptimize) {
   LocationSummary* locations = new (GetGraph()->GetArena())
       LocationSummary(deoptimize, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  InvokeRuntimeCallingConvention calling_convention;
+  RegisterSet caller_saves = RegisterSet::Empty();
+  caller_saves.Add(Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
+  locations->SetCustomSlowPathCallerSaves(caller_saves);
   if (IsBooleanValueOrMaterializedCondition(deoptimize->InputAt(0))) {
     locations->SetInAt(0, Location::RequiresRegister());
   }
@@ -3208,80 +2915,6 @@ void CodeGeneratorARM::GenerateNop() {
   __ nop();
 }
 
-// `temp` is an extra temporary register that is used for some conditions;
-// callers may not specify it, in which case the method will use a scratch
-// register instead.
-void CodeGeneratorARM::GenerateConditionWithZero(IfCondition condition,
-                                                 Register out,
-                                                 Register in,
-                                                 Register temp) {
-  switch (condition) {
-    case kCondEQ:
-    // x <= 0 iff x == 0 when the comparison is unsigned.
-    case kCondBE:
-      if (temp == kNoRegister || (ArmAssembler::IsLowRegister(out) && out != in)) {
-        temp = out;
-      }
-
-      // Avoid 32-bit instructions if possible; note that `in` and `temp` must be
-      // different as well.
-      if (ArmAssembler::IsLowRegister(in) && ArmAssembler::IsLowRegister(temp) && in != temp) {
-        // temp = - in; only 0 sets the carry flag.
-        __ rsbs(temp, in, ShifterOperand(0));
-
-        if (out == in) {
-          std::swap(in, temp);
-        }
-
-        // out = - in + in + carry = carry
-        __ adc(out, temp, ShifterOperand(in));
-      } else {
-        // If `in` is 0, then it has 32 leading zeros, and less than that otherwise.
-        __ clz(out, in);
-        // Any number less than 32 logically shifted right by 5 bits results in 0;
-        // the same operation on 32 yields 1.
-        __ Lsr(out, out, 5);
-      }
-
-      break;
-    case kCondNE:
-    // x > 0 iff x != 0 when the comparison is unsigned.
-    case kCondA:
-      if (out == in) {
-        if (temp == kNoRegister || in == temp) {
-          temp = IP;
-        }
-      } else if (temp == kNoRegister || !ArmAssembler::IsLowRegister(temp)) {
-        temp = out;
-      }
-
-      // temp = in - 1; only 0 does not set the carry flag.
-      __ subs(temp, in, ShifterOperand(1));
-      // out = in + ~temp + carry = in + (-(in - 1) - 1) + carry = in - in + 1 - 1 + carry = carry
-      __ sbc(out, in, ShifterOperand(temp));
-      break;
-    case kCondGE:
-      __ mvn(out, ShifterOperand(in));
-      in = out;
-      FALLTHROUGH_INTENDED;
-    case kCondLT:
-      // We only care about the sign bit.
-      __ Lsr(out, in, 31);
-      break;
-    case kCondAE:
-      // Trivially true.
-      __ mov(out, ShifterOperand(1));
-      break;
-    case kCondB:
-      // Trivially false.
-      __ mov(out, ShifterOperand(0));
-      break;
-    default:
-      LOG(FATAL) << "Unexpected condition " << condition;
-      UNREACHABLE();
-  }
-}
-
 void LocationsBuilderARM::HandleCondition(HCondition* cond) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(cond, LocationSummary::kNoCall);
@@ -3318,42 +2951,48 @@ void InstructionCodeGeneratorARM::HandleCondition(HCondition* cond) {
     return;
   }
 
-  const Primitive::Type type = cond->GetLeft()->GetType();
+  const Register out = cond->GetLocations()->Out().AsRegister<Register>();
 
-  if (Primitive::IsFloatingPointType(type)) {
-    GenerateConditionGeneric(cond, codegen_);
+  if (ArmAssembler::IsLowRegister(out) && CanGenerateTest(cond, codegen_->GetAssembler())) {
+    const auto condition = GenerateTest(cond, false, codegen_);
+
+    __ it(condition.first);
+    __ mov(out, ShifterOperand(1), condition.first);
+    __ it(condition.second);
+    __ mov(out, ShifterOperand(0), condition.second);
     return;
   }
 
-  DCHECK(Primitive::IsIntegralType(type) || type == Primitive::kPrimNot) << type;
+  // Convert the jumps into the result.
+  Label done_label;
+  Label* const final_label = codegen_->GetFinalLabel(cond, &done_label);
 
-  if (type == Primitive::kPrimBoolean) {
-    const LocationSummary* const locations = cond->GetLocations();
-    const IfCondition c = cond->GetCondition();
-    Register left = locations->InAt(0).AsRegister<Register>();
-    const Register out = locations->Out().AsRegister<Register>();
-    const Location right_loc = locations->InAt(1);
+  if (cond->InputAt(0)->GetType() == Primitive::kPrimLong) {
+    Label true_label, false_label;
 
-    // All other cases are handled by the instruction simplifier.
-    DCHECK((c == kCondEQ || c == kCondNE) && !right_loc.IsConstant());
+    GenerateLongComparesAndJumps(cond, &true_label, &false_label);
 
-    Register right = right_loc.AsRegister<Register>();
+    // False case: result = 0.
+    __ Bind(&false_label);
+    __ LoadImmediate(out, 0);
+    __ b(final_label);
 
-    // Avoid 32-bit instructions if possible.
-    if (out == right) {
-      std::swap(left, right);
-    }
+    // True case: result = 1.
+    __ Bind(&true_label);
+    __ LoadImmediate(out, 1);
+  } else {
+    DCHECK(CanGenerateTest(cond, codegen_->GetAssembler()));
 
-    __ eor(out, left, ShifterOperand(right));
+    const auto condition = GenerateTest(cond, false, codegen_);
 
-    if (c == kCondEQ) {
-      __ eor(out, out, ShifterOperand(1));
-    }
-
-    return;
+    __ mov(out, ShifterOperand(0), AL, kCcKeep);
+    __ b(final_label, condition.second);
+    __ LoadImmediate(out, 1);
   }
 
-  GenerateConditionIntegralOrNonPrimitive(cond, codegen_);
+  if (done_label.IsLinked()) {
+    __ Bind(&done_label);
+  }
 }
 
 void LocationsBuilderARM::VisitEqual(HEqual* comp) {
@@ -8422,8 +8061,9 @@ void InstructionCodeGeneratorARM::GenerateGcRootFieldLoad(HInstruction* instruct
         //   return_address:
 
         CheckLastTempIsBakerCcEntrypointRegister(instruction);
+        bool narrow = CanEmitNarrowLdr(root_reg, obj, offset);
         uint32_t custom_data =
-            linker::Thumb2RelativePatcher::EncodeBakerReadBarrierGcRootData(root_reg);
+            linker::Thumb2RelativePatcher::EncodeBakerReadBarrierGcRootData(root_reg, narrow);
         Label* bne_label = codegen_->NewBakerReadBarrierPatch(custom_data);
 
         // entrypoint_reg =
@@ -8436,16 +8076,18 @@ void InstructionCodeGeneratorARM::GenerateGcRootFieldLoad(HInstruction* instruct
         Label return_address;
         __ AdrCode(LR, &return_address);
         __ CmpConstant(kBakerCcEntrypointRegister, 0);
-        static_assert(
-            BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_OFFSET == -8,
-            "GC root LDR must be 2 32-bit instructions (8B) before the return address label.");
         // Currently the offset is always within range. If that changes,
         // we shall have to split the load the same way as for fields.
         DCHECK_LT(offset, kReferenceLoadMinFarOffset);
-        ScopedForce32Bit force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()));
+        DCHECK(!down_cast<Thumb2Assembler*>(GetAssembler())->IsForced32Bit());
+        ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()), !narrow);
+        int old_position = GetAssembler()->GetBuffer()->GetPosition();
         __ LoadFromOffset(kLoadWord, root_reg, obj, offset);
         EmitPlaceholderBne(codegen_, bne_label);
         __ Bind(&return_address);
+        DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+                  narrow ? BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_NARROW_OFFSET
+                         : BAKER_MARK_INTROSPECTION_GC_ROOT_LDR_WIDE_OFFSET);
       } else {
         // Note that we do not actually check the value of
         // `GetIsGcMarking()` to decide whether to mark the loaded GC
@@ -8545,10 +8187,12 @@ void CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instr
     //   not_gray_return_address:
     //     // Original reference load. If the offset is too large to fit
     //     // into LDR, we use an adjusted base register here.
-    //     GcRoot<mirror::Object> reference = *(obj+offset);
+    //     HeapReference<mirror::Object> reference = *(obj+offset);
     //   gray_return_address:
 
     DCHECK_ALIGNED(offset, sizeof(mirror::HeapReference<mirror::Object>));
+    Register ref_reg = ref.AsRegister<Register>();
+    bool narrow = CanEmitNarrowLdr(ref_reg, obj, offset);
     Register base = obj;
     if (offset >= kReferenceLoadMinFarOffset) {
       base = temp.AsRegister<Register>();
@@ -8556,10 +8200,14 @@ void CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instr
       static_assert(IsPowerOfTwo(kReferenceLoadMinFarOffset), "Expecting a power of 2.");
       __ AddConstant(base, obj, offset & ~(kReferenceLoadMinFarOffset - 1u));
       offset &= (kReferenceLoadMinFarOffset - 1u);
+      // Use narrow LDR only for small offsets. Generating narrow encoding LDR for the large
+      // offsets with `(offset & (kReferenceLoadMinFarOffset - 1u)) < 32u` would most likely
+      // increase the overall code size when taking the generated thunks into account.
+      DCHECK(!narrow);
     }
     CheckLastTempIsBakerCcEntrypointRegister(instruction);
     uint32_t custom_data =
-        linker::Thumb2RelativePatcher::EncodeBakerReadBarrierFieldData(base, obj);
+        linker::Thumb2RelativePatcher::EncodeBakerReadBarrierFieldData(base, obj, narrow);
     Label* bne_label = NewBakerReadBarrierPatch(custom_data);
 
     // entrypoint_reg =
@@ -8572,19 +8220,20 @@ void CodeGeneratorARM::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instr
     Label return_address;
     __ AdrCode(LR, &return_address);
     __ CmpConstant(kBakerCcEntrypointRegister, 0);
-    ScopedForce32Bit force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()));
     EmitPlaceholderBne(this, bne_label);
-    static_assert(BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET == (kPoisonHeapReferences ? -8 : -4),
-                  "Field LDR must be 1 32-bit instruction (4B) before the return address label; "
-                  " 2 32-bit instructions (8B) for heap poisoning.");
-    Register ref_reg = ref.AsRegister<Register>();
     DCHECK_LT(offset, kReferenceLoadMinFarOffset);
+    DCHECK(!down_cast<Thumb2Assembler*>(GetAssembler())->IsForced32Bit());
+    ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()), !narrow);
+    int old_position = GetAssembler()->GetBuffer()->GetPosition();
     __ LoadFromOffset(kLoadWord, ref_reg, base, offset);
     if (needs_null_check) {
       MaybeRecordImplicitNullCheck(instruction);
     }
     GetAssembler()->MaybeUnpoisonHeapReference(ref_reg);
     __ Bind(&return_address);
+    DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+              narrow ? BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_OFFSET
+                     : BAKER_MARK_INTROSPECTION_FIELD_LDR_WIDE_OFFSET);
     return;
   }
 
@@ -8630,7 +8279,7 @@ void CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier(HInstruction* instr
     //   not_gray_return_address:
     //     // Original reference load. If the offset is too large to fit
     //     // into LDR, we use an adjusted base register here.
-    //     GcRoot<mirror::Object> reference = data[index];
+    //     HeapReference<mirror::Object> reference = data[index];
     //   gray_return_address:
 
     DCHECK(index.IsValid());
@@ -8655,15 +8304,15 @@ void CodeGeneratorARM::GenerateArrayLoadWithBakerReadBarrier(HInstruction* instr
     Label return_address;
     __ AdrCode(LR, &return_address);
     __ CmpConstant(kBakerCcEntrypointRegister, 0);
-    ScopedForce32Bit force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()));
     EmitPlaceholderBne(this, bne_label);
-    static_assert(BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET == (kPoisonHeapReferences ? -8 : -4),
-                  "Array LDR must be 1 32-bit instruction (4B) before the return address label; "
-                  " 2 32-bit instructions (8B) for heap poisoning.");
+    ScopedForce32Bit maybe_force_32bit(down_cast<Thumb2Assembler*>(GetAssembler()));
+    int old_position = GetAssembler()->GetBuffer()->GetPosition();
     __ ldr(ref_reg, Address(data_reg, index_reg, LSL, scale_factor));
     DCHECK(!needs_null_check);  // The thunk cannot handle the null check.
     GetAssembler()->MaybeUnpoisonHeapReference(ref_reg);
     __ Bind(&return_address);
+    DCHECK_EQ(old_position - GetAssembler()->GetBuffer()->GetPosition(),
+              BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET);
     return;
   }
 
