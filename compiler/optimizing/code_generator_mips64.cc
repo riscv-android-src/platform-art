@@ -302,10 +302,13 @@ class SuspendCheckSlowPathMIPS64 : public SlowPathCodeMIPS64 {
       : SlowPathCodeMIPS64(instruction), successor_(successor) {}
 
   void EmitNativeCode(CodeGenerator* codegen) OVERRIDE {
+    LocationSummary* locations = instruction_->GetLocations();
     CodeGeneratorMIPS64* mips64_codegen = down_cast<CodeGeneratorMIPS64*>(codegen);
     __ Bind(GetEntryLabel());
+    SaveLiveRegisters(codegen, locations);     // Only saves live vector registers for SIMD.
     mips64_codegen->InvokeRuntime(kQuickTestSuspend, instruction_, instruction_->GetDexPc(), this);
     CheckEntrypointTypes<kQuickTestSuspend, void, void>();
+    RestoreLiveRegisters(codegen, locations);  // Only restores live vector registers for SIMD.
     if (successor_ == nullptr) {
       __ Bc(GetReturnLabel());
     } else {
@@ -1586,14 +1589,20 @@ void CodeGeneratorMIPS64::PatchJitRootUse(uint8_t* code,
 
 void CodeGeneratorMIPS64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) {
   for (const auto& entry : jit_string_patches_) {
-    const auto& it = jit_string_roots_.find(entry.first);
+    const StringReference& string_reference = entry.first;
+    Literal* table_entry_literal = entry.second;
+    const auto it = jit_string_roots_.find(string_reference);
     DCHECK(it != jit_string_roots_.end());
-    PatchJitRootUse(code, roots_data, entry.second, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
   for (const auto& entry : jit_class_patches_) {
-    const auto& it = jit_class_roots_.find(entry.first);
+    const TypeReference& type_reference = entry.first;
+    Literal* table_entry_literal = entry.second;
+    const auto it = jit_class_roots_.find(type_reference);
     DCHECK(it != jit_class_roots_.end());
-    PatchJitRootUse(code, roots_data, entry.second, it->second);
+    uint64_t index_in_table = it->second;
+    PatchJitRootUse(code, roots_data, table_entry_literal, index_in_table);
   }
 }
 
@@ -1641,13 +1650,19 @@ size_t CodeGeneratorMIPS64::RestoreCoreRegister(size_t stack_index, uint32_t reg
 }
 
 size_t CodeGeneratorMIPS64::SaveFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
-  __ StoreFpuToOffset(kStoreDoubleword, FpuRegister(reg_id), SP, stack_index);
-  return kMips64DoublewordSize;
+  __ StoreFpuToOffset(GetGraph()->HasSIMD() ? kStoreQuadword : kStoreDoubleword,
+                      FpuRegister(reg_id),
+                      SP,
+                      stack_index);
+  return GetFloatingPointSpillSlotSize();
 }
 
 size_t CodeGeneratorMIPS64::RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
-  __ LoadFpuFromOffset(kLoadDoubleword, FpuRegister(reg_id), SP, stack_index);
-  return kMips64DoublewordSize;
+  __ LoadFpuFromOffset(GetGraph()->HasSIMD() ? kLoadQuadword : kLoadDoubleword,
+                       FpuRegister(reg_id),
+                       SP,
+                       stack_index);
+  return GetFloatingPointSpillSlotSize();
 }
 
 void CodeGeneratorMIPS64::DumpCoreRegister(std::ostream& stream, int reg) const {
@@ -5846,7 +5861,11 @@ void InstructionCodeGeneratorMIPS64::VisitUnresolvedStaticFieldSet(
 void LocationsBuilderMIPS64::VisitSuspendCheck(HSuspendCheck* instruction) {
   LocationSummary* locations =
       new (GetGraph()->GetArena()) LocationSummary(instruction, LocationSummary::kCallOnSlowPath);
-  locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
+  // In suspend check slow path, usually there are no caller-save registers at all.
+  // If SIMD instructions are present, however, we force spilling all live SIMD
+  // registers in full width (since the runtime only saves/restores lower part).
+  locations->SetCustomSlowPathCallerSaves(
+      GetGraph()->HasSIMD() ? RegisterSet::AllFpu() : RegisterSet::Empty());
 }
 
 void InstructionCodeGeneratorMIPS64::VisitSuspendCheck(HSuspendCheck* instruction) {
@@ -5973,68 +5992,6 @@ void InstructionCodeGeneratorMIPS64::VisitTypeConversion(HTypeConversion* conver
     CHECK(result_type == Primitive::kPrimInt || result_type == Primitive::kPrimLong);
     GpuRegister dst = locations->Out().AsRegister<GpuRegister>();
     FpuRegister src = locations->InAt(0).AsFpuRegister<FpuRegister>();
-    Mips64Label truncate;
-    Mips64Label done;
-
-    // When NAN2008=0 (R2 and before), the truncate instruction produces the maximum positive
-    // value when the input is either a NaN or is outside of the range of the output type
-    // after the truncation. IOW, the three special cases (NaN, too small, too big) produce
-    // the same result.
-    //
-    // When NAN2008=1 (R6), the truncate instruction caps the output at the minimum/maximum
-    // value of the output type if the input is outside of the range after the truncation or
-    // produces 0 when the input is a NaN. IOW, the three special cases produce three distinct
-    // results. This matches the desired float/double-to-int/long conversion exactly.
-    //
-    // So, NAN2008 affects handling of negative values and NaNs by the truncate instruction.
-    //
-    // The following code supports both NAN2008=0 and NAN2008=1 behaviors of the truncate
-    // instruction, the reason being that the emulator implements NAN2008=0 on MIPS64R6,
-    // even though it must be NAN2008=1 on R6.
-    //
-    // The code takes care of the different behaviors by first comparing the input to the
-    // minimum output value (-2**-63 for truncating to long, -2**-31 for truncating to int).
-    // If the input is greater than or equal to the minimum, it procedes to the truncate
-    // instruction, which will handle such an input the same way irrespective of NAN2008.
-    // Otherwise the input is compared to itself to determine whether it is a NaN or not
-    // in order to return either zero or the minimum value.
-    //
-    // TODO: simplify this when the emulator correctly implements NAN2008=1 behavior of the
-    // truncate instruction for MIPS64R6.
-    if (input_type == Primitive::kPrimFloat) {
-      uint32_t min_val = (result_type == Primitive::kPrimLong)
-          ? bit_cast<uint32_t, float>(std::numeric_limits<int64_t>::min())
-          : bit_cast<uint32_t, float>(std::numeric_limits<int32_t>::min());
-      __ LoadConst32(TMP, min_val);
-      __ Mtc1(TMP, FTMP);
-      __ CmpLeS(FTMP, FTMP, src);
-    } else {
-      uint64_t min_val = (result_type == Primitive::kPrimLong)
-          ? bit_cast<uint64_t, double>(std::numeric_limits<int64_t>::min())
-          : bit_cast<uint64_t, double>(std::numeric_limits<int32_t>::min());
-      __ LoadConst64(TMP, min_val);
-      __ Dmtc1(TMP, FTMP);
-      __ CmpLeD(FTMP, FTMP, src);
-    }
-
-    __ Bc1nez(FTMP, &truncate);
-
-    if (input_type == Primitive::kPrimFloat) {
-      __ CmpEqS(FTMP, src, src);
-    } else {
-      __ CmpEqD(FTMP, src, src);
-    }
-    if (result_type == Primitive::kPrimLong) {
-      __ LoadConst64(dst, std::numeric_limits<int64_t>::min());
-    } else {
-      __ LoadConst32(dst, std::numeric_limits<int32_t>::min());
-    }
-    __ Mfc1(TMP, FTMP);
-    __ And(dst, dst, TMP);
-
-    __ Bc(&done);
-
-    __ Bind(&truncate);
 
     if (result_type == Primitive::kPrimLong) {
       if (input_type == Primitive::kPrimFloat) {
@@ -6051,8 +6008,6 @@ void InstructionCodeGeneratorMIPS64::VisitTypeConversion(HTypeConversion* conver
       }
       __ Mfc1(dst, FTMP);
     }
-
-    __ Bind(&done);
   } else if (Primitive::IsFloatingPointType(result_type) &&
              Primitive::IsFloatingPointType(input_type)) {
     FpuRegister dst = locations->Out().AsFpuRegister<FpuRegister>();
