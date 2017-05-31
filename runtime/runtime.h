@@ -34,10 +34,7 @@
 #include "experimental_flags.h"
 #include "gc_root.h"
 #include "instrumentation.h"
-#include "jobject_comparator.h"
-#include "method_reference.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "process_state.h"
 #include "quick/quick_method_frame_info.h"
@@ -79,6 +76,7 @@ class ClassLinker;
 class CompilerCallbacks;
 class DexFile;
 class InternTable;
+class IsMarkedVisitor;
 class JavaVMExt;
 class LinearAlloc;
 class MemMap;
@@ -681,6 +679,14 @@ class Runtime {
     deoptimization_counts_[static_cast<size_t>(kind)]++;
   }
 
+  uint32_t GetNumberOfDeoptimizations() const {
+    uint32_t result = 0;
+    for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+      result += deoptimization_counts_[i];
+    }
+    return result;
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -783,7 +789,13 @@ class Runtime {
   ClassLinker* class_linker_;
 
   SignalCatcher* signal_catcher_;
-  std::string stack_trace_dir_;
+
+  // If true, the runtime will connect to tombstoned via a socket to
+  // request an open file descriptor to write its traces to.
+  bool use_tombstoned_traces_;
+
+  // Location to which traces must be written on SIGQUIT. Only used if
+  // tombstoned_traces_ == false.
   std::string stack_trace_file_;
 
   std::unique_ptr<JavaVMExt> java_vm_;

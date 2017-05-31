@@ -508,7 +508,6 @@
             "640-checker-short-simd",
             "641-checker-arraycopy",
             "643-checker-bogus-ic",
-            "644-checker-deopt",
             "645-checker-abs-simd",
             "706-checker-scheduler"],
         "description": ["Checker tests are not compatible with jvmti."],
@@ -651,8 +650,7 @@
             "969-iface-super",
             "981-dedup-original-dex",
             "984-obsolete-invoke",
-            "985-re-obsolete",
-            "987-stack-trace-dumping"
+            "985-re-obsolete"
         ],
         "description": "The tests above fail with --build-with-javac-dx.",
         "env_vars": {"ANDROID_COMPILE_WITH_JACK": "false"},
