@@ -17,13 +17,15 @@
 #include <math.h>
 #include <string.h>
 
+#include "arch/arm64/asm_support_arm64.h"
+#include "base/bit_utils.h"
+#include "entrypoints/entrypoint_utils.h"
 #include "entrypoints/jni/jni_entrypoints.h"
+#include "entrypoints/math_entrypoints.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_default_externs.h"
 #include "entrypoints/quick/quick_default_init_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "entrypoints/entrypoint_utils.h"
-#include "entrypoints/math_entrypoints.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
 
@@ -70,7 +72,11 @@ extern "C" mirror::Object* art_quick_read_barrier_mark_reg27(mirror::Object*);
 extern "C" mirror::Object* art_quick_read_barrier_mark_reg28(mirror::Object*);
 extern "C" mirror::Object* art_quick_read_barrier_mark_reg29(mirror::Object*);
 
-void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_marking) {
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_arrays(mirror::Object*);
+extern "C" mirror::Object* art_quick_read_barrier_mark_introspection_gc_roots(mirror::Object*);
+
+void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_active) {
   // ARM64 is the architecture with the largest number of core
   // registers (32) that supports the read barrier configuration.
   // Because registers 30 (LR) and 31 (SP/XZR) cannot be used to pass
@@ -80,35 +86,50 @@ void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_marking) {
   // have less core registers (resp. 16, 8 and 16).  (We may have to
   // revise that design choice if read barrier support is added for
   // MIPS and/or MIPS64.)
-  qpoints->pReadBarrierMarkReg00 = is_marking ? art_quick_read_barrier_mark_reg00 : nullptr;
-  qpoints->pReadBarrierMarkReg01 = is_marking ? art_quick_read_barrier_mark_reg01 : nullptr;
-  qpoints->pReadBarrierMarkReg02 = is_marking ? art_quick_read_barrier_mark_reg02 : nullptr;
-  qpoints->pReadBarrierMarkReg03 = is_marking ? art_quick_read_barrier_mark_reg03 : nullptr;
-  qpoints->pReadBarrierMarkReg04 = is_marking ? art_quick_read_barrier_mark_reg04 : nullptr;
-  qpoints->pReadBarrierMarkReg05 = is_marking ? art_quick_read_barrier_mark_reg05 : nullptr;
-  qpoints->pReadBarrierMarkReg06 = is_marking ? art_quick_read_barrier_mark_reg06 : nullptr;
-  qpoints->pReadBarrierMarkReg07 = is_marking ? art_quick_read_barrier_mark_reg07 : nullptr;
-  qpoints->pReadBarrierMarkReg08 = is_marking ? art_quick_read_barrier_mark_reg08 : nullptr;
-  qpoints->pReadBarrierMarkReg09 = is_marking ? art_quick_read_barrier_mark_reg09 : nullptr;
-  qpoints->pReadBarrierMarkReg10 = is_marking ? art_quick_read_barrier_mark_reg10 : nullptr;
-  qpoints->pReadBarrierMarkReg11 = is_marking ? art_quick_read_barrier_mark_reg11 : nullptr;
-  qpoints->pReadBarrierMarkReg12 = is_marking ? art_quick_read_barrier_mark_reg12 : nullptr;
-  qpoints->pReadBarrierMarkReg13 = is_marking ? art_quick_read_barrier_mark_reg13 : nullptr;
-  qpoints->pReadBarrierMarkReg14 = is_marking ? art_quick_read_barrier_mark_reg14 : nullptr;
-  qpoints->pReadBarrierMarkReg15 = is_marking ? art_quick_read_barrier_mark_reg15 : nullptr;
-  qpoints->pReadBarrierMarkReg17 = is_marking ? art_quick_read_barrier_mark_reg17 : nullptr;
-  qpoints->pReadBarrierMarkReg18 = is_marking ? art_quick_read_barrier_mark_reg18 : nullptr;
-  qpoints->pReadBarrierMarkReg19 = is_marking ? art_quick_read_barrier_mark_reg19 : nullptr;
-  qpoints->pReadBarrierMarkReg20 = is_marking ? art_quick_read_barrier_mark_reg20 : nullptr;
-  qpoints->pReadBarrierMarkReg21 = is_marking ? art_quick_read_barrier_mark_reg21 : nullptr;
-  qpoints->pReadBarrierMarkReg22 = is_marking ? art_quick_read_barrier_mark_reg22 : nullptr;
-  qpoints->pReadBarrierMarkReg23 = is_marking ? art_quick_read_barrier_mark_reg23 : nullptr;
-  qpoints->pReadBarrierMarkReg24 = is_marking ? art_quick_read_barrier_mark_reg24 : nullptr;
-  qpoints->pReadBarrierMarkReg25 = is_marking ? art_quick_read_barrier_mark_reg25 : nullptr;
-  qpoints->pReadBarrierMarkReg26 = is_marking ? art_quick_read_barrier_mark_reg26 : nullptr;
-  qpoints->pReadBarrierMarkReg27 = is_marking ? art_quick_read_barrier_mark_reg27 : nullptr;
-  qpoints->pReadBarrierMarkReg28 = is_marking ? art_quick_read_barrier_mark_reg28 : nullptr;
-  qpoints->pReadBarrierMarkReg29 = is_marking ? art_quick_read_barrier_mark_reg29 : nullptr;
+  qpoints->pReadBarrierMarkReg00 = is_active ? art_quick_read_barrier_mark_reg00 : nullptr;
+  qpoints->pReadBarrierMarkReg01 = is_active ? art_quick_read_barrier_mark_reg01 : nullptr;
+  qpoints->pReadBarrierMarkReg02 = is_active ? art_quick_read_barrier_mark_reg02 : nullptr;
+  qpoints->pReadBarrierMarkReg03 = is_active ? art_quick_read_barrier_mark_reg03 : nullptr;
+  qpoints->pReadBarrierMarkReg04 = is_active ? art_quick_read_barrier_mark_reg04 : nullptr;
+  qpoints->pReadBarrierMarkReg05 = is_active ? art_quick_read_barrier_mark_reg05 : nullptr;
+  qpoints->pReadBarrierMarkReg06 = is_active ? art_quick_read_barrier_mark_reg06 : nullptr;
+  qpoints->pReadBarrierMarkReg07 = is_active ? art_quick_read_barrier_mark_reg07 : nullptr;
+  qpoints->pReadBarrierMarkReg08 = is_active ? art_quick_read_barrier_mark_reg08 : nullptr;
+  qpoints->pReadBarrierMarkReg09 = is_active ? art_quick_read_barrier_mark_reg09 : nullptr;
+  qpoints->pReadBarrierMarkReg10 = is_active ? art_quick_read_barrier_mark_reg10 : nullptr;
+  qpoints->pReadBarrierMarkReg11 = is_active ? art_quick_read_barrier_mark_reg11 : nullptr;
+  qpoints->pReadBarrierMarkReg12 = is_active ? art_quick_read_barrier_mark_reg12 : nullptr;
+  qpoints->pReadBarrierMarkReg13 = is_active ? art_quick_read_barrier_mark_reg13 : nullptr;
+  qpoints->pReadBarrierMarkReg14 = is_active ? art_quick_read_barrier_mark_reg14 : nullptr;
+  qpoints->pReadBarrierMarkReg15 = is_active ? art_quick_read_barrier_mark_reg15 : nullptr;
+  qpoints->pReadBarrierMarkReg17 = is_active ? art_quick_read_barrier_mark_reg17 : nullptr;
+  qpoints->pReadBarrierMarkReg18 = is_active ? art_quick_read_barrier_mark_reg18 : nullptr;
+  qpoints->pReadBarrierMarkReg19 = is_active ? art_quick_read_barrier_mark_reg19 : nullptr;
+  qpoints->pReadBarrierMarkReg20 = is_active ? art_quick_read_barrier_mark_reg20 : nullptr;
+  qpoints->pReadBarrierMarkReg21 = is_active ? art_quick_read_barrier_mark_reg21 : nullptr;
+  qpoints->pReadBarrierMarkReg22 = is_active ? art_quick_read_barrier_mark_reg22 : nullptr;
+  qpoints->pReadBarrierMarkReg23 = is_active ? art_quick_read_barrier_mark_reg23 : nullptr;
+  qpoints->pReadBarrierMarkReg24 = is_active ? art_quick_read_barrier_mark_reg24 : nullptr;
+  qpoints->pReadBarrierMarkReg25 = is_active ? art_quick_read_barrier_mark_reg25 : nullptr;
+  qpoints->pReadBarrierMarkReg26 = is_active ? art_quick_read_barrier_mark_reg26 : nullptr;
+  qpoints->pReadBarrierMarkReg27 = is_active ? art_quick_read_barrier_mark_reg27 : nullptr;
+  qpoints->pReadBarrierMarkReg28 = is_active ? art_quick_read_barrier_mark_reg28 : nullptr;
+  qpoints->pReadBarrierMarkReg29 = is_active ? art_quick_read_barrier_mark_reg29 : nullptr;
+
+  // Check that array switch cases are at appropriate offsets from the introspection entrypoint.
+  DCHECK_ALIGNED(art_quick_read_barrier_mark_introspection, 512u);
+  intptr_t array_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_arrays) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_ARRAY_SWITCH_OFFSET, array_diff);
+  // Check that the GC root entrypoint is at appropriate offset from the introspection entrypoint.
+  intptr_t gc_roots_diff =
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection_gc_roots) -
+      reinterpret_cast<intptr_t>(art_quick_read_barrier_mark_introspection);
+  DCHECK_EQ(BAKER_MARK_INTROSPECTION_GC_ROOT_ENTRYPOINT_OFFSET, gc_roots_diff);
+  // The register 16, i.e. IP0, is reserved, so there is no art_quick_read_barrier_mark_reg16.
+  // We're using the entry to hold a pointer to the introspection entrypoint instead.
+  qpoints->pReadBarrierMarkReg16 = is_active ? art_quick_read_barrier_mark_introspection : nullptr;
 }
 
 void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
@@ -168,7 +189,7 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   // Read barrier.
   qpoints->pReadBarrierJni = ReadBarrierJni;
   qpoints->pReadBarrierMarkReg16 = nullptr;  // IP0 is used as a temp by the asm stub.
-  UpdateReadBarrierEntrypoints(qpoints, /*is_marking*/ false);
+  UpdateReadBarrierEntrypoints(qpoints, /*is_active*/ false);
   qpoints->pReadBarrierSlow = artReadBarrierSlow;
   qpoints->pReadBarrierForRootSlow = artReadBarrierForRootSlow;
 };

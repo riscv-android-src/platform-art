@@ -21,7 +21,7 @@
 #include "gc/space/space-inl.h"
 #include "mirror/array-inl.h"
 #include "space_bitmap-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -97,7 +97,8 @@ class ModUnionTableTest : public CommonRuntimeTest {
 class CollectVisitedVisitor : public MarkObjectVisitor {
  public:
   explicit CollectVisitedVisitor(std::set<mirror::Object*>* out) : out_(out) {}
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* ref) OVERRIDE
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* ref,
+                                 bool do_atomic_update ATTRIBUTE_UNUSED) OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK(ref != nullptr);
     MarkObject(ref->AsMirrorPtr());

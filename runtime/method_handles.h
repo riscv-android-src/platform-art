@@ -21,17 +21,16 @@
 
 #include "dex_instruction.h"
 #include "handle.h"
+#include "interpreter/shadow_frame.h"
 #include "jvalue.h"
 #include "mirror/class.h"
 
 namespace art {
 
 namespace mirror {
-  class MethodHandleImpl;
+  class MethodHandle;
   class MethodType;
-}  // mirror
-
-class ShadowFrame;
+}  // namespace mirror
 
 // Returns true if there is a possible conversion from |from| to |to|
 // for a MethodHandle parameter.
@@ -202,15 +201,24 @@ class ShadowFrameSetter {
   size_t arg_index_;
 };
 
-template <bool is_range, bool do_assignability_check>
-bool DoInvokePolymorphic(Thread* self,
-                         ArtMethod* invoke_method,
-                         ShadowFrame& shadow_frame,
-                         Handle<mirror::MethodHandleImpl> method_handle,
-                         Handle<mirror::MethodType> callsite_type,
-                         const uint32_t (&args)[Instruction::kMaxVarArgRegs],
-                         uint32_t first_arg,
-                         JValue* result)
+template <bool is_range>
+bool MethodHandleInvoke(Thread* self,
+                        ShadowFrame& shadow_frame,
+                        Handle<mirror::MethodHandle> method_handle,
+                        Handle<mirror::MethodType> callsite_type,
+                        const uint32_t (&args)[Instruction::kMaxVarArgRegs],
+                        uint32_t first_arg,
+                        JValue* result)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+template <bool is_range>
+bool MethodHandleInvokeExact(Thread* self,
+                             ShadowFrame& shadow_frame,
+                             Handle<mirror::MethodHandle> method_handle,
+                             Handle<mirror::MethodType> callsite_type,
+                             const uint32_t (&args)[Instruction::kMaxVarArgRegs],
+                             uint32_t first_arg,
+                             JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 }  // namespace art

@@ -17,10 +17,20 @@
 #ifndef ART_RUNTIME_COMMON_DEX_OPERATIONS_H_
 #define ART_RUNTIME_COMMON_DEX_OPERATIONS_H_
 
+#include "android-base/logging.h"
 #include "art_field.h"
 #include "art_method.h"
+#include "base/macros.h"
+#include "base/mutex.h"
 #include "class_linker.h"
+#include "handle_scope-inl.h"
+#include "instrumentation.h"
+#include "interpreter/shadow_frame.h"
 #include "interpreter/unstarted_runtime.h"
+#include "mirror/class.h"
+#include "mirror/object.h"
+#include "obj_ptr-inl.h"
+#include "primitive.h"
 #include "runtime.h"
 #include "stack.h"
 #include "thread.h"
@@ -36,8 +46,8 @@ namespace interpreter {
 
   void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                           ArtMethod* caller,
-                                          const DexFile::CodeItem* code_item,
                                           ShadowFrame* shadow_frame,
+                                          uint16_t arg_offset,
                                           JValue* result);
 }  // namespace interpreter
 
@@ -46,31 +56,41 @@ inline void PerformCall(Thread* self,
                         ArtMethod* caller_method,
                         const size_t first_dest_reg,
                         ShadowFrame* callee_frame,
-                        JValue* result)
+                        JValue* result,
+                        bool use_interpreter_entrypoint)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (LIKELY(Runtime::Current()->IsStarted())) {
-    ArtMethod* target = callee_frame->GetMethod();
-    if (ClassLinker::ShouldUseInterpreterEntrypoint(
-        target,
-        target->GetEntryPointFromQuickCompiledCode())) {
+    if (use_interpreter_entrypoint) {
       interpreter::ArtInterpreterToInterpreterBridge(self, code_item, callee_frame, result);
     } else {
       interpreter::ArtInterpreterToCompiledCodeBridge(
-          self, caller_method, code_item, callee_frame, result);
+          self, caller_method, callee_frame, first_dest_reg, result);
     }
   } else {
     interpreter::UnstartedRuntime::Invoke(self, code_item, callee_frame, result, first_dest_reg);
   }
 }
 
+template <typename T>
+inline void DCheckStaticState(Thread* self, T* entity) REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (kIsDebugBuild) {
+    ObjPtr<mirror::Class> klass = entity->GetDeclaringClass();
+    if (entity->IsStatic()) {
+      klass->AssertInitializedOrInitializingInThread(self);
+    } else {
+      CHECK(klass->IsInitializing() || klass->IsErroneousResolved());
+    }
+  }
+}
+
 template<Primitive::Type field_type>
-static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
+static ALWAYS_INLINE bool DoFieldGetCommon(Thread* self,
                                            const ShadowFrame& shadow_frame,
                                            ObjPtr<mirror::Object> obj,
                                            ArtField* field,
                                            JValue* result)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  field->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
+  DCheckStaticState(self, field);
 
   // Report this field access to instrumentation if needed.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
@@ -87,6 +107,9 @@ static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
                                     shadow_frame.GetMethod(),
                                     shadow_frame.GetDexPC(),
                                     field);
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
+    }
   }
 
   switch (field_type) {
@@ -115,6 +138,7 @@ static ALWAYS_INLINE void DoFieldGetCommon(Thread* self,
       LOG(FATAL) << "Unreachable " << field_type;
       break;
   }
+  return true;
 }
 
 template<Primitive::Type field_type, bool do_assignability_check, bool transaction_active>
@@ -122,23 +146,30 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
                                     const ShadowFrame& shadow_frame,
                                     ObjPtr<mirror::Object> obj,
                                     ArtField* field,
-                                    const JValue& value)
+                                    JValue& value)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  field->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
+  DCheckStaticState(self, field);
 
   // Report this field access to instrumentation if needed. Since we only have the offset of
   // the field from the base of the object, we need to look for it first.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
   if (UNLIKELY(instrumentation->HasFieldWriteListeners())) {
-    StackHandleScope<1> hs(self);
-    // Wrap in handle wrapper in case the listener does thread suspension.
+    StackHandleScope<2> hs(self);
+    // Save this and return value (if needed) in case the instrumentation causes a suspend.
     HandleWrapperObjPtr<mirror::Object> h(hs.NewHandleWrapper(&obj));
     ObjPtr<mirror::Object> this_object = field->IsStatic() ? nullptr : obj;
-    instrumentation->FieldWriteEvent(self, this_object.Ptr(),
+    mirror::Object* fake_root = nullptr;
+    HandleWrapper<mirror::Object> ret(hs.NewHandleWrapper<mirror::Object>(
+        field_type == Primitive::kPrimNot ? value.GetGCRoot() : &fake_root));
+    instrumentation->FieldWriteEvent(self,
+                                     this_object.Ptr(),
                                      shadow_frame.GetMethod(),
                                      shadow_frame.GetDexPC(),
                                      field,
                                      value);
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
+    }
   }
 
   switch (field_type) {
@@ -189,6 +220,11 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
     case Primitive::kPrimVoid: {
       LOG(FATAL) << "Unreachable " << field_type;
       break;
+    }
+  }
+  if (transaction_active) {
+    if (UNLIKELY(self->IsExceptionPending())) {
+      return false;
     }
   }
   return true;

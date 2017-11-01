@@ -16,23 +16,25 @@
 
 #include <stdio.h>
 
-#include "base/macros.h"
+#include "android-base/macros.h"
 #include "jni.h"
-#include "openjdkjvmti/jvmti.h"
-#include "ScopedUtfChars.h"
+#include "jvmti.h"
+#include "scoped_utf_chars.h"
 
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+// Test infrastructure
+#include "jni_helper.h"
+#include "jvmti_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test922Properties {
 
-extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getSystemProperties(
+extern "C" JNIEXPORT jobjectArray JNICALL Java_art_Test922_getSystemProperties(
     JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED) {
   jint count;
   char** properties;
   jvmtiError result = jvmti_env->GetSystemProperties(&count, &properties);
-  if (JvmtiErrorToException(env, result)) {
+  if (JvmtiErrorToException(env, jvmti_env, result)) {
     return nullptr;
   }
 
@@ -52,7 +54,7 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getSystemProperties(
   return ret;
 }
 
-extern "C" JNIEXPORT jstring JNICALL Java_Main_getSystemProperty(
+extern "C" JNIEXPORT jstring JNICALL Java_art_Test922_getSystemProperty(
     JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED, jstring key) {
   ScopedUtfChars string(env, key);
   if (string.c_str() == nullptr) {
@@ -61,7 +63,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_Main_getSystemProperty(
 
   char* value = nullptr;
   jvmtiError result = jvmti_env->GetSystemProperty(string.c_str(), &value);
-  if (JvmtiErrorToException(env, result)) {
+  if (JvmtiErrorToException(env, jvmti_env, result)) {
     return nullptr;
   }
 
@@ -72,7 +74,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_Main_getSystemProperty(
   return ret;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_Main_setSystemProperty(
+extern "C" JNIEXPORT void JNICALL Java_art_Test922_setSystemProperty(
     JNIEnv* env, jclass Main_klass ATTRIBUTE_UNUSED, jstring key, jstring value) {
   ScopedUtfChars key_string(env, key);
   if (key_string.c_str() == nullptr) {
@@ -84,7 +86,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_setSystemProperty(
   }
 
   jvmtiError result = jvmti_env->SetSystemProperty(key_string.c_str(), value_string.c_str());
-  if (JvmtiErrorToException(env, result)) {
+  if (JvmtiErrorToException(env, jvmti_env, result)) {
     return;
   }
 }

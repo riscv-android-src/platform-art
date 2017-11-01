@@ -20,7 +20,6 @@ art_global_defaults {
     // Additional flags are computed by art.go
 
     name: "art_defaults",
-    clang: true,
     cflags: [
         // Base set of cflags used by all things ART.
         "-fno-rtti",
@@ -59,27 +58,14 @@ art_global_defaults {
         "-Wunreachable-code-break",
         "-Wunreachable-code-return",
 
-        // Bug: http://b/29823425  Disable -Wconstant-conversion and
-        // -Wundefined-var-template for Clang update to r271374
-        "-Wno-constant-conversion",
-        "-Wno-undefined-var-template",
-
-        "-DART_STACK_OVERFLOW_GAP_arm=8192",
-        "-DART_STACK_OVERFLOW_GAP_arm64=8192",
-        "-DART_STACK_OVERFLOW_GAP_mips=16384",
-        "-DART_STACK_OVERFLOW_GAP_mips64=16384",
-        "-DART_STACK_OVERFLOW_GAP_x86=8192",
-        "-DART_STACK_OVERFLOW_GAP_x86_64=8192",
+        // Enable thread annotations for std::mutex, etc.
+        "-D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS",
     ],
 
     target: {
         android: {
             cflags: [
                 "-DART_TARGET",
-
-                // Enable missing-noreturn only on non-Mac. As lots of things are not implemented
-                // for Apple, it's a pain.
-                "-Wmissing-noreturn",
 
                 // To use oprofile_android --callgraph, uncomment this and recompile with
                 //    mmma -j art
@@ -99,19 +85,21 @@ art_global_defaults {
                 // Apple, it's a pain.
                 "-Wmissing-noreturn",
             ],
-            host_ldlibs: [
-                "-lrt",
-            ],
         },
         host: {
             cflags: [
                 // Bug: 15446488. We don't omit the frame pointer to work around
                 // clang/libunwind bugs that cause SEGVs in run-test-004-ThreadStress.
                 "-fno-omit-frame-pointer",
-            ],
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
+                // The build assumes that all our x86/x86_64 hosts (such as buildbots and developer
+                // desktops) support at least sse4.2/popcount. This firstly implies that the ART
+                // runtime binary itself may exploit these features. Secondly, this implies that
+                // the ART runtime passes these feature flags to dex2oat and JIT by calling the
+                // method InstructionSetFeatures::FromCppDefines(). Since invoking dex2oat directly
+                // does not pick up these flags, cross-compiling from a x86/x86_64 host to a
+                // x86/x86_64 target should not be affected.
+                "-msse4.2",
+                "-mpopcnt",
             ],
         },
     },
@@ -145,9 +133,31 @@ art_global_defaults {
         "external/vixl/src",
         "external/zlib",
     ],
+    header_libs: [
+        "jni_platform_headers",
+    ],
 
     tidy_checks: [
         "-google-default-arguments",
+        // We have local stores that are only used for debug checks.
+        "-clang-analyzer-deadcode.DeadStores",
+        // We are OK with some static globals and that they can, in theory, throw.
+        "-cert-err58-cpp",
+        // We have lots of C-style variadic functions, and are OK with them. JNI ensures
+        // that working around this warning would be extra-painful.
+        "-cert-dcl50-cpp",
+        // No exceptions.
+        "-misc-noexcept-move-constructor",
+    ],
+
+    tidy_flags: [
+        // The static analyzer treats DCHECK as always enabled; we sometimes get
+        // false positives when we use DCHECKs with code that relies on NDEBUG.
+        "-extra-arg=-UNDEBUG",
+        // clang-tidy complains about functions like:
+        // void foo() { CHECK(kIsFooEnabled); /* do foo... */ }
+        // not being marked noreturn if kIsFooEnabled is false.
+        "-extra-arg=-Wno-missing-noreturn",
     ],
 }
 

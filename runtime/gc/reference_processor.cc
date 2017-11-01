@@ -18,12 +18,14 @@
 
 #include "base/time_utils.h"
 #include "collector/garbage_collector.h"
+#include "java_vm_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/reference-inl.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "object_callbacks.h"
 #include "reference_processor-inl.h"
 #include "reflection.h"
-#include "ScopedLocalRef.h"
 #include "scoped_thread_state_change-inl.h"
 #include "task_processor.h"
 #include "utils.h"
@@ -104,7 +106,7 @@ ObjPtr<mirror::Object> ReferenceProcessor::GetReferent(Thread* self,
     }
     // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
     // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpoint();
+    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::reference_processor_lock_);
     condition_.WaitHoldingLocks(self);
   }
   return reference->GetReferent();
@@ -138,6 +140,14 @@ void ReferenceProcessor::ProcessReferences(bool concurrent,
       // Weak ref access is enabled at Zygote compaction by SemiSpace (concurrent == false).
       CHECK_EQ(!self->GetWeakRefAccessEnabled(), concurrent);
     }
+  }
+  if (kIsDebugBuild && collector->IsTransactionActive()) {
+    // In transaction mode, we shouldn't enqueue any Reference to the queues.
+    // See DelayReferenceReferent().
+    DCHECK(soft_reference_queue_.IsEmpty());
+    DCHECK(weak_reference_queue_.IsEmpty());
+    DCHECK(finalizer_reference_queue_.IsEmpty());
+    DCHECK(phantom_reference_queue_.IsEmpty());
   }
   // Unless required to clear soft references with white references, preserve some white referents.
   if (!clear_soft_references) {
@@ -206,6 +216,15 @@ void ReferenceProcessor::DelayReferenceReferent(ObjPtr<mirror::Class> klass,
   // do_atomic_update needs to be true because this happens outside of the reference processing
   // phase.
   if (!collector->IsNullOrMarkedHeapReference(referent, /*do_atomic_update*/true)) {
+    if (UNLIKELY(collector->IsTransactionActive())) {
+      // In transaction mode, keep the referent alive and avoid any reference processing to avoid the
+      // issue of rolling back reference processing.  do_atomic_update needs to be true because this
+      // happens outside of the reference processing phase.
+      if (!referent->IsNull()) {
+        collector->MarkHeapReference(referent, /*do_atomic_update*/ true);
+      }
+      return;
+    }
     Thread* self = Thread::Current();
     // TODO: Remove these locks, and use atomic stacks for storing references?
     // We need to check that the references haven't already been enqueued since we can end up
@@ -292,7 +311,7 @@ void ReferenceProcessor::WaitUntilDoneProcessingReferences(Thread* self) {
          (kUseReadBarrier && !self->GetWeakRefAccessEnabled())) {
     // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
     // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpoint();
+    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::reference_processor_lock_);
     condition_.WaitHoldingLocks(self);
   }
 }

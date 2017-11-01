@@ -17,15 +17,13 @@
 #ifndef ART_RUNTIME_JIT_JIT_H_
 #define ART_RUNTIME_JIT_JIT_H_
 
-#include "base/arena_allocator.h"
 #include "base/histogram-inl.h"
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/timing_logger.h"
 #include "jit/profile_saver_options.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
-#include "offline_profiling_info.h"
+#include "profile_compilation_info.h"
 #include "thread_pool.h"
 
 namespace art {
@@ -50,10 +48,10 @@ static constexpr int16_t kJitHotnessDisabled = -2;
 
 class Jit {
  public:
-  static constexpr bool kStressMode = kIsDebugBuild;
-  static constexpr size_t kDefaultCompileThreshold = kStressMode ? 2 : 10000;
   static constexpr size_t kDefaultPriorityThreadWeightRatio = 1000;
   static constexpr size_t kDefaultInvokeTransitionWeightRatio = 500;
+  // How frequently should the interpreter check to see if OSR compilation is ready.
+  static constexpr int16_t kJitRecheckOSRThreshold = 100;
 
   virtual ~Jit();
   static Jit* Create(JitOptions* options, std::string* error_msg);
@@ -134,14 +132,8 @@ class Jit {
   // Starts the profile saver if the config options allow profile recording.
   // The profile will be stored in the specified `filename` and will contain
   // information collected from the given `code_paths` (a set of dex locations).
-  // The `foreign_dex_profile_path` is the path where the saver will put the
-  // profile markers for loaded dex files which are not owned by the application.
-  // The `app_dir` is the application directory and is used to decide which
-  // dex files belong to the application.
   void StartProfileSaver(const std::string& filename,
-                         const std::vector<std::string>& code_paths,
-                         const std::string& foreign_dex_profile_path,
-                         const std::string& app_dir);
+                         const std::vector<std::string>& code_paths);
   void StopProfileSaver();
 
   void DumpForSigQuit(std::ostream& os) REQUIRES(!lock_);
@@ -160,7 +152,7 @@ class Jit {
   bool CanInvokeCompiledCode(ArtMethod* method);
 
   // Return whether the runtime should use a priority thread weight when sampling.
-  static bool ShouldUsePriorityThreadWeight();
+  static bool ShouldUsePriorityThreadWeight(Thread* self);
 
   // If an OSR compiled version is available for `method`,
   // and `dex_pc + dex_pc_offset` is an entry point of that compiled
@@ -283,6 +275,10 @@ class JitOptions {
         code_cache_initial_capacity_(0),
         code_cache_max_capacity_(0),
         compile_threshold_(0),
+        warmup_threshold_(0),
+        osr_threshold_(0),
+        priority_thread_weight_(0),
+        invoke_transition_weight_(0),
         dump_info_on_shutdown_(false) {}
 
   DISALLOW_COPY_AND_ASSIGN(JitOptions);

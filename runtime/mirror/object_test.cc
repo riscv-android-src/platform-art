@@ -26,8 +26,8 @@
 #include "asm_support.h"
 #include "base/enums.h"
 #include "class-inl.h"
-#include "class_linker.h"
 #include "class_linker-inl.h"
+#include "class_linker.h"
 #include "common_runtime_test.h"
 #include "dex_file.h"
 #include "entrypoints/entrypoint_utils-inl.h"
@@ -73,6 +73,13 @@ class ObjectTest : public CommonRuntimeTest {
     }
     EXPECT_EQ(expected_hash, string->GetHashCode());
   }
+
+  template <class T>
+  mirror::ObjectArray<T>* AllocObjectArray(Thread* self, size_t length)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return mirror::ObjectArray<T>::Alloc(
+        self, class_linker_->GetClassRoot(ClassLinker::ClassRoot::kObjectArrayClass), length);
+  }
 };
 
 // Keep constants in sync.
@@ -100,8 +107,7 @@ TEST_F(ObjectTest, IsInSamePackage) {
 TEST_F(ObjectTest, Clone) {
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<2> hs(soa.Self());
-  Handle<ObjectArray<Object>> a1(
-      hs.NewHandle(class_linker_->AllocObjectArray<Object>(soa.Self(), 256)));
+  Handle<ObjectArray<Object>> a1(hs.NewHandle(AllocObjectArray<Object>(soa.Self(), 256)));
   size_t s1 = a1->SizeOf();
   Object* clone = a1->Clone(soa.Self());
   EXPECT_EQ(s1, clone->SizeOf());
@@ -111,8 +117,7 @@ TEST_F(ObjectTest, Clone) {
 TEST_F(ObjectTest, AllocObjectArray) {
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<2> hs(soa.Self());
-  Handle<ObjectArray<Object>> oa(
-      hs.NewHandle(class_linker_->AllocObjectArray<Object>(soa.Self(), 2)));
+  Handle<ObjectArray<Object>> oa(hs.NewHandle(AllocObjectArray<Object>(soa.Self(), 2)));
   EXPECT_EQ(2, oa->GetLength());
   EXPECT_TRUE(oa->Get(0) == nullptr);
   EXPECT_TRUE(oa->Get(1) == nullptr);
@@ -305,23 +310,6 @@ TEST_F(ObjectTest, PrimitiveArray_Float_Alloc) {
   soa.Self()->ClearException();
 }
 
-
-TEST_F(ObjectTest, CheckAndAllocArrayFromCode) {
-  // pretend we are trying to call 'new char[3]' from String.toCharArray
-  ScopedObjectAccess soa(Thread::Current());
-  Class* java_util_Arrays = class_linker_->FindSystemClass(soa.Self(), "Ljava/util/Arrays;");
-  ArtMethod* sort = java_util_Arrays->FindDirectMethod("sort", "([I)V", kRuntimePointerSize);
-  const DexFile::TypeId* type_id = java_lang_dex_file_->FindTypeId("[I");
-  ASSERT_TRUE(type_id != nullptr);
-  dex::TypeIndex type_idx = java_lang_dex_file_->GetIndexForTypeId(*type_id);
-  Object* array = CheckAndAllocArrayFromCodeInstrumented(
-      type_idx, 3, sort, Thread::Current(), false,
-      Runtime::Current()->GetHeap()->GetCurrentAllocator());
-  EXPECT_TRUE(array->IsArrayInstance());
-  EXPECT_EQ(3, array->AsArray()->GetLength());
-  EXPECT_TRUE(array->GetClass()->IsArrayClass());
-  EXPECT_TRUE(array->GetClass()->GetComponentType()->IsPrimitive());
-}
 
 TEST_F(ObjectTest, CreateMultiArray) {
   ScopedObjectAccess soa(Thread::Current());
@@ -547,8 +535,8 @@ TEST_F(ObjectTest, InstanceOf) {
 
   Handle<Object> x(hs.NewHandle(X->AllocObject(soa.Self())));
   Handle<Object> y(hs.NewHandle(Y->AllocObject(soa.Self())));
-  ASSERT_TRUE(x.Get() != nullptr);
-  ASSERT_TRUE(y.Get() != nullptr);
+  ASSERT_TRUE(x != nullptr);
+  ASSERT_TRUE(y != nullptr);
 
   EXPECT_TRUE(x->InstanceOf(X));
   EXPECT_FALSE(x->InstanceOf(Y));
@@ -594,7 +582,7 @@ TEST_F(ObjectTest, IsAssignableFrom) {
 
   // Primitive types are only assignable to themselves
   const char* prims = "ZBCSIJFD";
-  Class* prim_types[strlen(prims)];
+  std::vector<Class*> prim_types(strlen(prims));
   for (size_t i = 0; i < strlen(prims); i++) {
     prim_types[i] = class_linker_->FindPrimitiveClass(prims[i]);
   }
@@ -667,7 +655,7 @@ TEST_F(ObjectTest, FindInstanceField) {
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<1> hs(soa.Self());
   Handle<String> s(hs.NewHandle(String::AllocFromModifiedUtf8(soa.Self(), "ABC")));
-  ASSERT_TRUE(s.Get() != nullptr);
+  ASSERT_TRUE(s != nullptr);
   Class* c = s->GetClass();
   ASSERT_TRUE(c != nullptr);
 
@@ -701,9 +689,9 @@ TEST_F(ObjectTest, FindStaticField) {
   ScopedObjectAccess soa(Thread::Current());
   StackHandleScope<4> hs(soa.Self());
   Handle<String> s(hs.NewHandle(String::AllocFromModifiedUtf8(soa.Self(), "ABC")));
-  ASSERT_TRUE(s.Get() != nullptr);
+  ASSERT_TRUE(s != nullptr);
   Handle<Class> c(hs.NewHandle(s->GetClass()));
-  ASSERT_TRUE(c.Get() != nullptr);
+  ASSERT_TRUE(c != nullptr);
 
   // Wrong type.
   EXPECT_TRUE(c->FindDeclaredStaticField("CASE_INSENSITIVE_ORDER", "I") == nullptr);
@@ -743,57 +731,60 @@ TEST_F(ObjectTest, ObjectPointer) {
   ScopedObjectAccess soa(Thread::Current());
   jobject jclass_loader = LoadDex("XandY");
   StackHandleScope<2> hs(soa.Self());
-  ObjPtr<mirror::Object, /*kPoison*/ true> null_ptr;
-  EXPECT_TRUE(null_ptr.IsNull());
-  EXPECT_TRUE(null_ptr.IsValid());
-  EXPECT_TRUE(null_ptr.Ptr() == nullptr);
-  EXPECT_TRUE(null_ptr == nullptr);
-  EXPECT_TRUE(null_ptr == null_ptr);
-  EXPECT_FALSE(null_ptr != null_ptr);
-  EXPECT_FALSE(null_ptr != nullptr);
-  null_ptr.AssertValid();
   Handle<ClassLoader> class_loader(hs.NewHandle(soa.Decode<ClassLoader>(jclass_loader)));
   Handle<mirror::Class> h_X(
       hs.NewHandle(class_linker_->FindClass(soa.Self(), "LX;", class_loader)));
-  ObjPtr<Class, /*kPoison*/ true> X(h_X.Get());
-  EXPECT_TRUE(!X.IsNull());
-  EXPECT_TRUE(X.IsValid());
-  EXPECT_TRUE(X.Ptr() != nullptr);
-  EXPECT_OBJ_PTR_EQ(h_X.Get(), X);
-  // FindClass may cause thread suspension, it should invalidate X.
-  ObjPtr<Class, /*kPoison*/ true> Y(class_linker_->FindClass(soa.Self(), "LY;", class_loader));
-  EXPECT_TRUE(!Y.IsNull());
-  EXPECT_TRUE(Y.IsValid());
-  EXPECT_TRUE(Y.Ptr() != nullptr);
 
-  // Should IsNull be safe to call on null ObjPtr? I'll allow it for now.
-  EXPECT_TRUE(!X.IsNull());
-  EXPECT_TRUE(!X.IsValid());
-  // Make X valid again by copying out of handle.
-  X.Assign(h_X.Get());
-  EXPECT_TRUE(!X.IsNull());
-  EXPECT_TRUE(X.IsValid());
-  EXPECT_OBJ_PTR_EQ(h_X.Get(), X);
+  if (kObjPtrPoisoning) {
+    ObjPtr<mirror::Object> null_ptr;
+    EXPECT_TRUE(null_ptr.IsNull());
+    EXPECT_TRUE(null_ptr.IsValid());
+    EXPECT_TRUE(null_ptr.Ptr() == nullptr);
+    EXPECT_TRUE(null_ptr == nullptr);
+    EXPECT_TRUE(null_ptr == null_ptr);
+    EXPECT_FALSE(null_ptr != null_ptr);
+    EXPECT_FALSE(null_ptr != nullptr);
+    null_ptr.AssertValid();
+    ObjPtr<Class> X(h_X.Get());
+    EXPECT_TRUE(!X.IsNull());
+    EXPECT_TRUE(X.IsValid());
+    EXPECT_TRUE(X.Ptr() != nullptr);
+    EXPECT_OBJ_PTR_EQ(h_X.Get(), X);
+    // FindClass may cause thread suspension, it should invalidate X.
+    ObjPtr<Class> Y(class_linker_->FindClass(soa.Self(), "LY;", class_loader));
+    EXPECT_TRUE(!Y.IsNull());
+    EXPECT_TRUE(Y.IsValid());
+    EXPECT_TRUE(Y.Ptr() != nullptr);
 
-  // Allow thread suspension to invalidate Y.
-  soa.Self()->AllowThreadSuspension();
-  EXPECT_TRUE(!Y.IsNull());
-  EXPECT_TRUE(!Y.IsValid());
+    // Should IsNull be safe to call on null ObjPtr? I'll allow it for now.
+    EXPECT_TRUE(!X.IsNull());
+    EXPECT_TRUE(!X.IsValid());
+    // Make X valid again by copying out of handle.
+    X.Assign(h_X.Get());
+    EXPECT_TRUE(!X.IsNull());
+    EXPECT_TRUE(X.IsValid());
+    EXPECT_OBJ_PTR_EQ(h_X.Get(), X);
 
-  // Test unpoisoned.
-  ObjPtr<mirror::Object, /*kPoison*/ false> unpoisoned;
-  EXPECT_TRUE(unpoisoned.IsNull());
-  EXPECT_TRUE(unpoisoned.IsValid());
-  EXPECT_TRUE(unpoisoned.Ptr() == nullptr);
-  EXPECT_TRUE(unpoisoned == nullptr);
-  EXPECT_TRUE(unpoisoned == unpoisoned);
-  EXPECT_FALSE(unpoisoned != unpoisoned);
-  EXPECT_FALSE(unpoisoned != nullptr);
+    // Allow thread suspension to invalidate Y.
+    soa.Self()->AllowThreadSuspension();
+    EXPECT_TRUE(!Y.IsNull());
+    EXPECT_TRUE(!Y.IsValid());
+  } else {
+    // Test unpoisoned.
+    ObjPtr<mirror::Object> unpoisoned;
+    EXPECT_TRUE(unpoisoned.IsNull());
+    EXPECT_TRUE(unpoisoned.IsValid());
+    EXPECT_TRUE(unpoisoned.Ptr() == nullptr);
+    EXPECT_TRUE(unpoisoned == nullptr);
+    EXPECT_TRUE(unpoisoned == unpoisoned);
+    EXPECT_FALSE(unpoisoned != unpoisoned);
+    EXPECT_FALSE(unpoisoned != nullptr);
 
-  unpoisoned = h_X.Get();
-  EXPECT_FALSE(unpoisoned.IsNull());
-  EXPECT_TRUE(unpoisoned == h_X.Get());
-  EXPECT_OBJ_PTR_EQ(unpoisoned, h_X.Get());
+    unpoisoned = h_X.Get();
+    EXPECT_FALSE(unpoisoned.IsNull());
+    EXPECT_TRUE(unpoisoned == h_X.Get());
+    EXPECT_OBJ_PTR_EQ(unpoisoned, h_X.Get());
+  }
 }
 
 }  // namespace mirror

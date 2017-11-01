@@ -28,8 +28,8 @@
 
 #include "base/allocator.h"
 #include "base/bit_utils.h"
-#include "base/mutex.h"
 #include "base/logging.h"
+#include "base/mutex.h"
 #include "globals.h"
 #include "thread.h"
 
@@ -141,7 +141,7 @@ class RosAlloc {
   template<bool kUseTail = true>
   class SlotFreeList {
    public:
-    SlotFreeList() : head_(0U), tail_(0), size_(0) {}
+    SlotFreeList() : head_(0U), tail_(0), size_(0), padding_(0) {}
     Slot* Head() const {
       return reinterpret_cast<Slot*>(head_);
     }
@@ -706,6 +706,9 @@ class RosAlloc {
   // The maximum capacity. The address, base_ + max_capacity_, indicates
   // the end of the memory region that's ever managed by this allocator.
   size_t max_capacity_;
+
+  template<class Key, AllocatorTag kTag, class Compare = std::less<Key>>
+  using AllocationTrackingSet = std::set<Key, Compare, TrackingAllocator<Key, kTag>>;
 
   // The run sets that hold the runs whose slots are not all
   // full. non_full_runs_[i] is guarded by size_bracket_locks_[i].

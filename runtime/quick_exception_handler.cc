@@ -19,6 +19,7 @@
 #include "arch/context.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "dex_file_types.h"
 #include "dex_instruction.h"
 #include "entrypoints/entrypoint_utils.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
@@ -32,7 +33,6 @@
 #include "oat_quick_method_header.h"
 #include "stack.h"
 #include "stack_map.h"
-#include "verifier/method_verifier.h"
 
 namespace art {
 
@@ -99,17 +99,17 @@ class CatchBlockStackVisitor FINAL : public StackVisitor {
  private:
   bool HandleTryItems(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    uint32_t dex_pc = DexFile::kDexNoIndex;
+    uint32_t dex_pc = dex::kDexNoIndex;
     if (!method->IsNative()) {
       dex_pc = GetDexPc();
     }
-    if (dex_pc != DexFile::kDexNoIndex) {
+    if (dex_pc != dex::kDexNoIndex) {
       bool clear_exception = false;
       StackHandleScope<1> hs(GetThread());
       Handle<mirror::Class> to_find(hs.NewHandle((*exception_)->GetClass()));
       uint32_t found_dex_pc = method->FindCatchBlock(to_find, dex_pc, &clear_exception);
       exception_handler_->SetClearException(clear_exception);
-      if (found_dex_pc != DexFile::kDexNoIndex) {
+      if (found_dex_pc != dex::kDexNoIndex) {
         exception_handler_->SetHandlerMethod(method);
         exception_handler_->SetHandlerDexPc(found_dex_pc);
         exception_handler_->SetHandlerQuickFramePc(
@@ -166,10 +166,9 @@ void QuickExceptionHandler::FindCatch(ObjPtr<mirror::Throwable> exception) {
                 << line_number << ")";
     }
   }
-  if (clear_exception_) {
-    // Exception was cleared as part of delivery.
-    DCHECK(!self_->IsExceptionPending());
-  } else {
+  // Exception was cleared as part of delivery.
+  DCHECK(!self_->IsExceptionPending());
+  if (!clear_exception_) {
     // Put exception back in root set with clear throw location.
     self_->SetException(exception_ref.Get());
   }
@@ -347,9 +346,11 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
       callee_method_ = method;
       return true;
     } else if (!single_frame_deopt_ &&
-               !Runtime::Current()->IsDeoptimizeable(GetCurrentQuickFramePc())) {
+               !Runtime::Current()->IsAsyncDeoptimizeable(GetCurrentQuickFramePc())) {
       // We hit some code that's not deoptimizeable. However, Single-frame deoptimization triggered
       // from compiled code is always allowed since HDeoptimize always saves the full environment.
+      LOG(WARNING) << "Got request to deoptimize un-deoptimizable method "
+                   << method->PrettyMethod();
       FinishStackWalk();
       return false;  // End stack walk.
     } else {
@@ -405,7 +406,8 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
     CodeInfoEncoding encoding = code_info.ExtractEncoding();
     StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
     const size_t number_of_vregs = m->GetCodeItem()->registers_size_;
-    uint32_t register_mask = stack_map.GetRegisterMask(encoding.stack_map_encoding);
+    uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, stack_map);
+    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, stack_map);
     DexRegisterMap vreg_map = IsInInlinedFrame()
         ? code_info.GetDexRegisterMapAtDepth(GetCurrentInliningDepth() - 1,
                                              code_info.GetInlineInfoOf(stack_map, encoding),
@@ -438,8 +440,7 @@ class DeoptimizeStackVisitor FINAL : public StackVisitor {
           const uint8_t* addr = reinterpret_cast<const uint8_t*>(GetCurrentQuickFrame()) + offset;
           value = *reinterpret_cast<const uint32_t*>(addr);
           uint32_t bit = (offset >> 2);
-          if (stack_map.GetNumberOfStackMaskBits(encoding.stack_map_encoding) > bit &&
-              stack_map.GetStackMaskBit(encoding.stack_map_encoding, bit)) {
+          if (bit < encoding.stack_mask.encoding.BitSize() && stack_mask.LoadBit(bit)) {
             is_reference = true;
           }
           break;
@@ -529,13 +530,8 @@ void QuickExceptionHandler::DeoptimizeStack() {
   PrepareForLongJumpToInvokeStubOrInterpreterBridge();
 }
 
-void QuickExceptionHandler::DeoptimizeSingleFrame() {
+void QuickExceptionHandler::DeoptimizeSingleFrame(DeoptimizationKind kind) {
   DCHECK(is_deoptimization_);
-
-  if (VLOG_IS_ON(deopt) || kDebugExceptionDelivery) {
-    LOG(INFO) << "Single-frame deopting:";
-    DumpFramesWithType(self_, true);
-  }
 
   DeoptimizeStackVisitor visitor(self_, context_, this, true);
   visitor.WalkStack(true);
@@ -543,6 +539,13 @@ void QuickExceptionHandler::DeoptimizeSingleFrame() {
   // Compiled code made an explicit deoptimization.
   ArtMethod* deopt_method = visitor.GetSingleFrameDeoptMethod();
   DCHECK(deopt_method != nullptr);
+  if (VLOG_IS_ON(deopt) || kDebugExceptionDelivery) {
+    LOG(INFO) << "Single-frame deopting: "
+              << deopt_method->PrettyMethod()
+              << " due to "
+              << GetDeoptimizationKindName(kind);
+    DumpFramesWithType(self_, /* details */ true);
+  }
   if (Runtime::Current()->UseJitCompilation()) {
     Runtime::Current()->GetJit()->GetCodeCache()->InvalidateCompiledCodeFor(
         deopt_method, visitor.GetSingleFrameDeoptQuickMethodHeader());

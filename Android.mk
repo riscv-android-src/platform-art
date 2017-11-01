@@ -42,7 +42,7 @@ clean-oat: clean-oat-host clean-oat-target
 
 .PHONY: clean-oat-host
 clean-oat-host:
-	find $(OUT_DIR) -name "*.oat" -o -name "*.odex" -o -name "*.art" | xargs rm -f
+	find $(OUT_DIR) -name "*.oat" -o -name "*.odex" -o -name "*.art" -o -name '*.vdex' | xargs rm -f
 ifneq ($(TMPDIR),)
 	rm -rf $(TMPDIR)/$(USER)/test-*/dalvik-cache/*
 	rm -rf $(TMPDIR)/android-data/dalvik-cache/*
@@ -86,10 +86,19 @@ ART_HOST_DEPENDENCIES := \
   $(ART_HOST_EXECUTABLES) \
   $(ART_HOST_DEX_DEPENDENCIES) \
   $(ART_HOST_SHARED_LIBRARY_DEPENDENCIES)
+
+ifeq ($(ART_BUILD_HOST_DEBUG),true)
+ART_HOST_DEPENDENCIES += $(ART_HOST_SHARED_LIBRARY_DEBUG_DEPENDENCIES)
+endif
+
 ART_TARGET_DEPENDENCIES := \
   $(ART_TARGET_EXECUTABLES) \
   $(ART_TARGET_DEX_DEPENDENCIES) \
   $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES)
+
+ifeq ($(ART_BUILD_TARGET_DEBUG),true)
+ART_TARGET_DEPENDENCIES += $(ART_TARGET_SHARED_LIBRARY_DEBUG_DEPENDENCIES)
+endif
 
 ########################################################################
 # test rules
@@ -122,7 +131,7 @@ ifneq ($(ART_TEST_NO_SYNC),true)
 ifeq ($(ART_TEST_ANDROID_ROOT),)
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
 	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
-	adb sync
+	adb sync system && adb sync data
 else
 test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
 	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
@@ -341,6 +350,72 @@ valgrind-test-art-target64: valgrind-test-art-target-gtest64
 
 endif  # art_test_bother
 
+#######################
+# Fake packages for ART
+
+# The art-runtime package depends on the core ART libraries and binaries. It exists so we can
+# manipulate the set of things shipped, e.g., add debug versions and so on.
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := art-runtime
+
+# Base requirements.
+LOCAL_REQUIRED_MODULES := \
+    dalvikvm \
+    dex2oat \
+    dexoptanalyzer \
+    libart \
+    libart-compiler \
+    libopenjdkjvm \
+    libopenjdkjvmti \
+    patchoat \
+    profman \
+
+# For nosy apps, we provide a fake library that avoids namespace issues and gives some warnings.
+LOCAL_REQUIRED_MODULES += libart_fake
+
+# Potentially add in debug variants:
+#
+# * We will never add them if PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD = false.
+# * We will always add them if PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD = true.
+# * Otherwise, we will add them by default to userdebug and eng builds.
+art_target_include_debug_build := $(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD)
+ifneq (false,$(art_target_include_debug_build))
+ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
+  art_target_include_debug_build := true
+endif
+ifeq (true,$(art_target_include_debug_build))
+LOCAL_REQUIRED_MODULES += \
+    dex2oatd \
+    dexoptanalyzerd \
+    libartd \
+    libartd-compiler \
+    libopenjdkd \
+    libopenjdkjvmd \
+    libopenjdkjvmtid \
+    patchoatd \
+    profmand \
+
+endif
+endif
+
+include $(BUILD_PHONY_PACKAGE)
+
+# The art-tools package depends on helpers and tools that are useful for developers and on-device
+# investigations.
+
+include $(CLEAR_VARS)
+LOCAL_MODULE := art-tools
+LOCAL_REQUIRED_MODULES := \
+    ahat \
+    dexdiag \
+    dexdump \
+    dexlist \
+    hprof-conv \
+    oatdump \
+
+include $(BUILD_PHONY_PACKAGE)
+
 ####################################################################################################
 # Fake packages to ensure generation of libopenjdkd when one builds with mm/mmm/mmma.
 #
@@ -382,12 +457,13 @@ build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CO
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
 
 ########################################################################
-# Phony target for only building what go/lem requires on target.
+# Phony target for only building what go/lem requires for pushing ART on /data.
 .PHONY: build-art-target-golem
 # Also include libartbenchmark, we always include it when running golem.
 # libstdc++ is needed when building for ART_TARGET_LINUX.
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-target-golem: dex2oat dalvikvm patchoat linker libstdc++ \
+                        $(TARGET_OUT_EXECUTABLES)/art \
                         $(TARGET_OUT)/etc/public.libraries.txt \
                         $(ART_TARGET_DEX_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES) \
@@ -404,6 +480,11 @@ build-art-target-golem: dex2oat dalvikvm patchoat linker libstdc++ \
 ART_HOST_SHARED_LIBRARY_BENCHMARK := $(ART_HOST_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-host-golem: build-art-host \
                       $(ART_HOST_SHARED_LIBRARY_BENCHMARK)
+
+########################################################################
+# Phony target for building what go/lem requires for syncing /system to target.
+.PHONY: build-art-unbundled-golem
+build-art-unbundled-golem: art-runtime linker oatdump $(TARGET_CORE_JARS)
 
 ########################################################################
 # Rules for building all dependencies for tests.

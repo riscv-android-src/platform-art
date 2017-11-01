@@ -22,8 +22,8 @@
 #include "base/mutex.h"
 #include "handle.h"
 #include "obj_ptr-inl.h"
-#include "thread-inl.h"
-#include "verify_object-inl.h"
+#include "thread-current-inl.h"
+#include "verify_object.h"
 
 namespace art {
 
@@ -114,9 +114,9 @@ inline MutableHandle<T> FixedSizeHandleScope<kNumReferences>::NewHandle(T* objec
   return h;
 }
 
-template<size_t kNumReferences> template<class MirrorType, bool kPoison>
+template<size_t kNumReferences> template<class MirrorType>
 inline MutableHandle<MirrorType> FixedSizeHandleScope<kNumReferences>::NewHandle(
-    ObjPtr<MirrorType, kPoison> object) {
+    ObjPtr<MirrorType> object) {
   return NewHandle(object.Ptr());
 }
 
@@ -191,9 +191,8 @@ MutableHandle<T> VariableSizedHandleScope::NewHandle(T* object) {
   return current_scope_->NewHandle(object);
 }
 
-template<class MirrorType, bool kPoison>
-inline MutableHandle<MirrorType> VariableSizedHandleScope::NewHandle(
-    ObjPtr<MirrorType, kPoison> ptr) {
+template<class MirrorType>
+inline MutableHandle<MirrorType> VariableSizedHandleScope::NewHandle(ObjPtr<MirrorType> ptr) {
   return NewHandle(ptr.Ptr());
 }
 

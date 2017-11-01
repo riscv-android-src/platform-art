@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+import java.lang.reflect.Method;
 
 public class Main {
   public static boolean doThrow = false;
@@ -83,7 +84,9 @@ public class Main {
     }
 
     assertCharEquals('7', $opt$noinline$stringCharAtCatch("0123456789", 7));
+    assertCharEquals('7', $noinline$runSmaliTest("stringCharAtCatch", "0123456789", 7));
     assertCharEquals('\0', $opt$noinline$stringCharAtCatch("0123456789", 10));
+    assertCharEquals('\0', $noinline$runSmaliTest("stringCharAtCatch","0123456789", 10));
 
     assertIntEquals('a' + 'b' + 'c', $opt$noinline$stringSumChars("abc"));
     assertIntEquals('a' + 'b' + 'c', $opt$noinline$stringSumLeadingChars("abcdef", 3));
@@ -166,17 +169,23 @@ public class Main {
   }
 
   /// CHECK-START: char Main.$opt$noinline$stringCharAtCatch(java.lang.String, int) instruction_simplifier (before)
+  /// CHECK-DAG:  <<Int:i\d+>>      IntConstant 0
   /// CHECK-DAG:  <<Char:c\d+>>     InvokeVirtual intrinsic:StringCharAt
-  /// CHECK-DAG:                    Return [<<Char>>]
+
+  //                                The return value can come from a Phi should the two returns be merged.
+  //                                Please refer to the Smali code for a more detailed verification.
+
+  /// CHECK-DAG:                    Return [{{(c|i)\d+}}]
 
   /// CHECK-START: char Main.$opt$noinline$stringCharAtCatch(java.lang.String, int) instruction_simplifier (after)
   /// CHECK-DAG:  <<String:l\d+>>   ParameterValue
   /// CHECK-DAG:  <<Pos:i\d+>>      ParameterValue
+  /// CHECK-DAG:  <<Int:i\d+>>      IntConstant 0
   /// CHECK-DAG:  <<NullCk:l\d+>>   NullCheck [<<String>>]
   /// CHECK-DAG:  <<Length:i\d+>>   ArrayLength [<<NullCk>>] is_string_length:true
   /// CHECK-DAG:  <<Bounds:i\d+>>   BoundsCheck [<<Pos>>,<<Length>>] is_string_char_at:true
   /// CHECK-DAG:  <<Char:c\d+>>     ArrayGet [<<NullCk>>,<<Bounds>>] is_string_char_at:true
-  /// CHECK-DAG:                    Return [<<Char>>]
+  /// CHECK-DAG:                    Return [{{(c|i)\d+}}]
 
   /// CHECK-START: char Main.$opt$noinline$stringCharAtCatch(java.lang.String, int) instruction_simplifier (after)
   /// CHECK-NOT:                    InvokeVirtual intrinsic:StringCharAt
@@ -329,7 +338,22 @@ public class Main {
   /// CHECK-NOT:      cbz
   // Terminate the scope for the CHECK-NOT search at the reference or length comparison,
   // whichever comes first.
-  /// CHECK:          cmp {{w.*,}} {{w.*}}
+  /// CHECK:          cmp {{w.*,}} {{w.*|#.*}}
+
+  /// CHECK-START-MIPS: boolean Main.stringArgumentNotNull(java.lang.Object) disassembly (after)
+  /// CHECK:          InvokeVirtual {{.*\.equals.*}} intrinsic:StringEquals
+  /// CHECK-NOT:      beq zero,
+  /// CHECK-NOT:      beqz
+  /// CHECK-NOT:      beqzc
+  // Terminate the scope for the CHECK-NOT search at the class field or length comparison,
+  // whichever comes first.
+  /// CHECK:          lw
+
+  /// CHECK-START-MIPS64: boolean Main.stringArgumentNotNull(java.lang.Object) disassembly (after)
+  /// CHECK:          InvokeVirtual {{.*\.equals.*}} intrinsic:StringEquals
+  /// CHECK-NOT:      beqzc
+  // Terminate the scope for the CHECK-NOT search at the reference comparison.
+  /// CHECK:          beqc
   public static boolean stringArgumentNotNull(Object obj) {
     obj.getClass();
     return "foo".equals(obj);
@@ -380,14 +404,40 @@ public class Main {
   // so repeat the check twice.
   /// CHECK-NOT:      ldr {{w\d+}}, [{{x\d+}}]
   /// CHECK-NOT:      ldr {{w\d+}}, [{{x\d+}}, #0]
-  /// CHECK:          cmp {{w\d+}}, {{w\d+}}
+  /// CHECK:          cmp {{w\d+}}, {{w\d+|#.*}}
   /// CHECK-NOT:      ldr {{w\d+}}, [{{x\d+}}]
   /// CHECK-NOT:      ldr {{w\d+}}, [{{x\d+}}, #0]
-  /// CHECK:          cmp {{w\d+}}, {{w\d+}}
+  /// CHECK:          cmp {{w\d+}}, {{w\d+|#.*}}
+
+  // Test is brittle as it depends on the class offset being 0.
+  /// CHECK-START-MIPS: boolean Main.stringArgumentIsString() disassembly (after)
+  /// CHECK:          InvokeVirtual intrinsic:StringEquals
+  /// CHECK:          beq{{(zc)?}}
+  // Check that we don't try to compare the classes.
+  /// CHECK-NOT:      lw {{r\d+}}, +0({{r\d+}})
+  /// CHECK:          bne{{c?}}
+
+  // Test is brittle as it depends on the class offset being 0.
+  /// CHECK-START-MIPS64: boolean Main.stringArgumentIsString() disassembly (after)
+  /// CHECK:          InvokeVirtual intrinsic:StringEquals
+  /// CHECK:          beqzc
+  // Check that we don't try to compare the classes.
+  /// CHECK-NOT:      lw {{r\d+}}, +0({{r\d+}})
+  /// CHECK:          bnec
   public static boolean stringArgumentIsString() {
     return "foo".equals(myString);
   }
 
   static String myString;
   static Object myObject;
+
+  public static char $noinline$runSmaliTest(String name, String str, int pos) {
+    try {
+      Class<?> c = Class.forName("SmaliTests");
+      Method m = c.getMethod(name, String.class, int.class);
+      return (Character) m.invoke(null, str, pos);
+    } catch (Exception ex) {
+      throw new Error(ex);
+    }
+  }
 }

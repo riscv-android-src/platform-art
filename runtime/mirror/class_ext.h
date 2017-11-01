@@ -17,14 +17,12 @@
 #ifndef ART_RUNTIME_MIRROR_CLASS_EXT_H_
 #define ART_RUNTIME_MIRROR_CLASS_EXT_H_
 
-#include "class-inl.h"
-
 #include "array.h"
+#include "class.h"
 #include "dex_cache.h"
 #include "gc_root.h"
 #include "object.h"
 #include "object_array.h"
-#include "object_callbacks.h"
 #include "string.h"
 
 namespace art {
@@ -36,10 +34,7 @@ namespace mirror {
 // C++ mirror of dalvik.system.ClassExt
 class MANAGED ClassExt : public Object {
  public:
-  static uint32_t ClassSize(PointerSize pointer_size) {
-    uint32_t vtable_entries = Object::kVTableLength;
-    return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, pointer_size);
-  }
+  static uint32_t ClassSize(PointerSize pointer_size);
 
   // Size of an instance of dalvik.system.ClassExt.
   static constexpr uint32_t InstanceSize() {
@@ -57,9 +52,18 @@ class MANAGED ClassExt : public Object {
         OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_dex_caches_));
   }
 
-  PointerArray* GetObsoleteMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldObject<PointerArray>(OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_methods_));
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  inline PointerArray* GetObsoleteMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(
+        OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_methods_));
   }
+
+  Object* GetOriginalDexFile() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetFieldObject<Object>(OFFSET_OF_OBJECT_MEMBER(ClassExt, original_dex_file_));
+  }
+
+  void SetOriginalDexFile(ObjPtr<Object> bytes) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetObsoleteArrays(ObjPtr<PointerArray> methods, ObjPtr<ObjectArray<DexCache>> dex_caches)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -72,6 +76,10 @@ class MANAGED ClassExt : public Object {
   static void ResetClass();
   static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
+  inline void VisitNativeRoots(Visitor& visitor, PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   static ClassExt* Alloc(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
@@ -80,7 +88,7 @@ class MANAGED ClassExt : public Object {
 
   HeapReference<PointerArray> obsolete_methods_;
 
-  HeapReference<DexCache> original_dex_cache_;
+  HeapReference<Object> original_dex_file_;
 
   // The saved verification error of this class.
   HeapReference<Object> verify_error_;

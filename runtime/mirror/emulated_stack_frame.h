@@ -62,6 +62,10 @@ class MANAGED EmulatedStackFrame : public Object {
     return GetFieldObject<MethodType>(OFFSET_OF_OBJECT_MEMBER(EmulatedStackFrame, type_));
   }
 
+  mirror::Object* GetReceiver() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetReferences()->Get(0);
+  }
+
   static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
   static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
   static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -81,6 +85,10 @@ class MANAGED EmulatedStackFrame : public Object {
         OFFSET_OF_OBJECT_MEMBER(EmulatedStackFrame, stack_frame_));
   }
 
+  static MemberOffset CallsiteTypeOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(EmulatedStackFrame, callsite_type_));
+  }
+
   static MemberOffset TypeOffset() {
     return MemberOffset(OFFSETOF_MEMBER(EmulatedStackFrame, type_));
   }
@@ -93,6 +101,7 @@ class MANAGED EmulatedStackFrame : public Object {
     return MemberOffset(OFFSETOF_MEMBER(EmulatedStackFrame, stack_frame_));
   }
 
+  HeapReference<mirror::MethodType> callsite_type_;
   HeapReference<mirror::ObjectArray<mirror::Object>> references_;
   HeapReference<mirror::ByteArray> stack_frame_;
   HeapReference<mirror::MethodType> type_;

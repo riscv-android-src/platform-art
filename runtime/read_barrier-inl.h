@@ -19,8 +19,10 @@
 
 #include "read_barrier.h"
 
+#include "gc/accounting/read_barrier_table.h"
 #include "gc/collector/concurrent_copying-inl.h"
 #include "gc/heap.h"
+#include "mirror/object-readbarrier-inl.h"
 #include "mirror/object_reference.h"
 #include "mirror/reference.h"
 #include "runtime.h"
@@ -28,12 +30,16 @@
 
 namespace art {
 
-template <typename MirrorType, ReadBarrierOption kReadBarrierOption, bool kAlwaysUpdateField>
+// Disabled for performance reasons.
+static constexpr bool kCheckDebugDisallowReadBarrierCount = false;
+
+template <typename MirrorType, bool kIsVolatile, ReadBarrierOption kReadBarrierOption,
+          bool kAlwaysUpdateField>
 inline MirrorType* ReadBarrier::Barrier(
     mirror::Object* obj, MemberOffset offset, mirror::HeapReference<MirrorType>* ref_addr) {
   constexpr bool with_read_barrier = kReadBarrierOption == kWithReadBarrier;
   if (kUseReadBarrier && with_read_barrier) {
-    if (kIsDebugBuild) {
+    if (kCheckDebugDisallowReadBarrierCount) {
       Thread* const self = Thread::Current();
       if (self != nullptr) {
         CHECK_EQ(self->GetDebugDisallowReadBarrierCount(), 0u);
@@ -50,7 +56,7 @@ inline MirrorType* ReadBarrier::Barrier(
       }
       ref_addr = reinterpret_cast<mirror::HeapReference<MirrorType>*>(
           fake_address_dependency | reinterpret_cast<uintptr_t>(ref_addr));
-      MirrorType* ref = ref_addr->AsMirrorPtr();
+      MirrorType* ref = ref_addr->template AsMirrorPtr<kIsVolatile>();
       MirrorType* old_ref = ref;
       if (is_gray) {
         // Slow-path.
@@ -58,7 +64,7 @@ inline MirrorType* ReadBarrier::Barrier(
         // If kAlwaysUpdateField is true, update the field atomically. This may fail if mutator
         // updates before us, but it's OK.
         if (kAlwaysUpdateField && ref != old_ref) {
-          obj->CasFieldStrongRelaxedObjectWithoutWriteBarrier<false, false>(
+          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
               offset, old_ref, ref);
         }
       }
@@ -66,9 +72,9 @@ inline MirrorType* ReadBarrier::Barrier(
       return ref;
     } else if (kUseBrooksReadBarrier) {
       // To be implemented.
-      return ref_addr->AsMirrorPtr();
+      return ref_addr->template AsMirrorPtr<kIsVolatile>();
     } else if (kUseTableLookupReadBarrier) {
-      MirrorType* ref = ref_addr->AsMirrorPtr();
+      MirrorType* ref = ref_addr->template AsMirrorPtr<kIsVolatile>();
       MirrorType* old_ref = ref;
       // The heap or the collector can be null at startup. TODO: avoid the need for this null check.
       gc::Heap* heap = Runtime::Current()->GetHeap();
@@ -76,7 +82,7 @@ inline MirrorType* ReadBarrier::Barrier(
         ref = reinterpret_cast<MirrorType*>(Mark(old_ref));
         // Update the field atomically. This may fail if mutator updates before us, but it's ok.
         if (ref != old_ref) {
-          obj->CasFieldStrongRelaxedObjectWithoutWriteBarrier<false, false>(
+          obj->CasFieldStrongReleaseObjectWithoutWriteBarrier<false, false>(
               offset, old_ref, ref);
         }
       }
@@ -88,7 +94,7 @@ inline MirrorType* ReadBarrier::Barrier(
     }
   } else {
     // No read barrier.
-    return ref_addr->AsMirrorPtr();
+    return ref_addr->template AsMirrorPtr<kIsVolatile>();
   }
 }
 
@@ -178,6 +184,26 @@ inline MirrorType* ReadBarrier::BarrierForRoot(mirror::CompressedReference<Mirro
   }
 }
 
+template <typename MirrorType>
+inline MirrorType* ReadBarrier::IsMarked(MirrorType* ref) {
+  // Only read-barrier configurations can have mutators run while
+  // the GC is marking.
+  if (!kUseReadBarrier) {
+    return ref;
+  }
+  // IsMarked does not handle null, so handle it here.
+  if (ref == nullptr) {
+    return nullptr;
+  }
+  // IsMarked should only be called when the GC is marking.
+  if (!Thread::Current()->GetIsGcMarking()) {
+    return ref;
+  }
+
+  return reinterpret_cast<MirrorType*>(
+      Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->IsMarked(ref));
+}
+
 inline bool ReadBarrier::IsDuringStartup() {
   gc::Heap* heap = Runtime::Current()->GetHeap();
   if (heap == nullptr) {
@@ -198,7 +224,7 @@ inline bool ReadBarrier::IsDuringStartup() {
 
 inline void ReadBarrier::AssertToSpaceInvariant(mirror::Object* obj, MemberOffset offset,
                                                 mirror::Object* ref) {
-  if (kEnableToSpaceInvariantChecks || kIsDebugBuild) {
+  if (kEnableToSpaceInvariantChecks) {
     if (ref == nullptr || IsDuringStartup()) {
       return;
     }
@@ -209,7 +235,7 @@ inline void ReadBarrier::AssertToSpaceInvariant(mirror::Object* obj, MemberOffse
 
 inline void ReadBarrier::AssertToSpaceInvariant(GcRootSource* gc_root_source,
                                                 mirror::Object* ref) {
-  if (kEnableToSpaceInvariantChecks || kIsDebugBuild) {
+  if (kEnableToSpaceInvariantChecks) {
     if (ref == nullptr || IsDuringStartup()) {
       return;
     }

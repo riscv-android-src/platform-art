@@ -17,12 +17,17 @@
 #include "java_lang_VMClassLoader.h"
 
 #include "class_linker.h"
+#include "dex_file_loader.h"
 #include "jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_utf_chars.h"
 #include "obj_ptr.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "ScopedUtfChars.h"
+#include "well_known_classes.h"
 #include "zip_archive.h"
 
 namespace art {
@@ -81,14 +86,12 @@ static jclass VMClassLoader_findLoadedClass(JNIEnv* env, jclass, jobject javaLoa
   if (c != nullptr && c->IsErroneous()) {
     cl->ThrowEarlierClassFailure(c.Ptr());
     Thread* self = soa.Self();
-    ObjPtr<mirror::Class> eiie_class =
-        self->DecodeJObject(WellKnownClasses::java_lang_ExceptionInInitializerError)->AsClass();
     ObjPtr<mirror::Class> iae_class =
         self->DecodeJObject(WellKnownClasses::java_lang_IllegalAccessError)->AsClass();
     ObjPtr<mirror::Class> ncdfe_class =
         self->DecodeJObject(WellKnownClasses::java_lang_NoClassDefFoundError)->AsClass();
     ObjPtr<mirror::Class> exception = self->GetException()->GetClass();
-    if (exception == eiie_class || exception == iae_class || exception == ncdfe_class) {
+    if (exception == iae_class || exception == ncdfe_class) {
       self->ThrowNewWrappedException("Ljava/lang/ClassNotFoundException;",
                                      c->PrettyDescriptor().c_str());
     }
@@ -123,22 +126,30 @@ static jclass VMClassLoader_findLoadedClass(JNIEnv* env, jclass, jobject javaLoa
 static jobjectArray VMClassLoader_getBootClassPathEntries(JNIEnv* env, jclass) {
   const std::vector<const DexFile*>& path =
       Runtime::Current()->GetClassLinker()->GetBootClassPath();
-  jclass stringClass = env->FindClass("java/lang/String");
-  jobjectArray array = env->NewObjectArray(path.size(), stringClass, nullptr);
+  jobjectArray array =
+      env->NewObjectArray(path.size(), WellKnownClasses::java_lang_String, nullptr);
+  if (array == nullptr) {
+    DCHECK(env->ExceptionCheck());
+    return nullptr;
+  }
   for (size_t i = 0; i < path.size(); ++i) {
     const DexFile* dex_file = path[i];
 
-    // For multidex locations, e.g., x.jar:classes2.dex, we want to look into x.jar.
-    const std::string& location(dex_file->GetBaseLocation());
+    // For multidex locations, e.g., x.jar!classes2.dex, we want to look into x.jar.
+    const std::string location(DexFileLoader::GetBaseLocation(dex_file->GetLocation()));
 
-    jstring javaPath = env->NewStringUTF(location.c_str());
-    env->SetObjectArrayElement(array, i, javaPath);
+    ScopedLocalRef<jstring> javaPath(env, env->NewStringUTF(location.c_str()));
+    if (javaPath.get() == nullptr) {
+      DCHECK(env->ExceptionCheck());
+      return nullptr;
+    }
+    env->SetObjectArrayElement(array, i, javaPath.get());
   }
   return array;
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(VMClassLoader, findLoadedClass, "!(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(VMClassLoader, findLoadedClass, "(Ljava/lang/ClassLoader;Ljava/lang/String;)Ljava/lang/Class;"),
   NATIVE_METHOD(VMClassLoader, getBootClassPathEntries, "()[Ljava/lang/String;"),
 };
 

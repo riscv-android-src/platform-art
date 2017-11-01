@@ -15,13 +15,16 @@
  */
 
 #include "cmdline_parser.h"
-#include "runtime/runtime_options.h"
-#include "runtime/parsed_options.h"
 
-#include "utils.h"
 #include <numeric>
+
 #include "gtest/gtest.h"
-#include "runtime/experimental_flags.h"
+
+#include "experimental_flags.h"
+#include "parsed_options.h"
+#include "runtime.h"
+#include "runtime_options.h"
+#include "utils.h"
 
 #define EXPECT_NULL(expected) EXPECT_EQ(reinterpret_cast<const void*>(expected), \
                                         reinterpret_cast<void*>(nullptr));
@@ -34,7 +37,7 @@ namespace art {
     return lhs.enabled_ == rhs.enabled_ &&
         lhs.min_save_period_ms_ == rhs.min_save_period_ms_ &&
         lhs.save_resolved_classes_delay_ms_ == rhs.save_resolved_classes_delay_ms_ &&
-        lhs.startup_method_samples_ == rhs.startup_method_samples_ &&
+        lhs.hot_startup_method_samples_ == rhs.hot_startup_method_samples_ &&
         lhs.min_methods_to_save_ == rhs.min_methods_to_save_ &&
         lhs.min_classes_to_save_ == rhs.min_classes_to_save_ &&
         lhs.min_notification_before_wake_ == rhs.min_notification_before_wake_ &&
@@ -122,7 +125,7 @@ class CmdlineParserTest : public ::testing::Test {
   using RuntimeParser = ParsedOptions::RuntimeParser;
 
   static void SetUpTestCase() {
-    art::InitLogging(nullptr, art::Runtime::Aborter);  // argv = null
+    art::InitLogging(nullptr, art::Runtime::Abort);  // argv = null
   }
 
   virtual void SetUp() {
@@ -298,6 +301,13 @@ TEST_F(CmdlineParserTest, TestLogVerbosity) {
     const char* log_args = "-verbose:oat";
     LogVerbosity log_verbosity = LogVerbosity();
     log_verbosity.oat = true;
+    EXPECT_SINGLE_PARSE_VALUE(log_verbosity, log_args, M::Verbose);
+  }
+
+  {
+    const char* log_args = "-verbose:dex";
+    LogVerbosity log_verbosity = LogVerbosity();
+    log_verbosity.dex = true;
     EXPECT_SINGLE_PARSE_VALUE(log_verbosity, log_args, M::Verbose);
   }
 }  // TEST_F
@@ -476,17 +486,19 @@ TEST_F(CmdlineParserTest, TestJitOptions) {
 * -Xps-*
 */
 TEST_F(CmdlineParserTest, ProfileSaverOptions) {
-  ProfileSaverOptions opt = ProfileSaverOptions(true, 1, 2, 3, 4, 5, 6, 7);
+  ProfileSaverOptions opt = ProfileSaverOptions(true, 1, 2, 3, 4, 5, 6, 7, "abc", true);
 
   EXPECT_SINGLE_PARSE_VALUE(opt,
                             "-Xjitsaveprofilinginfo "
                             "-Xps-min-save-period-ms:1 "
                             "-Xps-save-resolved-classes-delay-ms:2 "
-                            "-Xps-startup-method-samples:3 "
+                            "-Xps-hot-startup-method-samples:3 "
                             "-Xps-min-methods-to-save:4 "
                             "-Xps-min-classes-to-save:5 "
                             "-Xps-min-notification-before-wake:6 "
-                            "-Xps-max-notification-before-wake:7",
+                            "-Xps-max-notification-before-wake:7 "
+                            "-Xps-profile-path:abc "
+                            "-Xps-profile-boot-class-path",
                             M::ProfileSaverOpts);
 }  // TEST_F
 

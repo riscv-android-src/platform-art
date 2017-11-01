@@ -16,13 +16,17 @@
 
 #include "org_apache_harmony_dalvik_ddmc_DdmVmInternal.h"
 
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/mutex.h"
 #include "debugger.h"
+#include "gc/heap.h"
 #include "jni_internal.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_primitive_array.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedPrimitiveArray.h"
 #include "thread_list.h"
 
 namespace art {
@@ -62,7 +66,9 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
     }
 
     // Suspend thread to build stack trace.
-    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id, false, &timed_out);
+    Thread* thread = thread_list->SuspendThreadByThreadId(thin_lock_id,
+                                                          SuspendReason::kInternal,
+                                                          &timed_out);
     if (thread != nullptr) {
       {
         ScopedObjectAccess soa(env);
@@ -70,7 +76,8 @@ static jobjectArray DdmVmInternal_getStackTraceById(JNIEnv* env, jclass, jint th
         trace = Thread::InternalStackTraceToStackTraceElementArray(soa, internal_trace);
       }
       // Restart suspended thread.
-      thread_list->Resume(thread, false);
+      bool resumed = thread_list->Resume(thread, SuspendReason::kInternal);
+      DCHECK(resumed);
     } else {
       if (timed_out) {
         LOG(ERROR) << "Trying to get thread's stack by id failed as the thread failed to suspend "
@@ -165,11 +172,11 @@ static void DdmVmInternal_threadNotify(JNIEnv*, jclass, jboolean enable) {
 
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(DdmVmInternal, enableRecentAllocations, "(Z)V"),
-  NATIVE_METHOD(DdmVmInternal, getRecentAllocations, "!()[B"),
-  NATIVE_METHOD(DdmVmInternal, getRecentAllocationStatus, "!()Z"),
+  FAST_NATIVE_METHOD(DdmVmInternal, getRecentAllocations, "()[B"),
+  FAST_NATIVE_METHOD(DdmVmInternal, getRecentAllocationStatus, "()Z"),
   NATIVE_METHOD(DdmVmInternal, getStackTraceById, "(I)[Ljava/lang/StackTraceElement;"),
   NATIVE_METHOD(DdmVmInternal, getThreadStats, "()[B"),
-  NATIVE_METHOD(DdmVmInternal, heapInfoNotify, "!(I)Z"),
+  FAST_NATIVE_METHOD(DdmVmInternal, heapInfoNotify, "(I)Z"),
   NATIVE_METHOD(DdmVmInternal, heapSegmentNotify, "(IIZ)Z"),
   NATIVE_METHOD(DdmVmInternal, threadNotify, "(Z)V"),
 };

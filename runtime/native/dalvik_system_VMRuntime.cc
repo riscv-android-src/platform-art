@@ -17,20 +17,17 @@
 #include "dalvik_system_VMRuntime.h"
 
 #ifdef ART_TARGET_ANDROID
+#include <sys/resource.h>
+#include <sys/time.h>
 extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #endif
 #include <limits.h>
-#include <ScopedUtfChars.h>
-
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wshadow"
-#include "toStringArray.h"
-#pragma GCC diagnostic pop
+#include "nativehelper/scoped_utf_chars.h"
 
 #include "android-base/stringprintf.h"
 
-#include "art_method-inl.h"
 #include "arch/instruction_set.h"
+#include "art_method-inl.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
@@ -44,15 +41,20 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "gc/space/image_space.h"
 #include "gc/task_processor.h"
 #include "intern_table.h"
+#include "java_vm_ext.h"
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "runtime.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "thread_list.h"
+#include "well_known_classes.h"
 
 namespace art {
 
@@ -161,7 +163,27 @@ static jboolean VMRuntime_isNativeDebuggable(JNIEnv*, jobject) {
 }
 
 static jobjectArray VMRuntime_properties(JNIEnv* env, jobject) {
-  return toStringArray(env, Runtime::Current()->GetProperties());
+  DCHECK(WellKnownClasses::java_lang_String != nullptr);
+
+  const std::vector<std::string>& properties = Runtime::Current()->GetProperties();
+  ScopedLocalRef<jobjectArray> ret(env,
+                                   env->NewObjectArray(static_cast<jsize>(properties.size()),
+                                                       WellKnownClasses::java_lang_String,
+                                                       nullptr /* initial element */));
+  if (ret == nullptr) {
+    DCHECK(env->ExceptionCheck());
+    return nullptr;
+  }
+  for (size_t i = 0; i != properties.size(); ++i) {
+    ScopedLocalRef<jstring> str(env, env->NewStringUTF(properties[i].c_str()));
+    if (str == nullptr) {
+      DCHECK(env->ExceptionCheck());
+      return nullptr;
+    }
+    env->SetObjectArrayElement(ret.get(), static_cast<jsize>(i), str.get());
+    DCHECK(!env->ExceptionCheck());
+  }
+  return ret.release();
 }
 
 // This is for backward compatibility with dalvik which returned the
@@ -250,7 +272,7 @@ static void VMRuntime_trimHeap(JNIEnv* env, jobject) {
 }
 
 static void VMRuntime_concurrentGC(JNIEnv* env, jobject) {
-  Runtime::Current()->GetHeap()->ConcurrentGC(ThreadForEnv(env), true);
+  Runtime::Current()->GetHeap()->ConcurrentGC(ThreadForEnv(env), gc::kGcCauseBackground, true);
 }
 
 static void VMRuntime_requestHeapTrim(JNIEnv* env, jobject) {
@@ -258,7 +280,9 @@ static void VMRuntime_requestHeapTrim(JNIEnv* env, jobject) {
 }
 
 static void VMRuntime_requestConcurrentGC(JNIEnv* env, jobject) {
-  Runtime::Current()->GetHeap()->RequestConcurrentGC(ThreadForEnv(env), true);
+  Runtime::Current()->GetHeap()->RequestConcurrentGC(ThreadForEnv(env),
+                                                     gc::kGcCauseBackground,
+                                                     true);
 }
 
 static void VMRuntime_startHeapTaskProcessor(JNIEnv* env, jobject) {
@@ -291,15 +315,16 @@ class PreloadDexCachesStringsVisitor : public SingleRootVisitor {
 
 // Based on ClassLinker::ResolveString.
 static void PreloadDexCachesResolveString(
-    Handle<mirror::DexCache> dex_cache, dex::StringIndex string_idx, StringTable& strings)
+    ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx, StringTable& strings)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::String>  string = dex_cache->GetResolvedString(string_idx);
-  if (string != nullptr) {
-    return;
+  uint32_t slot_idx = dex_cache->StringSlotIndex(string_idx);
+  auto pair = dex_cache->GetStrings()[slot_idx].load(std::memory_order_relaxed);
+  if (!pair.object.IsNull()) {
+    return;  // The entry already contains some String.
   }
   const DexFile* dex_file = dex_cache->GetDexFile();
   const char* utf8 = dex_file->StringDataByIdx(string_idx);
-  string = strings[utf8];
+  ObjPtr<mirror::String> string = strings[utf8];
   if (string == nullptr) {
     return;
   }
@@ -312,18 +337,17 @@ static void PreloadDexCachesResolveType(Thread* self,
                                         ObjPtr<mirror::DexCache> dex_cache,
                                         dex::TypeIndex type_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::Class> klass = dex_cache->GetResolvedType(type_idx);
-  if (klass != nullptr) {
-    return;
+  uint32_t slot_idx = dex_cache->TypeSlotIndex(type_idx);
+  auto pair = dex_cache->GetResolvedTypes()[slot_idx].load(std::memory_order_relaxed);
+  if (!pair.object.IsNull()) {
+    return;  // The entry already contains some Class.
   }
   const DexFile* dex_file = dex_cache->GetDexFile();
   const char* class_name = dex_file->StringByTypeIdx(type_idx);
   ClassLinker* linker = Runtime::Current()->GetClassLinker();
-  if (class_name[1] == '\0') {
-    klass = linker->FindPrimitiveClass(class_name[0]);
-  } else {
-    klass = linker->LookupClass(self, class_name, nullptr);
-  }
+  ObjPtr<mirror::Class> klass = (class_name[1] == '\0')
+      ? linker->FindPrimitiveClass(class_name[0])
+      : linker->LookupClass(self, class_name, nullptr);
   if (klass == nullptr) {
     return;
   }
@@ -338,26 +362,27 @@ static void PreloadDexCachesResolveType(Thread* self,
 }
 
 // Based on ClassLinker::ResolveField.
-static void PreloadDexCachesResolveField(Handle<mirror::DexCache> dex_cache, uint32_t field_idx,
+static void PreloadDexCachesResolveField(ObjPtr<mirror::DexCache> dex_cache,
+                                         uint32_t field_idx,
                                          bool is_static)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ArtField* field = dex_cache->GetResolvedField(field_idx, kRuntimePointerSize);
-  if (field != nullptr) {
-    return;
+  uint32_t slot_idx = dex_cache->FieldSlotIndex(field_idx);
+  auto pair = mirror::DexCache::GetNativePairPtrSize(dex_cache->GetResolvedFields(),
+                                                     slot_idx,
+                                                     kRuntimePointerSize);
+  if (pair.object != nullptr) {
+    return;  // The entry already contains some ArtField.
   }
   const DexFile* dex_file = dex_cache->GetDexFile();
   const DexFile::FieldId& field_id = dex_file->GetFieldId(field_idx);
-  Thread* const self = Thread::Current();
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Class> klass(hs.NewHandle(dex_cache->GetResolvedType(field_id.class_idx_)));
-  if (klass.Get() == nullptr) {
+  ObjPtr<mirror::Class> klass =
+      ClassLinker::LookupResolvedType(field_id.class_idx_, dex_cache, nullptr);
+  if (klass == nullptr) {
     return;
   }
-  if (is_static) {
-    field = mirror::Class::FindStaticField(self, klass.Get(), dex_cache.Get(), field_idx);
-  } else {
-    field = klass->FindInstanceField(dex_cache.Get(), field_idx);
-  }
+  ArtField* field = is_static
+      ? mirror::Class::FindStaticField(Thread::Current(), klass, dex_cache, field_idx)
+      : klass->FindInstanceField(dex_cache, field_idx);
   if (field == nullptr) {
     return;
   }
@@ -365,35 +390,25 @@ static void PreloadDexCachesResolveField(Handle<mirror::DexCache> dex_cache, uin
 }
 
 // Based on ClassLinker::ResolveMethod.
-static void PreloadDexCachesResolveMethod(Handle<mirror::DexCache> dex_cache, uint32_t method_idx,
-                                          InvokeType invoke_type)
+static void PreloadDexCachesResolveMethod(ObjPtr<mirror::DexCache> dex_cache, uint32_t method_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ArtMethod* method = dex_cache->GetResolvedMethod(method_idx, kRuntimePointerSize);
-  if (method != nullptr) {
-    return;
+  uint32_t slot_idx = dex_cache->MethodSlotIndex(method_idx);
+  auto pair = mirror::DexCache::GetNativePairPtrSize(dex_cache->GetResolvedMethods(),
+                                                     slot_idx,
+                                                     kRuntimePointerSize);
+  if (pair.object != nullptr) {
+    return;  // The entry already contains some ArtMethod.
   }
   const DexFile* dex_file = dex_cache->GetDexFile();
   const DexFile::MethodId& method_id = dex_file->GetMethodId(method_idx);
-  ObjPtr<mirror::Class> klass = dex_cache->GetResolvedType(method_id.class_idx_);
+  ObjPtr<mirror::Class> klass =
+      ClassLinker::LookupResolvedType(method_id.class_idx_, dex_cache, nullptr);
   if (klass == nullptr) {
     return;
   }
-  switch (invoke_type) {
-    case kDirect:
-    case kStatic:
-      method = klass->FindDirectMethod(dex_cache.Get(), method_idx, kRuntimePointerSize);
-      break;
-    case kInterface:
-      method = klass->FindInterfaceMethod(dex_cache.Get(), method_idx, kRuntimePointerSize);
-      break;
-    case kSuper:
-    case kVirtual:
-      method = klass->FindVirtualMethod(dex_cache.Get(), method_idx, kRuntimePointerSize);
-      break;
-    default:
-      LOG(FATAL) << "Unreachable - invocation type: " << invoke_type;
-      UNREACHABLE();
-  }
+  ArtMethod* method = klass->IsInterface()
+      ? klass->FindInterfaceMethod(dex_cache, method_idx, kRuntimePointerSize)
+      : klass->FindClassMethod(dex_cache, method_idx, kRuntimePointerSize);
   if (method == nullptr) {
     return;
   }
@@ -444,36 +459,42 @@ static void PreloadDexCachesStatsFilled(DexCacheStats* filled)
   if (!kPreloadDexCachesCollectStats) {
     return;
   }
+  // TODO: Update for hash-based DexCache arrays.
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
   Thread* const self = Thread::Current();
   for (const DexFile* dex_file : class_linker->GetBootClassPath()) {
     CHECK(dex_file != nullptr);
-    ObjPtr<mirror::DexCache> const dex_cache = class_linker->FindDexCache(self, *dex_file, true);
-    // If dex cache was deallocated, just continue.
-    if (dex_cache == nullptr) {
+    // In fallback mode, not all boot classpath components might be registered, yet.
+    if (!class_linker->IsDexFileRegistered(self, *dex_file)) {
       continue;
     }
-    for (size_t j = 0; j < dex_cache->NumStrings(); j++) {
-      ObjPtr<mirror::String> string = dex_cache->GetResolvedString(dex::StringIndex(j));
-      if (string != nullptr) {
+    ObjPtr<mirror::DexCache> const dex_cache = class_linker->FindDexCache(self, *dex_file);
+    DCHECK(dex_cache != nullptr);  // Boot class path dex caches are never unloaded.
+    for (size_t j = 0, num_strings = dex_cache->NumStrings(); j < num_strings; ++j) {
+      auto pair = dex_cache->GetStrings()[j].load(std::memory_order_relaxed);
+      if (!pair.object.IsNull()) {
         filled->num_strings++;
       }
     }
-    for (size_t j = 0; j < dex_cache->NumResolvedTypes(); j++) {
-      ObjPtr<mirror::Class> klass = dex_cache->GetResolvedType(dex::TypeIndex(j));
-      if (klass != nullptr) {
+    for (size_t j = 0, num_types = dex_cache->NumResolvedTypes(); j < num_types; ++j) {
+      auto pair = dex_cache->GetResolvedTypes()[j].load(std::memory_order_relaxed);
+      if (!pair.object.IsNull()) {
         filled->num_types++;
       }
     }
-    for (size_t j = 0; j < dex_cache->NumResolvedFields(); j++) {
-      ArtField* field = class_linker->GetResolvedField(j, dex_cache);
-      if (field != nullptr) {
+    for (size_t j = 0, num_fields = dex_cache->NumResolvedFields(); j < num_fields; ++j) {
+      auto pair = mirror::DexCache::GetNativePairPtrSize(dex_cache->GetResolvedFields(),
+                                                         j,
+                                                         kRuntimePointerSize);
+      if (pair.object != nullptr) {
         filled->num_fields++;
       }
     }
-    for (size_t j = 0; j < dex_cache->NumResolvedMethods(); j++) {
-      ArtMethod* method = dex_cache->GetResolvedMethod(j, kRuntimePointerSize);
-      if (method != nullptr) {
+    for (size_t j = 0, num_methods = dex_cache->NumResolvedMethods(); j < num_methods; ++j) {
+      auto pair = mirror::DexCache::GetNativePairPtrSize(dex_cache->GetResolvedMethods(),
+                                                         j,
+                                                         kRuntimePointerSize);
+      if (pair.object != nullptr) {
         filled->num_methods++;
       }
     }
@@ -513,9 +534,8 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
   for (size_t i = 0; i < boot_class_path.size(); i++) {
     const DexFile* dex_file = boot_class_path[i];
     CHECK(dex_file != nullptr);
-    StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::DexCache> dex_cache(hs.NewHandle(linker->RegisterDexFile(*dex_file, nullptr)));
-
+    ObjPtr<mirror::DexCache> dex_cache = linker->RegisterDexFile(*dex_file, nullptr);
+    CHECK(dex_cache != nullptr);  // Boot class path dex caches are never unloaded.
     if (kPreloadDexCachesStrings) {
       for (size_t j = 0; j < dex_cache->NumStrings(); j++) {
         PreloadDexCachesResolveString(dex_cache, dex::StringIndex(j), strings);
@@ -524,7 +544,7 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
 
     if (kPreloadDexCachesTypes) {
       for (size_t j = 0; j < dex_cache->NumResolvedTypes(); j++) {
-        PreloadDexCachesResolveType(soa.Self(), dex_cache.Get(), dex::TypeIndex(j));
+        PreloadDexCachesResolveType(soa.Self(), dex_cache, dex::TypeIndex(j));
       }
     }
 
@@ -548,13 +568,11 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
         }
         for (; it.HasNextDirectMethod(); it.Next()) {
           uint32_t method_idx = it.GetMemberIndex();
-          InvokeType invoke_type = it.GetMethodInvokeType(class_def);
-          PreloadDexCachesResolveMethod(dex_cache, method_idx, invoke_type);
+          PreloadDexCachesResolveMethod(dex_cache, method_idx);
         }
         for (; it.HasNextVirtualMethod(); it.Next()) {
           uint32_t method_idx = it.GetMemberIndex();
-          InvokeType invoke_type = it.GetMethodInvokeType(class_def);
-          PreloadDexCachesResolveMethod(dex_cache, method_idx, invoke_type);
+          PreloadDexCachesResolveMethod(dex_cache, method_idx);
         }
       }
     }
@@ -583,9 +601,7 @@ static void VMRuntime_preloadDexCaches(JNIEnv* env, jobject) {
 static void VMRuntime_registerAppInfo(JNIEnv* env,
                                       jclass clazz ATTRIBUTE_UNUSED,
                                       jstring profile_file,
-                                      jstring app_dir,
-                                      jobjectArray code_paths,
-                                      jstring foreign_dex_profile_path) {
+                                      jobjectArray code_paths) {
   std::vector<std::string> code_paths_vec;
   int code_paths_length = env->GetArrayLength(code_paths);
   for (int i = 0; i < code_paths_length; i++) {
@@ -599,22 +615,7 @@ static void VMRuntime_registerAppInfo(JNIEnv* env,
   std::string profile_file_str(raw_profile_file);
   env->ReleaseStringUTFChars(profile_file, raw_profile_file);
 
-  std::string foreign_dex_profile_path_str = "";
-  if (foreign_dex_profile_path != nullptr) {
-    const char* raw_foreign_dex_profile_path =
-        env->GetStringUTFChars(foreign_dex_profile_path, nullptr);
-    foreign_dex_profile_path_str.assign(raw_foreign_dex_profile_path);
-    env->ReleaseStringUTFChars(foreign_dex_profile_path, raw_foreign_dex_profile_path);
-  }
-
-  const char* raw_app_dir = env->GetStringUTFChars(app_dir, nullptr);
-  std::string app_dir_str(raw_app_dir);
-  env->ReleaseStringUTFChars(app_dir, raw_app_dir);
-
-  Runtime::Current()->RegisterAppInfo(code_paths_vec,
-                                      profile_file_str,
-                                      foreign_dex_profile_path_str,
-                                      app_dir_str);
+  Runtime::Current()->RegisterAppInfo(code_paths_vec, profile_file_str);
 }
 
 static jboolean VMRuntime_isBootClassPathOnDisk(JNIEnv* env, jclass, jstring java_instruction_set) {
@@ -644,8 +645,25 @@ static jboolean VMRuntime_didPruneDalvikCache(JNIEnv* env ATTRIBUTE_UNUSED,
   return Runtime::Current()->GetPrunedDalvikCache() ? JNI_TRUE : JNI_FALSE;
 }
 
+static void VMRuntime_setSystemDaemonThreadPriority(JNIEnv* env ATTRIBUTE_UNUSED,
+                                                    jclass klass ATTRIBUTE_UNUSED) {
+#ifdef ART_TARGET_ANDROID
+  Thread* self = Thread::Current();
+  DCHECK(self != nullptr);
+  pid_t tid = self->GetTid();
+  // We use a priority lower than the default for the system daemon threads (eg HeapTaskDaemon) to
+  // avoid jank due to CPU contentions between GC and other UI-related threads. b/36631902.
+  // We may use a native priority that doesn't have a corresponding java.lang.Thread-level priority.
+  static constexpr int kSystemDaemonNiceValue = 4;  // priority 124
+  if (setpriority(PRIO_PROCESS, tid, kSystemDaemonNiceValue) != 0) {
+    PLOG(INFO) << *self << " setpriority(PRIO_PROCESS, " << tid << ", "
+               << kSystemDaemonNiceValue << ") failed";
+  }
+#endif
+}
+
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(VMRuntime, addressOf, "!(Ljava/lang/Object;)J"),
+  FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, clampGrowthLimit, "()V"),
   NATIVE_METHOD(VMRuntime, classPath, "()Ljava/lang/String;"),
@@ -653,11 +671,11 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
-  NATIVE_METHOD(VMRuntime, isDebuggerActive, "!()Z"),
-  NATIVE_METHOD(VMRuntime, isNativeDebuggable, "!()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isDebuggerActive, "()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isNativeDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, nativeSetTargetHeapUtilization, "(F)V"),
-  NATIVE_METHOD(VMRuntime, newNonMovableArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
-  NATIVE_METHOD(VMRuntime, newUnpaddedArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(VMRuntime, newNonMovableArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(VMRuntime, newUnpaddedArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
   NATIVE_METHOD(VMRuntime, properties, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, setTargetSdkVersionNative, "(I)V"),
   NATIVE_METHOD(VMRuntime, registerNativeAllocation, "(I)V"),
@@ -674,14 +692,14 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, vmVersion, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, vmLibrary, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, vmInstructionSet, "()Ljava/lang/String;"),
-  NATIVE_METHOD(VMRuntime, is64Bit, "!()Z"),
-  NATIVE_METHOD(VMRuntime, isCheckJniEnabled, "!()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, is64Bit, "()Z"),
+  FAST_NATIVE_METHOD(VMRuntime, isCheckJniEnabled, "()Z"),
   NATIVE_METHOD(VMRuntime, preloadDexCaches, "()V"),
-  NATIVE_METHOD(VMRuntime, registerAppInfo,
-                "(Ljava/lang/String;Ljava/lang/String;[Ljava/lang/String;Ljava/lang/String;)V"),
+  NATIVE_METHOD(VMRuntime, registerAppInfo, "(Ljava/lang/String;[Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, isBootClassPathOnDisk, "(Ljava/lang/String;)Z"),
   NATIVE_METHOD(VMRuntime, getCurrentInstructionSet, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, didPruneDalvikCache, "()Z"),
+  NATIVE_METHOD(VMRuntime, setSystemDaemonThreadPriority, "()V"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

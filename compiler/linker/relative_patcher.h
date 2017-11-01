@@ -28,10 +28,15 @@
 namespace art {
 
 class CompiledMethod;
-class LinkerPatch;
-class OutputStream;
+
+namespace debug {
+struct MethodDebugInfo;
+}  // namespace debug
 
 namespace linker {
+
+class LinkerPatch;
+class OutputStream;
 
 /**
  * @class RelativePatcherTargetProvider
@@ -109,6 +114,14 @@ class RelativePatcher {
                                         uint32_t patch_offset,
                                         uint32_t target_offset) = 0;
 
+  // Patch a branch to a Baker read barrier thunk.
+  virtual void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code,
+                                           const LinkerPatch& patch,
+                                           uint32_t patch_offset) = 0;
+
+  virtual std::vector<debug::MethodDebugInfo> GenerateThunkDebugInfo(
+      uint32_t executable_offset) = 0;
+
  protected:
   RelativePatcher()
       : size_code_alignment_(0u),
@@ -117,7 +130,7 @@ class RelativePatcher {
   }
 
   bool WriteCodeAlignment(OutputStream* out, uint32_t aligned_code_delta);
-  bool WriteRelCallThunk(OutputStream* out, const ArrayRef<const uint8_t>& thunk);
+  bool WriteThunk(OutputStream* out, const ArrayRef<const uint8_t>& thunk);
   bool WriteMiscThunk(OutputStream* out, const ArrayRef<const uint8_t>& thunk);
 
  private:

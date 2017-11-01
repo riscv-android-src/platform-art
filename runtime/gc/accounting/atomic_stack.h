@@ -17,6 +17,8 @@
 #ifndef ART_RUNTIME_GC_ACCOUNTING_ATOMIC_STACK_H_
 #define ART_RUNTIME_GC_ACCOUNTING_ATOMIC_STACK_H_
 
+#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
+
 #include <algorithm>
 #include <memory>
 #include <string>
@@ -25,7 +27,14 @@
 #include "base/logging.h"
 #include "base/macros.h"
 #include "mem_map.h"
-#include "stack.h"
+#include "stack_reference.h"
+
+// This implements a double-ended queue (deque) with various flavors of PushBack operations,
+// as well as PopBack and PopFront operations. We expect that all calls are performed
+// by a single thread (normally the GC). There is one exception, which accounts for the
+// name:
+// - Multiple calls to AtomicPushBack*() and AtomicBumpBack() may be made concurrently,
+// provided no other calls are made at the same time.
 
 namespace art {
 namespace gc {
@@ -148,7 +157,7 @@ class AtomicStack {
   // Pop a number of elements.
   void PopBackCount(int32_t n) {
     DCHECK_GE(Size(), static_cast<size_t>(n));
-    back_index_.FetchAndSubSequentiallyConsistent(n);
+    back_index_.StoreRelaxed(back_index_.LoadRelaxed() - n);
   }
 
   bool IsEmpty() const {

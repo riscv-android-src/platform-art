@@ -51,9 +51,9 @@ art_cc_defaults {
     // These really are gtests, but the gtest library comes from libart-gtest.so
     gtest: false,
     defaults: [
-        "art_defaults",
-        "art_debug_defaults",
         "art_test_defaults",
+        "art_debug_defaults",
+        "art_defaults",
     ],
 
     shared_libs: [
@@ -67,13 +67,10 @@ art_cc_defaults {
         "libicuuc",
         "libicui18n",
         "libnativehelper",
+        "libz",
     ],
     whole_static_libs: [
         "libsigchain",
-    ],
-    include_dirs: [
-        "art",
-        "art/cmdline",
     ],
 
     target: {
@@ -86,14 +83,6 @@ art_cc_defaults {
                 "-Wl,-u,Java_MyClassNatives_bar",
                 "-Wl,-u,Java_MyClassNatives_sbar",
             ],
-            shared_libs: [
-                "libziparchive",
-                "libz-host",
-            ],
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
             cflags: [
                 // gtest issue
                 "-Wno-used-but-marked-unused",
@@ -101,24 +90,14 @@ art_cc_defaults {
                 "-Wno-missing-noreturn",
             ],
         },
-        android: {
-            ldflags: [
-                // Allow jni_compiler_test to find Java_MyClassNatives_bar
-                // within itself using dlopen(NULL, ...).
-                "-Wl,--export-dynamic",
-                "-Wl,-u,Java_MyClassNatives_bar",
-                "-Wl,-u,Java_MyClassNatives_sbar",
+        host: {
+            shared_libs: [
+                "libziparchive",
             ],
+        },
+        android: {
             shared_libs: [
                 "liblog",
-                "libdl",
-                "libz",
-            ],
-            cflags: [
-                // gtest issue
-                "-Wno-used-but-marked-unused",
-                "-Wno-deprecated",
-                "-Wno-missing-noreturn",
             ],
         },
     },
@@ -128,8 +107,8 @@ art_cc_defaults {
     name: "libart-gtest-defaults",
     host_supported: true,
     defaults: [
-        "art_defaults",
         "art_debug_defaults",
+        "art_defaults",
     ],
     shared_libs: [
         "libartd",
@@ -144,14 +123,6 @@ art_cc_defaults {
         },
         android64: {
             cflags: ["-DART_TARGET_NATIVETEST_DIR=/data/nativetest64/art"],
-        },
-        android: {
-            cflags: [
-                // gtest issue
-                "-Wno-used-but-marked-unused",
-                "-Wno-deprecated",
-                "-Wno-missing-noreturn",
-            ],
         },
         linux: {
             cflags: [
@@ -179,19 +150,9 @@ art_cc_library {
         "libartd",
         "libartd-compiler",
         "libbase",
+        "libbacktrace",
     ],
     target: {
-        android: {
-            shared_libs: [
-                "libdl",
-            ],
-        },
-        host: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
         darwin: {
             enabled: false,
         },
@@ -201,25 +162,14 @@ art_cc_library {
 cc_defaults {
     name: "libartagent-defaults",
     defaults: [
-        "art_defaults",
         "art_test_defaults",
+        "art_defaults",
     ],
     shared_libs: [
         "libbacktrace",
         "libbase",
         "libnativehelper",
     ],
-    target: {
-        android: {
-            shared_libs: ["libdl"],
-        },
-        host: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
-    },
 }
 
 art_cc_test_library {
@@ -233,29 +183,41 @@ art_cc_test_library {
     name: "libartagentd",
     srcs: ["900-hello-plugin/load_unload.cc"],
     defaults: [
-        "libartagent-defaults",
         "art_debug_defaults",
+        "libartagent-defaults",
     ],
     shared_libs: ["libartd"],
 }
 
 art_cc_defaults {
-    name: "libtiagent-defaults",
+    name: "libtiagent-base-defaults",
     defaults: ["libartagent-defaults"],
     srcs: [
-        // This is to get the IsInterpreted native method.
-        "common/stack_inspect.cc",
-        "common/runtime_state.cc",
-        "ti-agent/common_load.cc",
+        // These are the ART-independent parts.
+        "ti-agent/agent_common.cc",
+        "ti-agent/agent_startup.cc",
+        "ti-agent/jni_binder.cc",
+        "ti-agent/jvmti_helper.cc",
+        "ti-agent/test_env.cc",
+        "ti-agent/breakpoint_helper.cc",
         "ti-agent/common_helper.cc",
-        "901-hello-ti-agent/basics.cc",
+        "ti-agent/frame_pop_helper.cc",
+        "ti-agent/locals_helper.cc",
+        "ti-agent/monitors_helper.cc",
+        "ti-agent/redefinition_helper.cc",
+        "ti-agent/suspension_helper.cc",
+        "ti-agent/stack_trace_helper.cc",
+        "ti-agent/threads_helper.cc",
+        "ti-agent/trace_helper.cc",
+        "ti-agent/exceptions_helper.cc",
+        // This is the list of non-special OnLoad things and excludes BCI and anything that depends
+        // on ART internals.
         "903-hello-tagging/tagging.cc",
         "904-object-allocation/tracking.cc",
         "905-object-free/tracking_free.cc",
         "906-iterate-heap/iterate_heap.cc",
         "907-get-loaded-classes/get_loaded_classes.cc",
         "908-gc-start-finish/gc_callbacks.cc",
-        "909-attach-agent/attach.cc",
         "910-methods/methods.cc",
         "911-get-stack-trace/stack_trace.cc",
         "912-classes/classes.cc",
@@ -265,9 +227,61 @@ art_cc_defaults {
         "922-properties/properties.cc",
         "923-monitors/monitors.cc",
         "924-threads/threads.cc",
+        "925-threadgroups/threadgroups.cc",
+        "927-timers/timers.cc",
+        "928-jni-table/jni_table.cc",
+        "929-search/search.cc",
+        "931-agent-thread/agent_thread.cc",
+        "933-misc-events/misc_events.cc",
+        "945-obsolete-native/obsolete_native.cc",
+        "984-obsolete-invoke/obsolete_invoke.cc",
+        "986-native-method-bind/native_bind.cc",
+        "987-agent-bind/agent_bind.cc",
+        "989-method-trace-throw/method_trace.cc",
+        "991-field-trace-2/field_trace.cc",
+        "992-source-data/source_file.cc",
+        "993-breakpoints/breakpoints.cc",
+        "996-breakpoint-obsolete/obsolete_breakpoints.cc",
+        "1900-track-alloc/alloc.cc",
+        "1901-get-bytecodes/bytecodes.cc",
+        "1905-suspend-native/native_suspend.cc",
+        "1908-suspend-native-resume-self/native_suspend_resume.cc",
+        "1909-per-agent-tls/agent_tls.cc",
+        "1914-get-local-instance/local_instance.cc",
+        "1919-vminit-thread-start-timing/vminit.cc",
+        "1920-suspend-native-monitor/native_suspend_monitor.cc",
+        "1921-suspend-native-recursive-monitor/native_suspend_recursive_monitor.cc",
+        "1922-owned-monitors-info/owned_monitors.cc",
+        "1924-frame-pop-toggle/frame_pop_toggle.cc",
+        "1926-missed-frame-pop/frame_pop_missed.cc",
+        "1927-exception-event/exception_event.cc",
+        "1930-monitor-info/monitor.cc",
+        "1932-monitor-events-misc/monitor_misc.cc",
+        "1934-jvmti-signal-thread/signal_threads.cc",
+        "1939-proxy-frames/local_instance.cc",
     ],
     shared_libs: [
         "libbase",
+    ],
+    header_libs: ["libopenjdkjvmti_headers"],
+    include_dirs: ["art/test/ti-agent"],
+}
+
+art_cc_defaults {
+    name: "libtiagent-defaults",
+    defaults: ["libtiagent-base-defaults"],
+    srcs: [
+        // This is to get the IsInterpreted native method.
+        "common/stack_inspect.cc",
+        "common/runtime_state.cc",
+        "ti-agent/common_load.cc",
+        // This includes the remaining test functions. We should try to refactor things to
+        // make this list smaller.
+        "901-hello-ti-agent/basics.cc",
+        "909-attach-agent/attach.cc",
+        "912-classes/classes_art.cc",
+        "936-search-onload/search_onload.cc",
+        "983-source-transform-verify/source_transform.cc",
     ],
 }
 
@@ -280,17 +294,51 @@ art_cc_test_library {
 art_cc_test_library {
     name: "libtiagentd",
     defaults: [
-        "libtiagent-defaults",
         "art_debug_defaults",
+        "libtiagent-defaults",
     ],
     shared_libs: ["libartd"],
+}
+
+art_cc_defaults {
+    name: "libtistress-defaults",
+    defaults: ["libartagent-defaults"],
+    srcs: [
+        "ti-stress/stress.cc",
+    ],
+    shared_libs: [
+        "libbase",
+        "slicer",
+    ],
+    header_libs: ["libopenjdkjvmti_headers"],
+}
+
+art_cc_test_library {
+    name: "libtistress",
+    defaults: ["libtistress-defaults"],
+    shared_libs: ["libart"],
+}
+
+art_cc_test_library {
+    name: "libtistressd",
+    defaults: [
+        "art_debug_defaults",
+        "libtistress-defaults",
+    ],
+    shared_libs: ["libartd"],
+}
+
+art_cc_test_library {
+    name: "libctstiagent",
+    defaults: ["libtiagent-base-defaults"],
+    export_include_dirs: ["ti-agent"],
 }
 
 cc_defaults {
     name: "libarttest-defaults",
     defaults: [
-        "art_defaults",
         "art_test_defaults",
+        "art_defaults",
     ],
     srcs: [
         "common/runtime_state.cc",
@@ -311,6 +359,8 @@ cc_defaults {
         "141-class-unload/jni_unload.cc",
         "148-multithread-gc-annotations/gc_coverage.cc",
         "149-suspend-all-stress/suspend_all.cc",
+        "203-multi-checkpoint/multi_checkpoint.cc",
+        "154-gc-loop/heap_interface.cc",
         "454-get-vreg/get_vreg_jni.cc",
         "457-regs/regs_jni.cc",
         "461-get-reference-vreg/get_reference_vreg_jni.cc",
@@ -321,25 +371,21 @@ cc_defaults {
         "570-checker-osr/osr.cc",
         "595-profile-saving/profile-saving.cc",
         "596-app-images/app_images.cc",
+        "596-monitor-inflation/monitor_inflation.cc",
         "597-deopt-new-string/deopt.cc",
         "626-const-class-linking/clear_dex_cache_types.cc",
+        "642-fp-callees/fp_callees.cc",
+        "647-jni-get-field-id/get_field_id.cc",
+        "656-annotation-lookup-generic-jni/test.cc",
+        "661-oat-writer-layout/oat_writer_layout.cc",
+        "664-aget-verifier/aget-verifier.cc",
+        "708-jit-cache-churn/jit.cc",
     ],
     shared_libs: [
         "libbacktrace",
         "libbase",
         "libnativehelper",
     ],
-    target: {
-        android: {
-            shared_libs: ["libdl"],
-        },
-        host: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
-    },
 }
 
 art_cc_test_library {
@@ -351,8 +397,8 @@ art_cc_test_library {
 art_cc_test_library {
     name: "libarttestd",
     defaults: [
-        "libarttest-defaults",
         "art_debug_defaults",
+        "libarttest-defaults",
     ],
     shared_libs: ["libartd"],
 }
@@ -361,23 +407,10 @@ art_cc_test_library {
     name: "libnativebridgetest",
     shared_libs: ["libart"],
     defaults: [
-        "art_defaults",
-        "art_debug_defaults",
         "art_test_defaults",
+        "art_debug_defaults",
+        "art_defaults",
     ],
+    header_libs: ["libnativebridge-dummy-headers"],
     srcs: ["115-native-bridge/nativebridge.cc"],
-    target: {
-        android: {
-            shared_libs: ["libdl"],
-        },
-        host: {
-            host_ldlibs: [
-                "-ldl",
-                "-lpthread",
-            ],
-        },
-        linux: {
-            host_ldlibs: ["-lrt"],
-        },
-    },
 }

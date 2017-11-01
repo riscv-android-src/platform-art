@@ -16,12 +16,16 @@
  * Header file of an in-memory representation of DEX files.
  */
 
+#include "dex_writer.h"
+
 #include <stdint.h>
 
 #include <queue>
 #include <vector>
 
-#include "dex_writer.h"
+#include "cdex/compact_dex_file.h"
+#include "dex_file_types.h"
+#include "standard_dex_file.h"
 #include "utf.h"
 
 namespace art {
@@ -150,6 +154,12 @@ size_t DexWriter::WriteEncodedValue(dex_ir::EncodedValue* encoded_value, size_t 
     case DexFile::kDexAnnotationDouble:
       length = EncodeDoubleValue(encoded_value->GetDouble(), buffer);
       start = 8 - length;
+      break;
+    case DexFile::kDexAnnotationMethodType:
+      length = EncodeUIntValue(encoded_value->GetProtoId()->GetIndex(), buffer);
+      break;
+    case DexFile::kDexAnnotationMethodHandle:
+      length = EncodeUIntValue(encoded_value->GetMethodHandle()->GetIndex(), buffer);
       break;
     case DexFile::kDexAnnotationString:
       length = EncodeUIntValue(encoded_value->GetStringId()->GetIndex(), buffer);
@@ -456,10 +466,10 @@ void DexWriter::WriteClasses() {
   for (std::unique_ptr<dex_ir::ClassDef>& class_def : header_->GetCollections().ClassDefs()) {
     class_def_buffer[0] = class_def->ClassType()->GetIndex();
     class_def_buffer[1] = class_def->GetAccessFlags();
-    class_def_buffer[2] = class_def->Superclass() == nullptr ? DexFile::kDexNoIndex :
+    class_def_buffer[2] = class_def->Superclass() == nullptr ? dex::kDexNoIndex :
         class_def->Superclass()->GetIndex();
     class_def_buffer[3] = class_def->InterfacesOffset();
-    class_def_buffer[4] = class_def->SourceFile() == nullptr ? DexFile::kDexNoIndex :
+    class_def_buffer[4] = class_def->SourceFile() == nullptr ? dex::kDexNoIndex :
         class_def->SourceFile()->GetIndex();
     class_def_buffer[5] = class_def->Annotations() == nullptr ? 0 :
         class_def->Annotations()->GetOffset();
@@ -482,6 +492,27 @@ void DexWriter::WriteClasses() {
     offset += WriteEncodedFields(class_data->InstanceFields(), offset);
     offset += WriteEncodedMethods(class_data->DirectMethods(), offset);
     offset += WriteEncodedMethods(class_data->VirtualMethods(), offset);
+  }
+}
+
+void DexWriter::WriteCallSites() {
+  uint32_t call_site_off[1];
+  for (std::unique_ptr<dex_ir::CallSiteId>& call_site_id :
+      header_->GetCollections().CallSiteIds()) {
+    call_site_off[0] = call_site_id->CallSiteItem()->GetOffset();
+    Write(call_site_off, call_site_id->GetSize(), call_site_id->GetOffset());
+  }
+}
+
+void DexWriter::WriteMethodHandles() {
+  uint16_t method_handle_buff[4];
+  for (std::unique_ptr<dex_ir::MethodHandleItem>& method_handle :
+      header_->GetCollections().MethodHandleItems()) {
+    method_handle_buff[0] = static_cast<uint16_t>(method_handle->GetMethodHandleType());
+    method_handle_buff[1] = 0;  // unused.
+    method_handle_buff[2] = method_handle->GetFieldOrMethodId()->GetIndex();
+    method_handle_buff[3] = 0;  // unused.
+    Write(method_handle_buff, method_handle->GetSize(), method_handle->GetOffset());
   }
 }
 
@@ -527,6 +558,14 @@ void DexWriter::WriteMapItem() {
   if (collection.ClassDefsSize() != 0) {
     queue.push(MapItemContainer(DexFile::kDexTypeClassDefItem, collection.ClassDefsSize(),
         collection.ClassDefsOffset()));
+  }
+  if (collection.CallSiteIdsSize() != 0) {
+    queue.push(MapItemContainer(DexFile::kDexTypeCallSiteIdItem, collection.CallSiteIdsSize(),
+        collection.CallSiteIdsOffset()));
+  }
+  if (collection.MethodHandleItemsSize() != 0) {
+    queue.push(MapItemContainer(DexFile::kDexTypeMethodHandleItem,
+        collection.MethodHandleItemsSize(), collection.MethodHandleItemsOffset()));
   }
 
   // Data section.
@@ -593,7 +632,18 @@ void DexWriter::WriteHeader() {
   uint32_t buffer[20];
   dex_ir::Collections& collections = header_->GetCollections();
   size_t offset = 0;
-  offset += Write(header_->Magic(), 8 * sizeof(uint8_t), offset);
+  if (compact_dex_level_ != CompactDexLevel::kCompactDexLevelNone) {
+    static constexpr size_t kMagicAndVersionLen =
+        CompactDexFile::kDexMagicSize + CompactDexFile::kDexVersionLen;
+    uint8_t magic_and_version[kMagicAndVersionLen] = {};
+    CompactDexFile::WriteMagic(&magic_and_version[0]);
+    CompactDexFile::WriteCurrentVersion(&magic_and_version[0]);
+    offset += Write(magic_and_version, kMagicAndVersionLen * sizeof(uint8_t), offset);
+  } else {
+    static constexpr size_t kMagicAndVersionLen =
+        StandardDexFile::kDexMagicSize + StandardDexFile::kDexVersionLen;
+    offset += Write(header_->Magic(), kMagicAndVersionLen * sizeof(uint8_t), offset);
+  }
   buffer[0] = header_->Checksum();
   offset += Write(buffer, sizeof(uint32_t), offset);
   offset += Write(header_->Signature(), 20 * sizeof(uint8_t), offset);
@@ -618,10 +668,8 @@ void DexWriter::WriteHeader() {
   uint32_t class_defs_off = collections.ClassDefsOffset();
   buffer[16] = class_defs_size;
   buffer[17] = class_defs_off;
-  uint32_t data_off = class_defs_off + class_defs_size * dex_ir::ClassDef::ItemSize();
-  uint32_t data_size = file_size - data_off;
-  buffer[18] = data_size;
-  buffer[19] = data_off;
+  buffer[18] = header_->DataSize();
+  buffer[19] = header_->DataOffset();
   Write(buffer, 20 * sizeof(uint32_t), offset);
 }
 
@@ -640,12 +688,14 @@ void DexWriter::WriteMemMap() {
   WriteDebugInfoItems();
   WriteCodeItems();
   WriteClasses();
+  WriteCallSites();
+  WriteMethodHandles();
   WriteMapItem();
   WriteHeader();
 }
 
-void DexWriter::Output(dex_ir::Header* header, MemMap* mem_map) {
-  DexWriter dex_writer(header, mem_map);
+void DexWriter::Output(dex_ir::Header* header, MemMap* mem_map, CompactDexLevel compact_dex_level) {
+  DexWriter dex_writer(header, mem_map, compact_dex_level);
   dex_writer.WriteMemMap();
 }
 

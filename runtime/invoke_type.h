@@ -21,13 +21,14 @@
 
 namespace art {
 
-enum InvokeType {
-  kStatic,     // <<static>>
-  kDirect,     // <<direct>>
-  kVirtual,    // <<virtual>>
-  kSuper,      // <<super>>
-  kInterface,  // <<interface>>
-  kMaxInvokeType = kInterface
+enum InvokeType : uint32_t {
+  kStatic,       // <<static>>
+  kDirect,       // <<direct>>
+  kVirtual,      // <<virtual>>
+  kSuper,        // <<super>>
+  kInterface,    // <<interface>>
+  kPolymorphic,  // <<polymorphic>>
+  kMaxInvokeType = kPolymorphic
 };
 
 std::ostream& operator<<(std::ostream& os, const InvokeType& rhs);

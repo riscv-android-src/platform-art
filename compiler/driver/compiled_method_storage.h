@@ -28,8 +28,9 @@
 
 namespace art {
 
+namespace linker {
 class LinkerPatch;
-class SrcMapElem;
+}  // namespace linker
 
 class CompiledMethodStorage {
  public:
@@ -52,9 +53,9 @@ class CompiledMethodStorage {
   const LengthPrefixedArray<uint8_t>* DeduplicateCode(const ArrayRef<const uint8_t>& code);
   void ReleaseCode(const LengthPrefixedArray<uint8_t>* code);
 
-  const LengthPrefixedArray<SrcMapElem>* DeduplicateSrcMappingTable(
-      const ArrayRef<const SrcMapElem>& src_map);
-  void ReleaseSrcMappingTable(const LengthPrefixedArray<SrcMapElem>* src_map);
+  const LengthPrefixedArray<uint8_t>* DeduplicateMethodInfo(
+      const ArrayRef<const uint8_t>& method_info);
+  void ReleaseMethodInfo(const LengthPrefixedArray<uint8_t>* method_info);
 
   const LengthPrefixedArray<uint8_t>* DeduplicateVMapTable(const ArrayRef<const uint8_t>& table);
   void ReleaseVMapTable(const LengthPrefixedArray<uint8_t>* table);
@@ -62,9 +63,9 @@ class CompiledMethodStorage {
   const LengthPrefixedArray<uint8_t>* DeduplicateCFIInfo(const ArrayRef<const uint8_t>& cfi_info);
   void ReleaseCFIInfo(const LengthPrefixedArray<uint8_t>* cfi_info);
 
-  const LengthPrefixedArray<LinkerPatch>* DeduplicateLinkerPatches(
-      const ArrayRef<const LinkerPatch>& linker_patches);
-  void ReleaseLinkerPatches(const LengthPrefixedArray<LinkerPatch>* linker_patches);
+  const LengthPrefixedArray<linker::LinkerPatch>* DeduplicateLinkerPatches(
+      const ArrayRef<const linker::LinkerPatch>& linker_patches);
+  void ReleaseLinkerPatches(const LengthPrefixedArray<linker::LinkerPatch>* linker_patches);
 
  private:
   template <typename T, typename DedupeSetType>
@@ -96,10 +97,10 @@ class CompiledMethodStorage {
   bool dedupe_enabled_;
 
   ArrayDedupeSet<uint8_t> dedupe_code_;
-  ArrayDedupeSet<SrcMapElem> dedupe_src_mapping_table_;
+  ArrayDedupeSet<uint8_t> dedupe_method_info_;
   ArrayDedupeSet<uint8_t> dedupe_vmap_table_;
   ArrayDedupeSet<uint8_t> dedupe_cfi_info_;
-  ArrayDedupeSet<LinkerPatch> dedupe_linker_patches_;
+  ArrayDedupeSet<linker::LinkerPatch> dedupe_linker_patches_;
 
   DISALLOW_COPY_AND_ASSIGN(CompiledMethodStorage);
 };

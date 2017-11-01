@@ -70,16 +70,25 @@
 // Macros to poison (negate) the reference for heap poisoning.
 .macro POISON_HEAP_REF rRef
 #ifdef USE_HEAP_POISONING
-    subu \rRef, $zero, \rRef
+    dsubu \rRef, $zero, \rRef
+    dext  \rRef, \rRef, 0, 32
 #endif  // USE_HEAP_POISONING
 .endm
 
 // Macros to unpoison (negate) the reference for heap poisoning.
 .macro UNPOISON_HEAP_REF rRef
 #ifdef USE_HEAP_POISONING
-    subu \rRef, $zero, \rRef
+    dsubu \rRef, $zero, \rRef
+    dext  \rRef, \rRef, 0, 32
 #endif  // USE_HEAP_POISONING
 .endm
+
+// Byte size of the instructions (un)poisoning heap references.
+#ifdef USE_HEAP_POISONING
+#define HEAP_POISON_INSTR_SIZE 8
+#else
+#define HEAP_POISON_INSTR_SIZE 0
+#endif  // USE_HEAP_POISONING
 
 // Based on contents of creg select the minimum integer
 // At the end of the macro the original value of creg is lost

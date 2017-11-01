@@ -14,11 +14,12 @@
  * limitations under the License.
  */
 
+#include <cmath>
 #include <random>
 
 #include <inttypes.h>
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -54,7 +55,7 @@ static constexpr const char* kRelOps[]     = { "==", "!=", ">", ">=", "<", "<=" 
  * to preserve the property that a given version of JFuzz yields the same
  * fuzzed program for a deterministic random seed.
  */
-const char* VERSION = "1.2";
+const char* VERSION = "1.4";
 
 /*
  * Maximum number of array dimensions, together with corresponding maximum size
@@ -698,6 +699,72 @@ class JFuzz {
     return mayFollow;
   }
 
+  // Emit one dimension of an array initializer, where parameter dim >= 1
+  // denotes the number of remaining dimensions that should be emitted.
+  void emitArrayInitDim(int dim) {
+    if (dim == 1) {
+      // Last dimension: set of values.
+      fputs("{ ", out_);
+      for (uint32_t i = 0; i < array_size_; i++) {
+        emitExpression(array_type_);
+        fputs(", ", out_);
+      }
+      fputs("}", out_);
+
+    } else {
+      // Outer dimensions: set of sets.
+      fputs("{\n", out_);
+      indentation_ += 2;
+      emitIndentation();
+
+      for (uint32_t i = 0; i < array_size_; i++) {
+        emitArrayInitDim(dim - 1);
+        if (i != array_size_ - 1) {
+          fputs(",\n", out_);
+          emitIndentation();
+        }
+      }
+
+      fputs(",\n", out_);
+      indentation_ -= 2;
+      emitIndentation();
+      fputs("}", out_);
+    }
+  }
+
+  // Emit an array initializer of the following form.
+  //   {
+  //     type[]..[] tmp = { .. };
+  //     mArray = tmp;
+  //   }
+  bool emitArrayInit() {
+    // Avoid elaborate array initializers.
+    uint64_t p = pow(array_size_, array_dim_);
+    if (p > 20) {
+      return emitAssignment();  // fall back
+    }
+
+    fputs("{\n", out_);
+
+    indentation_ += 2;
+    emitIndentation();
+    emitType(array_type_);
+    for (uint32_t i = 0; i < array_dim_; i++) {
+      fputs("[]", out_);
+    }
+    fputs(" tmp = ", out_);
+    emitArrayInitDim(array_dim_);
+    fputs(";\n", out_);
+
+    emitIndentation();
+    fputs("mArray = tmp;\n", out_);
+
+    indentation_ -= 2;
+    emitIndentation();
+    fputs("}\n", out_);
+    return true;
+  }
+
   // Emit a for loop.
   bool emitForLoop() {
     // Continuing loop nest becomes less likely as the depth grows.
@@ -735,13 +802,6 @@ class JFuzz {
     // Continuing loop nest becomes less likely as the depth grows.
     if (random1(loop_nest_ + 1) > fuzz_loop_nest_) {
       return emitAssignment();  // fall back
-    }
-
-    // TODO: remove this
-    // The jack bug b/28862040 prevents generating while/do-while loops because otherwise
-    // we get dozens of reports on the same issue per nightly/ run.
-    if (true) {
-      return emitAssignment();
     }
 
     bool isWhile = random1(2) == 1;
@@ -874,10 +934,11 @@ class JFuzz {
       case 2:  return emitContinue();    break;
       case 3:  return emitBreak();       break;
       case 4:  return emitScope();       break;
-      case 5:  return emitForLoop();     break;
-      case 6:  return emitDoLoop();      break;
-      case 7:  return emitIfStmt();      break;
-      case 8:  return emitSwitch();      break;
+      case 5:  return emitArrayInit();   break;
+      case 6:  return emitForLoop();     break;
+      case 7:  return emitDoLoop();      break;
+      case 8:  return emitIfStmt();      break;
+      case 9:  return emitSwitch();      break;
       default: return emitAssignment();  break;
     }
   }

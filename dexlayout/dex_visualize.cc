@@ -31,154 +31,59 @@
 
 #include "dex_ir.h"
 #include "dexlayout.h"
-#include "jit/offline_profiling_info.h"
+#include "jit/profile_compilation_info.h"
 
 namespace art {
 
-struct FileSection {
- public:
-  std::string name_;
-  uint16_t type_;
-  std::function<uint32_t(const dex_ir::Collections&)> size_fn_;
-  std::function<uint32_t(const dex_ir::Collections&)> offset_fn_;
-};
-
-static const std::vector<FileSection> kFileSections = {
-  {
-    "StringId",
-    DexFile::kDexTypeStringIdItem,
-    &dex_ir::Collections::StringIdsSize,
-    &dex_ir::Collections::StringIdsOffset
-  }, {
-    "TypeId",
-    DexFile::kDexTypeTypeIdItem,
-    &dex_ir::Collections::TypeIdsSize,
-    &dex_ir::Collections::TypeIdsOffset
-  }, {
-    "ProtoId",
-    DexFile::kDexTypeProtoIdItem,
-    &dex_ir::Collections::ProtoIdsSize,
-    &dex_ir::Collections::ProtoIdsOffset
-  }, {
-    "FieldId",
-    DexFile::kDexTypeFieldIdItem,
-    &dex_ir::Collections::FieldIdsSize,
-    &dex_ir::Collections::FieldIdsOffset
-  }, {
-    "MethodId",
-    DexFile::kDexTypeMethodIdItem,
-    &dex_ir::Collections::MethodIdsSize,
-    &dex_ir::Collections::MethodIdsOffset
-  }, {
-    "ClassDef",
-    DexFile::kDexTypeClassDefItem,
-    &dex_ir::Collections::ClassDefsSize,
-    &dex_ir::Collections::ClassDefsOffset
-  }, {
-    "StringData",
-    DexFile::kDexTypeStringDataItem,
-    &dex_ir::Collections::StringDatasSize,
-    &dex_ir::Collections::StringDatasOffset
-  }, {
-    "TypeList",
-    DexFile::kDexTypeTypeList,
-    &dex_ir::Collections::TypeListsSize,
-    &dex_ir::Collections::TypeListsOffset
-  }, {
-    "EncArr",
-    DexFile::kDexTypeEncodedArrayItem,
-    &dex_ir::Collections::EncodedArrayItemsSize,
-    &dex_ir::Collections::EncodedArrayItemsOffset
-  }, {
-    "Annotation",
-    DexFile::kDexTypeAnnotationItem,
-    &dex_ir::Collections::AnnotationItemsSize,
-    &dex_ir::Collections::AnnotationItemsOffset
-  }, {
-    "AnnoSet",
-    DexFile::kDexTypeAnnotationSetItem,
-    &dex_ir::Collections::AnnotationSetItemsSize,
-    &dex_ir::Collections::AnnotationSetItemsOffset
-  }, {
-    "AnnoSetRL",
-    DexFile::kDexTypeAnnotationSetRefList,
-    &dex_ir::Collections::AnnotationSetRefListsSize,
-    &dex_ir::Collections::AnnotationSetRefListsOffset
-  }, {
-    "AnnoDir",
-    DexFile::kDexTypeAnnotationsDirectoryItem,
-    &dex_ir::Collections::AnnotationsDirectoryItemsSize,
-    &dex_ir::Collections::AnnotationsDirectoryItemsOffset
-  }, {
-    "DebugInfo",
-    DexFile::kDexTypeDebugInfoItem,
-    &dex_ir::Collections::DebugInfoItemsSize,
-    &dex_ir::Collections::DebugInfoItemsOffset
-  }, {
-    "CodeItem",
-    DexFile::kDexTypeCodeItem,
-    &dex_ir::Collections::CodeItemsSize,
-    &dex_ir::Collections::CodeItemsOffset
-  }, {
-    "ClassData",
-    DexFile::kDexTypeClassDataItem,
-    &dex_ir::Collections::ClassDatasSize,
-    &dex_ir::Collections::ClassDatasOffset
-  }
-};
+static std::string MultidexName(const std::string& prefix,
+                                size_t dex_file_index,
+                                const std::string& suffix) {
+  return prefix + ((dex_file_index > 0) ? std::to_string(dex_file_index + 1) : "") + suffix;
+}
 
 class Dumper {
  public:
   // Colors are based on the type of the section in MapList.
-  Dumper(const dex_ir::Collections& collections, size_t dex_file_index) {
-    // Build the table that will map from offset to color
-    table_.emplace_back(DexFile::kDexTypeHeaderItem, 0u);
-    for (const FileSection& s : kFileSections) {
-      table_.emplace_back(s.type_, s.offset_fn_(collections));
-    }
-    // Sort into descending order by offset.
-    std::sort(table_.begin(),
-              table_.end(),
-              [](const SectionColor& a, const SectionColor& b) { return a.offset_ > b.offset_; });
+  explicit Dumper(dex_ir::Header* header)
+      : out_file_(nullptr),
+        sorted_sections_(
+            dex_ir::GetSortedDexFileSections(header, dex_ir::SortDirection::kSortDescending)) { }
+
+  bool OpenAndPrintHeader(size_t dex_index) {
     // Open the file and emit the gnuplot prologue.
-    std::string dex_file_name("classes");
-    std::string out_file_base_name("layout");
-    if (dex_file_index > 0) {
-      out_file_base_name += std::to_string(dex_file_index + 1);
-      dex_file_name += std::to_string(dex_file_index + 1);
+    out_file_ = fopen(MultidexName("layout", dex_index, ".gnuplot").c_str(), "w");
+    if (out_file_ == nullptr) {
+      return false;
     }
-    dex_file_name += ".dex";
-    std::string out_file_name(out_file_base_name + ".gnuplot");
-    std::string png_file_name(out_file_base_name + ".png");
-    out_file_ = fopen(out_file_name.c_str(), "w");
     fprintf(out_file_, "set terminal png size 1920,1080\n");
-    fprintf(out_file_, "set output \"%s\"\n", png_file_name.c_str());
-    fprintf(out_file_, "set title \"%s\"\n", dex_file_name.c_str());
+    fprintf(out_file_, "set output \"%s\"\n", MultidexName("layout", dex_index, ".png").c_str());
+    fprintf(out_file_, "set title \"%s\"\n", MultidexName("classes", dex_index, ".dex").c_str());
     fprintf(out_file_, "set xlabel \"Page offset into dex\"\n");
     fprintf(out_file_, "set ylabel \"ClassDef index\"\n");
     fprintf(out_file_, "set xtics rotate out (");
-    fprintf(out_file_, "\"Header\" %d, ", 0);
     bool printed_one = false;
-    for (const FileSection& s : kFileSections) {
-      if (s.size_fn_(collections) > 0) {
+
+    for (const dex_ir::DexFileSection& s : sorted_sections_) {
+      if (s.size > 0) {
         if (printed_one) {
           fprintf(out_file_, ", ");
         }
-        fprintf(out_file_, "\"%s\" %d", s.name_.c_str(), s.offset_fn_(collections) / kPageSize);
+        fprintf(out_file_, "\"%s\" %d", s.name.c_str(), s.offset / kPageSize);
         printed_one = true;
       }
     }
     fprintf(out_file_, ")\n");
     fprintf(out_file_,
             "plot \"-\" using 1:2:3:4:5 with vector nohead linewidth 1 lc variable notitle\n");
+    return true;
   }
 
   int GetColor(uint32_t offset) const {
     // The dread linear search to find the right section for the reference.
     uint16_t section = 0;
-    for (uint16_t i = 0; i < table_.size(); ++i) {
-      if (table_[i].offset_ < offset) {
-        section = table_[i].type_;
+    for (const dex_ir::DexFileSection& file_section : sorted_sections_) {
+      if (file_section.offset < offset) {
+        section = file_section.type;
         break;
       }
     }
@@ -269,7 +174,7 @@ class Dumper {
                       ProfileCompilationInfo* profile_info) {
     if (profile_info != nullptr) {
       uint32_t method_idx = method->GetMethodId()->GetIndex();
-      if (!profile_info->ContainsMethod(MethodReference(dex_file, method_idx))) {
+      if (!profile_info->GetMethodHotness(MethodReference(dex_file, method_idx)).IsHot()) {
         return;
       }
     }
@@ -308,13 +213,6 @@ class Dumper {
   }
 
  private:
-  struct SectionColor {
-   public:
-    SectionColor(uint16_t type, uint32_t offset) : type_(type), offset_(offset) { }
-    uint16_t type_;
-    uint32_t offset_;
-  };
-
   using ColorMapType = std::map<uint16_t, int>;
   const ColorMapType kColorMap = {
     { DexFile::kDexTypeHeaderItem, 1 },
@@ -336,8 +234,8 @@ class Dumper {
     { DexFile::kDexTypeAnnotationsDirectoryItem, 16 }
   };
 
-  std::vector<SectionColor> table_;
   FILE* out_file_;
+  std::vector<dex_ir::DexFileSection> sorted_sections_;
 
   DISALLOW_COPY_AND_ASSIGN(Dumper);
 };
@@ -350,7 +248,11 @@ void VisualizeDexLayout(dex_ir::Header* header,
                         const DexFile* dex_file,
                         size_t dex_file_index,
                         ProfileCompilationInfo* profile_info) {
-  std::unique_ptr<Dumper> dumper(new Dumper(header->GetCollections(), dex_file_index));
+  std::unique_ptr<Dumper> dumper(new Dumper(header));
+  if (!dumper->OpenAndPrintHeader(dex_file_index)) {
+    fprintf(stderr, "Could not open output file.\n");
+    return;
+  }
 
   const uint32_t class_defs_size = header->GetCollections().ClassDefsSize();
   for (uint32_t class_index = 0; class_index < class_defs_size; class_index++) {
@@ -399,6 +301,47 @@ void VisualizeDexLayout(dex_ir::Header* header,
       }
     }
   }  // for
+}
+
+static uint32_t FindNextByteAfterSection(dex_ir::Header* header,
+                                         const std::vector<dex_ir::DexFileSection>& sorted_sections,
+                                         size_t section_index) {
+  for (size_t i = section_index + 1; i < sorted_sections.size(); ++i) {
+    const dex_ir::DexFileSection& section = sorted_sections.at(i);
+    if (section.size != 0) {
+      return section.offset;
+    }
+  }
+  return header->FileSize();
+}
+
+/*
+ * Dumps the offset and size of sections within the file.
+ */
+void ShowDexSectionStatistics(dex_ir::Header* header, size_t dex_file_index) {
+  // Compute the (multidex) class file name).
+  fprintf(stdout, "%s (%d bytes)\n",
+          MultidexName("classes", dex_file_index, ".dex").c_str(),
+          header->FileSize());
+  fprintf(stdout, "section      offset    items    bytes    pages pct\n");
+  std::vector<dex_ir::DexFileSection> sorted_sections =
+      GetSortedDexFileSections(header, dex_ir::SortDirection::kSortAscending);
+  for (size_t i = 0; i < sorted_sections.size(); ++i) {
+    const dex_ir::DexFileSection& file_section = sorted_sections[i];
+    uint32_t bytes = 0;
+    if (file_section.size > 0) {
+      bytes = FindNextByteAfterSection(header, sorted_sections, i) - file_section.offset;
+    }
+    fprintf(stdout,
+            "%-10s %8d %8d %8d %8d %%%02d\n",
+            file_section.name.c_str(),
+            file_section.offset,
+            file_section.size,
+            bytes,
+            RoundUp(bytes, kPageSize) / kPageSize,
+            100 * bytes / header->FileSize());
+  }
+  fprintf(stdout, "\n");
 }
 
 }  // namespace art

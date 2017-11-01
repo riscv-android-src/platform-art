@@ -21,19 +21,19 @@
 #include <memory>
 
 #include "base/mutex.h"
-#include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "gc_root.h"
+#include "obj_ptr.h"
 
 namespace art {
 
 class ArtMethod;
+class IsMarkedVisitor;
 class Thread;
 
 namespace mirror {
   class Class;
   class Object;
-}
+}  // namespace mirror
 
 namespace gc {
 

@@ -18,6 +18,7 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/callee_save_type.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
@@ -43,8 +44,8 @@ class StubTest : public CommonRuntimeTest {
       // Create callee-save methods
       ScopedObjectAccess soa(Thread::Current());
       runtime_->SetInstructionSet(kRuntimeISA);
-      for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
-        Runtime::CalleeSaveType type = Runtime::CalleeSaveType(i);
+      for (uint32_t i = 0; i < static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {
+        CalleeSaveType type = CalleeSaveType(i);
         if (!runtime_->HasCalleeSaveMethod(type)) {
           runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
         }
@@ -908,139 +909,6 @@ TEST_F(StubTest, CheckCast) {
 #endif
 }
 
-
-TEST_F(StubTest, APutObj) {
-#if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || defined(__mips__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
-  Thread* self = Thread::Current();
-
-  // Do not check non-checked ones, we'd need handlers and stuff...
-  const uintptr_t art_quick_aput_obj_with_null_and_bound_check =
-      StubTest::GetEntrypoint(self, kQuickAputObjectWithNullAndBoundCheck);
-
-  // Create an object
-  ScopedObjectAccess soa(self);
-  // garbage is created during ClassLinker::Init
-
-  StackHandleScope<5> hs(soa.Self());
-  Handle<mirror::Class> c(
-      hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "Ljava/lang/Object;")));
-  Handle<mirror::Class> ca(
-      hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;")));
-
-  // Build a string array of size 1
-  Handle<mirror::ObjectArray<mirror::Object>> array(
-      hs.NewHandle(mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), ca.Get(), 10)));
-
-  // Build a string -> should be assignable
-  Handle<mirror::String> str_obj(
-      hs.NewHandle(mirror::String::AllocFromModifiedUtf8(soa.Self(), "hello, world!")));
-
-  // Build a generic object -> should fail assigning
-  Handle<mirror::Object> obj_obj(hs.NewHandle(c->AllocObject(soa.Self())));
-
-  // Play with it...
-
-  // 1) Success cases
-  // 1.1) Assign str_obj to array[0..3]
-
-  EXPECT_FALSE(self->IsExceptionPending());
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 0U, reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(str_obj.Get(), array->Get(0));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 1U, reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(str_obj.Get(), array->Get(1));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 2U, reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(str_obj.Get(), array->Get(2));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 3U, reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(str_obj.Get(), array->Get(3));
-
-  // 1.2) Assign null to array[0..3]
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 0U, reinterpret_cast<size_t>(nullptr),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(nullptr, array->Get(0));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 1U, reinterpret_cast<size_t>(nullptr),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(nullptr, array->Get(1));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 2U, reinterpret_cast<size_t>(nullptr),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(nullptr, array->Get(2));
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 3U, reinterpret_cast<size_t>(nullptr),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_FALSE(self->IsExceptionPending());
-  EXPECT_EQ(nullptr, array->Get(3));
-
-  // TODO: Check _which_ exception is thrown. Then make 3) check that it's the right check order.
-
-  // 2) Failure cases (str into str[])
-  // 2.1) Array = null
-  // TODO: Throwing NPE needs actual DEX code
-
-//  Invoke3(reinterpret_cast<size_t>(nullptr), 0U, reinterpret_cast<size_t>(str_obj.Get()),
-//          reinterpret_cast<uintptr_t>(&art_quick_aput_obj_with_null_and_bound_check), self);
-//
-//  EXPECT_TRUE(self->IsExceptionPending());
-//  self->ClearException();
-
-  // 2.2) Index < 0
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), static_cast<size_t>(-1),
-          reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_TRUE(self->IsExceptionPending());
-  self->ClearException();
-
-  // 2.3) Index > 0
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 10U, reinterpret_cast<size_t>(str_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_TRUE(self->IsExceptionPending());
-  self->ClearException();
-
-  // 3) Failure cases (obj into str[])
-
-  Invoke3(reinterpret_cast<size_t>(array.Get()), 0U, reinterpret_cast<size_t>(obj_obj.Get()),
-          art_quick_aput_obj_with_null_and_bound_check, self);
-
-  EXPECT_TRUE(self->IsExceptionPending());
-  self->ClearException();
-
-  // Tests done.
-#else
-  LOG(INFO) << "Skipping aput_obj as I don't know how to do that on " << kRuntimeISA;
-  // Force-print to std::cout so it's also outside the logcat.
-  std::cout << "Skipping aput_obj as I don't know how to do that on " << kRuntimeISA << std::endl;
-#endif
-}
-
 TEST_F(StubTest, AllocObject) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || defined(__mips__) || \
     (defined(__x86_64__) && !defined(__APPLE__))
@@ -1062,12 +930,8 @@ TEST_F(StubTest, AllocObject) {
 
   EXPECT_FALSE(self->IsExceptionPending());
   {
-    // Use an arbitrary method from c to use as referrer
-    size_t result = Invoke3(static_cast<size_t>(c->GetDexTypeIndex().index_),    // type_idx
-                            // arbitrary
-                            reinterpret_cast<size_t>(c->GetVirtualMethod(0, kRuntimePointerSize)),
-                            0U,
-                            StubTest::GetEntrypoint(self, kQuickAllocObject),
+    size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), 0u, 0U,
+                            StubTest::GetEntrypoint(self, kQuickAllocObjectWithChecks),
                             self);
 
     EXPECT_FALSE(self->IsExceptionPending());
@@ -1078,8 +942,6 @@ TEST_F(StubTest, AllocObject) {
   }
 
   {
-    // We can use null in the second argument as we do not need a method here (not used in
-    // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), 0u, 0U,
                             StubTest::GetEntrypoint(self, kQuickAllocObjectResolved),
                             self);
@@ -1092,8 +954,6 @@ TEST_F(StubTest, AllocObject) {
   }
 
   {
-    // We can use null in the second argument as we do not need a method here (not used in
-    // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), 0u, 0U,
                             StubTest::GetEntrypoint(self, kQuickAllocObjectInitialized),
                             self);
@@ -1125,7 +985,7 @@ TEST_F(StubTest, AllocObject) {
     while (length > 10) {
       Handle<mirror::Object> h(hsp->NewHandle<mirror::Object>(
           mirror::ObjectArray<mirror::Object>::Alloc(soa.Self(), ca.Get(), length / 4)));
-      if (self->IsExceptionPending() || h.Get() == nullptr) {
+      if (self->IsExceptionPending() || h == nullptr) {
         self->ClearException();
 
         // Try a smaller length
@@ -1144,7 +1004,7 @@ TEST_F(StubTest, AllocObject) {
     // Allocate simple objects till it fails.
     while (!self->IsExceptionPending()) {
       Handle<mirror::Object> h = hsp->NewHandle(c->AllocObject(soa.Self()));
-      if (!self->IsExceptionPending() && h.Get() != nullptr) {
+      if (!self->IsExceptionPending() && h != nullptr) {
         handles.push_back(h);
       }
     }
@@ -1179,45 +1039,20 @@ TEST_F(StubTest, AllocObjectArray) {
   ScopedObjectAccess soa(self);
   // garbage is created during ClassLinker::Init
 
-  StackHandleScope<2> hs(self);
+  StackHandleScope<1> hs(self);
   Handle<mirror::Class> c(
       hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/Object;")));
-
-  // Needed to have a linked method.
-  Handle<mirror::Class> c_obj(
-      hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "Ljava/lang/Object;")));
 
   // Play with it...
 
   EXPECT_FALSE(self->IsExceptionPending());
-
-  // For some reason this does not work, as the type_idx is artificial and outside what the
-  // resolved types of c_obj allow...
-
-  if ((false)) {
-    // Use an arbitrary method from c to use as referrer
-    size_t result = Invoke3(
-        static_cast<size_t>(c->GetDexTypeIndex().index_),    // type_idx
-        10U,
-        // arbitrary
-        reinterpret_cast<size_t>(c_obj->GetVirtualMethod(0, kRuntimePointerSize)),
-        StubTest::GetEntrypoint(self, kQuickAllocArray),
-        self);
-
-    EXPECT_FALSE(self->IsExceptionPending());
-    EXPECT_NE(reinterpret_cast<size_t>(nullptr), result);
-    mirror::Array* obj = reinterpret_cast<mirror::Array*>(result);
-    EXPECT_EQ(c.Get(), obj->GetClass());
-    VerifyObject(obj);
-    EXPECT_EQ(obj->GetLength(), 10);
-  }
 
   {
     // We can use null in the second argument as we do not need a method here (not used in
     // resolved/initialized cases)
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()), 10U,
                             reinterpret_cast<size_t>(nullptr),
-                            StubTest::GetEntrypoint(self, kQuickAllocArrayResolved),
+                            StubTest::GetEntrypoint(self, kQuickAllocArrayResolved32),
                             self);
     EXPECT_FALSE(self->IsExceptionPending()) << mirror::Object::PrettyTypeOf(self->GetException());
     EXPECT_NE(reinterpret_cast<size_t>(nullptr), result);
@@ -1237,7 +1072,7 @@ TEST_F(StubTest, AllocObjectArray) {
     size_t result = Invoke3(reinterpret_cast<size_t>(c.Get()),
                             GB,  // that should fail...
                             reinterpret_cast<size_t>(nullptr),
-                            StubTest::GetEntrypoint(self, kQuickAllocArrayResolved),
+                            StubTest::GetEntrypoint(self, kQuickAllocArrayResolved32),
                             self);
 
     EXPECT_TRUE(self->IsExceptionPending());
@@ -1776,8 +1611,8 @@ static void GetSet64Static(ArtField* f, Thread* self, ArtMethod* referrer,
   for (size_t i = 0; i < arraysize(values); ++i) {
     // 64 bit FieldSet stores the set value in the second register.
     test->Invoke3WithReferrer(static_cast<size_t>(f->GetDexFieldIndex()),
-                              0U,
                               values[i],
+                              0U,
                               StubTest::GetEntrypoint(self, kQuickSet64Static),
                               self,
                               referrer);

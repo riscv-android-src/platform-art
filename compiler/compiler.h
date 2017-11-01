@@ -17,18 +17,20 @@
 #ifndef ART_COMPILER_COMPILER_H_
 #define ART_COMPILER_COMPILER_H_
 
-#include "dex_file.h"
 #include "base/mutex.h"
+#include "dex_file.h"
 #include "os.h"
 
 namespace art {
 
 namespace jit {
   class JitCodeCache;
-}
+  class JitLogger;
+}  // namespace jit
 namespace mirror {
+  class ClassLoader;
   class DexCache;
-}
+}  // namespace mirror
 
 class ArtMethod;
 class CompilerDriver;
@@ -63,7 +65,7 @@ class Compiler {
                                   InvokeType invoke_type,
                                   uint16_t class_def_idx,
                                   uint32_t method_idx,
-                                  jobject class_loader,
+                                  Handle<mirror::ClassLoader> class_loader,
                                   const DexFile& dex_file,
                                   Handle<mirror::DexCache> dex_cache) const = 0;
 
@@ -75,7 +77,8 @@ class Compiler {
   virtual bool JitCompile(Thread* self ATTRIBUTE_UNUSED,
                           jit::JitCodeCache* code_cache ATTRIBUTE_UNUSED,
                           ArtMethod* method ATTRIBUTE_UNUSED,
-                          bool osr ATTRIBUTE_UNUSED)
+                          bool osr ATTRIBUTE_UNUSED,
+                          jit::JitLogger* jit_logger ATTRIBUTE_UNUSED)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     return false;
   }

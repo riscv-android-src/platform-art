@@ -98,7 +98,7 @@ MutateFail - because mutation is a random process, and has attempt thresholds to
 Timed Out  - mutated files that timed out for one or more backends.
              Current timeouts are:
                Optimizing - 5 seconds
-               Intepreter - 30 seconds
+               Interpreter - 30 seconds
               (use --short-timeouts to set all backends to 2 seconds.)
 Successful - mutated files that executed and all backends agreed on the resulting
              output. NB: if all backends crashed with the same output, this would
@@ -137,10 +137,16 @@ FieldFlagChanger 40
 InstructionDeleter 40
 InstructionDuplicator 80
 InstructionSwapper 80
+InvokeChanger 30
+NewArrayLengthChanger 50
+NewInstanceChanger 10
 NewMethodCaller 10
 NonsenseStringPrinter 10
+OppositeBranchChanger 40
 PoolIndexChanger 30
+RandomBranchChanger 30
 RandomInstructionGenerator 30
+RegisterClobber 10
 SwitchBranchShifter 30
 TryBlockShifter 40
 ValuePrinter 40

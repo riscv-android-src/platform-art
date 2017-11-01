@@ -18,12 +18,13 @@
 #ifndef ART_RUNTIME_FAULT_HANDLER_H_
 #define ART_RUNTIME_FAULT_HANDLER_H_
 
-#include <signal.h>
-#include <vector>
 #include <setjmp.h>
+#include <signal.h>
 #include <stdint.h>
 
-#include "base/mutex.h"   // For annotalysis.
+#include <vector>
+
+#include "base/mutex.h"  // For annotalysis.
 
 namespace art {
 
@@ -42,10 +43,9 @@ class FaultManager {
 
   // Unclaim signals and delete registered handlers.
   void Shutdown();
-  void EnsureArtActionInFrontOfSignalChain();
 
-  void HandleFault(int sig, siginfo_t* info, void* context);
-  void HandleNestedSignal(int sig, siginfo_t* info, void* context);
+  // Try to handle a fault, returns true if successful.
+  bool HandleFault(int sig, siginfo_t* info, void* context);
 
   // Added handlers are owned by the fault handler and will be freed on Shutdown().
   void AddHandler(FaultHandler* handler, bool generated_code);

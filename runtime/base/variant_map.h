@@ -22,7 +22,8 @@
 #include <type_traits>
 #include <utility>
 
-#include "base/stl_util.h"
+#include "android-base/logging.h"
+#include "base/stl_util_identity.h"
 
 namespace art {
 
@@ -236,6 +237,14 @@ struct VariantMap {
     return (ptr == nullptr) ? key.CreateDefaultValue() : *ptr;
   }
 
+  template <typename T, typename U>
+  void AssignIfExists(const TKey<T>& key, U* out) {
+    DCHECK(out != nullptr);
+    if (Exists(key)) {
+      *out = std::move(*Get(key));
+    }
+  }
+
  private:
   // TODO: move to detail, or make it more generic like a ScopeGuard(function)
   template <typename TValue>
@@ -278,7 +287,8 @@ struct VariantMap {
     auto* new_value = new TValue(value);
 
     Remove(key);
-    storage_map_.insert({{key.Clone(), new_value}});
+    bool inserted = storage_map_.insert({key.Clone(), new_value}).second;
+    DCHECK(inserted);  // ensure key.Clone() does not leak memory.
   }
 
   // Set a value for a given key, only if there was no previous value before.

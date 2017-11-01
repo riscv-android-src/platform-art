@@ -14,20 +14,17 @@
  * limitations under the License.
  */
 
-
 #include "fault_handler.h"
 
 #include <sys/ucontext.h>
 
-#include "art_method-inl.h"
+#include "art_method.h"
 #include "base/enums.h"
-#include "base/macros.h"
 #include "base/hex_dump.h"
-#include "globals.h"
 #include "base/logging.h"
-#include "base/hex_dump.h"
-#include "thread.h"
-#include "thread-inl.h"
+#include "base/macros.h"
+#include "globals.h"
+#include "thread-current-inl.h"
 
 //
 // ARM specific fault handler functions.
@@ -45,24 +42,6 @@ static uint32_t GetInstructionSize(uint8_t* pc) {
   bool is_32bit = ((instr & 0xF000) == 0xF000) || ((instr & 0xF800) == 0xE800);
   uint32_t instr_size = is_32bit ? 4 : 2;
   return instr_size;
-}
-
-void FaultManager::HandleNestedSignal(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBUTE_UNUSED,
-                                      void* context) {
-  // Note that in this handler we set up the registers and return to
-  // longjmp directly rather than going through an assembly language stub.  The
-  // reason for this is that longjmp is (currently) in ARM mode and that would
-  // require switching modes in the stub - incurring an unwanted relocation.
-
-  struct ucontext *uc = reinterpret_cast<struct ucontext*>(context);
-  struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
-  Thread* self = Thread::Current();
-  CHECK(self != nullptr);  // This will cause a SIGABRT if self is null.
-
-  sc->arm_r0 = reinterpret_cast<uintptr_t>(*self->GetNestedSignalState());
-  sc->arm_r1 = 1;
-  sc->arm_pc = reinterpret_cast<uintptr_t>(longjmp);
-  VLOG(signals) << "longjmp address: " << reinterpret_cast<void*>(sc->arm_pc);
 }
 
 void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo ATTRIBUTE_UNUSED, void* context,

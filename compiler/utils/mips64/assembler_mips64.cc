@@ -184,6 +184,122 @@ void Mips64Assembler::EmitFI(int opcode, int fmt, FpuRegister ft, uint16_t imm) 
   Emit(encoding);
 }
 
+void Mips64Assembler::EmitMsa3R(int operation,
+                                int df,
+                                VectorRegister wt,
+                                VectorRegister ws,
+                                VectorRegister wd,
+                                int minor_opcode) {
+  CHECK_NE(wt, kNoVectorRegister);
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df << kDfShift |
+                      static_cast<uint32_t>(wt) << kWtShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsaBIT(int operation,
+                                 int df_m,
+                                 VectorRegister ws,
+                                 VectorRegister wd,
+                                 int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df_m << kDfMShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsaELM(int operation,
+                                 int df_n,
+                                 VectorRegister ws,
+                                 VectorRegister wd,
+                                 int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaELMOperationShift |
+                      df_n << kDfNShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsaMI10(int s10,
+                                  GpuRegister rs,
+                                  VectorRegister wd,
+                                  int minor_opcode,
+                                  int df) {
+  CHECK_NE(rs, kNoGpuRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  CHECK(IsUint<10>(s10)) << s10;
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      s10 << kS10Shift |
+                      static_cast<uint32_t>(rs) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode << kS10MinorShift |
+                      df;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsaI10(int operation,
+                                 int df,
+                                 int i10,
+                                 VectorRegister wd,
+                                 int minor_opcode) {
+  CHECK_NE(wd, kNoVectorRegister);
+  CHECK(IsUint<10>(i10)) << i10;
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df << kDfShift |
+                      i10 << kI10Shift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsa2R(int operation,
+                                int df,
+                                VectorRegister ws,
+                                VectorRegister wd,
+                                int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsa2ROperationShift |
+                      df << kDf2RShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
+void Mips64Assembler::EmitMsa2RF(int operation,
+                                 int df,
+                                 VectorRegister ws,
+                                 VectorRegister wd,
+                                 int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsa2RFOperationShift |
+                      df << kDf2RShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+}
+
 void Mips64Assembler::Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
   EmitR(0, rs, rt, rd, 0, 0x21);
 }
@@ -488,6 +604,11 @@ void Mips64Assembler::Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16) {
   EmitI(0xf, rs, rt, imm16);
 }
 
+void Mips64Assembler::Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16) {
+  CHECK_NE(rs, ZERO);
+  EmitI(0x1d, rs, rt, imm16);
+}
+
 void Mips64Assembler::Dahi(GpuRegister rs, uint16_t imm16) {
   EmitI(1, rs, static_cast<GpuRegister>(6), imm16);
 }
@@ -674,10 +795,42 @@ void Mips64Assembler::Bc1nez(FpuRegister ft, uint16_t imm16) {
   EmitFI(0x11, 0xD, ft, imm16);
 }
 
-void Mips64Assembler::EmitBcondc(BranchCondition cond,
-                                 GpuRegister rs,
-                                 GpuRegister rt,
-                                 uint32_t imm16_21) {
+void Mips64Assembler::Beq(GpuRegister rs, GpuRegister rt, uint16_t imm16) {
+  EmitI(0x4, rs, rt, imm16);
+}
+
+void Mips64Assembler::Bne(GpuRegister rs, GpuRegister rt, uint16_t imm16) {
+  EmitI(0x5, rs, rt, imm16);
+}
+
+void Mips64Assembler::Beqz(GpuRegister rt, uint16_t imm16) {
+  Beq(rt, ZERO, imm16);
+}
+
+void Mips64Assembler::Bnez(GpuRegister rt, uint16_t imm16) {
+  Bne(rt, ZERO, imm16);
+}
+
+void Mips64Assembler::Bltz(GpuRegister rt, uint16_t imm16) {
+  EmitI(0x1, rt, static_cast<GpuRegister>(0), imm16);
+}
+
+void Mips64Assembler::Bgez(GpuRegister rt, uint16_t imm16) {
+  EmitI(0x1, rt, static_cast<GpuRegister>(0x1), imm16);
+}
+
+void Mips64Assembler::Blez(GpuRegister rt, uint16_t imm16) {
+  EmitI(0x6, rt, static_cast<GpuRegister>(0), imm16);
+}
+
+void Mips64Assembler::Bgtz(GpuRegister rt, uint16_t imm16) {
+  EmitI(0x7, rt, static_cast<GpuRegister>(0), imm16);
+}
+
+void Mips64Assembler::EmitBcondR6(BranchCondition cond,
+                                  GpuRegister rs,
+                                  GpuRegister rt,
+                                  uint32_t imm16_21) {
   switch (cond) {
     case kCondLT:
       Bltc(rs, rt, imm16_21);
@@ -735,6 +888,55 @@ void Mips64Assembler::EmitBcondc(BranchCondition cond,
       CHECK_EQ(rt, ZERO);
       Bc1nez(static_cast<FpuRegister>(rs), imm16_21);
       break;
+    case kUncond:
+      LOG(FATAL) << "Unexpected branch condition " << cond;
+      UNREACHABLE();
+  }
+}
+
+void Mips64Assembler::EmitBcondR2(BranchCondition cond,
+                                  GpuRegister rs,
+                                  GpuRegister rt,
+                                  uint16_t imm16) {
+  switch (cond) {
+    case kCondLTZ:
+      CHECK_EQ(rt, ZERO);
+      Bltz(rs, imm16);
+      break;
+    case kCondGEZ:
+      CHECK_EQ(rt, ZERO);
+      Bgez(rs, imm16);
+      break;
+    case kCondLEZ:
+      CHECK_EQ(rt, ZERO);
+      Blez(rs, imm16);
+      break;
+    case kCondGTZ:
+      CHECK_EQ(rt, ZERO);
+      Bgtz(rs, imm16);
+      break;
+    case kCondEQ:
+      Beq(rs, rt, imm16);
+      break;
+    case kCondNE:
+      Bne(rs, rt, imm16);
+      break;
+    case kCondEQZ:
+      CHECK_EQ(rt, ZERO);
+      Beqz(rs, imm16);
+      break;
+    case kCondNEZ:
+      CHECK_EQ(rt, ZERO);
+      Bnez(rs, imm16);
+      break;
+    case kCondF:
+    case kCondT:
+    case kCondLT:
+    case kCondGE:
+    case kCondLE:
+    case kCondGT:
+    case kCondLTU:
+    case kCondGEU:
     case kUncond:
       LOG(FATAL) << "Unexpected branch condition " << cond;
       UNREACHABLE();
@@ -875,6 +1077,22 @@ void Mips64Assembler::SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
 
 void Mips64Assembler::SelD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   EmitFR(0x11, 0x11, ft, fs, fd, 0x10);
+}
+
+void Mips64Assembler::SeleqzS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  EmitFR(0x11, 0x10, ft, fs, fd, 0x14);
+}
+
+void Mips64Assembler::SeleqzD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  EmitFR(0x11, 0x11, ft, fs, fd, 0x14);
+}
+
+void Mips64Assembler::SelnezS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  EmitFR(0x11, 0x10, ft, fs, fd, 0x17);
+}
+
+void Mips64Assembler::SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  EmitFR(0x11, 0x11, ft, fs, fd, 0x17);
 }
 
 void Mips64Assembler::RintS(FpuRegister fd, FpuRegister fs) {
@@ -1075,6 +1293,932 @@ void Mips64Assembler::Not(GpuRegister rd, GpuRegister rs) {
   Nor(rd, rs, ZERO);
 }
 
+void Mips64Assembler::AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x10);
+}
+
+void Mips64Assembler::Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x3, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x3, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x3, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x3, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0xe);
+}
+
+void Mips64Assembler::FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::Ffint_sW(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  EmitMsa2RF(0x19e, 0x0, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::Ffint_sD(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  EmitMsa2RF(0x19e, 0x1, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::Ftint_sW(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  EmitMsa2RF(0x19c, 0x0, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::Ftint_sD(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  EmitMsa2RF(0x19c, 0x1, ws, wd, 0x1e);
+}
+
+void Mips64Assembler::SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xd);
+}
+
+void Mips64Assembler::SlliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  EmitMsaBIT(0x0, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SlliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  EmitMsaBIT(0x0, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SlliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  EmitMsaBIT(0x0, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SlliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  EmitMsaBIT(0x0, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SraiB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  EmitMsaBIT(0x1, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SraiH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  EmitMsaBIT(0x1, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SraiW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  EmitMsaBIT(0x1, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SraiD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  EmitMsaBIT(0x1, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SrliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  EmitMsaBIT(0x2, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SrliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  EmitMsaBIT(0x2, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SrliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  EmitMsaBIT(0x2, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::SrliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  EmitMsaBIT(0x2, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
+}
+
+void Mips64Assembler::MoveV(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  EmitMsaBIT(0x1, 0x3e, ws, wd, 0x19);
+}
+
+void Mips64Assembler::SplatiB(VectorRegister wd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  EmitMsaELM(0x1, n4 | kMsaDfNByteMask, ws, wd, 0x19);
+}
+
+void Mips64Assembler::SplatiH(VectorRegister wd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  EmitMsaELM(0x1, n3 | kMsaDfNHalfwordMask, ws, wd, 0x19);
+}
+
+void Mips64Assembler::SplatiW(VectorRegister wd, VectorRegister ws, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  EmitMsaELM(0x1, n2 | kMsaDfNWordMask, ws, wd, 0x19);
+}
+
+void Mips64Assembler::SplatiD(VectorRegister wd, VectorRegister ws, int n1) {
+  CHECK(HasMsa());
+  CHECK(IsUint<1>(n1)) << n1;
+  EmitMsaELM(0x1, n1 | kMsaDfNDoublewordMask, ws, wd, 0x19);
+}
+
+void Mips64Assembler::Copy_sB(GpuRegister rd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  EmitMsaELM(0x2, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_sH(GpuRegister rd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  EmitMsaELM(0x2, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_sW(GpuRegister rd, VectorRegister ws, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  EmitMsaELM(0x2, n2 | kMsaDfNWordMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_sD(GpuRegister rd, VectorRegister ws, int n1) {
+  CHECK(HasMsa());
+  CHECK(IsUint<1>(n1)) << n1;
+  EmitMsaELM(0x2, n1 | kMsaDfNDoublewordMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_uB(GpuRegister rd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  EmitMsaELM(0x3, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_uH(GpuRegister rd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  EmitMsaELM(0x3, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::Copy_uW(GpuRegister rd, VectorRegister ws, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  EmitMsaELM(0x3, n2 | kMsaDfNWordMask, ws, static_cast<VectorRegister>(rd), 0x19);
+}
+
+void Mips64Assembler::InsertB(VectorRegister wd, GpuRegister rs, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  EmitMsaELM(0x4, n4 | kMsaDfNByteMask, static_cast<VectorRegister>(rs), wd, 0x19);
+}
+
+void Mips64Assembler::InsertH(VectorRegister wd, GpuRegister rs, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  EmitMsaELM(0x4, n3 | kMsaDfNHalfwordMask, static_cast<VectorRegister>(rs), wd, 0x19);
+}
+
+void Mips64Assembler::InsertW(VectorRegister wd, GpuRegister rs, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  EmitMsaELM(0x4, n2 | kMsaDfNWordMask, static_cast<VectorRegister>(rs), wd, 0x19);
+}
+
+void Mips64Assembler::InsertD(VectorRegister wd, GpuRegister rs, int n1) {
+  CHECK(HasMsa());
+  CHECK(IsUint<1>(n1)) << n1;
+  EmitMsaELM(0x4, n1 | kMsaDfNDoublewordMask, static_cast<VectorRegister>(rs), wd, 0x19);
+}
+
+void Mips64Assembler::FillB(VectorRegister wd, GpuRegister rs) {
+  CHECK(HasMsa());
+  EmitMsa2R(0xc0, 0x0, static_cast<VectorRegister>(rs), wd, 0x1e);
+}
+
+void Mips64Assembler::FillH(VectorRegister wd, GpuRegister rs) {
+  CHECK(HasMsa());
+  EmitMsa2R(0xc0, 0x1, static_cast<VectorRegister>(rs), wd, 0x1e);
+}
+
+void Mips64Assembler::FillW(VectorRegister wd, GpuRegister rs) {
+  CHECK(HasMsa());
+  EmitMsa2R(0xc0, 0x2, static_cast<VectorRegister>(rs), wd, 0x1e);
+}
+
+void Mips64Assembler::FillD(VectorRegister wd, GpuRegister rs) {
+  CHECK(HasMsa());
+  EmitMsa2R(0xc0, 0x3, static_cast<VectorRegister>(rs), wd, 0x1e);
+}
+
+void Mips64Assembler::LdiB(VectorRegister wd, int imm8) {
+  CHECK(HasMsa());
+  CHECK(IsInt<8>(imm8)) << imm8;
+  EmitMsaI10(0x6, 0x0, imm8 & kMsaS10Mask, wd, 0x7);
+}
+
+void Mips64Assembler::LdiH(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  EmitMsaI10(0x6, 0x1, imm10 & kMsaS10Mask, wd, 0x7);
+}
+
+void Mips64Assembler::LdiW(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  EmitMsaI10(0x6, 0x2, imm10 & kMsaS10Mask, wd, 0x7);
+}
+
+void Mips64Assembler::LdiD(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  EmitMsaI10(0x6, 0x3, imm10 & kMsaS10Mask, wd, 0x7);
+}
+
+void Mips64Assembler::LdB(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(offset)) << offset;
+  EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x8, 0x0);
+}
+
+void Mips64Assembler::LdH(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<11>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64HalfwordSize);
+  EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x8, 0x1);
+}
+
+void Mips64Assembler::LdW(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<12>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64WordSize);
+  EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x8, 0x2);
+}
+
+void Mips64Assembler::LdD(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<13>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64DoublewordSize);
+  EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x8, 0x3);
+}
+
+void Mips64Assembler::StB(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(offset)) << offset;
+  EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x9, 0x0);
+}
+
+void Mips64Assembler::StH(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<11>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64HalfwordSize);
+  EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x9, 0x1);
+}
+
+void Mips64Assembler::StW(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<12>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64WordSize);
+  EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x9, 0x2);
+}
+
+void Mips64Assembler::StD(VectorRegister wd, GpuRegister rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<13>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMips64DoublewordSize);
+  EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x9, 0x3);
+}
+
+void Mips64Assembler::IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x14);
+}
+
+void Mips64Assembler::MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x12);
+}
+
+void Mips64Assembler::FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x1b);
+}
+
+void Mips64Assembler::Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x15);
+}
+
+void Mips64Assembler::ReplicateFPToVectorRegister(VectorRegister dst,
+                                                  FpuRegister src,
+                                                  bool is_double) {
+  // Float or double in FPU register Fx can be considered as 0th element in vector register Wx.
+  if (is_double) {
+    SplatiD(dst, static_cast<VectorRegister>(src), 0);
+  } else {
+    SplatiW(dst, static_cast<VectorRegister>(src), 0);
+  }
+}
+
 void Mips64Assembler::LoadConst32(GpuRegister rd, int32_t value) {
   TemplateLoadConst32(this, rd, value);
 }
@@ -1101,7 +2245,9 @@ void Mips64Assembler::Addiu32(GpuRegister rt, GpuRegister rs, int32_t value) {
   }
 }
 
+// TODO: don't use rtmp, use daui, dahi, dati.
 void Mips64Assembler::Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp) {
+  CHECK_NE(rs, rtmp);
   if (IsInt<16>(value)) {
     Daddiu(rt, rs, value);
   } else {
@@ -1116,37 +2262,67 @@ void Mips64Assembler::Branch::InitShortOrLong(Mips64Assembler::Branch::OffsetBit
   type_ = (offset_size <= branch_info_[short_type].offset_size) ? short_type : long_type;
 }
 
-void Mips64Assembler::Branch::InitializeType(Type initial_type) {
-  OffsetBits offset_size = GetOffsetSizeNeeded(location_, target_);
-  switch (initial_type) {
-    case kLabel:
-    case kLiteral:
-    case kLiteralUnsigned:
-    case kLiteralLong:
-      CHECK(!IsResolved());
-      type_ = initial_type;
-      break;
-    case kCall:
-      InitShortOrLong(offset_size, kCall, kLongCall);
-      break;
-    case kCondBranch:
-      switch (condition_) {
-        case kUncond:
-          InitShortOrLong(offset_size, kUncondBranch, kLongUncondBranch);
-          break;
-        case kCondEQZ:
-        case kCondNEZ:
-          // Special case for beqzc/bnezc with longer offset than in other b<cond>c instructions.
-          type_ = (offset_size <= kOffset23) ? kCondBranch : kLongCondBranch;
-          break;
-        default:
-          InitShortOrLong(offset_size, kCondBranch, kLongCondBranch);
-          break;
-      }
-      break;
-    default:
-      LOG(FATAL) << "Unexpected branch type " << initial_type;
-      UNREACHABLE();
+void Mips64Assembler::Branch::InitializeType(Type initial_type, bool is_r6) {
+  OffsetBits offset_size_needed = GetOffsetSizeNeeded(location_, target_);
+  if (is_r6) {
+    // R6
+    switch (initial_type) {
+      case kLabel:
+      case kLiteral:
+      case kLiteralUnsigned:
+      case kLiteralLong:
+        CHECK(!IsResolved());
+        type_ = initial_type;
+        break;
+      case kCall:
+        InitShortOrLong(offset_size_needed, kCall, kLongCall);
+        break;
+      case kCondBranch:
+        switch (condition_) {
+          case kUncond:
+            InitShortOrLong(offset_size_needed, kUncondBranch, kLongUncondBranch);
+            break;
+          case kCondEQZ:
+          case kCondNEZ:
+            // Special case for beqzc/bnezc with longer offset than in other b<cond>c instructions.
+            type_ = (offset_size_needed <= kOffset23) ? kCondBranch : kLongCondBranch;
+            break;
+          default:
+            InitShortOrLong(offset_size_needed, kCondBranch, kLongCondBranch);
+            break;
+        }
+        break;
+      case kBareCall:
+        type_ = kBareCall;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
+        break;
+      case kBareCondBranch:
+        type_ = (condition_ == kUncond) ? kBareUncondBranch : kBareCondBranch;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
+        break;
+      default:
+        LOG(FATAL) << "Unexpected branch type " << initial_type;
+        UNREACHABLE();
+    }
+  } else {
+    // R2
+    CHECK_EQ(initial_type, kBareCondBranch);
+    switch (condition_) {
+      case kCondLTZ:
+      case kCondGEZ:
+      case kCondLEZ:
+      case kCondGTZ:
+      case kCondEQ:
+      case kCondNE:
+      case kCondEQZ:
+      case kCondNEZ:
+        break;
+      default:
+        LOG(FATAL) << "Unexpected R2 branch condition " << condition_;
+        UNREACHABLE();
+    }
+    type_ = kR2BareCondBranch;
+    CHECK_LE(offset_size_needed, GetOffsetSize());
   }
   old_type_ = type_;
 }
@@ -1179,21 +2355,25 @@ bool Mips64Assembler::Branch::IsUncond(BranchCondition condition,
   }
 }
 
-Mips64Assembler::Branch::Branch(uint32_t location, uint32_t target, bool is_call)
+Mips64Assembler::Branch::Branch(uint32_t location, uint32_t target, bool is_call, bool is_bare)
     : old_location_(location),
       location_(location),
       target_(target),
       lhs_reg_(ZERO),
       rhs_reg_(ZERO),
       condition_(kUncond) {
-  InitializeType(is_call ? kCall : kCondBranch);
+  InitializeType(
+      (is_call ? (is_bare ? kBareCall : kCall) : (is_bare ? kBareCondBranch : kCondBranch)),
+      /* is_r6 */ true);
 }
 
-Mips64Assembler::Branch::Branch(uint32_t location,
+Mips64Assembler::Branch::Branch(bool is_r6,
+                                uint32_t location,
                                 uint32_t target,
                                 Mips64Assembler::BranchCondition condition,
                                 GpuRegister lhs_reg,
-                                GpuRegister rhs_reg)
+                                GpuRegister rhs_reg,
+                                bool is_bare)
     : old_location_(location),
       location_(location),
       target_(target),
@@ -1234,7 +2414,7 @@ Mips64Assembler::Branch::Branch(uint32_t location,
     // Branch condition is always true, make the branch unconditional.
     condition_ = kUncond;
   }
-  InitializeType(kCondBranch);
+  InitializeType((is_bare ? kBareCondBranch : kCondBranch), is_r6);
 }
 
 Mips64Assembler::Branch::Branch(uint32_t location, GpuRegister dest_reg, Type label_or_literal_type)
@@ -1245,7 +2425,7 @@ Mips64Assembler::Branch::Branch(uint32_t location, GpuRegister dest_reg, Type la
       rhs_reg_(ZERO),
       condition_(kUncond) {
   CHECK_NE(dest_reg, ZERO);
-  InitializeType(label_or_literal_type);
+  InitializeType(label_or_literal_type, /* is_r6 */ true);
 }
 
 Mips64Assembler::BranchCondition Mips64Assembler::Branch::OppositeCondition(
@@ -1341,12 +2521,32 @@ uint32_t Mips64Assembler::Branch::GetOldEndLocation() const {
   return GetOldLocation() + GetOldSize();
 }
 
+bool Mips64Assembler::Branch::IsBare() const {
+  switch (type_) {
+    // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+    case kBareUncondBranch:
+    case kBareCondBranch:
+    case kBareCall:
+    // R2 short branches (can't be promoted to long), delay slots filled manually.
+    case kR2BareCondBranch:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool Mips64Assembler::Branch::IsLong() const {
   switch (type_) {
-    // Short branches.
+    // R6 short branches (can be promoted to long).
     case kUncondBranch:
     case kCondBranch:
     case kCall:
+    // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+    case kBareUncondBranch:
+    case kBareCondBranch:
+    case kBareCall:
+    // R2 short branches (can't be promoted to long), delay slots filled manually.
+    case kR2BareCondBranch:
     // Near label.
     case kLabel:
     // Near literals.
@@ -1374,8 +2574,9 @@ bool Mips64Assembler::Branch::IsResolved() const {
 }
 
 Mips64Assembler::Branch::OffsetBits Mips64Assembler::Branch::GetOffsetSize() const {
+  bool r6_cond_branch = (type_ == kCondBranch || type_ == kBareCondBranch);
   OffsetBits offset_size =
-      (type_ == kCondBranch && (condition_ == kCondEQZ || condition_ == kCondNEZ))
+      (r6_cond_branch && (condition_ == kCondEQZ || condition_ == kCondNEZ))
           ? kOffset23
           : branch_info_[type_].offset_size;
   return offset_size;
@@ -1421,8 +2622,9 @@ void Mips64Assembler::Branch::Relocate(uint32_t expand_location, uint32_t delta)
 }
 
 void Mips64Assembler::Branch::PromoteToLong() {
+  CHECK(!IsBare());  // Bare branches do not promote.
   switch (type_) {
-    // Short branches.
+    // R6 short branches (can be promoted to long).
     case kUncondBranch:
       type_ = kLongUncondBranch;
       break;
@@ -1469,7 +2671,7 @@ uint32_t Mips64Assembler::Branch::PromoteIfNeeded(uint32_t max_short_distance) {
   }
   // The following logic is for debugging/testing purposes.
   // Promote some short branches to long when it's not really required.
-  if (UNLIKELY(max_short_distance != std::numeric_limits<uint32_t>::max())) {
+  if (UNLIKELY(max_short_distance != std::numeric_limits<uint32_t>::max() && !IsBare())) {
     int64_t distance = static_cast<int64_t>(target_) - location_;
     distance = (distance >= 0) ? distance : -distance;
     if (distance >= max_short_distance) {
@@ -1601,13 +2803,15 @@ void Mips64Assembler::FinalizeLabeledBranch(Mips64Label* label) {
   }
 }
 
-void Mips64Assembler::Buncond(Mips64Label* label) {
+void Mips64Assembler::Buncond(Mips64Label* label, bool is_bare) {
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(buffer_.Size(), target, /* is_call */ false);
+  branches_.emplace_back(buffer_.Size(), target, /* is_call */ false, is_bare);
   FinalizeLabeledBranch(label);
 }
 
 void Mips64Assembler::Bcond(Mips64Label* label,
+                            bool is_r6,
+                            bool is_bare,
                             BranchCondition condition,
                             GpuRegister lhs,
                             GpuRegister rhs) {
@@ -1616,13 +2820,13 @@ void Mips64Assembler::Bcond(Mips64Label* label,
     return;
   }
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(buffer_.Size(), target, condition, lhs, rhs);
+  branches_.emplace_back(is_r6, buffer_.Size(), target, condition, lhs, rhs, is_bare);
   FinalizeLabeledBranch(label);
 }
 
-void Mips64Assembler::Call(Mips64Label* label) {
+void Mips64Assembler::Call(Mips64Label* label, bool is_bare) {
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(buffer_.Size(), target, /* is_call */ true);
+  branches_.emplace_back(buffer_.Size(), target, /* is_call */ true, is_bare);
   FinalizeLabeledBranch(label);
 }
 
@@ -1833,11 +3037,18 @@ void Mips64Assembler::PromoteBranches() {
 
 // Note: make sure branch_info_[] and EmitBranch() are kept synchronized.
 const Mips64Assembler::Branch::BranchInfo Mips64Assembler::Branch::branch_info_[] = {
-  // Short branches.
+  // R6 short branches (can be promoted to long).
   {  1, 0, 1, Mips64Assembler::Branch::kOffset28, 2 },  // kUncondBranch
   {  2, 0, 1, Mips64Assembler::Branch::kOffset18, 2 },  // kCondBranch
                                                         // Exception: kOffset23 for beqzc/bnezc
   {  1, 0, 1, Mips64Assembler::Branch::kOffset28, 2 },  // kCall
+  // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+  {  1, 0, 1, Mips64Assembler::Branch::kOffset28, 2 },  // kBareUncondBranch
+  {  1, 0, 1, Mips64Assembler::Branch::kOffset18, 2 },  // kBareCondBranch
+                                                        // Exception: kOffset23 for beqzc/bnezc
+  {  1, 0, 1, Mips64Assembler::Branch::kOffset28, 2 },  // kBareCall
+  // R2 short branches (can't be promoted to long), delay slots filled manually.
+  {  1, 0, 1, Mips64Assembler::Branch::kOffset18, 2 },  // kR2BareCondBranch
   // Near label.
   {  1, 0, 0, Mips64Assembler::Branch::kOffset21, 2 },  // kLabel
   // Near literals.
@@ -1872,12 +3083,28 @@ void Mips64Assembler::EmitBranch(Mips64Assembler::Branch* branch) {
       break;
     case Branch::kCondBranch:
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
-      EmitBcondc(condition, lhs, rhs, offset);
+      EmitBcondR6(condition, lhs, rhs, offset);
       Nop();  // TODO: improve by filling the forbidden/delay slot.
       break;
     case Branch::kCall:
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
       Balc(offset);
+      break;
+    case Branch::kBareUncondBranch:
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      Bc(offset);
+      break;
+    case Branch::kBareCondBranch:
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      EmitBcondR6(condition, lhs, rhs, offset);
+      break;
+    case Branch::kBareCall:
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      Balc(offset);
+      break;
+    case Branch::kR2BareCondBranch:
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      EmitBcondR2(condition, lhs, rhs, offset);
       break;
 
     // Near label.
@@ -1907,7 +3134,7 @@ void Mips64Assembler::EmitBranch(Mips64Assembler::Branch* branch) {
       Jic(AT, Low16Bits(offset));
       break;
     case Branch::kLongCondBranch:
-      EmitBcondc(Branch::OppositeCondition(condition), lhs, rhs, 2);
+      EmitBcondR6(Branch::OppositeCondition(condition), lhs, rhs, 2);
       offset += (offset & 0x8000) << 1;  // Account for sign extension in jic.
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
       Auipc(AT, High16Bits(offset));
@@ -1951,144 +3178,295 @@ void Mips64Assembler::EmitBranch(Mips64Assembler::Branch* branch) {
   CHECK_LT(branch->GetSize(), static_cast<uint32_t>(Branch::kMaxBranchSize));
 }
 
-void Mips64Assembler::Bc(Mips64Label* label) {
-  Buncond(label);
+void Mips64Assembler::Bc(Mips64Label* label, bool is_bare) {
+  Buncond(label, is_bare);
 }
 
-void Mips64Assembler::Balc(Mips64Label* label) {
-  Call(label);
+void Mips64Assembler::Balc(Mips64Label* label, bool is_bare) {
+  Call(label, is_bare);
 }
 
-void Mips64Assembler::Bltc(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondLT, rs, rt);
+void Mips64Assembler::Bltc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLT, rs, rt);
 }
 
-void Mips64Assembler::Bltzc(GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondLTZ, rt);
+void Mips64Assembler::Bltzc(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLTZ, rt);
 }
 
-void Mips64Assembler::Bgtzc(GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondGTZ, rt);
+void Mips64Assembler::Bgtzc(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGTZ, rt);
 }
 
-void Mips64Assembler::Bgec(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondGE, rs, rt);
+void Mips64Assembler::Bgec(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGE, rs, rt);
 }
 
-void Mips64Assembler::Bgezc(GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondGEZ, rt);
+void Mips64Assembler::Bgezc(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGEZ, rt);
 }
 
-void Mips64Assembler::Blezc(GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondLEZ, rt);
+void Mips64Assembler::Blezc(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLEZ, rt);
 }
 
-void Mips64Assembler::Bltuc(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondLTU, rs, rt);
+void Mips64Assembler::Bltuc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLTU, rs, rt);
 }
 
-void Mips64Assembler::Bgeuc(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondGEU, rs, rt);
+void Mips64Assembler::Bgeuc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGEU, rs, rt);
 }
 
-void Mips64Assembler::Beqc(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondEQ, rs, rt);
+void Mips64Assembler::Beqc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondEQ, rs, rt);
 }
 
-void Mips64Assembler::Bnec(GpuRegister rs, GpuRegister rt, Mips64Label* label) {
-  Bcond(label, kCondNE, rs, rt);
+void Mips64Assembler::Bnec(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondNE, rs, rt);
 }
 
-void Mips64Assembler::Beqzc(GpuRegister rs, Mips64Label* label) {
-  Bcond(label, kCondEQZ, rs);
+void Mips64Assembler::Beqzc(GpuRegister rs, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondEQZ, rs);
 }
 
-void Mips64Assembler::Bnezc(GpuRegister rs, Mips64Label* label) {
-  Bcond(label, kCondNEZ, rs);
+void Mips64Assembler::Bnezc(GpuRegister rs, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondNEZ, rs);
 }
 
-void Mips64Assembler::Bc1eqz(FpuRegister ft, Mips64Label* label) {
-  Bcond(label, kCondF, static_cast<GpuRegister>(ft), ZERO);
+void Mips64Assembler::Bc1eqz(FpuRegister ft, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondF, static_cast<GpuRegister>(ft), ZERO);
 }
 
-void Mips64Assembler::Bc1nez(FpuRegister ft, Mips64Label* label) {
-  Bcond(label, kCondT, static_cast<GpuRegister>(ft), ZERO);
+void Mips64Assembler::Bc1nez(FpuRegister ft, Mips64Label* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondT, static_cast<GpuRegister>(ft), ZERO);
 }
 
-void Mips64Assembler::LoadFromOffset(LoadOperandType type, GpuRegister reg, GpuRegister base,
+void Mips64Assembler::Bltz(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondLTZ, rt);
+}
+
+void Mips64Assembler::Bgtz(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondGTZ, rt);
+}
+
+void Mips64Assembler::Bgez(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondGEZ, rt);
+}
+
+void Mips64Assembler::Blez(GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondLEZ, rt);
+}
+
+void Mips64Assembler::Beq(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondEQ, rs, rt);
+}
+
+void Mips64Assembler::Bne(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondNE, rs, rt);
+}
+
+void Mips64Assembler::Beqz(GpuRegister rs, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondEQZ, rs);
+}
+
+void Mips64Assembler::Bnez(GpuRegister rs, Mips64Label* label, bool is_bare) {
+  CHECK(is_bare);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondNEZ, rs);
+}
+
+void Mips64Assembler::AdjustBaseAndOffset(GpuRegister& base,
+                                          int32_t& offset,
+                                          bool is_doubleword) {
+  // This method is used to adjust the base register and offset pair
+  // for a load/store when the offset doesn't fit into int16_t.
+  // It is assumed that `base + offset` is sufficiently aligned for memory
+  // operands that are machine word in size or smaller. For doubleword-sized
+  // operands it's assumed that `base` is a multiple of 8, while `offset`
+  // may be a multiple of 4 (e.g. 4-byte-aligned long and double arguments
+  // and spilled variables on the stack accessed relative to the stack
+  // pointer register).
+  // We preserve the "alignment" of `offset` by adjusting it by a multiple of 8.
+  CHECK_NE(base, AT);  // Must not overwrite the register `base` while loading `offset`.
+
+  bool doubleword_aligned = IsAligned<kMips64DoublewordSize>(offset);
+  bool two_accesses = is_doubleword && !doubleword_aligned;
+
+  // IsInt<16> must be passed a signed value, hence the static cast below.
+  if (IsInt<16>(offset) &&
+      (!two_accesses || IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
+    // Nothing to do: `offset` (and, if needed, `offset + 4`) fits into int16_t.
+    return;
+  }
+
+  // Remember the "(mis)alignment" of `offset`, it will be checked at the end.
+  uint32_t misalignment = offset & (kMips64DoublewordSize - 1);
+
+  // First, see if `offset` can be represented as a sum of two 16-bit signed
+  // offsets. This can save an instruction.
+  // To simplify matters, only do this for a symmetric range of offsets from
+  // about -64KB to about +64KB, allowing further addition of 4 when accessing
+  // 64-bit variables with two 32-bit accesses.
+  constexpr int32_t kMinOffsetForSimpleAdjustment = 0x7ff8;  // Max int16_t that's a multiple of 8.
+  constexpr int32_t kMaxOffsetForSimpleAdjustment = 2 * kMinOffsetForSimpleAdjustment;
+
+  if (0 <= offset && offset <= kMaxOffsetForSimpleAdjustment) {
+    Daddiu(AT, base, kMinOffsetForSimpleAdjustment);
+    offset -= kMinOffsetForSimpleAdjustment;
+  } else if (-kMaxOffsetForSimpleAdjustment <= offset && offset < 0) {
+    Daddiu(AT, base, -kMinOffsetForSimpleAdjustment);
+    offset += kMinOffsetForSimpleAdjustment;
+  } else {
+    // In more complex cases take advantage of the daui instruction, e.g.:
+    //    daui   AT, base, offset_high
+    //   [dahi   AT, 1]                       // When `offset` is close to +2GB.
+    //    lw     reg_lo, offset_low(AT)
+    //   [lw     reg_hi, (offset_low+4)(AT)]  // If misaligned 64-bit load.
+    // or when offset_low+4 overflows int16_t:
+    //    daui   AT, base, offset_high
+    //    daddiu AT, AT, 8
+    //    lw     reg_lo, (offset_low-8)(AT)
+    //    lw     reg_hi, (offset_low-4)(AT)
+    int16_t offset_low = Low16Bits(offset);
+    int32_t offset_low32 = offset_low;
+    int16_t offset_high = High16Bits(offset);
+    bool increment_hi16 = offset_low < 0;
+    bool overflow_hi16 = false;
+
+    if (increment_hi16) {
+      offset_high++;
+      overflow_hi16 = (offset_high == -32768);
+    }
+    Daui(AT, base, offset_high);
+
+    if (overflow_hi16) {
+      Dahi(AT, 1);
+    }
+
+    if (two_accesses && !IsInt<16>(static_cast<int32_t>(offset_low32 + kMips64WordSize))) {
+      // Avoid overflow in the 16-bit offset of the load/store instruction when adding 4.
+      Daddiu(AT, AT, kMips64DoublewordSize);
+      offset_low32 -= kMips64DoublewordSize;
+    }
+
+    offset = offset_low32;
+  }
+  base = AT;
+
+  CHECK(IsInt<16>(offset));
+  if (two_accesses) {
+    CHECK(IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)));
+  }
+  CHECK_EQ(misalignment, offset & (kMips64DoublewordSize - 1));
+}
+
+void Mips64Assembler::AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
+                                                          int32_t& offset,
+                                                          int& element_size_shift) {
+  // This method is used to adjust the base register, offset and element_size_shift
+  // for a vector load/store when the offset doesn't fit into allowed number of bits.
+  // MSA ld.df and st.df instructions take signed offsets as arguments, but maximum
+  // offset is dependant on the size of the data format df (10-bit offsets for ld.b,
+  // 11-bit for ld.h, 12-bit for ld.w and 13-bit for ld.d).
+  // If element_size_shift is non-negative at entry, it won't be changed, but offset
+  // will be checked for appropriate alignment. If negative at entry, it will be
+  // adjusted based on offset for maximum fit.
+  // It's assumed that `base` is a multiple of 8.
+
+  CHECK_NE(base, AT);  // Must not overwrite the register `base` while loading `offset`.
+
+  if (element_size_shift >= 0) {
+    CHECK_LE(element_size_shift, TIMES_8);
+    CHECK_GE(JAVASTYLE_CTZ(offset), element_size_shift);
+  } else if (IsAligned<kMips64DoublewordSize>(offset)) {
+    element_size_shift = TIMES_8;
+  } else if (IsAligned<kMips64WordSize>(offset)) {
+    element_size_shift = TIMES_4;
+  } else if (IsAligned<kMips64HalfwordSize>(offset)) {
+    element_size_shift = TIMES_2;
+  } else {
+    element_size_shift = TIMES_1;
+  }
+
+  const int low_len = 10 + element_size_shift;  // How many low bits of `offset` ld.df/st.df
+                                                // will take.
+  int16_t low = offset & ((1 << low_len) - 1);  // Isolate these bits.
+  low -= (low & (1 << (low_len - 1))) << 1;     // Sign-extend these bits.
+  if (low == offset) {
+    return;  // `offset` fits into ld.df/st.df.
+  }
+
+  // First, see if `offset` can be represented as a sum of two signed offsets.
+  // This can save an instruction.
+
+  // Max int16_t that's a multiple of element size.
+  const int32_t kMaxDeltaForSimpleAdjustment = 0x8000 - (1 << element_size_shift);
+  // Max ld.df/st.df offset that's a multiple of element size.
+  const int32_t kMaxLoadStoreOffset = 0x1ff << element_size_shift;
+  const int32_t kMaxOffsetForSimpleAdjustment = kMaxDeltaForSimpleAdjustment + kMaxLoadStoreOffset;
+
+  if (IsInt<16>(offset)) {
+    Daddiu(AT, base, offset);
+    offset = 0;
+  } else if (0 <= offset && offset <= kMaxOffsetForSimpleAdjustment) {
+    Daddiu(AT, base, kMaxDeltaForSimpleAdjustment);
+    offset -= kMaxDeltaForSimpleAdjustment;
+  } else if (-kMaxOffsetForSimpleAdjustment <= offset && offset < 0) {
+    Daddiu(AT, base, -kMaxDeltaForSimpleAdjustment);
+    offset += kMaxDeltaForSimpleAdjustment;
+  } else {
+    // Let's treat `offset` as 64-bit to simplify handling of sign
+    // extensions in the instructions that supply its smaller signed parts.
+    //
+    // 16-bit or smaller parts of `offset`:
+    // |63  top  48|47  hi  32|31  upper  16|15  mid  13-10|12-9  low  0|
+    //
+    // Instructions that supply each part as a signed integer addend:
+    // |dati       |dahi      |daui         |daddiu        |ld.df/st.df |
+    //
+    // `top` is always 0, so dati isn't used.
+    // `hi` is 1 when `offset` is close to +2GB and 0 otherwise.
+    uint64_t tmp = static_cast<uint64_t>(offset) - low;  // Exclude `low` from the rest of `offset`
+                                                         // (accounts for sign of `low`).
+    tmp += (tmp & (UINT64_C(1) << 15)) << 1;  // Account for sign extension in daddiu.
+    tmp += (tmp & (UINT64_C(1) << 31)) << 1;  // Account for sign extension in daui.
+    int16_t mid = Low16Bits(tmp);
+    int16_t upper = High16Bits(tmp);
+    int16_t hi = Low16Bits(High32Bits(tmp));
+    Daui(AT, base, upper);
+    if (hi != 0) {
+      CHECK_EQ(hi, 1);
+      Dahi(AT, hi);
+    }
+    if (mid != 0) {
+      Daddiu(AT, AT, mid);
+    }
+    offset = low;
+  }
+  base = AT;
+  CHECK_GE(JAVASTYLE_CTZ(offset), element_size_shift);
+  CHECK(IsInt<10>(offset >> element_size_shift));
+}
+
+void Mips64Assembler::LoadFromOffset(LoadOperandType type,
+                                     GpuRegister reg,
+                                     GpuRegister base,
                                      int32_t offset) {
-  if (!IsInt<16>(offset) ||
-      (type == kLoadDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
-       !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
-    LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
-    Daddu(AT, AT, base);
-    base = AT;
-    offset &= (kMips64DoublewordSize - 1);
-  }
-
-  switch (type) {
-    case kLoadSignedByte:
-      Lb(reg, base, offset);
-      break;
-    case kLoadUnsignedByte:
-      Lbu(reg, base, offset);
-      break;
-    case kLoadSignedHalfword:
-      Lh(reg, base, offset);
-      break;
-    case kLoadUnsignedHalfword:
-      Lhu(reg, base, offset);
-      break;
-    case kLoadWord:
-      CHECK_ALIGNED(offset, kMips64WordSize);
-      Lw(reg, base, offset);
-      break;
-    case kLoadUnsignedWord:
-      CHECK_ALIGNED(offset, kMips64WordSize);
-      Lwu(reg, base, offset);
-      break;
-    case kLoadDoubleword:
-      if (!IsAligned<kMips64DoublewordSize>(offset)) {
-        CHECK_ALIGNED(offset, kMips64WordSize);
-        Lwu(reg, base, offset);
-        Lwu(TMP2, base, offset + kMips64WordSize);
-        Dinsu(reg, TMP2, 32, 32);
-      } else {
-        Ld(reg, base, offset);
-      }
-      break;
-  }
+  LoadFromOffset<>(type, reg, base, offset);
 }
 
-void Mips64Assembler::LoadFpuFromOffset(LoadOperandType type, FpuRegister reg, GpuRegister base,
+void Mips64Assembler::LoadFpuFromOffset(LoadOperandType type,
+                                        FpuRegister reg,
+                                        GpuRegister base,
                                         int32_t offset) {
-  if (!IsInt<16>(offset) ||
-      (type == kLoadDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
-       !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
-    LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
-    Daddu(AT, AT, base);
-    base = AT;
-    offset &= (kMips64DoublewordSize - 1);
-  }
-
-  switch (type) {
-    case kLoadWord:
-      CHECK_ALIGNED(offset, kMips64WordSize);
-      Lwc1(reg, base, offset);
-      break;
-    case kLoadDoubleword:
-      if (!IsAligned<kMips64DoublewordSize>(offset)) {
-        CHECK_ALIGNED(offset, kMips64WordSize);
-        Lwc1(reg, base, offset);
-        Lw(TMP2, base, offset + kMips64WordSize);
-        Mthc1(TMP2, reg);
-      } else {
-        Ldc1(reg, base, offset);
-      }
-      break;
-    default:
-      LOG(FATAL) << "UNREACHABLE";
-  }
+  LoadFpuFromOffset<>(type, reg, base, offset);
 }
 
 void Mips64Assembler::EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset,
@@ -2118,72 +3496,18 @@ void Mips64Assembler::EmitLoad(ManagedRegister m_dst, GpuRegister src_register, 
   }
 }
 
-void Mips64Assembler::StoreToOffset(StoreOperandType type, GpuRegister reg, GpuRegister base,
+void Mips64Assembler::StoreToOffset(StoreOperandType type,
+                                    GpuRegister reg,
+                                    GpuRegister base,
                                     int32_t offset) {
-  if (!IsInt<16>(offset) ||
-      (type == kStoreDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
-       !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
-    LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
-    Daddu(AT, AT, base);
-    base = AT;
-    offset &= (kMips64DoublewordSize - 1);
-  }
-
-  switch (type) {
-    case kStoreByte:
-      Sb(reg, base, offset);
-      break;
-    case kStoreHalfword:
-      Sh(reg, base, offset);
-      break;
-    case kStoreWord:
-      CHECK_ALIGNED(offset, kMips64WordSize);
-      Sw(reg, base, offset);
-      break;
-    case kStoreDoubleword:
-      if (!IsAligned<kMips64DoublewordSize>(offset)) {
-        CHECK_ALIGNED(offset, kMips64WordSize);
-        Sw(reg, base, offset);
-        Dsrl32(TMP2, reg, 0);
-        Sw(TMP2, base, offset + kMips64WordSize);
-      } else {
-        Sd(reg, base, offset);
-      }
-      break;
-    default:
-      LOG(FATAL) << "UNREACHABLE";
-  }
+  StoreToOffset<>(type, reg, base, offset);
 }
 
-void Mips64Assembler::StoreFpuToOffset(StoreOperandType type, FpuRegister reg, GpuRegister base,
+void Mips64Assembler::StoreFpuToOffset(StoreOperandType type,
+                                       FpuRegister reg,
+                                       GpuRegister base,
                                        int32_t offset) {
-  if (!IsInt<16>(offset) ||
-      (type == kStoreDoubleword && !IsAligned<kMips64DoublewordSize>(offset) &&
-       !IsInt<16>(static_cast<int32_t>(offset + kMips64WordSize)))) {
-    LoadConst32(AT, offset & ~(kMips64DoublewordSize - 1));
-    Daddu(AT, AT, base);
-    base = AT;
-    offset &= (kMips64DoublewordSize - 1);
-  }
-
-  switch (type) {
-    case kStoreWord:
-      CHECK_ALIGNED(offset, kMips64WordSize);
-      Swc1(reg, base, offset);
-      break;
-    case kStoreDoubleword:
-      if (!IsAligned<kMips64DoublewordSize>(offset)) {
-        CHECK_ALIGNED(offset, kMips64WordSize);
-        Mfhc1(TMP2, reg);
-        Swc1(reg, base, offset);
-        Sw(TMP2, base, offset + kMips64WordSize);
-      } else {
-        Sdc1(reg, base, offset);
-      }
-      break;
-    default:
-      LOG(FATAL) << "UNREACHABLE";
-  }
+  StoreFpuToOffset<>(type, reg, base, offset);
 }
 
 static dwarf::Reg DWARFReg(GpuRegister reg) {
@@ -2238,7 +3562,8 @@ void Mips64Assembler::BuildFrame(size_t frame_size,
 }
 
 void Mips64Assembler::RemoveFrame(size_t frame_size,
-                                  ArrayRef<const ManagedRegister> callee_save_regs) {
+                                  ArrayRef<const ManagedRegister> callee_save_regs,
+                                  bool may_suspend ATTRIBUTE_UNUSED) {
   CHECK_ALIGNED(frame_size, kStackAlignment);
   DCHECK(!overwriting_);
   cfi_.RememberState();
@@ -2367,12 +3692,8 @@ void Mips64Assembler::LoadRef(ManagedRegister mdest, ManagedRegister base, Membe
   CHECK(dest.IsGpuRegister() && base.AsMips64().IsGpuRegister());
   LoadFromOffset(kLoadUnsignedWord, dest.AsGpuRegister(),
                  base.AsMips64().AsGpuRegister(), offs.Int32Value());
-  if (kPoisonHeapReferences && unpoison_reference) {
-    // TODO: review
-    // Negate the 32-bit ref
-    Dsubu(dest.AsGpuRegister(), ZERO, dest.AsGpuRegister());
-    // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64
-    Dext(dest.AsGpuRegister(), dest.AsGpuRegister(), 0, 32);
+  if (unpoison_reference) {
+    MaybeUnpoisonHeapReference(dest.AsGpuRegister());
   }
 }
 

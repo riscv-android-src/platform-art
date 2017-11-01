@@ -18,19 +18,22 @@
 
 #include <limits>
 
+#include "common_dex_operations.h"
 #include "common_throws.h"
+#include "dex_file_types.h"
 #include "interpreter_common.h"
 #include "interpreter_mterp_impl.h"
 #include "interpreter_switch_impl.h"
-#include "jvalue-inl.h"
-#include "mirror/string-inl.h"
-#include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
-#include "stack.h"
-#include "unstarted_runtime.h"
-#include "mterp/mterp.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
+#include "jvalue-inl.h"
+#include "mirror/string-inl.h"
+#include "mterp/mterp.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "scoped_thread_state_change-inl.h"
+#include "stack.h"
+#include "thread-inl.h"
+#include "unstarted_runtime.h"
 
 namespace art {
 namespace interpreter {
@@ -232,12 +235,6 @@ enum InterpreterImplKind {
   kSwitchImplKind,        // Switch-based interpreter implementation.
   kMterpImplKind          // Assembly interpreter
 };
-static std::ostream& operator<<(std::ostream& os, const InterpreterImplKind& rhs) {
-  os << ((rhs == kSwitchImplKind)
-              ? "Switch-based interpreter"
-              : "Asm interpreter");
-  return os;
-}
 
 static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
 
@@ -259,6 +256,13 @@ static inline JValue Execute(
     if (UNLIKELY(instrumentation->HasMethodEntryListeners())) {
       instrumentation->MethodEnterEvent(self, shadow_frame.GetThisObject(code_item->ins_size_),
                                         method, 0);
+      if (UNLIKELY(self->IsExceptionPending())) {
+        instrumentation->MethodUnwindEvent(self,
+                                           shadow_frame.GetThisObject(code_item->ins_size_),
+                                           method,
+                                           0);
+        return JValue();
+      }
     }
 
     if (!stay_in_interpreter) {
@@ -270,7 +274,11 @@ static inline JValue Execute(
 
           // Pop the shadow frame before calling into compiled code.
           self->PopShadowFrame();
-          ArtInterpreterToCompiledCodeBridge(self, nullptr, code_item, &shadow_frame, &result);
+          // Calculate the offset of the first input reg. The input registers are in the high regs.
+          // It's ok to access the code item here since JIT code will have been touched by the
+          // interpreter and compiler already.
+          uint16_t arg_offset = code_item->registers_size_ - code_item->ins_size_;
+          ArtInterpreterToCompiledCodeBridge(self, nullptr, &shadow_frame, arg_offset, &result);
           // Push the shadow frame back as the caller will expect it.
           self->PushShadowFrame(&shadow_frame);
 
@@ -280,11 +288,12 @@ static inline JValue Execute(
     }
   }
 
-  shadow_frame.GetMethod()->GetDeclaringClass()->AssertInitializedOrInitializingInThread(self);
+  ArtMethod* method = shadow_frame.GetMethod();
+
+  DCheckStaticState(self, method);
 
   // Lock counting is a special version of accessibility checks, and for simplicity and
   // reduction of template parameters, we gate it behind access-checks mode.
-  ArtMethod* method = shadow_frame.GetMethod();
   DCHECK(!method->SkipAccessChecks() || !method->MustCountLocks());
 
   bool transaction_active = Runtime::Current()->IsActiveTransaction();
@@ -312,7 +321,7 @@ static inline JValue Execute(
             // Mterp didn't like that instruction.  Single-step it with the reference interpreter.
             result_register = ExecuteSwitchImpl<false, false>(self, code_item, shadow_frame,
                                                               result_register, true);
-            if (shadow_frame.GetDexPC() == DexFile::kDexNoIndex) {
+            if (shadow_frame.GetDexPC() == dex::kDexNoIndex) {
               // Single-stepped a return or an exception not handled locally.  Return to caller.
               return result_register;
             }
@@ -363,6 +372,14 @@ void EnterInterpreterFromInvoke(Thread* self,
   bool implicit_check = !Runtime::Current()->ExplicitStackOverflowChecks();
   if (UNLIKELY(__builtin_frame_address(0) < self->GetStackEndForInterpreter(implicit_check))) {
     ThrowStackOverflowError(self);
+    return;
+  }
+
+  // This can happen if we are in forced interpreter mode and an obsolete method is called using
+  // reflection.
+  if (UNLIKELY(method->IsObsolete())) {
+    ThrowInternalError("Attempting to invoke obsolete version of '%s'.",
+                       method->PrettyMethod().c_str());
     return;
   }
 
@@ -453,29 +470,6 @@ void EnterInterpreterFromInvoke(Thread* self,
   self->PopShadowFrame();
 }
 
-static bool IsStringInit(const Instruction* instr, ArtMethod* caller)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (instr->Opcode() == Instruction::INVOKE_DIRECT ||
-      instr->Opcode() == Instruction::INVOKE_DIRECT_RANGE) {
-    // Instead of calling ResolveMethod() which has suspend point and can trigger
-    // GC, look up the callee method symbolically.
-    uint16_t callee_method_idx = (instr->Opcode() == Instruction::INVOKE_DIRECT_RANGE) ?
-        instr->VRegB_3rc() : instr->VRegB_35c();
-    const DexFile* dex_file = caller->GetDexFile();
-    const DexFile::MethodId& method_id = dex_file->GetMethodId(callee_method_idx);
-    const char* class_name = dex_file->StringByTypeIdx(method_id.class_idx_);
-    const char* method_name = dex_file->GetMethodName(method_id);
-    // Compare method's class name and method name against string init.
-    // It's ok since it's not allowed to create your own java/lang/String.
-    // TODO: verify that assumption.
-    if ((strcmp(class_name, "Ljava/lang/String;") == 0) &&
-        (strcmp(method_name, "<init>") == 0)) {
-      return true;
-    }
-  }
-  return false;
-}
-
 static int16_t GetReceiverRegisterForStringInit(const Instruction* instr) {
   DCHECK(instr->Opcode() == Instruction::INVOKE_DIRECT_RANGE ||
          instr->Opcode() == Instruction::INVOKE_DIRECT);
@@ -485,8 +479,9 @@ static int16_t GetReceiverRegisterForStringInit(const Instruction* instr) {
 
 void EnterInterpreterFromDeoptimize(Thread* self,
                                     ShadowFrame* shadow_frame,
+                                    JValue* ret_val,
                                     bool from_code,
-                                    JValue* ret_val)
+                                    DeoptimizationMethodType deopt_method_type)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   JValue value;
   // Set value to last known result in case the shadow frame chain is empty.
@@ -508,16 +503,30 @@ void EnterInterpreterFromDeoptimize(Thread* self,
       // null Instrumentation*.
       const instrumentation::Instrumentation* const instrumentation =
           first ? nullptr : Runtime::Current()->GetInstrumentation();
-      uint32_t found_dex_pc = FindNextInstructionFollowingException(self, *shadow_frame, dex_pc,
-                                                                    instrumentation);
-      new_dex_pc = found_dex_pc;  // the dex pc of a matching catch handler
-                                  // or DexFile::kDexNoIndex if there is none.
+      new_dex_pc = MoveToExceptionHandler(
+          self, *shadow_frame, instrumentation) ? shadow_frame->GetDexPC() : dex::kDexNoIndex;
     } else if (!from_code) {
-      // For the debugger and full deoptimization stack, we must go past the invoke
-      // instruction, as it already executed.
-      // TODO: should be tested more once b/17586779 is fixed.
+      // Deoptimization is not called from code directly.
       const Instruction* instr = Instruction::At(&code_item->insns_[dex_pc]);
-      if (instr->IsInvoke()) {
+      if (deopt_method_type == DeoptimizationMethodType::kKeepDexPc) {
+        DCHECK(first);
+        // Need to re-execute the dex instruction.
+        // (1) An invocation might be split into class initialization and invoke.
+        //     In this case, the invoke should not be skipped.
+        // (2) A suspend check should also execute the dex instruction at the
+        //     corresponding dex pc.
+        DCHECK_EQ(new_dex_pc, dex_pc);
+      } else if (instr->Opcode() == Instruction::MONITOR_ENTER ||
+                 instr->Opcode() == Instruction::MONITOR_EXIT) {
+        DCHECK(deopt_method_type == DeoptimizationMethodType::kDefault);
+        DCHECK(first);
+        // Non-idempotent dex instruction should not be re-executed.
+        // On the other hand, if a MONITOR_ENTER is at the dex_pc of a suspend
+        // check, that MONITOR_ENTER should be executed. That case is handled
+        // above.
+        new_dex_pc = dex_pc + instr->SizeInCodeUnits();
+      } else if (instr->IsInvoke()) {
+        DCHECK(deopt_method_type == DeoptimizationMethodType::kDefault);
         if (IsStringInit(instr, shadow_frame->GetMethod())) {
           uint16_t this_obj_vreg = GetReceiverRegisterForStringInit(instr);
           // Move the StringFactory.newStringFromChars() result into the register representing
@@ -530,40 +539,39 @@ void EnterInterpreterFromDeoptimize(Thread* self,
         }
         new_dex_pc = dex_pc + instr->SizeInCodeUnits();
       } else if (instr->Opcode() == Instruction::NEW_INSTANCE) {
-        // It's possible to deoptimize at a NEW_INSTANCE dex instruciton that's for a
-        // java string, which is turned into a call into StringFactory.newEmptyString();
-        // Move the StringFactory.newEmptyString() result into the destination register.
-        DCHECK(value.GetL()->IsString());
-        shadow_frame->SetVRegReference(instr->VRegA_21c(), value.GetL());
-        // new-instance doesn't generate a result value.
-        value.SetJ(0);
-        // Skip the dex instruction since we essentially come back from an invocation.
-        new_dex_pc = dex_pc + instr->SizeInCodeUnits();
-        if (kIsDebugBuild) {
-          ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-          // This is a suspend point. But it's ok since value has been set into shadow_frame.
-          ObjPtr<mirror::Class> klass = class_linker->ResolveType(
-              dex::TypeIndex(instr->VRegB_21c()), shadow_frame->GetMethod());
-          DCHECK(klass->IsStringClass());
-        }
+        // A NEW_INSTANCE is simply re-executed, including
+        // "new-instance String" which is compiled into a call into
+        // StringFactory.newEmptyString().
+        DCHECK_EQ(new_dex_pc, dex_pc);
       } else {
-        CHECK(false) << "Unexpected instruction opcode " << instr->Opcode()
-                     << " at dex_pc " << dex_pc
-                     << " of method: " << ArtMethod::PrettyMethod(shadow_frame->GetMethod(), false);
+        DCHECK(deopt_method_type == DeoptimizationMethodType::kDefault);
+        DCHECK(first);
+        // By default, we re-execute the dex instruction since if they are not
+        // an invoke, so that we don't have to decode the dex instruction to move
+        // result into the right vreg. All slow paths have been audited to be
+        // idempotent except monitor-enter/exit and invocation stubs.
+        // TODO: move result and advance dex pc. That also requires that we
+        // can tell the return type of a runtime method, possibly by decoding
+        // the dex instruction at the caller.
+        DCHECK_EQ(new_dex_pc, dex_pc);
       }
     } else {
       // Nothing to do, the dex_pc is the one at which the code requested
       // the deoptimization.
+      DCHECK(first);
+      DCHECK_EQ(new_dex_pc, dex_pc);
     }
-    if (new_dex_pc != DexFile::kDexNoIndex) {
+    if (new_dex_pc != dex::kDexNoIndex) {
       shadow_frame->SetDexPC(new_dex_pc);
       value = Execute(self, code_item, *shadow_frame, value);
     }
     ShadowFrame* old_frame = shadow_frame;
     shadow_frame = shadow_frame->GetLink();
     ShadowFrame::DeleteDeoptimizedFrame(old_frame);
-    // Following deoptimizations of shadow frames must pass the invoke instruction.
+    // Following deoptimizations of shadow frames must be at invocation point
+    // and should advance dex pc past the invoke instruction.
     from_code = false;
+    deopt_method_type = DeoptimizationMethodType::kDefault;
     first = false;
   }
   ret_val->SetJ(value.GetJ());

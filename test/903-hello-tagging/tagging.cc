@@ -14,57 +14,27 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
 #include <vector>
 
+#include "android-base/logging.h"
 #include "jni.h"
-#include "ScopedLocalRef.h"
-#include "ScopedPrimitiveArray.h"
+#include "jvmti.h"
+#include "scoped_local_ref.h"
+#include "scoped_primitive_array.h"
 
-#include "art_method-inl.h"
-#include "base/logging.h"
-#include "openjdkjvmti/jvmti.h"
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
-#include "utils.h"
+// Test infrastructure
+#include "jvmti_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test903HelloTagging {
 
-extern "C" JNIEXPORT void JNICALL Java_Main_setTag(JNIEnv* env ATTRIBUTE_UNUSED,
-                                                   jclass,
-                                                   jobject obj,
-                                                   jlong tag) {
-  jvmtiError ret = jvmti_env->SetTag(obj, tag);
-  if (ret != JVMTI_ERROR_NONE) {
-    char* err;
-    jvmti_env->GetErrorName(ret, &err);
-    printf("Error setting tag: %s\n", err);
-    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
-  }
-}
-
-extern "C" JNIEXPORT jlong JNICALL Java_Main_getTag(JNIEnv* env ATTRIBUTE_UNUSED,
-                                                    jclass,
-                                                    jobject obj) {
-  jlong tag = 0;
-  jvmtiError ret = jvmti_env->GetTag(obj, &tag);
-  if (ret != JVMTI_ERROR_NONE) {
-    char* err;
-    jvmti_env->GetErrorName(ret, &err);
-    printf("Error getting tag: %s\n", err);
-    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
-  }
-  return tag;
-}
-
-extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getTaggedObjects(JNIEnv* env,
-                                                                     jclass,
-                                                                     jlongArray searchTags,
-                                                                     jboolean returnObjects,
-                                                                     jboolean returnTags) {
+extern "C" JNIEXPORT jobjectArray JNICALL Java_art_Test903_getTaggedObjects(
+    JNIEnv* env, jclass, jlongArray searchTags, jboolean returnObjects, jboolean returnTags) {
   ScopedLongArrayRO scoped_array(env);
   if (searchTags != nullptr) {
     scoped_array.reset(searchTags);
@@ -86,11 +56,7 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getTaggedObjects(JNIEnv* env
                                                  &result_count,
                                                  result_object_array_ptr,
                                                  result_tag_array_ptr);
-  if (ret != JVMTI_ERROR_NONE) {
-    char* err;
-    jvmti_env->GetErrorName(ret, &err);
-    printf("Failure running GetLoadedClasses: %s\n", err);
-    jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
+  if (JvmtiErrorToException(env, jvmti_env, ret)) {
     return nullptr;
   }
 
@@ -139,6 +105,61 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getTaggedObjects(JNIEnv* env
   return resultArray;
 }
 
+static jvmtiEnv* CreateJvmtiEnv(JNIEnv* env) {
+  JavaVM* jvm;
+  CHECK_EQ(0, env->GetJavaVM(&jvm));
+
+  jvmtiEnv* new_jvmti_env;
+  CHECK_EQ(0, jvm->GetEnv(reinterpret_cast<void**>(&new_jvmti_env), JVMTI_VERSION_1_0));
+
+  jvmtiCapabilities capa;
+  memset(&capa, 0, sizeof(jvmtiCapabilities));
+  capa.can_tag_objects = 1;
+  jvmtiError error = new_jvmti_env->AddCapabilities(&capa);
+  CHECK_EQ(JVMTI_ERROR_NONE, error);
+
+  return new_jvmti_env;
+}
+
+static void SetTag(jvmtiEnv* env, jobject obj, jlong tag) {
+  jvmtiError ret = env->SetTag(obj, tag);
+  CHECK_EQ(JVMTI_ERROR_NONE, ret);
+}
+
+static jlong GetTag(jvmtiEnv* env, jobject obj) {
+  jlong tag;
+  jvmtiError ret = env->GetTag(obj, &tag);
+  CHECK_EQ(JVMTI_ERROR_NONE, ret);
+  return tag;
+}
+
+extern "C" JNIEXPORT jlongArray JNICALL Java_art_Test903_testTagsInDifferentEnvs(
+    JNIEnv* env, jclass klass ATTRIBUTE_UNUSED, jobject obj, jlong base_tag, jint count) {
+  std::unique_ptr<jvmtiEnv*[]> envs = std::unique_ptr<jvmtiEnv*[]>(new jvmtiEnv*[count]);
+  envs[0] = jvmti_env;
+  for (int32_t i = 1; i != count; ++i) {
+    envs[i] = CreateJvmtiEnv(env);
+  }
+
+  for (int32_t i = 0; i != count; ++i) {
+    SetTag(envs[i], obj, base_tag + i);
+  }
+  std::unique_ptr<jlong[]> vals = std::unique_ptr<jlong[]>(new jlong[count]);
+  for (int32_t i = 0; i != count; ++i) {
+    vals[i] = GetTag(envs[i], obj);
+  }
+
+  for (int32_t i = 1; i != count; ++i) {
+    CHECK_EQ(JVMTI_ERROR_NONE, envs[i]->DisposeEnvironment());
+  }
+
+  jlongArray res = env->NewLongArray(count);
+  if (res == nullptr) {
+    return nullptr;
+  }
+  env->SetLongArrayRegion(res, 0, count, vals.get());
+  return res;
+}
+
 }  // namespace Test903HelloTagging
 }  // namespace art
-

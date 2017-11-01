@@ -20,17 +20,22 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/logging.h"
+#include "base/memory_tool.h"
 #include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
+#include "java_vm_ext.h"
 #include "jit_code_cache.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
-#include "offline_profiling_info.h"
+#include "profile_compilation_info.h"
 #include "profile_saver.h"
 #include "runtime.h"
 #include "runtime_options.h"
+#include "stack.h"
 #include "stack_map.h"
+#include "thread-inl.h"
 #include "thread_list.h"
 #include "utils.h"
 
@@ -41,6 +46,11 @@ static constexpr bool kEnableOnStackReplacement = true;
 // At what priority to schedule jit threads. 9 is the lowest foreground priority on device.
 static constexpr int kJitPoolThreadPthreadPriority = 9;
 
+// Different compilation threshold constants. These can be overridden on the command line.
+static constexpr size_t kJitDefaultCompileThreshold           = 10000;  // Non-debug default.
+static constexpr size_t kJitStressDefaultCompileThreshold     = 100;    // Fast-debug build.
+static constexpr size_t kJitSlowStressDefaultCompileThreshold = 2;      // Slow-debug build.
+
 // JIT compiler
 void* Jit::jit_library_handle_= nullptr;
 void* Jit::jit_compiler_handle_ = nullptr;
@@ -49,6 +59,11 @@ void (*Jit::jit_unload_)(void*) = nullptr;
 bool (*Jit::jit_compile_method_)(void*, ArtMethod*, Thread*, bool) = nullptr;
 void (*Jit::jit_types_loaded_)(void*, mirror::Class**, size_t count) = nullptr;
 bool Jit::generate_debug_info_ = false;
+
+struct StressModeHelper {
+  DECLARE_RUNTIME_DEBUG_FLAG(kSlowMode);
+};
+DEFINE_RUNTIME_DEBUG_FLAG(StressModeHelper, kSlowMode);
 
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
@@ -63,7 +78,16 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   jit_options->profile_saver_options_ =
       options.GetOrDefault(RuntimeArgumentMap::ProfileSaverOpts);
 
-  jit_options->compile_threshold_ = options.GetOrDefault(RuntimeArgumentMap::JITCompileThreshold);
+  if (options.Exists(RuntimeArgumentMap::JITCompileThreshold)) {
+    jit_options->compile_threshold_ = *options.Get(RuntimeArgumentMap::JITCompileThreshold);
+  } else {
+    jit_options->compile_threshold_ =
+        kIsDebugBuild
+            ? (StressModeHelper::kSlowMode
+                   ? kJitSlowStressDefaultCompileThreshold
+                   : kJitStressDefaultCompileThreshold)
+            : kJitDefaultCompileThreshold;
+  }
   if (jit_options->compile_threshold_ > std::numeric_limits<uint16_t>::max()) {
     LOG(FATAL) << "Method compilation threshold is above its internal limit.";
   }
@@ -120,9 +144,8 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   return jit_options;
 }
 
-bool Jit::ShouldUsePriorityThreadWeight() {
-  return Runtime::Current()->InJankPerceptibleProcessState()
-      && Thread::Current()->IsJitSensitiveThread();
+bool Jit::ShouldUsePriorityThreadWeight(Thread* self) {
+  return self->IsJitSensitiveThread() && Runtime::Current()->InJankPerceptibleProcessState();
 }
 
 void Jit::DumpInfo(std::ostream& os) {
@@ -145,7 +168,12 @@ Jit::Jit() : dump_info_on_shutdown_(false),
              cumulative_timings_("JIT timings"),
              memory_use_("Memory used for compilation", 16),
              lock_("JIT memory use lock"),
-             use_jit_compilation_(true) {}
+             use_jit_compilation_(true),
+             hot_method_threshold_(0),
+             warm_method_threshold_(0),
+             osr_method_threshold_(0),
+             priority_thread_weight_(0),
+             invoke_transition_weight_(0) {}
 
 Jit* Jit::Create(JitOptions* options, std::string* error_msg) {
   DCHECK(options->UseJitCompilation() || options->GetProfileSaverOptions().IsEnabled());
@@ -244,9 +272,12 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool osr) {
   DCHECK(Runtime::Current()->UseJitCompilation());
   DCHECK(!method->IsRuntimeMethod());
 
+  RuntimeCallbacks* cb = Runtime::Current()->GetRuntimeCallbacks();
   // Don't compile the method if it has breakpoints.
-  if (Dbg::IsDebuggerActive() && Dbg::MethodHasAnyBreakpoints(method)) {
-    VLOG(jit) << "JIT not compiling " << method->PrettyMethod() << " due to breakpoint";
+  if (cb->IsMethodBeingInspected(method) && !cb->IsMethodSafeToJit(method)) {
+    VLOG(jit) << "JIT not compiling " << method->PrettyMethod()
+              << " due to not being safe to jit according to runtime-callbacks. For example, there"
+              << " could be breakpoints in this method.";
     return false;
   }
 
@@ -289,7 +320,11 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool osr) {
 void Jit::CreateThreadPool() {
   // There is a DCHECK in the 'AddSamples' method to ensure the tread pool
   // is not null when we instrument.
-  thread_pool_.reset(new ThreadPool("Jit thread pool", 1));
+
+  // We need peers as we may report the JIT thread, e.g., in the debugger.
+  constexpr bool kJitPoolNeedsPeers = true;
+  thread_pool_.reset(new ThreadPool("Jit thread pool", 1, kJitPoolNeedsPeers));
+
   thread_pool_->SetPthreadPriority(kJitPoolThreadPthreadPriority);
   Start();
 }
@@ -298,34 +333,33 @@ void Jit::DeleteThreadPool() {
   Thread* self = Thread::Current();
   DCHECK(Runtime::Current()->IsShuttingDown(self));
   if (thread_pool_ != nullptr) {
-    ThreadPool* cache = nullptr;
+    std::unique_ptr<ThreadPool> pool;
     {
       ScopedSuspendAll ssa(__FUNCTION__);
       // Clear thread_pool_ field while the threads are suspended.
       // A mutator in the 'AddSamples' method will check against it.
-      cache = thread_pool_.release();
+      pool = std::move(thread_pool_);
     }
-    cache->StopWorkers(self);
-    cache->RemoveAllTasks(self);
+
+    // When running sanitized, let all tasks finish to not leak. Otherwise just clear the queue.
+    if (!RUNNING_ON_MEMORY_TOOL) {
+      pool->StopWorkers(self);
+      pool->RemoveAllTasks(self);
+    }
     // We could just suspend all threads, but we know those threads
     // will finish in a short period, so it's not worth adding a suspend logic
     // here. Besides, this is only done for shutdown.
-    cache->Wait(self, false, false);
-    delete cache;
+    pool->Wait(self, false, false);
   }
 }
 
 void Jit::StartProfileSaver(const std::string& filename,
-                            const std::vector<std::string>& code_paths,
-                            const std::string& foreign_dex_profile_path,
-                            const std::string& app_dir) {
+                            const std::vector<std::string>& code_paths) {
   if (profile_saver_options_.IsEnabled()) {
     ProfileSaver::Start(profile_saver_options_,
                         filename,
                         code_cache_.get(),
-                        code_paths,
-                        foreign_dex_profile_path,
-                        app_dir);
+                        code_paths);
   }
 }
 
@@ -347,6 +381,7 @@ Jit::~Jit() {
   DCHECK(!profile_saver_options_.IsEnabled() || !ProfileSaver::IsStarted());
   if (dump_info_on_shutdown_) {
     DumpInfo(LOG_STREAM(INFO));
+    Runtime::Current()->DumpDeoptimizations(LOG_STREAM(INFO));
   }
   DeleteThreadPool();
   if (jit_compiler_handle_ != nullptr) {
@@ -458,10 +493,10 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
       return false;
     }
 
-    // Before allowing the jump, make sure the debugger is not active to avoid jumping from
-    // interpreter to OSR while e.g. single stepping. Note that we could selectively disable
-    // OSR when single stepping, but that's currently hard to know at this point.
-    if (Dbg::IsDebuggerActive()) {
+    // Before allowing the jump, make sure no code is actively inspecting the method to avoid
+    // jumping from interpreter to OSR while e.g. single stepping. Note that we could selectively
+    // disable OSR when single stepping, but that's currently hard to know at this point.
+    if (Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method)) {
       return false;
     }
 
@@ -514,7 +549,7 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
       }
     }
 
-    native_pc = stack_map.GetNativePcOffset(encoding.stack_map_encoding) +
+    native_pc = stack_map.GetNativePcOffset(encoding.stack_map.encoding, kRuntimeISA) +
         osr_method->GetEntryPoint();
     VLOG(jit) << "Jumping to "
               << method_name
@@ -620,7 +655,7 @@ void Jit::AddSamples(Thread* self, ArtMethod* method, uint16_t count, bool with_
   DCHECK_LE(priority_thread_weight_, hot_method_threshold_);
 
   int32_t starting_count = method->GetCounter();
-  if (Jit::ShouldUsePriorityThreadWeight()) {
+  if (Jit::ShouldUsePriorityThreadWeight(self)) {
     count *= priority_thread_weight_;
   }
   int32_t new_count = starting_count + count;   // int32 here to avoid wrap-around;

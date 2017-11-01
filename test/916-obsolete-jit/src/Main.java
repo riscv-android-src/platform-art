@@ -14,6 +14,9 @@
  * limitations under the License.
  */
 
+
+import art.Redefinition;
+
 import java.util.function.Consumer;
 import java.lang.reflect.Method;
 import java.util.Base64;
@@ -113,15 +116,7 @@ public class Main {
   }
 
   public static void main(String[] args) {
-    System.loadLibrary(args[1]);
     doTest(new Transform(), new TestWatcher());
-  }
-
-  // TODO Workaround to (1) inability to ensure that current_method is not put into a register by
-  // the JIT and/or (2) inability to deoptimize frames near runtime functions.
-  // TODO Fix one/both of these issues.
-  public static void doCall(Runnable r) {
-      r.run();
   }
 
   private static boolean interpreting = true;
@@ -130,65 +125,36 @@ public class Main {
   public static void doTest(Transform t, TestWatcher w) {
     // Get the methods that need to be optimized.
     Method say_hi_method;
-    Method do_call_method;
     // Figure out if we can even JIT at all.
     final boolean has_jit = hasJit();
     try {
       say_hi_method = Transform.class.getDeclaredMethod(
           "sayHi", Runnable.class, Consumer.class);
-      do_call_method = Main.class.getDeclaredMethod("doCall", Runnable.class);
     } catch (Exception e) {
       System.out.println("Unable to find methods!");
-      e.printStackTrace();
+      e.printStackTrace(System.out);
       return;
     }
     // Makes sure the stack is the way we want it for the test and does the redefinition. It will
-    // set the retry boolean to true if we need to go around again due to a bad stack.
+    // set the retry boolean to true if the stack does not have a JIT-compiled sayHi entry. This can
+    // only happen if the method gets GC'd.
     Runnable do_redefinition = () -> {
-      if (has_jit &&
-          (Main.isInterpretedFunction(say_hi_method, true) ||
-           Main.isInterpretedFunction(do_call_method, false))) {
+      if (has_jit && Main.isInterpretedFunction(say_hi_method, true)) {
         // Try again. We are not running the right jitted methods/cannot redefine them now.
         retry = true;
       } else {
         // Actually do the redefinition. The stack looks good.
         retry = false;
         w.accept("transforming calling function");
-        doCommonClassRedefinition(Transform.class, CLASS_BYTES, DEX_BYTES);
+        Redefinition.doCommonClassRedefinition(Transform.class, CLASS_BYTES, DEX_BYTES);
       }
     };
-    // This does nothing.
-    Runnable noop = () -> {};
     // This just prints something out to show we are running the Runnable.
     Runnable say_nothing = () -> { w.accept("Not doing anything here"); };
-    // This checks to see if we have jitted the methods we are testing.
-    Runnable check_interpreting = () -> {
-      // TODO remove the second check when we remove the doCall function. We need to check that
-      // both of these functions aren't being interpreted because if sayHi is the test doesn't do
-      // anything and if doCall is then there will be a runtime call right above the sayHi
-      // function preventing sayHi from being deoptimized.
-      interpreting = has_jit && (Main.isInterpretedFunction(say_hi_method, true) ||
-                                 Main.isInterpretedFunction(do_call_method, false));
-    };
     do {
-      w.clear();
-      // Wait for the methods to be jitted
-      long j = 0;
-      do {
-        for (int i = 0; i < 10000; i++) {
-          t.sayHi(noop, w);
-          j++;
-          // Clear so that we won't OOM if we go around a few times.
-          w.clear();
-        }
-        t.sayHi(check_interpreting, w);
-        if (j >= 1000000) {
-          System.out.println("FAIL: Could not make sayHi be Jitted!");
-          return;
-        }
-        j++;
-      } while(interpreting);
-      // Clear output. Now we try for real.
+      // Run ensureJitCompiled here since it might get GCd
+      ensureJitCompiled(Transform.class, "sayHi");
+      // Clear output.
       w.clear();
       // Try and redefine.
       t.sayHi(say_nothing, w);
@@ -203,8 +169,5 @@ public class Main {
 
   private static native boolean isInterpretedFunction(Method m, boolean require_deoptimizable);
 
-  // Transforms the class
-  private static native void doCommonClassRedefinition(Class<?> target,
-                                                       byte[] classfile,
-                                                       byte[] dexfile);
+  private static native void ensureJitCompiled(Class c, String name);
 }

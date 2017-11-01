@@ -18,9 +18,11 @@
 #include <vector>
 
 #include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
+#include "mirror/class-inl.h"
 #include "mirror/field-inl.h"
 #include "mirror/method.h"
 #include "scoped_thread_state_change-inl.h"
@@ -62,21 +64,27 @@ class ProxyTest : public CommonCompilerTest {
     jsize array_index = 0;
     // Fill the method array
     DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
-    ArtMethod* method = javaLangObject->FindDeclaredVirtualMethod(
+    ArtMethod* method = javaLangObject->FindClassMethod(
         "equals", "(Ljava/lang/Object;)Z", kRuntimePointerSize);
     CHECK(method != nullptr);
+    CHECK(!method->IsDirect());
+    CHECK(method->GetDeclaringClass() == javaLangObject);
     DCHECK(!Runtime::Current()->IsActiveTransaction());
     soa.Env()->SetObjectArrayElement(
         proxyClassMethods, array_index++, soa.AddLocalReference<jobject>(
             mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), method)));
-    method = javaLangObject->FindDeclaredVirtualMethod("hashCode", "()I", kRuntimePointerSize);
+    method = javaLangObject->FindClassMethod("hashCode", "()I", kRuntimePointerSize);
     CHECK(method != nullptr);
+    CHECK(!method->IsDirect());
+    CHECK(method->GetDeclaringClass() == javaLangObject);
     soa.Env()->SetObjectArrayElement(
         proxyClassMethods, array_index++, soa.AddLocalReference<jobject>(
             mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), method)));
-    method = javaLangObject->FindDeclaredVirtualMethod(
+    method = javaLangObject->FindClassMethod(
         "toString", "()Ljava/lang/String;", kRuntimePointerSize);
     CHECK(method != nullptr);
+    CHECK(!method->IsDirect());
+    CHECK(method->GetDeclaringClass() == javaLangObject);
     soa.Env()->SetObjectArrayElement(
         proxyClassMethods, array_index++, soa.AddLocalReference<jobject>(
             mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), method)));
@@ -114,8 +122,8 @@ TEST_F(ProxyTest, ProxyClassHelper) {
       class_linker_->FindClass(soa.Self(), "LInterfaces$I;", class_loader)));
   Handle<mirror::Class> J(hs.NewHandle(
       class_linker_->FindClass(soa.Self(), "LInterfaces$J;", class_loader)));
-  ASSERT_TRUE(I.Get() != nullptr);
-  ASSERT_TRUE(J.Get() != nullptr);
+  ASSERT_TRUE(I != nullptr);
+  ASSERT_TRUE(J != nullptr);
 
   std::vector<mirror::Class*> interfaces;
   interfaces.push_back(I.Get());
@@ -123,7 +131,7 @@ TEST_F(ProxyTest, ProxyClassHelper) {
   Handle<mirror::Class> proxy_class(hs.NewHandle(
       GenerateProxyClass(soa, jclass_loader, "$Proxy1234", interfaces)));
   interfaces.clear();  // Don't least possibly stale objects in the array as good practice.
-  ASSERT_TRUE(proxy_class.Get() != nullptr);
+  ASSERT_TRUE(proxy_class != nullptr);
   ASSERT_TRUE(proxy_class->IsProxyClass());
   ASSERT_TRUE(proxy_class->IsInitialized());
 
@@ -148,8 +156,8 @@ TEST_F(ProxyTest, ProxyFieldHelper) {
       class_linker_->FindClass(soa.Self(), "LInterfaces$I;", class_loader)));
   Handle<mirror::Class> J(hs.NewHandle(
       class_linker_->FindClass(soa.Self(), "LInterfaces$J;", class_loader)));
-  ASSERT_TRUE(I.Get() != nullptr);
-  ASSERT_TRUE(J.Get() != nullptr);
+  ASSERT_TRUE(I != nullptr);
+  ASSERT_TRUE(J != nullptr);
 
   Handle<mirror::Class> proxyClass;
   {
@@ -159,7 +167,7 @@ TEST_F(ProxyTest, ProxyFieldHelper) {
     proxyClass = hs.NewHandle(GenerateProxyClass(soa, jclass_loader, "$Proxy1234", interfaces));
   }
 
-  ASSERT_TRUE(proxyClass.Get() != nullptr);
+  ASSERT_TRUE(proxyClass != nullptr);
   ASSERT_TRUE(proxyClass->IsProxyClass());
   ASSERT_TRUE(proxyClass->IsInitialized());
 
@@ -171,10 +179,10 @@ TEST_F(ProxyTest, ProxyFieldHelper) {
 
   Handle<mirror::Class> interfacesFieldClass(
       hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/Class;")));
-  ASSERT_TRUE(interfacesFieldClass.Get() != nullptr);
+  ASSERT_TRUE(interfacesFieldClass != nullptr);
   Handle<mirror::Class> throwsFieldClass(
       hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[[Ljava/lang/Class;")));
-  ASSERT_TRUE(throwsFieldClass.Get() != nullptr);
+  ASSERT_TRUE(throwsFieldClass != nullptr);
 
   // Test "Class[] interfaces" field.
   ArtField* field = &static_fields->At(0);
@@ -208,10 +216,10 @@ TEST_F(ProxyTest, CheckArtMirrorFieldsOfProxyStaticFields) {
     proxyClass1 = hs.NewHandle(GenerateProxyClass(soa, jclass_loader, "$Proxy1", interfaces));
   }
 
-  ASSERT_TRUE(proxyClass0.Get() != nullptr);
+  ASSERT_TRUE(proxyClass0 != nullptr);
   ASSERT_TRUE(proxyClass0->IsProxyClass());
   ASSERT_TRUE(proxyClass0->IsInitialized());
-  ASSERT_TRUE(proxyClass1.Get() != nullptr);
+  ASSERT_TRUE(proxyClass1 != nullptr);
   ASSERT_TRUE(proxyClass1->IsProxyClass());
   ASSERT_TRUE(proxyClass1->IsInitialized());
 

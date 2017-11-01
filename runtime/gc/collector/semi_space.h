@@ -23,11 +23,10 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "garbage_collector.h"
-#include "gc_root.h"
 #include "gc/accounting/heap_bitmap.h"
+#include "gc_root.h"
 #include "immune_spaces.h"
 #include "mirror/object_reference.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 
 namespace art {
@@ -98,19 +97,20 @@ class SemiSpace : public GarbageCollector {
   // Find the default mark bitmap.
   void FindDefaultMarkBitmap();
 
-  // Updates obj_ptr if the object has moved.
-  template<bool kPoisonReferences>
-  void MarkObject(mirror::ObjectReference<kPoisonReferences, mirror::Object>* obj_ptr)
+  // Updates obj_ptr if the object has moved. Takes either an ObjectReference or a HeapReference.
+  template<typename CompressedReferenceType>
+  void MarkObject(CompressedReferenceType* obj_ptr)
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
 
-  template<bool kPoisonReferences>
-  void MarkObjectIfNotInToSpace(mirror::ObjectReference<kPoisonReferences, mirror::Object>* obj_ptr)
+  template<typename CompressedReferenceType>
+  void MarkObjectIfNotInToSpace(CompressedReferenceType* obj_ptr)
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
 
   virtual mirror::Object* MarkObject(mirror::Object* root) OVERRIDE
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
 
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr) OVERRIDE
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr,
+                                 bool do_atomic_update) OVERRIDE
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
 
   void ScanObject(mirror::Object* obj)

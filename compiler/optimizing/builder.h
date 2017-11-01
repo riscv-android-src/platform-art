@@ -17,87 +17,52 @@
 #ifndef ART_COMPILER_OPTIMIZING_BUILDER_H_
 #define ART_COMPILER_OPTIMIZING_BUILDER_H_
 
-#include "base/arena_containers.h"
 #include "base/arena_object.h"
-#include "block_builder.h"
-#include "dex_file.h"
 #include "dex_file-inl.h"
+#include "dex_file.h"
 #include "driver/compiler_driver.h"
 #include "driver/dex_compilation_unit.h"
-#include "instruction_builder.h"
-#include "optimizing_compiler_stats.h"
-#include "primitive.h"
 #include "nodes.h"
-#include "ssa_builder.h"
 
 namespace art {
+
+class CodeGenerator;
+class OptimizingCompilerStats;
 
 class HGraphBuilder : public ValueObject {
  public:
   HGraphBuilder(HGraph* graph,
-                DexCompilationUnit* dex_compilation_unit,
-                const DexCompilationUnit* const outer_compilation_unit,
-                const DexFile* dex_file,
-                const DexFile::CodeItem& code_item,
+                const DexCompilationUnit* dex_compilation_unit,
+                const DexCompilationUnit* outer_compilation_unit,
                 CompilerDriver* driver,
+                CodeGenerator* code_generator,
                 OptimizingCompilerStats* compiler_stats,
                 const uint8_t* interpreter_metadata,
-                Handle<mirror::DexCache> dex_cache,
-                VariableSizedHandleScope* handles)
-      : graph_(graph),
-        dex_file_(dex_file),
-        code_item_(code_item),
-        dex_compilation_unit_(dex_compilation_unit),
-        compiler_driver_(driver),
-        compilation_stats_(compiler_stats),
-        block_builder_(graph, dex_file, code_item),
-        ssa_builder_(graph, dex_compilation_unit->GetDexCache(), handles),
-        instruction_builder_(graph,
-                             &block_builder_,
-                             &ssa_builder_,
-                             dex_file,
-                             code_item_,
-                             Primitive::GetType(dex_compilation_unit_->GetShorty()[0]),
-                             dex_compilation_unit,
-                             outer_compilation_unit,
-                             driver,
-                             interpreter_metadata,
-                             compiler_stats,
-                             dex_cache) {}
+                VariableSizedHandleScope* handles);
 
   // Only for unit testing.
   HGraphBuilder(HGraph* graph,
+                const DexCompilationUnit* dex_compilation_unit,
                 const DexFile::CodeItem& code_item,
                 VariableSizedHandleScope* handles,
-                Primitive::Type return_type = Primitive::kPrimInt)
+                DataType::Type return_type = DataType::Type::kInt32)
       : graph_(graph),
-        dex_file_(nullptr),
+        dex_file_(dex_compilation_unit->GetDexFile()),
         code_item_(code_item),
-        dex_compilation_unit_(nullptr),
+        dex_compilation_unit_(dex_compilation_unit),
+        outer_compilation_unit_(nullptr),
         compiler_driver_(nullptr),
-        null_dex_cache_(),
+        code_generator_(nullptr),
         compilation_stats_(nullptr),
-        block_builder_(graph, nullptr, code_item),
-        ssa_builder_(graph, null_dex_cache_, handles),
-        instruction_builder_(graph,
-                             &block_builder_,
-                             &ssa_builder_,
-                             /* dex_file */ nullptr,
-                             code_item_,
-                             return_type,
-                             /* dex_compilation_unit */ nullptr,
-                             /* outer_compilation_unit */ nullptr,
-                             /* compiler_driver */ nullptr,
-                             /* interpreter_metadata */ nullptr,
-                             /* compiler_stats */ nullptr,
-                             null_dex_cache_) {}
+        interpreter_metadata_(nullptr),
+        handles_(handles),
+        return_type_(return_type) {}
 
   GraphAnalysisResult BuildGraph();
 
   static constexpr const char* kBuilderPassName = "builder";
 
  private:
-  void MaybeRecordStat(MethodCompilationStat compilation_stat);
   bool SkipCompilation(size_t number_of_branches);
 
   HGraph* const graph_;
@@ -106,17 +71,18 @@ class HGraphBuilder : public ValueObject {
 
   // The compilation unit of the current method being compiled. Note that
   // it can be an inlined method.
-  DexCompilationUnit* const dex_compilation_unit_;
+  const DexCompilationUnit* const dex_compilation_unit_;
+
+  // The compilation unit of the enclosing method being compiled.
+  const DexCompilationUnit* const outer_compilation_unit_;
 
   CompilerDriver* const compiler_driver_;
+  CodeGenerator* const code_generator_;
 
-  ScopedNullHandle<mirror::DexCache> null_dex_cache_;
-
-  OptimizingCompilerStats* compilation_stats_;
-
-  HBasicBlockBuilder block_builder_;
-  SsaBuilder ssa_builder_;
-  HInstructionBuilder instruction_builder_;
+  OptimizingCompilerStats* const compilation_stats_;
+  const uint8_t* const interpreter_metadata_;
+  VariableSizedHandleScope* const handles_;
+  const DataType::Type return_type_;
 
   DISALLOW_COPY_AND_ASSIGN(HGraphBuilder);
 };

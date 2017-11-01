@@ -18,6 +18,7 @@
 
 #include "android-base/stringprintf.h"
 
+#include "base/strlcpy.h"
 #include "java_vm_ext.h"
 #include "runtime.h"
 
@@ -57,7 +58,7 @@ Agent::LoadError Agent::DoLoadHelper(bool attaching,
   }
   // Need to let the function fiddle with the array.
   std::unique_ptr<char[]> copied_args(new char[args_.size() + 1]);
-  strcpy(copied_args.get(), args_.c_str());
+  strlcpy(copied_args.get(), args_.c_str(), args_.size() + 1);
   // TODO Need to do some checks that we are at a good spot etc.
   *call_res = callback(Runtime::Current()->GetJavaVM(),
                        copied_args.get(),
@@ -70,6 +71,11 @@ Agent::LoadError Agent::DoLoadHelper(bool attaching,
   } else {
     return kNoError;
   }
+}
+
+void* Agent::FindSymbol(const std::string& name) const {
+  CHECK(IsStarted()) << "Cannot find symbols in an unloaded agent library " << this;
+  return dlsym(dlopen_handle_, name.c_str());
 }
 
 Agent::LoadError Agent::DoDlOpen(/*out*/std::string* error_msg) {
@@ -86,18 +92,15 @@ Agent::LoadError Agent::DoDlOpen(/*out*/std::string* error_msg) {
     return kLoadingError;
   }
 
-  onload_ = reinterpret_cast<AgentOnLoadFunction>(dlsym(dlopen_handle_,
-                                                        AGENT_ON_LOAD_FUNCTION_NAME));
+  onload_ = reinterpret_cast<AgentOnLoadFunction>(FindSymbol(AGENT_ON_LOAD_FUNCTION_NAME));
   if (onload_ == nullptr) {
     VLOG(agents) << "Unable to find 'Agent_OnLoad' symbol in " << this;
   }
-  onattach_ = reinterpret_cast<AgentOnLoadFunction>(dlsym(dlopen_handle_,
-                                                            AGENT_ON_ATTACH_FUNCTION_NAME));
+  onattach_ = reinterpret_cast<AgentOnLoadFunction>(FindSymbol(AGENT_ON_ATTACH_FUNCTION_NAME));
   if (onattach_ == nullptr) {
     VLOG(agents) << "Unable to find 'Agent_OnAttach' symbol in " << this;
   }
-  onunload_= reinterpret_cast<AgentOnUnloadFunction>(dlsym(dlopen_handle_,
-                                                           AGENT_ON_UNLOAD_FUNCTION_NAME));
+  onunload_= reinterpret_cast<AgentOnUnloadFunction>(FindSymbol(AGENT_ON_UNLOAD_FUNCTION_NAME));
   if (onunload_ == nullptr) {
     VLOG(agents) << "Unable to find 'Agent_OnUnload' symbol in " << this;
   }
@@ -110,7 +113,8 @@ void Agent::Unload() {
     if (onunload_ != nullptr) {
       onunload_(Runtime::Current()->GetJavaVM());
     }
-    dlclose(dlopen_handle_);
+    // Don't actually dlclose since some agents assume they will never get unloaded. Since this only
+    // happens when the runtime is shutting down anyway this isn't a big deal.
     dlopen_handle_ = nullptr;
     onload_ = nullptr;
     onattach_ = nullptr;
@@ -120,7 +124,7 @@ void Agent::Unload() {
   }
 }
 
-Agent::Agent(std::string arg)
+Agent::Agent(const std::string& arg)
     : dlopen_handle_(nullptr),
       onload_(nullptr),
       onattach_(nullptr),

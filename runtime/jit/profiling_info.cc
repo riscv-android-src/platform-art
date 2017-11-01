@@ -43,15 +43,12 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
   // instructions we are interested in profiling.
   DCHECK(!method->IsNative());
 
-  const DexFile::CodeItem& code_item = *method->GetCodeItem();
-  const uint16_t* code_ptr = code_item.insns_;
-  const uint16_t* code_end = code_item.insns_ + code_item.insns_size_in_code_units_;
-
-  uint32_t dex_pc = 0;
   std::vector<uint32_t> entries;
-  while (code_ptr < code_end) {
-    const Instruction& instruction = *Instruction::At(code_ptr);
-    switch (instruction.Opcode()) {
+
+  IterationRange<DexInstructionIterator> instructions = method->GetCodeItem()->Instructions();
+  for (auto inst = instructions.begin(); inst != instructions.end(); ++inst) {
+    const uint32_t dex_pc = inst.GetDexPC(instructions.begin());
+    switch (inst->Opcode()) {
       case Instruction::INVOKE_VIRTUAL:
       case Instruction::INVOKE_VIRTUAL_RANGE:
       case Instruction::INVOKE_VIRTUAL_QUICK:
@@ -64,8 +61,6 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
       default:
         break;
     }
-    dex_pc += instruction.SizeInCodeUnits();
-    code_ptr += instruction.SizeInCodeUnits();
   }
 
   // We always create a `ProfilingInfo` object, even if there is no instruction we are
@@ -77,28 +72,30 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
 }
 
 InlineCache* ProfilingInfo::GetInlineCache(uint32_t dex_pc) {
-  InlineCache* cache = nullptr;
   // TODO: binary search if array is too long.
   for (size_t i = 0; i < number_of_inline_caches_; ++i) {
     if (cache_[i].dex_pc_ == dex_pc) {
-      cache = &cache_[i];
-      break;
+      return &cache_[i];
     }
   }
-  return cache;
+  LOG(FATAL) << "No inline cache found for "  << ArtMethod::PrettyMethod(method_) << "@" << dex_pc;
+  UNREACHABLE();
 }
 
 void ProfilingInfo::AddInvokeInfo(uint32_t dex_pc, mirror::Class* cls) {
   InlineCache* cache = GetInlineCache(dex_pc);
-  CHECK(cache != nullptr) << ArtMethod::PrettyMethod(method_) << "@" << dex_pc;
   for (size_t i = 0; i < InlineCache::kIndividualCacheSize; ++i) {
-    mirror::Class* existing = cache->classes_[i].Read();
-    if (existing == cls) {
+    mirror::Class* existing = cache->classes_[i].Read<kWithoutReadBarrier>();
+    mirror::Class* marked = ReadBarrier::IsMarked(existing);
+    if (marked == cls) {
       // Receiver type is already in the cache, nothing else to do.
       return;
-    } else if (existing == nullptr) {
+    } else if (marked == nullptr) {
       // Cache entry is empty, try to put `cls` in it.
-      GcRoot<mirror::Class> expected_root(nullptr);
+      // Note: it's ok to spin on 'existing' here: if 'existing' is not null, that means
+      // it is a stalled heap address, which will only be cleared during SweepSystemWeaks,
+      // *after* this thread hits a suspend point.
+      GcRoot<mirror::Class> expected_root(existing);
       GcRoot<mirror::Class> desired_root(cls);
       if (!reinterpret_cast<Atomic<GcRoot<mirror::Class>>*>(&cache->classes_[i])->
               CompareExchangeStrongSequentiallyConsistent(expected_root, desired_root)) {

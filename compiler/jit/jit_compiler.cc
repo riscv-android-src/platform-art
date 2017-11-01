@@ -78,47 +78,27 @@ extern "C" void jit_types_loaded(void* handle, mirror::Class** types, size_t cou
   }
 }
 
-// Callers of this method assume it has NO_RETURN.
-NO_RETURN static void Usage(const char* fmt, ...) {
-  va_list ap;
-  va_start(ap, fmt);
-  std::string error;
-  android::base::StringAppendV(&error, fmt, ap);
-  LOG(FATAL) << error;
-  va_end(ap);
-  exit(EXIT_FAILURE);
-}
-
 JitCompiler::JitCompiler() {
-  compiler_options_.reset(new CompilerOptions(
-      CompilerFilter::kDefaultCompilerFilter,
-      CompilerOptions::kDefaultHugeMethodThreshold,
-      CompilerOptions::kDefaultLargeMethodThreshold,
-      CompilerOptions::kDefaultSmallMethodThreshold,
-      CompilerOptions::kDefaultTinyMethodThreshold,
-      CompilerOptions::kDefaultNumDexMethodsThreshold,
-      CompilerOptions::kDefaultInlineDepthLimit,
-      CompilerOptions::kDefaultInlineMaxCodeUnits,
-      /* no_inline_from */ nullptr,
-      /* include_patch_information */ false,
-      CompilerOptions::kDefaultTopKProfileThreshold,
-      Runtime::Current()->IsDebuggable(),
-      CompilerOptions::kDefaultGenerateDebugInfo,
-      /* implicit_null_checks */ true,
-      /* implicit_so_checks */ true,
-      /* implicit_suspend_checks */ false,
-      /* pic */ true,  // TODO: Support non-PIC in optimizing.
-      /* verbose_methods */ nullptr,
-      /* init_failure_output */ nullptr,
-      /* abort_on_hard_verifier_failure */ false,
-      /* dump_cfg_file_name */ "",
-      /* dump_cfg_append */ false,
-      /* force_determinism */ false,
-      RegisterAllocator::kRegisterAllocatorDefault,
-      /* passes_to_run */ nullptr));
-  for (const std::string& argument : Runtime::Current()->GetCompilerOptions()) {
-    compiler_options_->ParseCompilerOption(argument, Usage);
+  compiler_options_.reset(new CompilerOptions());
+  {
+    std::string error_msg;
+    if (!compiler_options_->ParseCompilerOptions(Runtime::Current()->GetCompilerOptions(),
+                                                 true /* ignore_unrecognized */,
+                                                 &error_msg)) {
+      LOG(FATAL) << error_msg;
+      UNREACHABLE();
+    }
   }
+  // JIT is never PIC, no matter what the runtime compiler options specify.
+  compiler_options_->SetNonPic();
+
+  // Set debuggability based on the runtime value.
+  compiler_options_->SetDebuggable(Runtime::Current()->IsJavaDebuggable());
+
+  // Special case max code units for inlining, whose default is "unset" (implictly
+  // meaning no limit).
+  compiler_options_->SetInlineMaxCodeUnits(CompilerOptions::kDefaultInlineMaxCodeUnits);
+
   const InstructionSet instruction_set = kRuntimeISA;
   for (const StringPiece option : Runtime::Current()->GetCompilerOptions()) {
     VLOG(compiler) << "JIT compiler option " << option;
@@ -178,10 +158,6 @@ JitCompiler::JitCompiler() {
     jit_logger_.reset(new JitLogger());
     jit_logger_->OpenLog();
   }
-
-  size_t inline_depth_limit = compiler_driver_->GetCompilerOptions().GetInlineDepthLimit();
-  DCHECK_LT(thread_count * inline_depth_limit, std::numeric_limits<uint16_t>::max())
-      << "ProfilingInfo's inline counter can potentially overflow";
 }
 
 JitCompiler::~JitCompiler() {
@@ -192,27 +168,20 @@ JitCompiler::~JitCompiler() {
 
 bool JitCompiler::CompileMethod(Thread* self, ArtMethod* method, bool osr) {
   DCHECK(!method->IsProxyMethod());
-  TimingLogger logger("JIT compiler timing logger", true, VLOG_IS_ON(jit));
-  StackHandleScope<2> hs(self);
+  DCHECK(method->GetDeclaringClass()->IsResolved());
+
+  TimingLogger logger(
+      "JIT compiler timing logger", true, VLOG_IS_ON(jit), TimingLogger::TimingKind::kThreadCpu);
   self->AssertNoPendingException();
   Runtime* runtime = Runtime::Current();
-
-  // Ensure the class is initialized.
-  Handle<mirror::Class> h_class(hs.NewHandle(method->GetDeclaringClass()));
-  if (!runtime->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
-    VLOG(jit) << "JIT failed to initialize " << method->PrettyMethod();
-    return false;
-  }
 
   // Do the compilation.
   bool success = false;
   {
     TimingLogger::ScopedTiming t2("Compiling", &logger);
     JitCodeCache* const code_cache = runtime->GetJit()->GetCodeCache();
-    success = compiler_driver_->GetCompiler()->JitCompile(self, code_cache, method, osr);
-    if (success && (jit_logger_ != nullptr)) {
-      jit_logger_->WriteLog(code_cache, method);
-    }
+    success = compiler_driver_->GetCompiler()->JitCompile(
+        self, code_cache, method, osr, jit_logger_.get());
   }
 
   // Trim maps to reduce memory usage.

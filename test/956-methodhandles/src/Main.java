@@ -15,6 +15,7 @@
  */
 
 import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandleInfo;
 import java.lang.invoke.MethodHandles;
 import java.lang.invoke.MethodHandles.Lookup;
 import java.lang.invoke.MethodType;
@@ -76,6 +77,8 @@ public class Main {
     testStringConstructors();
     testReturnValueConversions();
     testVariableArity();
+    testVariableArity_MethodHandles_bind();
+    testRevealDirect();
   }
 
   public static void testfindSpecial_invokeSuperBehaviour() throws Throwable {
@@ -180,13 +183,21 @@ public class Main {
     public String bar();
   }
 
-  public static class BarSuper {
+  public static abstract class BarAbstractSuper {
+    public abstract String abstractSuperPublicMethod();
+  }
+
+  public static class BarSuper extends BarAbstractSuper {
     public String superPublicMethod() {
       return "superPublicMethod";
     }
 
-    public String superProtectedMethod() {
+    protected String superProtectedMethod() {
       return "superProtectedMethod";
+    }
+
+    public String abstractSuperPublicMethod() {
+      return "abstractSuperPublicMethod";
     }
 
     String superPackageMethod() {
@@ -285,15 +296,19 @@ public class Main {
       System.out.println("Unexpected return value for BarImpl#bar: " + str);
     }
 
-    // TODO(narayan): Fix this case, we're using the wrong ArtMethod for the
-    // invoke resulting in a failing check in the interpreter.
-    //
-    // mh = MethodHandles.lookup().findVirtual(Bar.class, "bar",
-    //    MethodType.methodType(String.class));
-    // str = (String) mh.invoke(new BarImpl());
-    // if (!"bar".equals(str)) {
-    //   System.out.println("Unexpected return value for BarImpl#bar: " + str);
-    // }
+    mh = MethodHandles.lookup().findVirtual(Bar.class, "bar",
+                                            MethodType.methodType(String.class));
+    str = (String) mh.invoke(new BarImpl());
+    if (!"bar".equals(str)) {
+      System.out.println("Unexpected return value for BarImpl#bar: " + str);
+    }
+
+    mh = MethodHandles.lookup().findVirtual(BarAbstractSuper.class, "abstractSuperPublicMethod",
+        MethodType.methodType(String.class));
+    str = (String) mh.invoke(new BarImpl());
+    if (!"abstractSuperPublicMethod".equals(str)) {
+      System.out.println("Unexpected return value for BarImpl#abstractSuperPublicMethod: " + str);
+    }
 
     // We should also be able to lookup public / protected / package methods in
     // the super class, given sufficient access privileges.
@@ -382,6 +397,10 @@ public class Main {
 
     public String publicMethod() {
       return "publicMethod";
+    }
+
+    public String publicVarArgsMethod(String... args) {
+      return "publicVarArgsMethod";
     }
   }
 
@@ -668,6 +687,13 @@ public class Main {
         MethodHandle foo = MethodHandles.lookup().findConstructor(
             Integer.class, MethodType.methodType(Integer.class, Integer.class));
         fail("Unexpected success for non-void type for findConstructor");
+    } catch (NoSuchMethodException e) {}
+
+    // Array class constructor.
+    try {
+        MethodHandle foo = MethodHandles.lookup().findConstructor(
+            Object[].class, MethodType.methodType(void.class));
+        fail("Unexpected success for array class type for findConstructor");
     } catch (NoSuchMethodException e) {}
   }
 
@@ -1465,5 +1491,137 @@ public class Main {
       mh.invoke(true, true, 0);
       fail();
     } catch (WrongMethodTypeException e) {}
+  }
+
+  // The same tests as the above, except that we use use MethodHandles.bind instead of
+  // MethodHandle.bindTo.
+  public static void testVariableArity_MethodHandles_bind() throws Throwable {
+    VariableArityTester vat = new VariableArityTester();
+    MethodHandle mh = MethodHandles.lookup().bind(vat, "update",
+            MethodType.methodType(String.class, boolean[].class));
+    assertTrue(mh.isVarargsCollector());
+
+    assertEquals("[]", mh.invoke());
+    assertEquals("[true, false, true]", mh.invoke(true, false, true));
+    assertEquals("[true, false, true]", mh.invoke(new boolean[] { true, false, true}));
+    assertEquals("[false, true]", mh.invoke(Boolean.valueOf(false), Boolean.valueOf(true)));
+
+    try {
+      mh.invoke(true, true, 0);
+      fail();
+    } catch (WrongMethodTypeException e) {}
+  }
+
+  public static void testRevealDirect() throws Throwable {
+    // Test with a virtual method :
+    MethodType type = MethodType.methodType(String.class);
+    MethodHandle handle = MethodHandles.lookup().findVirtual(
+        UnreflectTester.class, "publicMethod", type);
+
+    // Comparisons with an equivalent member obtained via reflection :
+    MethodHandleInfo info = MethodHandles.lookup().revealDirect(handle);
+    Method meth = UnreflectTester.class.getMethod("publicMethod");
+
+    assertEquals(MethodHandleInfo.REF_invokeVirtual, info.getReferenceKind());
+    assertEquals("publicMethod", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertFalse(info.isVarArgs());
+    assertEquals(meth, info.reflectAs(Method.class, MethodHandles.lookup()));
+    assertEquals(type, info.getMethodType());
+
+    // Resolution via a public lookup should fail because the method in question
+    // isn't public.
+    try {
+      info.reflectAs(Method.class, MethodHandles.publicLookup());
+      fail();
+    } catch (IllegalArgumentException expected) {
+    }
+
+    // Test with a static method :
+    handle = MethodHandles.lookup().findStatic(UnreflectTester.class,
+        "publicStaticMethod",
+        MethodType.methodType(String.class));
+
+    info = MethodHandles.lookup().revealDirect(handle);
+    meth = UnreflectTester.class.getMethod("publicStaticMethod");
+    assertEquals(MethodHandleInfo.REF_invokeStatic, info.getReferenceKind());
+    assertEquals("publicStaticMethod", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertFalse(info.isVarArgs());
+    assertEquals(meth, info.reflectAs(Method.class, MethodHandles.lookup()));
+    assertEquals(type, info.getMethodType());
+
+    // Test with a var-args method :
+    type = MethodType.methodType(String.class, String[].class);
+    handle = MethodHandles.lookup().findVirtual(UnreflectTester.class,
+        "publicVarArgsMethod", type);
+
+    info = MethodHandles.lookup().revealDirect(handle);
+    meth = UnreflectTester.class.getMethod("publicVarArgsMethod", String[].class);
+    assertEquals(MethodHandleInfo.REF_invokeVirtual, info.getReferenceKind());
+    assertEquals("publicVarArgsMethod", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertTrue(info.isVarArgs());
+    assertEquals(meth, info.reflectAs(Method.class, MethodHandles.lookup()));
+    assertEquals(type, info.getMethodType());
+
+    // Test with a constructor :
+    Constructor cons = UnreflectTester.class.getConstructor(String.class, boolean.class);
+    type = MethodType.methodType(void.class, String.class, boolean.class);
+    handle = MethodHandles.lookup().findConstructor(UnreflectTester.class, type);
+
+    info = MethodHandles.lookup().revealDirect(handle);
+    assertEquals(MethodHandleInfo.REF_newInvokeSpecial, info.getReferenceKind());
+    assertEquals("<init>", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertFalse(info.isVarArgs());
+    assertEquals(cons, info.reflectAs(Constructor.class, MethodHandles.lookup()));
+    assertEquals(type, info.getMethodType());
+
+    // Test with a static field :
+    Field field = UnreflectTester.class.getField("publicStaticField");
+
+    handle = MethodHandles.lookup().findStaticSetter(
+        UnreflectTester.class, "publicStaticField", String.class);
+
+    info = MethodHandles.lookup().revealDirect(handle);
+    assertEquals(MethodHandleInfo.REF_putStatic, info.getReferenceKind());
+    assertEquals("publicStaticField", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertFalse(info.isVarArgs());
+    assertEquals(field, info.reflectAs(Field.class, MethodHandles.lookup()));
+    assertEquals(MethodType.methodType(void.class, String.class), info.getMethodType());
+
+    // Test with a setter on the same field, the type of the handle should change
+    // but everything else must remain the same.
+    handle = MethodHandles.lookup().findStaticGetter(
+        UnreflectTester.class, "publicStaticField", String.class);
+    info = MethodHandles.lookup().revealDirect(handle);
+    assertEquals(MethodHandleInfo.REF_getStatic, info.getReferenceKind());
+    assertEquals(field, info.reflectAs(Field.class, MethodHandles.lookup()));
+    assertEquals(MethodType.methodType(String.class), info.getMethodType());
+
+    // Test with an instance field :
+    field = UnreflectTester.class.getField("publicField");
+
+    handle = MethodHandles.lookup().findSetter(
+        UnreflectTester.class, "publicField", String.class);
+
+    info = MethodHandles.lookup().revealDirect(handle);
+    assertEquals(MethodHandleInfo.REF_putField, info.getReferenceKind());
+    assertEquals("publicField", info.getName());
+    assertTrue(UnreflectTester.class == info.getDeclaringClass());
+    assertFalse(info.isVarArgs());
+    assertEquals(field, info.reflectAs(Field.class, MethodHandles.lookup()));
+    assertEquals(MethodType.methodType(void.class, String.class), info.getMethodType());
+
+    // Test with a setter on the same field, the type of the handle should change
+    // but everything else must remain the same.
+    handle = MethodHandles.lookup().findGetter(
+        UnreflectTester.class, "publicField", String.class);
+    info = MethodHandles.lookup().revealDirect(handle);
+    assertEquals(MethodHandleInfo.REF_getField, info.getReferenceKind());
+    assertEquals(field, info.reflectAs(Field.class, MethodHandles.lookup()));
+    assertEquals(MethodType.methodType(String.class), info.getMethodType());
   }
 }

@@ -17,16 +17,14 @@
 #ifndef ART_RUNTIME_READ_BARRIER_H_
 #define ART_RUNTIME_READ_BARRIER_H_
 
-#include "base/mutex.h"
+#include "base/logging.h"
 #include "base/macros.h"
+#include "base/mutex.h"
 #include "gc_root.h"
 #include "jni.h"
 #include "mirror/object_reference.h"
 #include "offsets.h"
-#include "read_barrier_c.h"
-
-// This is a C++ (not C) header file, separate from read_barrier_c.h
-// which needs to be a C header file for asm_support.h.
+#include "read_barrier_config.h"
 
 namespace art {
 namespace mirror {
@@ -37,14 +35,21 @@ class ArtMethod;
 
 class ReadBarrier {
  public:
-  // Enable the to-space invariant checks.
-  static constexpr bool kEnableToSpaceInvariantChecks = kIsDebugBuild;
-  // Enable the read barrier checks.
-  static constexpr bool kEnableReadBarrierInvariantChecks = kIsDebugBuild;
+  // Enable the to-space invariant checks. This is slow and happens very often. Do not enable in
+  // fast-debug environment.
+  DECLARE_RUNTIME_DEBUG_FLAG(kEnableToSpaceInvariantChecks);
 
+  // Enable the read barrier checks. This is slow and happens very often. Do not enable in
+  // fast-debug environment.
+  DECLARE_RUNTIME_DEBUG_FLAG(kEnableReadBarrierInvariantChecks);
+
+  // Return the reference at ref_addr, invoking read barrier as appropriate.
+  // Ref_addr is an address within obj.
   // It's up to the implementation whether the given field gets updated whereas the return value
   // must be an updated reference unless kAlwaysUpdateField is true.
-  template <typename MirrorType, ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
+  template <typename MirrorType,
+            bool kIsVolatile,
+            ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
             bool kAlwaysUpdateField = false>
   ALWAYS_INLINE static MirrorType* Barrier(
       mirror::Object* obj, MemberOffset offset, mirror::HeapReference<MirrorType>* ref_addr)
@@ -64,6 +69,11 @@ class ReadBarrier {
                                                   GcRootSource* gc_root_source = nullptr)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Return the mirror Object if it is marked, or null if not.
+  template <typename MirrorType>
+  ALWAYS_INLINE static MirrorType* IsMarked(MirrorType* ref)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   static bool IsDuringStartup();
 
   // Without the holder object.
@@ -78,6 +88,14 @@ class ReadBarrier {
   // With GcRootSource.
   static void AssertToSpaceInvariant(GcRootSource* gc_root_source, mirror::Object* ref)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Without the holder object, and only with the read barrier configuration (no-op otherwise).
+  static void MaybeAssertToSpaceInvariant(mirror::Object* ref)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kUseReadBarrier) {
+      AssertToSpaceInvariant(ref);
+    }
+  }
 
   // ALWAYS_INLINE on this caused a performance regression b/26744236.
   static mirror::Object* Mark(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);

@@ -17,15 +17,29 @@
 #ifndef ART_RUNTIME_BASE_BIT_UTILS_H_
 #define ART_RUNTIME_BASE_BIT_UTILS_H_
 
-#include <iterator>
 #include <limits>
 #include <type_traits>
 
-#include "base/iteration_range.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/stl_util_identity.h"
 
 namespace art {
+
+// Like sizeof, but count how many bits a type takes. Pass type explicitly.
+template <typename T>
+constexpr size_t BitSizeOf() {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  using unsigned_type = typename std::make_unsigned<T>::type;
+  static_assert(sizeof(T) == sizeof(unsigned_type), "Unexpected type size mismatch!");
+  static_assert(std::numeric_limits<unsigned_type>::radix == 2, "Unexpected radix!");
+  return std::numeric_limits<unsigned_type>::digits;
+}
+
+// Like sizeof, but count how many bits a type takes. Infers type from parameter.
+template <typename T>
+constexpr size_t BitSizeOf(T /*x*/) {
+  return BitSizeOf<T>();
+}
 
 template<typename T>
 constexpr int CLZ(T x) {
@@ -35,6 +49,14 @@ constexpr int CLZ(T x) {
                 "T too large, must be smaller than long long");
   DCHECK_NE(x, 0u);
   return (sizeof(T) == sizeof(uint32_t)) ? __builtin_clz(x) : __builtin_clzll(x);
+}
+
+// Similar to CLZ except that on zero input it returns bitwidth and supports signed integers.
+template<typename T>
+constexpr int JAVASTYLE_CLZ(T x) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  using unsigned_type = typename std::make_unsigned<T>::type;
+  return (x == 0) ? BitSizeOf<T>() : CLZ(static_cast<unsigned_type>(x));
 }
 
 template<typename T>
@@ -48,10 +70,30 @@ constexpr int CTZ(T x) {
   return (sizeof(T) == sizeof(uint32_t)) ? __builtin_ctz(x) : __builtin_ctzll(x);
 }
 
+// Similar to CTZ except that on zero input it returns bitwidth and supports signed integers.
+template<typename T>
+constexpr int JAVASTYLE_CTZ(T x) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  using unsigned_type = typename std::make_unsigned<T>::type;
+  return (x == 0) ? BitSizeOf<T>() : CTZ(static_cast<unsigned_type>(x));
+}
+
 // Return the number of 1-bits in `x`.
 template<typename T>
 constexpr int POPCOUNT(T x) {
   return (sizeof(T) == sizeof(uint32_t)) ? __builtin_popcount(x) : __builtin_popcountll(x);
+}
+
+// Swap bytes.
+template<typename T>
+constexpr T BSWAP(T x) {
+  if (sizeof(T) == sizeof(uint16_t)) {
+    return __builtin_bswap16(x);
+  } else if (sizeof(T) == sizeof(uint32_t)) {
+    return __builtin_bswap32(x);
+  } else {
+    return __builtin_bswap64(x);
+  }
 }
 
 // Find the bit position of the most significant bit (0-based), or -1 if there were no bits set.
@@ -83,6 +125,14 @@ constexpr T RoundUpToPowerOfTwo(T x) {
   static_assert(std::is_unsigned<T>::value, "T must be unsigned");
   // NOTE: Undefined if x > (1 << (std::numeric_limits<T>::digits - 1)).
   return (x < 2u) ? x : static_cast<T>(1u) << (std::numeric_limits<T>::digits - CLZ(x - 1u));
+}
+
+// Return highest possible N - a power of two - such that val >= N.
+template <typename T>
+constexpr T TruncToPowerOfTwo(T val) {
+  static_assert(std::is_integral<T>::value, "T must be integral");
+  static_assert(std::is_unsigned<T>::value, "T must be unsigned");
+  return (val != 0) ? static_cast<T>(1u) << (BitSizeOf<T>() - CLZ(val) - 1u) : 0;
 }
 
 template<typename T>
@@ -152,6 +202,11 @@ inline bool IsAlignedParam(T x, int n) {
   return (x & (n - 1)) == 0;
 }
 
+template<typename T>
+inline bool IsAlignedParam(T* x, int n) {
+  return IsAlignedParam(reinterpret_cast<const uintptr_t>(x), n);
+}
+
 #define CHECK_ALIGNED(value, alignment) \
   CHECK(::art::IsAligned<alignment>(value)) << reinterpret_cast<const void*>(value)
 
@@ -163,22 +218,6 @@ inline bool IsAlignedParam(T x, int n) {
 
 #define DCHECK_ALIGNED_PARAM(value, alignment) \
   DCHECK(::art::IsAlignedParam(value, alignment)) << reinterpret_cast<const void*>(value)
-
-// Like sizeof, but count how many bits a type takes. Pass type explicitly.
-template <typename T>
-constexpr size_t BitSizeOf() {
-  static_assert(std::is_integral<T>::value, "T must be integral");
-  using unsigned_type = typename std::make_unsigned<T>::type;
-  static_assert(sizeof(T) == sizeof(unsigned_type), "Unexpected type size mismatch!");
-  static_assert(std::numeric_limits<unsigned_type>::radix == 2, "Unexpected radix!");
-  return std::numeric_limits<unsigned_type>::digits;
-}
-
-// Like sizeof, but count how many bits a type takes. Infers type from parameter.
-template <typename T>
-constexpr size_t BitSizeOf(T /*x*/) {
-  return BitSizeOf<T>();
-}
 
 inline uint16_t Low16Bits(uint32_t value) {
   return static_cast<uint16_t>(value);
@@ -279,83 +318,180 @@ constexpr T MinInt(size_t bits) {
           : static_cast<T>(0);
 }
 
-// Using the Curiously Recurring Template Pattern to implement everything shared
-// by LowToHighBitIterator and HighToLowBitIterator, i.e. everything but operator*().
-template <typename T, typename Iter>
-class BitIteratorBase
-    : public std::iterator<std::forward_iterator_tag, uint32_t, ptrdiff_t, void, void> {
-  static_assert(std::is_integral<T>::value, "T must be integral");
-  static_assert(std::is_unsigned<T>::value, "T must be unsigned");
-
-  static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t), "Unsupported size");
-
- public:
-  BitIteratorBase() : bits_(0u) { }
-  explicit BitIteratorBase(T bits) : bits_(bits) { }
-
-  Iter& operator++() {
-    DCHECK_NE(bits_, 0u);
-    uint32_t bit = *static_cast<Iter&>(*this);
-    bits_ &= ~(static_cast<T>(1u) << bit);
-    return static_cast<Iter&>(*this);
-  }
-
-  Iter& operator++(int) {
-    Iter tmp(static_cast<Iter&>(*this));
-    ++*this;
-    return tmp;
-  }
-
- protected:
-  T bits_;
-
-  template <typename U, typename I>
-  friend bool operator==(const BitIteratorBase<U, I>& lhs, const BitIteratorBase<U, I>& rhs);
-};
-
-template <typename T, typename Iter>
-bool operator==(const BitIteratorBase<T, Iter>& lhs, const BitIteratorBase<T, Iter>& rhs) {
-  return lhs.bits_ == rhs.bits_;
+// Returns value with bit set in lowest one-bit position or 0 if 0.  (java.lang.X.lowestOneBit).
+template <typename kind>
+inline static kind LowestOneBitValue(kind opnd) {
+  // Hacker's Delight, Section 2-1
+  return opnd & -opnd;
 }
 
-template <typename T, typename Iter>
-bool operator!=(const BitIteratorBase<T, Iter>& lhs, const BitIteratorBase<T, Iter>& rhs) {
-  return !(lhs == rhs);
+// Returns value with bit set in hightest one-bit position or 0 if 0.  (java.lang.X.highestOneBit).
+template <typename T>
+inline static T HighestOneBitValue(T opnd) {
+  using unsigned_type = typename std::make_unsigned<T>::type;
+  T res;
+  if (opnd == 0) {
+    res = 0;
+  } else {
+    int bit_position = BitSizeOf<T>() - (CLZ(static_cast<unsigned_type>(opnd)) + 1);
+    res = static_cast<T>(UINT64_C(1) << bit_position);
+  }
+  return res;
 }
 
-template <typename T>
-class LowToHighBitIterator : public BitIteratorBase<T, LowToHighBitIterator<T>> {
- public:
-  using BitIteratorBase<T, LowToHighBitIterator<T>>::BitIteratorBase;
-
-  uint32_t operator*() const {
-    DCHECK_NE(this->bits_, 0u);
-    return CTZ(this->bits_);
-  }
-};
-
-template <typename T>
-class HighToLowBitIterator : public BitIteratorBase<T, HighToLowBitIterator<T>> {
- public:
-  using BitIteratorBase<T, HighToLowBitIterator<T>>::BitIteratorBase;
-
-  uint32_t operator*() const {
-    DCHECK_NE(this->bits_, 0u);
-    static_assert(std::numeric_limits<T>::radix == 2, "Unexpected radix!");
-    return std::numeric_limits<T>::digits - 1u - CLZ(this->bits_);
-  }
-};
-
-template <typename T>
-IterationRange<LowToHighBitIterator<T>> LowToHighBits(T bits) {
-  return IterationRange<LowToHighBitIterator<T>>(
-      LowToHighBitIterator<T>(bits), LowToHighBitIterator<T>());
+// Rotate bits.
+template <typename T, bool left>
+inline static T Rot(T opnd, int distance) {
+  int mask = BitSizeOf<T>() - 1;
+  int unsigned_right_shift = left ? (-distance & mask) : (distance & mask);
+  int signed_left_shift = left ? (distance & mask) : (-distance & mask);
+  using unsigned_type = typename std::make_unsigned<T>::type;
+  return (static_cast<unsigned_type>(opnd) >> unsigned_right_shift) | (opnd << signed_left_shift);
 }
 
+// TUNING: use rbit for arm/arm64
+inline static uint32_t ReverseBits32(uint32_t opnd) {
+  // Hacker's Delight 7-1
+  opnd = ((opnd >>  1) & 0x55555555) | ((opnd & 0x55555555) <<  1);
+  opnd = ((opnd >>  2) & 0x33333333) | ((opnd & 0x33333333) <<  2);
+  opnd = ((opnd >>  4) & 0x0F0F0F0F) | ((opnd & 0x0F0F0F0F) <<  4);
+  opnd = ((opnd >>  8) & 0x00FF00FF) | ((opnd & 0x00FF00FF) <<  8);
+  opnd = ((opnd >> 16)) | ((opnd) << 16);
+  return opnd;
+}
+
+// TUNING: use rbit for arm/arm64
+inline static uint64_t ReverseBits64(uint64_t opnd) {
+  // Hacker's Delight 7-1
+  opnd = (opnd & 0x5555555555555555L) << 1 | ((opnd >> 1) & 0x5555555555555555L);
+  opnd = (opnd & 0x3333333333333333L) << 2 | ((opnd >> 2) & 0x3333333333333333L);
+  opnd = (opnd & 0x0f0f0f0f0f0f0f0fL) << 4 | ((opnd >> 4) & 0x0f0f0f0f0f0f0f0fL);
+  opnd = (opnd & 0x00ff00ff00ff00ffL) << 8 | ((opnd >> 8) & 0x00ff00ff00ff00ffL);
+  opnd = (opnd << 48) | ((opnd & 0xffff0000L) << 16) | ((opnd >> 16) & 0xffff0000L) | (opnd >> 48);
+  return opnd;
+}
+
+// Create a mask for the least significant "bits"
+// The returned value is always unsigned to prevent undefined behavior for bitwise ops.
+//
+// Given 'bits',
+// Returns:
+//                   <--- bits --->
+// +-----------------+------------+
+// | 0 ............0 |   1.....1  |
+// +-----------------+------------+
+// msb                           lsb
+template <typename T = size_t>
+inline static constexpr std::make_unsigned_t<T> MaskLeastSignificant(size_t bits) {
+  DCHECK_GE(BitSizeOf<T>(), bits) << "Bits out of range for type T";
+  using unsigned_T = std::make_unsigned_t<T>;
+  if (bits >= BitSizeOf<T>()) {
+    return std::numeric_limits<unsigned_T>::max();
+  } else {
+    auto kOne = static_cast<unsigned_T>(1);  // Do not truncate for T>size_t.
+    return static_cast<unsigned_T>((kOne << bits) - kOne);
+  }
+}
+
+// Clears the bitfield starting at the least significant bit "lsb" with a bitwidth of 'width'.
+// (Equivalent of ARM BFC instruction).
+//
+// Given:
+//           <-- width  -->
+// +--------+------------+--------+
+// | ABC... |  bitfield  | XYZ... +
+// +--------+------------+--------+
+//                       lsb      0
+// Returns:
+//           <-- width  -->
+// +--------+------------+--------+
+// | ABC... | 0........0 | XYZ... +
+// +--------+------------+--------+
+//                       lsb      0
 template <typename T>
-IterationRange<HighToLowBitIterator<T>> HighToLowBits(T bits) {
-  return IterationRange<HighToLowBitIterator<T>>(
-      HighToLowBitIterator<T>(bits), HighToLowBitIterator<T>());
+inline static constexpr T BitFieldClear(T value, size_t lsb, size_t width) {
+  DCHECK_GE(BitSizeOf(value), lsb + width) << "Bit field out of range for value";
+  const auto val = static_cast<std::make_unsigned_t<T>>(value);
+  const auto mask = MaskLeastSignificant<T>(width);
+
+  return static_cast<T>(val & ~(mask << lsb));
+}
+
+// Inserts the contents of 'data' into bitfield of 'value'  starting
+// at the least significant bit "lsb" with a bitwidth of 'width'.
+// Note: data must be within range of [MinInt(width), MaxInt(width)].
+// (Equivalent of ARM BFI instruction).
+//
+// Given (data):
+//           <-- width  -->
+// +--------+------------+--------+
+// | ABC... |  bitfield  | XYZ... +
+// +--------+------------+--------+
+//                       lsb      0
+// Returns:
+//           <-- width  -->
+// +--------+------------+--------+
+// | ABC... | 0...data   | XYZ... +
+// +--------+------------+--------+
+//                       lsb      0
+
+template <typename T, typename T2>
+inline static constexpr T BitFieldInsert(T value, T2 data, size_t lsb, size_t width) {
+  DCHECK_GE(BitSizeOf(value), lsb + width) << "Bit field out of range for value";
+  if (width != 0u) {
+    DCHECK_GE(MaxInt<T2>(width), data) << "Data out of range [too large] for bitwidth";
+    DCHECK_LE(MinInt<T2>(width), data) << "Data out of range [too small] for bitwidth";
+  } else {
+    DCHECK_EQ(static_cast<T2>(0), data) << "Data out of range [nonzero] for bitwidth 0";
+  }
+  const auto data_mask = MaskLeastSignificant<T2>(width);
+  const auto value_cleared = BitFieldClear(value, lsb, width);
+
+  return static_cast<T>(value_cleared | ((data & data_mask) << lsb));
+}
+
+// Extracts the bitfield starting at the least significant bit "lsb" with a bitwidth of 'width'.
+// Signed types are sign-extended during extraction. (Equivalent of ARM UBFX/SBFX instruction).
+//
+// Given:
+//           <-- width   -->
+// +--------+-------------+-------+
+// |        |   bitfield  |       +
+// +--------+-------------+-------+
+//                       lsb      0
+// (Unsigned) Returns:
+//                  <-- width   -->
+// +----------------+-------------+
+// | 0...        0  |   bitfield  |
+// +----------------+-------------+
+//                                0
+// (Signed) Returns:
+//                  <-- width   -->
+// +----------------+-------------+
+// | S...        S  |   bitfield  |
+// +----------------+-------------+
+//                                0
+// where S is the highest bit in 'bitfield'.
+template <typename T>
+inline static constexpr T BitFieldExtract(T value, size_t lsb, size_t width) {
+  DCHECK_GE(BitSizeOf(value), lsb + width) << "Bit field out of range for value";
+  const auto val = static_cast<std::make_unsigned_t<T>>(value);
+
+  const T bitfield_unsigned =
+      static_cast<T>((val >> lsb) & MaskLeastSignificant<T>(width));
+  if (std::is_signed<T>::value) {
+    // Perform sign extension
+    if (width == 0) {  // Avoid underflow.
+      return static_cast<T>(0);
+    } else if (bitfield_unsigned & (1 << (width - 1))) {  // Detect if sign bit was set.
+      // MSB        <width> LSB
+      // 0b11111...100...000000
+      const auto ones_negmask = ~MaskLeastSignificant<T>(width);
+      return static_cast<T>(bitfield_unsigned | ones_negmask);
+    }
+  }
+  // Skip sign extension.
+  return bitfield_unsigned;
 }
 
 }  // namespace art

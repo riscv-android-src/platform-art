@@ -23,28 +23,6 @@
 namespace art {
 namespace arm {
 
-class InstructionSimplifierArmVisitor : public HGraphVisitor {
- public:
-  InstructionSimplifierArmVisitor(HGraph* graph, OptimizingCompilerStats* stats)
-      : HGraphVisitor(graph), stats_(stats) {}
-
- private:
-  void RecordSimplification() {
-    if (stats_ != nullptr) {
-      stats_->RecordStat(kInstructionSimplificationsArch);
-    }
-  }
-
-  void VisitMul(HMul* instruction) OVERRIDE;
-  void VisitOr(HOr* instruction) OVERRIDE;
-  void VisitAnd(HAnd* instruction) OVERRIDE;
-  void VisitArrayGet(HArrayGet* instruction) OVERRIDE;
-  void VisitArraySet(HArraySet* instruction) OVERRIDE;
-
-  OptimizingCompilerStats* stats_;
-};
-
-
 class InstructionSimplifierArm : public HOptimization {
  public:
   InstructionSimplifierArm(HGraph* graph, OptimizingCompilerStats* stats)
@@ -52,10 +30,7 @@ class InstructionSimplifierArm : public HOptimization {
 
   static constexpr const char* kInstructionSimplifierArmPassName = "instruction_simplifier_arm";
 
-  void Run() OVERRIDE {
-    InstructionSimplifierArmVisitor visitor(graph_, stats_);
-    visitor.VisitReversePostOrder();
-  }
+  void Run() OVERRIDE;
 };
 
 }  // namespace arm

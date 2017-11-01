@@ -17,12 +17,14 @@
 #include "java_lang_reflect_Parameter.h"
 
 #include "android-base/stringprintf.h"
+#include "nativehelper/jni_macros.h"
 
 #include "art_method-inl.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
 #include "jni_internal.h"
+#include "native_util.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "utils.h"
 
@@ -63,9 +65,9 @@ static jobject Parameter_getAnnotationNative(JNIEnv* env,
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Parameter,
+  FAST_NATIVE_METHOD(Parameter,
                 getAnnotationNative,
-                "!(Ljava/lang/reflect/Executable;ILjava/lang/Class;)Ljava/lang/annotation/Annotation;"),
+                "(Ljava/lang/reflect/Executable;ILjava/lang/Class;)Ljava/lang/annotation/Annotation;"),
 };
 
 void register_java_lang_reflect_Parameter(JNIEnv* env) {

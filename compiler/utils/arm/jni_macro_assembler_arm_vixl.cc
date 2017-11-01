@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
+#include "jni_macro_assembler_arm_vixl.h"
+
 #include <iostream>
 #include <type_traits>
 
-#include "jni_macro_assembler_arm_vixl.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "thread.h"
 
@@ -116,12 +117,13 @@ void ArmVIXLJNIMacroAssembler::BuildFrame(size_t frame_size,
 }
 
 void ArmVIXLJNIMacroAssembler::RemoveFrame(size_t frame_size,
-                                           ArrayRef<const ManagedRegister> callee_save_regs) {
+                                           ArrayRef<const ManagedRegister> callee_save_regs,
+                                           bool may_suspend) {
   CHECK_ALIGNED(frame_size, kStackAlignment);
   cfi().RememberState();
 
-  // Compute callee saves to pop and PC.
-  RegList core_spill_mask = 1 << PC;
+  // Compute callee saves to pop and LR.
+  RegList core_spill_mask = 1 << LR;
   uint32_t fp_spill_mask = 0;
   for (const ManagedRegister& reg : callee_save_regs) {
     if (reg.AsArm().IsCoreRegister()) {
@@ -136,6 +138,7 @@ void ArmVIXLJNIMacroAssembler::RemoveFrame(size_t frame_size,
   CHECK_GT(frame_size, pop_values * kFramePointerSize);
   DecreaseFrameSize(frame_size - (pop_values * kFramePointerSize));  // handles CFI as well.
 
+  // Pop FP callee saves.
   if (fp_spill_mask != 0) {
     uint32_t first = CTZ(fp_spill_mask);
     // Check that list is contiguous.
@@ -146,8 +149,41 @@ void ArmVIXLJNIMacroAssembler::RemoveFrame(size_t frame_size,
     cfi().RestoreMany(DWARFReg(s0), fp_spill_mask);
   }
 
-  // Pop callee saves and PC.
+  // Pop core callee saves and LR.
   ___ Pop(RegisterList(core_spill_mask));
+
+  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+    if (may_suspend) {
+      // The method may be suspended; refresh the Marking Register.
+      ___ Ldr(mr, MemOperand(tr, Thread::IsGcMarkingOffset<kArmPointerSize>().Int32Value()));
+    } else {
+      // The method shall not be suspended; no need to refresh the Marking Register.
+
+      // Check that the Marking Register is a callee-save register,
+      // and thus has been preserved by native code following the
+      // AAPCS calling convention.
+      DCHECK_NE(core_spill_mask & (1 << MR), 0)
+          << "core_spill_mask should contain Marking Register R" << MR;
+
+      // The following condition is a compile-time one, so it does not have a run-time cost.
+      if (kIsDebugBuild) {
+        // The following condition is a run-time one; it is executed after the
+        // previous compile-time test, to avoid penalizing non-debug builds.
+        if (emit_run_time_checks_in_debug_mode_) {
+          // Emit a run-time check verifying that the Marking Register is up-to-date.
+          UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
+          vixl32::Register temp = temps.Acquire();
+          // Ensure we are not clobbering a callee-save register that was restored before.
+          DCHECK_EQ(core_spill_mask & (1 << temp.GetCode()), 0)
+              << "core_spill_mask hould not contain scratch register R" << temp.GetCode();
+          asm_.GenerateMarkingRegisterCheck(temp);
+        }
+      }
+    }
+  }
+
+  // Return to LR.
+  ___ Bx(vixl32::lr);
 
   // The CFI should be restored for any code that follows the exit block.
   cfi().RestoreState();

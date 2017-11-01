@@ -84,10 +84,10 @@ void LICM::Run() {
   // Only used during debug.
   ArenaBitVector* visited = nullptr;
   if (kIsDebugBuild) {
-    visited = new (graph_->GetArena()) ArenaBitVector(graph_->GetArena(),
-                                                      graph_->GetBlocks().size(),
-                                                      false,
-                                                      kArenaAllocLICM);
+    visited = new (graph_->GetAllocator()) ArenaBitVector(graph_->GetAllocator(),
+                                                          graph_->GetBlocks().size(),
+                                                          false,
+                                                          kArenaAllocLICM);
   }
 
   // Post order visit to visit inner loops before outer loops.
@@ -141,7 +141,7 @@ void LICM::Run() {
             DCHECK(!instruction->HasEnvironment());
           }
           instruction->MoveBefore(pre_header->GetLastInstruction());
-          MaybeRecordStat(MethodCompilationStat::kLoopInvariantMoved);
+          MaybeRecordStat(stats_, MethodCompilationStat::kLoopInvariantMoved);
         } else if (instruction->CanThrow() || instruction->DoesAnyWrite()) {
           // If `instruction` can do something visible (throw or write),
           // we cannot move further instructions that can throw.

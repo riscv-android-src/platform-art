@@ -24,12 +24,12 @@
 #include "base/mutex.h"
 #include "class_linker.h"
 #include "common_runtime_test.h"
+#include "handle_scope-inl.h"
 #include "mirror/accessible_object.h"
 #include "mirror/class.h"
 #include "mirror/class_loader.h"
-#include "handle_scope-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
@@ -53,7 +53,7 @@ class ImTableTest : public CommonRuntimeTest {
         ObjPtr<mirror::ClassLoader>::DownCast(self->DecodeJObject(jclass_loader_a)));
     Handle<mirror::Class> h_class_a(
           hs.NewHandle(class_linker->FindClass(self, class_name.c_str(), h_class_loader)));
-    if (h_class_a.Get() == nullptr) {
+    if (h_class_a == nullptr) {
       LOG(ERROR) << self->GetException()->Dump();
       CHECK(false) << "h_class_a == nullptr";
     }
@@ -63,7 +63,7 @@ class ImTableTest : public CommonRuntimeTest {
         ObjPtr<mirror::ClassLoader>::DownCast(self->DecodeJObject(jclass_loader_b)));
     Handle<mirror::Class> h_class_b(
           hs.NewHandle(class_linker->FindClass(self, class_name.c_str(), h_class_loader)));
-    if (h_class_b.Get() == nullptr) {
+    if (h_class_b == nullptr) {
       LOG(ERROR) << self->GetException()->Dump();
       CHECK(false) << "h_class_b == nullptr";
     }

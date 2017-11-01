@@ -18,6 +18,8 @@
 
 #include <sstream>
 
+#include "base/file_utils.h"
+#include "base/logging.h"
 #include "base/stringpiece.h"
 #include "debugger.h"
 #include "gc/heap.h"
@@ -96,7 +98,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       //     .WithType<std::vector<ti::Agent>>().AppendValues()
       //     .IntoKey(M::AgentLib)
       .Define("-agentpath:_")
-          .WithType<std::vector<ti::Agent>>().AppendValues()
+          .WithType<std::list<ti::Agent>>().AppendValues()
           .IntoKey(M::AgentPath)
       .Define("-Xms_")
           .WithType<MemoryKiB>()
@@ -120,7 +122,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<double>().WithRange(0.1, 0.9)
           .IntoKey(M::HeapTargetUtilization)
       .Define("-XX:ForegroundHeapGrowthMultiplier=_")
-          .WithType<double>().WithRange(0.1, 1.0)
+          .WithType<double>().WithRange(0.1, 5.0)
           .IntoKey(M::ForegroundHeapGrowthMultiplier)
       .Define("-XX:ParallelGCThreads=_")
           .WithType<unsigned int>()
@@ -158,6 +160,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::DumpNativeStackOnSigQuit)
+      .Define("-XX:MadviseRandomAccess:_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::MadviseRandomAccess)
       .Define("-Xusejit:_")
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
@@ -238,6 +244,12 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xlockprofthreshold:_")
           .WithType<unsigned int>()
           .IntoKey(M::LockProfThreshold)
+      .Define("-Xstackdumplockprofthreshold:_")
+          .WithType<unsigned int>()
+          .IntoKey(M::StackDumpLockProfThreshold)
+      .Define("-Xusetombstonedtraces")
+          .WithValue(true)
+          .IntoKey(M::UseTombstonedTraces)
       .Define("-Xstacktracefile:_")
           .WithType<std::string>()
           .IntoKey(M::StackTraceFile)
@@ -300,8 +312,16 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xplugin:_")
           .WithType<std::vector<Plugin>>().AppendValues()
           .IntoKey(M::Plugins)
-      .Define("-Xfully-deoptable")
-          .IntoKey(M::FullyDeoptable)
+      .Define("-XX:ThreadSuspendTimeout=_")  // in ms
+          .WithType<MillisecondsToNanoseconds>()  // store as ns
+          .IntoKey(M::ThreadSuspendTimeout)
+      .Define("-XX:GlobalRefAllocStackTraceLimit=_")  // Number of free slots to enable tracing.
+          .WithType<unsigned int>()
+          .IntoKey(M::GlobalRefAllocStackTraceLimit)
+      .Define("-XX:SlowDebug=_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::SlowDebug)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -475,7 +495,10 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     Usage(nullptr);
     return false;
   } else if (args.Exists(M::ShowVersion)) {
-    UsageMessage(stdout, "ART version %s\n", Runtime::GetVersion());
+    UsageMessage(stdout,
+                 "ART version %s %s\n",
+                 Runtime::GetVersion(),
+                 GetInstructionSetString(kRuntimeISA));
     Exit(0);
   } else if (args.Exists(M::BootClassPath)) {
     LOG(INFO) << "setting boot class path to " << *args.Get(M::BootClassPath);
@@ -509,6 +532,8 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
   }
 
   MaybeOverrideVerbosity();
+
+  SetRuntimeDebugFlagsEnabled(args.Get(M::SlowDebug));
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -594,42 +619,6 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
   if (args.GetOrDefault(M::HeapGrowthLimit) <= 0u ||
       args.GetOrDefault(M::HeapGrowthLimit) > args.GetOrDefault(M::MemoryMaximumSize)) {
     args.Set(M::HeapGrowthLimit, args.GetOrDefault(M::MemoryMaximumSize));
-  }
-
-  if (args.GetOrDefault(M::Experimental) & ExperimentalFlags::kRuntimePlugins) {
-    LOG(WARNING) << "Experimental runtime plugin support has been enabled. No guarantees are made "
-                 << "about stability or usage of this plugin support. Use at your own risk. Do "
-                 << "not attempt to write shipping code that relies on the implementation of "
-                 << "runtime plugins.";
-  } else if (!args.GetOrDefault(M::Plugins).empty()) {
-    LOG(WARNING) << "Experimental runtime plugin support has not been enabled. Ignored options: ";
-    for (const auto& op : args.GetOrDefault(M::Plugins)) {
-      LOG(WARNING) << "    -plugin:" << op.GetLibrary();
-    }
-  }
-
-  if (args.GetOrDefault(M::Experimental) & ExperimentalFlags::kAgents) {
-    LOG(WARNING) << "Experimental runtime agent support has been enabled. No guarantees are made "
-                 << "the completeness, accuracy, reliability, or stability of the agent "
-                 << "implementation. Use at your own risk. Do not attempt to write shipping code "
-                 << "that relies on the implementation of any part of this api.";
-  } else if (!args.GetOrDefault(M::AgentLib).empty() || !args.GetOrDefault(M::AgentPath).empty()) {
-    LOG(WARNING) << "agent support has not been enabled. Enable experimental agent "
-                 << " support with '-XExperimental:agent'. Ignored options are:";
-    for (const auto& op : args.GetOrDefault(M::AgentLib)) {
-      if (op.HasArgs()) {
-        LOG(WARNING) << "    -agentlib:" << op.GetName() << "=" << op.GetArgs();
-      } else {
-        LOG(WARNING) << "    -agentlib:" << op.GetName();
-      }
-    }
-    for (const auto& op : args.GetOrDefault(M::AgentPath)) {
-      if (op.HasArgs()) {
-        LOG(WARNING) << "    -agentpath:" << op.GetName() << "=" << op.GetArgs();
-      } else {
-        LOG(WARNING) << "    -agentpath:" << op.GetName();
-      }
-    }
   }
 
   *runtime_options = std::move(args);
@@ -724,6 +713,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:MaxSpinsBeforeThinLockInflation=integervalue\n");
   UsageMessage(stream, "  -XX:LongPauseLogThreshold=integervalue\n");
   UsageMessage(stream, "  -XX:LongGCLogThreshold=integervalue\n");
+  UsageMessage(stream, "  -XX:ThreadSuspendTimeout=integervalue\n");
   UsageMessage(stream, "  -XX:DumpGCPerformanceOnShutdown\n");
   UsageMessage(stream, "  -XX:DumpJITInfoOnShutdown\n");
   UsageMessage(stream, "  -XX:IgnoreMaxFootprint\n");
@@ -732,16 +722,19 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:LargeObjectSpace={disabled,map,freelist}\n");
   UsageMessage(stream, "  -XX:LargeObjectThreshold=N\n");
   UsageMessage(stream, "  -XX:DumpNativeStackOnSigQuit=booleanvalue\n");
+  UsageMessage(stream, "  -XX:MadviseRandomAccess:booleanvalue\n");
+  UsageMessage(stream, "  -XX:SlowDebug={false,true}\n");
   UsageMessage(stream, "  -Xmethod-trace\n");
   UsageMessage(stream, "  -Xmethod-trace-file:filename");
   UsageMessage(stream, "  -Xmethod-trace-file-size:integervalue\n");
   UsageMessage(stream, "  -Xps-min-save-period-ms:integervalue\n");
   UsageMessage(stream, "  -Xps-save-resolved-classes-delay-ms:integervalue\n");
-  UsageMessage(stream, "  -Xps-startup-method-samples:integervalue\n");
+  UsageMessage(stream, "  -Xps-hot-startup-method-samples:integervalue\n");
   UsageMessage(stream, "  -Xps-min-methods-to-save:integervalue\n");
   UsageMessage(stream, "  -Xps-min-classes-to-save:integervalue\n");
   UsageMessage(stream, "  -Xps-min-notification-before-wake:integervalue\n");
   UsageMessage(stream, "  -Xps-max-notification-before-wake:integervalue\n");
+  UsageMessage(stream, "  -Xps-profile-path:file-path\n");
   UsageMessage(stream, "  -Xcompiler:filename\n");
   UsageMessage(stream, "  -Xcompiler-option dex2oat-option\n");
   UsageMessage(stream, "  -Ximage-compiler-option dex2oat-option\n");
@@ -763,8 +756,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
                        "(Enable new and experimental agent support)\n");
   UsageMessage(stream, "  -Xexperimental:agents"
                        "(Enable new and experimental agent support)\n");
-  UsageMessage(stream, "  -Xexperimental:method-handles"
-                       "(Enable new and experimental method handles support)\n");
   UsageMessage(stream, "\n");
 
   UsageMessage(stream, "The following previously supported Dalvik options are ignored:\n");

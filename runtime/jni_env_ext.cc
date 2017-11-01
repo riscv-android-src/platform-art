@@ -28,7 +28,8 @@
 #include "lock_word.h"
 #include "mirror/object-inl.h"
 #include "nth_caller_visitor.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
+#include "thread_list.h"
 
 namespace art {
 
@@ -36,6 +37,8 @@ using android::base::StringPrintf;
 
 static constexpr size_t kMonitorsInitial = 32;  // Arbitrary.
 static constexpr size_t kMonitorsMax = 4096;  // Arbitrary sanity check.
+
+const JNINativeInterface* JNIEnvExt::table_override_ = nullptr;
 
 // Checking "locals" requires the mutator lock, but at creation time we're really only interested
 // in validity, which isn't changing. To avoid grabbing the mutator lock, factored out and tagged
@@ -78,10 +81,10 @@ JNIEnvExt::JNIEnvExt(Thread* self_in, JavaVMExt* vm_in, std::string* error_msg)
       runtime_deleted(false),
       critical(0),
       monitors("monitors", kMonitorsInitial, kMonitorsMax) {
-  functions = unchecked_functions = GetJniNativeInterface();
-  if (vm->IsCheckJniEnabled()) {
-    SetCheckJniEnabled(true);
-  }
+  MutexLock mu(Thread::Current(), *Locks::jni_function_table_lock_);
+  check_jni = vm->IsCheckJniEnabled();
+  functions = GetFunctionTable(check_jni);
+  unchecked_functions = GetJniNativeInterface();
 }
 
 void JNIEnvExt::SetFunctionsToRuntimeShutdownFunctions() {
@@ -96,7 +99,14 @@ jobject JNIEnvExt::NewLocalRef(mirror::Object* obj) {
   if (obj == nullptr) {
     return nullptr;
   }
-  return reinterpret_cast<jobject>(locals.Add(local_ref_cookie, obj));
+  std::string error_msg;
+  jobject ref = reinterpret_cast<jobject>(locals.Add(local_ref_cookie, obj, &error_msg));
+  if (UNLIKELY(ref == nullptr)) {
+    // This is really unexpected if we allow resizing local IRTs...
+    LOG(FATAL) << error_msg;
+    UNREACHABLE();
+  }
+  return ref;
 }
 
 void JNIEnvExt::DeleteLocalRef(jobject obj) {
@@ -107,7 +117,12 @@ void JNIEnvExt::DeleteLocalRef(jobject obj) {
 
 void JNIEnvExt::SetCheckJniEnabled(bool enabled) {
   check_jni = enabled;
-  functions = enabled ? GetCheckJniNativeInterface() : GetJniNativeInterface();
+  MutexLock mu(Thread::Current(), *Locks::jni_function_table_lock_);
+  functions = GetFunctionTable(enabled);
+  // Check whether this is a no-op because of override.
+  if (enabled && JNIEnvExt::table_override_ != nullptr) {
+    LOG(WARNING) << "Enabling CheckJNI after a JNIEnv function table override is not functional.";
+  }
 }
 
 void JNIEnvExt::DumpReferenceTables(std::ostream& os) {
@@ -115,8 +130,8 @@ void JNIEnvExt::DumpReferenceTables(std::ostream& os) {
   monitors.Dump(os);
 }
 
-void JNIEnvExt::PushFrame(int capacity ATTRIBUTE_UNUSED) {
-  // TODO: take 'capacity' into account.
+void JNIEnvExt::PushFrame(int capacity) {
+  DCHECK_GE(locals.FreeCapacity(), static_cast<size_t>(capacity));
   stacked_local_ref_cookies.push_back(local_ref_cookie);
   local_ref_cookie = locals.GetSegmentState();
 }
@@ -267,6 +282,35 @@ void JNIEnvExt::CheckNoHeldMonitors() {
       }
     }
   }
+}
+
+static void ThreadResetFunctionTable(Thread* thread, void* arg ATTRIBUTE_UNUSED)
+    REQUIRES(Locks::jni_function_table_lock_) {
+  JNIEnvExt* env = thread->GetJniEnv();
+  bool check_jni = env->check_jni;
+  env->functions = JNIEnvExt::GetFunctionTable(check_jni);
+}
+
+void JNIEnvExt::SetTableOverride(const JNINativeInterface* table_override) {
+  MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
+  MutexLock mu2(Thread::Current(), *Locks::jni_function_table_lock_);
+
+  JNIEnvExt::table_override_ = table_override;
+
+  // See if we have a runtime. Note: we cannot run other code (like JavaVMExt's CheckJNI install
+  // code), as we'd have to recursively lock the mutex.
+  Runtime* runtime = Runtime::Current();
+  if (runtime != nullptr) {
+    runtime->GetThreadList()->ForEach(ThreadResetFunctionTable, nullptr);
+  }
+}
+
+const JNINativeInterface* JNIEnvExt::GetFunctionTable(bool check_jni) {
+  const JNINativeInterface* override = JNIEnvExt::table_override_;
+  if (override != nullptr) {
+    return override;
+  }
+  return check_jni ? GetCheckJniNativeInterface() : GetJniNativeInterface();
 }
 
 }  // namespace art

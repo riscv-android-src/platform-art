@@ -18,13 +18,18 @@
 
 #include "base/array_ref.h"
 #include "base/bit_vector-inl.h"
+#include "base/scoped_arena_allocator.h"
+#include "base/scoped_arena_containers.h"
 #include "base/stl_util.h"
 #include "ssa_phi_elimination.h"
 
 namespace art {
 
 static void MarkReachableBlocks(HGraph* graph, ArenaBitVector* visited) {
-  ArenaVector<HBasicBlock*> worklist(graph->GetArena()->Adapter(kArenaAllocDCE));
+  // Use local allocator for allocating memory.
+  ScopedArenaAllocator allocator(graph->GetArenaStack());
+
+  ScopedArenaVector<HBasicBlock*> worklist(allocator.Adapter(kArenaAllocDCE));
   constexpr size_t kDefaultWorlistSize = 8;
   worklist.reserve(kDefaultWorlistSize);
   visited->SetBit(graph->GetEntryBlock()->GetBlockId());
@@ -118,7 +123,7 @@ static bool HasEquality(IfCondition condition) {
 }
 
 static HConstant* Evaluate(HCondition* condition, HInstruction* left, HInstruction* right) {
-  if (left == right && !Primitive::IsFloatingPointType(left->GetType())) {
+  if (left == right && !DataType::IsFloatingPointType(left->GetType())) {
     return condition->GetBlock()->GetGraph()->GetIntConstant(
         HasEquality(condition->GetCondition()) ? 1 : 0);
   }
@@ -305,9 +310,12 @@ void HDeadCodeElimination::ConnectSuccessiveBlocks() {
 }
 
 bool HDeadCodeElimination::RemoveDeadBlocks() {
+  // Use local allocator for allocating memory.
+  ScopedArenaAllocator allocator(graph_->GetArenaStack());
+
   // Classify blocks as reachable/unreachable.
-  ArenaAllocator* allocator = graph_->GetArena();
-  ArenaBitVector live_blocks(allocator, graph_->GetBlocks().size(), false, kArenaAllocDCE);
+  ArenaBitVector live_blocks(&allocator, graph_->GetBlocks().size(), false, kArenaAllocDCE);
+  live_blocks.ClearAllBits();
 
   MarkReachableBlocks(graph_, &live_blocks);
   bool removed_one_or_more_blocks = false;
@@ -359,7 +367,7 @@ void HDeadCodeElimination::RemoveDeadInstructions() {
       DCHECK(!inst->IsControlFlow());
       if (inst->IsDeadAndRemovable()) {
         block->RemoveInstruction(inst);
-        MaybeRecordStat(MethodCompilationStat::kRemovedDeadInstruction);
+        MaybeRecordStat(stats_, MethodCompilationStat::kRemovedDeadInstruction);
       }
     }
   }

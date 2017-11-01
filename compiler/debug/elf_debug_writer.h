@@ -23,19 +23,19 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "debug/dwarf/dwarf_constants.h"
-#include "elf_builder.h"
+#include "linker/elf_builder.h"
 
 namespace art {
 class OatHeader;
 namespace mirror {
 class Class;
-}
+}  // namespace mirror
 namespace debug {
 struct MethodDebugInfo;
 
 template <typename ElfTypes>
 void WriteDebugInfo(
-    ElfBuilder<ElfTypes>* builder,
+    linker::ElfBuilder<ElfTypes>* builder,
     const ArrayRef<const MethodDebugInfo>& method_infos,
     dwarf::CFIFormat cfi_format,
     bool write_oat_patches);
@@ -57,8 +57,6 @@ std::vector<uint8_t> WriteDebugElfFileForClasses(
     const InstructionSetFeatures* features,
     const ArrayRef<mirror::Class*>& types)
     REQUIRES_SHARED(Locks::mutator_lock_);
-
-std::vector<MethodDebugInfo> MakeTrampolineInfos(const OatHeader& oat_header);
 
 }  // namespace debug
 }  // namespace art

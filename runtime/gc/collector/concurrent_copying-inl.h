@@ -19,10 +19,12 @@
 
 #include "concurrent_copying.h"
 
+#include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/heap.h"
 #include "gc/space/region_space.h"
 #include "lock_word.h"
+#include "mirror/object-readbarrier-inl.h"
 
 namespace art {
 namespace gc {
@@ -95,7 +97,9 @@ inline mirror::Object* ConcurrentCopying::MarkImmuneSpace(mirror::Object* ref) {
 }
 
 template<bool kGrayImmuneObject, bool kFromGCThread>
-inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref) {
+inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref,
+                                               mirror::Object* holder,
+                                               MemberOffset offset) {
   if (from_ref == nullptr) {
     return nullptr;
   }
@@ -127,7 +131,7 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref) {
       mirror::Object* to_ref = GetFwdPtr(from_ref);
       if (to_ref == nullptr) {
         // It isn't marked yet. Mark it by copying it to the to-space.
-        to_ref = Copy(from_ref);
+        to_ref = Copy(from_ref, holder, offset);
       }
       DCHECK(region_space_->IsInToSpace(to_ref) || heap_->non_moving_space_->HasAddress(to_ref))
           << "from_ref=" << from_ref << " to_ref=" << to_ref;
@@ -140,7 +144,7 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref) {
       if (immune_spaces_.ContainsObject(from_ref)) {
         return MarkImmuneSpace<kGrayImmuneObject>(from_ref);
       } else {
-        return MarkNonMoving(from_ref);
+        return MarkNonMoving(from_ref, holder, offset);
       }
     default:
       UNREACHABLE();
@@ -149,7 +153,8 @@ inline mirror::Object* ConcurrentCopying::Mark(mirror::Object* from_ref) {
 
 inline mirror::Object* ConcurrentCopying::MarkFromReadBarrier(mirror::Object* from_ref) {
   mirror::Object* ret;
-  if (from_ref == nullptr) {
+  // We can get here before marking starts since we gray immune objects before the marking phase.
+  if (from_ref == nullptr || !Thread::Current()->GetIsGcMarking()) {
     return from_ref;
   }
   // TODO: Consider removing this check when we are done investigating slow paths. b/30162165

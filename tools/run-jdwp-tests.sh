@@ -19,19 +19,19 @@ if [ ! -d libcore ]; then
   exit 1
 fi
 
+source build/envsetup.sh >&/dev/null # for get_build_var, setpaths
+setpaths # include platform prebuilt java, javac, etc in $PATH.
+
 if [ -z "$ANDROID_HOST_OUT" ] ; then
   ANDROID_HOST_OUT=${OUT_DIR-$ANDROID_BUILD_TOP/out}/host/linux-x86
 fi
 
-# Jar containing all the tests.
-test_jack=${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES/apache-harmony-jdwp-tests-hostdex_intermediates/classes.jack
+using_jack=$(get_build_var ANDROID_COMPILE_WITH_JACK)
 
-if [ ! -f $test_jack ]; then
-  echo "Before running, you must build jdwp tests and vogar:" \
-       "make apache-harmony-jdwp-tests-hostdex vogar"
-  exit 1
-fi
+java_lib_location="${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES"
+make_target_name="apache-harmony-jdwp-tests-hostdex"
 
+vm_args=""
 art="/data/local/tmp/system/bin/art"
 art_debugee="sh /data/local/tmp/system/bin/art"
 args=$@
@@ -41,20 +41,34 @@ device_dir="--device-dir=/data/local/tmp"
 # image.
 vm_command="--vm-command=$art"
 image_compiler_option=""
+plugin=""
 debug="no"
+explicit_debug="no"
 verbose="no"
 image="-Ximage:/data/art-test/core.art"
+with_jdwp_path=""
+agent_wrapper=""
 vm_args=""
 # By default, we run the whole JDWP test suite.
+has_specific_test="no"
 test="org.apache.harmony.jpda.tests.share.AllTests"
-host="no"
+mode="target"
 # Use JIT compiling by default.
 use_jit=true
 variant_cmdline_parameter="--variant=X32"
+# Timeout of JDWP test in ms.
+#
+# Note: some tests expect a timeout to check that *no* reply/event is received for a specific case.
+# A lower timeout can save up several minutes when running the whole test suite, especially for
+# continuous testing. This value can be adjusted to fit the configuration of the host machine(s).
+jdwp_test_timeout=10000
+
+gdb_target=
+has_gdb="no"
 
 while true; do
   if [[ "$1" == "--mode=host" ]]; then
-    host="yes"
+    mode="host"
     # Specify bash explicitly since the art script cannot, since it has to run on the device
     # with mksh.
     art="bash ${OUT_DIR-out}/host/linux-x86/bin/art"
@@ -66,6 +80,30 @@ while true; do
     # Vogar knows which VM to use on host.
     vm_command=""
     shift
+  elif [[ "$1" == "--mode=jvm" ]]; then
+    mode="ri"
+    make_target_name="apache-harmony-jdwp-tests-host"
+    art="$(which java)"
+    art_debugee="$(which java)"
+    # No need for extra args.
+    debuggee_args=""
+    # No image. On the RI.
+    image=""
+    # We do not need a device directory on RI.
+    device_dir=""
+    # Vogar knows which VM to use on RI.
+    vm_command=""
+    # We don't care about jit with the RI
+    use_jit=false
+    shift
+  elif [[ $1 == --agent-wrapper ]]; then
+    # Remove the --agent-wrapper from the arguments.
+    args=${args/$1}
+    shift
+    agent_wrapper=${agent_wrapper}${1},
+    # Remove the argument
+    args=${args/$1}
+    shift
   elif [[ $1 == -Ximage:* ]]; then
     image="$1"
     shift
@@ -74,7 +112,14 @@ while true; do
     # Remove the --no-jit from the arguments.
     args=${args/$1}
     shift
+  elif [[ $1 == "--no-debug" ]]; then
+    explicit_debug="yes"
+    debug="no"
+    # Remove the --no-debug from the arguments.
+    args=${args/$1}
+    shift
   elif [[ $1 == "--debug" ]]; then
+    explicit_debug="yes"
     debug="yes"
     # Remove the --debug from the arguments.
     args=${args/$1}
@@ -84,12 +129,30 @@ while true; do
     # Remove the --verbose from the arguments.
     args=${args/$1}
     shift
+  elif [[ $1 == "--gdbserver" ]]; then
+    # Remove the --gdbserver from the arguments.
+    args=${args/$1}
+    has_gdb="yes"
+    shift
+    gdb_target=$1
+    # Remove the target from the arguments.
+    args=${args/$1}
+    shift
   elif [[ $1 == "--test" ]]; then
     # Remove the --test from the arguments.
     args=${args/$1}
     shift
+    has_specific_test="yes"
     test=$1
     # Remove the test from the arguments.
+    args=${args/$1}
+    shift
+  elif [[ "$1" == "--jdwp-path" ]]; then
+    # Remove the --jdwp-path from the arguments.
+    args=${args/$1}
+    shift
+    with_jdwp_path=$1
+    # Remove the path from the arguments.
     args=${args/$1}
     shift
   elif [[ "$1" == "" ]]; then
@@ -97,10 +160,79 @@ while true; do
   elif [[ $1 == --variant=* ]]; then
     variant_cmdline_parameter=$1
     shift
+  elif [[ $1 == -Xplugin:* ]]; then
+    plugin="$1"
+    args=${args/$1}
+    shift
   else
     shift
   fi
 done
+
+if [[ $has_gdb = "yes" ]]; then
+  if [[ $explicit_debug = "no" ]]; then
+    debug="yes"
+  fi
+fi
+
+if [[ $mode == "ri" ]]; then
+  using_jack="false"
+  if [[ "x$with_jdwp_path" != "x" ]]; then
+    vm_args="${vm_args} --vm-arg -Djpda.settings.debuggeeAgentArgument=-agentpath:${agent_wrapper}"
+    vm_args="${vm_args} --vm-arg -Djpda.settings.debuggeeAgentName=$with_jdwp_path"
+  fi
+  if [[ "x$image" != "x" ]]; then
+    echo "Cannot use -Ximage: with --mode=jvm"
+    exit 1
+  elif [[ $has_gdb = "yes" ]]; then
+    echo "Cannot use --gdbserver with --mode=jvm"
+    exit 1
+  elif [[ $debug == "yes" ]]; then
+    echo "Cannot use --debug with --mode=jvm"
+    exit 1
+  fi
+else
+  if [[ $has_gdb = "yes" ]]; then
+    if [[ $mode == "target" ]]; then
+      echo "Cannot use --gdbserver with --mode=target"
+      exit 1
+    else
+      art_debugee="$art_debugee --gdbserver $gdb_target"
+      # The tests absolutely require some timeout. We set a ~2 week timeout since we can kill the
+      # test with gdb if it goes on too long.
+      jdwp_test_timeout="1000000000"
+    fi
+  fi
+  if [[ "x$with_jdwp_path" != "x" ]]; then
+    vm_args="${vm_args} --vm-arg -Djpda.settings.debuggeeAgentArgument=-agentpath:${agent_wrapper}"
+    vm_args="${vm_args} --vm-arg -Djpda.settings.debuggeeAgentName=${with_jdwp_path}"
+  fi
+  vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --debuggable"
+  # Make sure the debuggee doesn't clean up what the debugger has generated.
+  art_debugee="$art_debugee --no-clean"
+fi
+
+function jlib_name {
+  local path=$1
+  local str="classes"
+  local suffix="jar"
+  if [[ $mode == "ri" ]]; then
+    suffix="jar"
+    str="javalib"
+  elif [[ $using_jack == "true" ]]; then
+    suffix="jack"
+  fi
+  echo "$path/$str.$suffix"
+}
+
+# Jar containing all the tests.
+test_jar=$(jlib_name "${java_lib_location}/${make_target_name}_intermediates")
+
+if [[ ! -f $test_jar ]]; then
+  echo "Before running, you must build jdwp tests and vogar:" \
+       "make ${make_target_name} vogar"
+  exit 1
+fi
 
 # For the host:
 #
@@ -110,7 +242,7 @@ done
 #
 # Note: this isn't necessary for the device as the BOOTCLASSPATH environment variable is set there
 #       and used as a fallback.
-if [[ $host == "yes" ]]; then
+if [[ $mode == "host" ]]; then
   variant=${variant_cmdline_parameter:10}
   if [[ $variant == "x32" || $variant == "X32" ]]; then
     art_debugee="$art_debugee --32"
@@ -123,22 +255,37 @@ if [[ $host == "yes" ]]; then
 fi
 
 if [[ "$image" != "" ]]; then
-  vm_args="--vm-arg $image"
+  vm_args="$vm_args --vm-arg $image"
 fi
+
+if [[ "$plugin" != "" ]]; then
+  vm_args="$vm_args --vm-arg $plugin"
+fi
+
 if $use_jit; then
-  vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --compiler-filter=interpret-only"
-  debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=interpret-only"
+  vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --compiler-filter=quicken"
+  debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=quicken"
 fi
-vm_args="$vm_args --vm-arg -Xusejit:$use_jit"
-debuggee_args="$debuggee_args -Xusejit:$use_jit"
+
+if [[ $mode != "ri" ]]; then
+  vm_args="$vm_args --vm-arg -Xusejit:$use_jit"
+  debuggee_args="$debuggee_args -Xusejit:$use_jit"
+fi
+
 if [[ $debug == "yes" ]]; then
   art="$art -d"
   art_debugee="$art_debugee -d"
-  vm_args="$vm_args --vm-arg -XXlib:libartd.so"
+  vm_args="$vm_args --vm-arg -XXlib:libartd.so --vm-arg -XX:SlowDebug=true"
 fi
 if [[ $verbose == "yes" ]]; then
   # Enable JDWP logs in the debuggee.
   art_debugee="$art_debugee -verbose:jdwp"
+fi
+
+if [[ $using_jack == "true" ]]; then
+  toolchain_args="--toolchain jack --language JN --jack-arg -g"
+else
+  toolchain_args="--toolchain dx --language CUR"
 fi
 
 # Run the tests using vogar.
@@ -150,18 +297,18 @@ vogar $vm_command \
       $image_compiler_option \
       --timeout 800 \
       --vm-arg -Djpda.settings.verbose=true \
+      --vm-arg -Djpda.settings.timeout=$jdwp_test_timeout \
+      --vm-arg -Djpda.settings.waitingTime=$jdwp_test_timeout \
       --vm-arg -Djpda.settings.transportAddress=127.0.0.1:55107 \
-      --vm-arg -Djpda.settings.debuggeeJavaPath="$art_debugee $image $debuggee_args" \
-      --classpath $test_jack \
-      --toolchain jack --language JN \
-      --vm-arg -Xcompiler-option --vm-arg --debuggable \
-      --jack-arg -g \
+      --vm-arg -Djpda.settings.debuggeeJavaPath="$art_debugee $plugin $image $debuggee_args" \
+      --classpath "$test_jar" \
+      $toolchain_args \
       $test
 
 vogar_exit_status=$?
 
 echo "Killing stalled dalvikvm processes..."
-if [[ $host == "yes" ]]; then
+if [[ $mode == "host" ]]; then
   pkill -9 -f /bin/dalvikvm
 else
   adb shell pkill -9 -f /bin/dalvikvm

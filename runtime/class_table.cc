@@ -14,9 +14,11 @@
  * limitations under the License.
  */
 
-#include "class_table.h"
+#include "class_table-inl.h"
 
+#include "base/stl_util.h"
 #include "mirror/class-inl.h"
+#include "oat_file.h"
 
 namespace art {
 
@@ -55,9 +57,11 @@ mirror::Class* ClassTable::LookupByDescriptor(ObjPtr<mirror::Class> klass) {
   return nullptr;
 }
 
-// Bug: http://b/31104323 Ignore -Wunreachable-code from the for loop below
+// To take into account http://b/35845221
 #pragma clang diagnostic push
+#if __clang_major__ < 4
 #pragma clang diagnostic ignored "-Wunreachable-code"
+#endif
 
 mirror::Class* ClassTable::UpdateClass(const char* descriptor, mirror::Class* klass, size_t hash) {
   WriterMutexLock mu(Thread::Current(), lock_);
@@ -84,7 +88,7 @@ mirror::Class* ClassTable::UpdateClass(const char* descriptor, mirror::Class* kl
   return existing;
 }
 
-#pragma clang diagnostic pop  // http://b/31104323
+#pragma clang diagnostic pop
 
 size_t ClassTable::CountDefiningLoaderClasses(ObjPtr<mirror::ClassLoader> defining_loader,
                                               const ClassSet& set) const {
@@ -111,6 +115,20 @@ size_t ClassTable::NumNonZygoteClasses(ObjPtr<mirror::ClassLoader> defining_load
   return CountDefiningLoaderClasses(defining_loader, classes_.back());
 }
 
+size_t ClassTable::NumReferencedZygoteClasses() const {
+  ReaderMutexLock mu(Thread::Current(), lock_);
+  size_t sum = 0;
+  for (size_t i = 0; i < classes_.size() - 1; ++i) {
+    sum += classes_[i].Size();
+  }
+  return sum;
+}
+
+size_t ClassTable::NumReferencedNonZygoteClasses() const {
+  ReaderMutexLock mu(Thread::Current(), lock_);
+  return classes_.back().Size();
+}
+
 mirror::Class* ClassTable::Lookup(const char* descriptor, size_t hash) {
   DescriptorHashPair pair(descriptor, hash);
   ReaderMutexLock mu(Thread::Current(), lock_);
@@ -123,10 +141,36 @@ mirror::Class* ClassTable::Lookup(const char* descriptor, size_t hash) {
   return nullptr;
 }
 
+ObjPtr<mirror::Class> ClassTable::TryInsert(ObjPtr<mirror::Class> klass) {
+  TableSlot slot(klass);
+  WriterMutexLock mu(Thread::Current(), lock_);
+  for (ClassSet& class_set : classes_) {
+    auto it = class_set.Find(slot);
+    if (it != class_set.end()) {
+      return it->Read();
+    }
+  }
+  classes_.back().Insert(slot);
+  return klass;
+}
+
 void ClassTable::Insert(ObjPtr<mirror::Class> klass) {
   const uint32_t hash = TableSlot::HashDescriptor(klass);
   WriterMutexLock mu(Thread::Current(), lock_);
   classes_.back().InsertWithHash(TableSlot(klass, hash), hash);
+}
+
+void ClassTable::CopyWithoutLocks(const ClassTable& source_table) {
+  if (kIsDebugBuild) {
+    for (ClassSet& class_set : classes_) {
+      CHECK(class_set.Empty());
+    }
+  }
+  for (const ClassSet& class_set : source_table.classes_) {
+    for (const TableSlot& slot : class_set) {
+      classes_.back().Insert(slot);
+    }
+  }
 }
 
 void ClassTable::InsertWithoutLocks(ObjPtr<mirror::Class> klass) {

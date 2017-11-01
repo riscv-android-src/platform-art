@@ -20,6 +20,7 @@
 #include "base/enums.h"
 #include "base/stl_util.h"
 #include "obj_ptr-inl.h"
+#include "object_callbacks.h"
 #include "stack.h"
 
 #ifdef ART_TARGET_ANDROID
@@ -292,7 +293,7 @@ void AllocRecordObjectMap::RecordAllocation(Thread* self,
                   (kUseReadBarrier && !self->GetWeakRefAccessEnabled()))) {
     // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
     // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpoint();
+    self->CheckEmptyCheckpointFromWeakRefAccess(Locks::alloc_tracker_lock_);
     new_record_condition_.WaitHoldingLocks(self);
   }
 

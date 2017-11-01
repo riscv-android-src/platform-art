@@ -17,16 +17,19 @@
 #ifndef ART_RUNTIME_CHA_H_
 #define ART_RUNTIME_CHA_H_
 
-#include "art_method.h"
+#include <unordered_map>
+#include <unordered_set>
+
 #include "base/enums.h"
 #include "base/mutex.h"
 #include "handle.h"
 #include "mirror/class.h"
 #include "oat_quick_method_header.h"
-#include <unordered_map>
-#include <unordered_set>
 
 namespace art {
+
+class ArtMethod;
+class LinearAlloc;
 
 /**
  * Class Hierarchy Analysis (CHA) tries to devirtualize virtual calls into
@@ -94,12 +97,11 @@ class ClassHierarchyAnalysis {
                      OatQuickMethodHeader* dependent_header) REQUIRES(Locks::cha_lock_);
 
   // Return compiled code that assumes that `method` has single-implementation.
-  std::vector<MethodAndMethodHeaderPair>* GetDependents(ArtMethod* method)
-      REQUIRES(Locks::cha_lock_);
+  const ListOfDependentPairs& GetDependents(ArtMethod* method) REQUIRES(Locks::cha_lock_);
 
   // Remove dependency tracking for compiled code that assumes that
   // `method` has single-implementation.
-  void RemoveDependencyFor(ArtMethod* method) REQUIRES(Locks::cha_lock_);
+  void RemoveAllDependenciesFor(ArtMethod* method) REQUIRES(Locks::cha_lock_);
 
   // Remove from cha_dependency_map_ all entries that contain OatQuickMethodHeader from
   // the given `method_headers` set.
@@ -111,29 +113,51 @@ class ClassHierarchyAnalysis {
   // Update CHA info for methods that `klass` overrides, after loading `klass`.
   void UpdateAfterLoadingOf(Handle<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Remove all of the dependencies for a linear allocator. This is called when dex cache unloading
+  // occurs.
+  void RemoveDependenciesForLinearAlloc(const LinearAlloc* linear_alloc)
+      REQUIRES(!Locks::cha_lock_);
+
  private:
-  void InitSingleImplementationFlag(Handle<mirror::Class> klass, ArtMethod* method)
+  void InitSingleImplementationFlag(Handle<mirror::Class> klass,
+                                    ArtMethod* method,
+                                    PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Check/update single-implementation info when one virtual method
+  // overrides another.
   // `virtual_method` in `klass` overrides `method_in_super`.
-  // This will invalidate some assumptions on single-implementation.
+  // This may invalidate some assumptions on single-implementation.
   // Append methods that should have their single-implementation flag invalidated
   // to `invalidated_single_impl_methods`.
-  void CheckSingleImplementationInfo(
+  void CheckVirtualMethodSingleImplementationInfo(
       Handle<mirror::Class> klass,
       ArtMethod* virtual_method,
       ArtMethod* method_in_super,
-      std::unordered_set<ArtMethod*>& invalidated_single_impl_methods)
+      std::unordered_set<ArtMethod*>& invalidated_single_impl_methods,
+      PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Verify all methods in the same vtable slot from verify_class and its supers
-  // don't have single-implementation.
-  void VerifyNonSingleImplementation(mirror::Class* verify_class, uint16_t verify_index)
+  // Check/update single-implementation info when one method
+  // implements an interface method.
+  // `implementation_method` in `klass` implements `interface_method`.
+  // Append `interface_method` to `invalidated_single_impl_methods`
+  // if `interface_method` gets a new implementation.
+  void CheckInterfaceMethodSingleImplementationInfo(
+      Handle<mirror::Class> klass,
+      ArtMethod* interface_method,
+      ArtMethod* implementation_method,
+      std::unordered_set<ArtMethod*>& invalidated_single_impl_methods,
+      PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void InvalidateSingleImplementationMethods(
+      std::unordered_set<ArtMethod*>& invalidated_single_impl_methods)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // A map that maps a method to a set of compiled code that assumes that method has a
   // single implementation, which is used to do CHA-based devirtualization.
-  std::unordered_map<ArtMethod*, ListOfDependentPairs*> cha_dependency_map_
+  std::unordered_map<ArtMethod*, ListOfDependentPairs> cha_dependency_map_
     GUARDED_BY(Locks::cha_lock_);
 
   DISALLOW_COPY_AND_ASSIGN(ClassHierarchyAnalysis);

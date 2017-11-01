@@ -24,32 +24,28 @@
 #include <set>
 #include <string>
 #include <utility>
+#include <memory>
 #include <vector>
 
 #include "arch/instruction_set.h"
 #include "base/macros.h"
+#include "base/mutex.h"
+#include "deoptimization_kind.h"
 #include "dex_file_types.h"
 #include "experimental_flags.h"
 #include "gc_root.h"
 #include "instrumentation.h"
-#include "jobject_comparator.h"
-#include "method_reference.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "process_state.h"
 #include "quick/quick_method_frame_info.h"
 #include "runtime_stats.h"
-#include "safe_map.h"
 
 namespace art {
 
 namespace gc {
   class AbstractSystemWeakHolder;
   class Heap;
-  namespace collector {
-    class GarbageCollector;
-  }  // namespace collector
 }  // namespace gc
 
 namespace jit {
@@ -76,20 +72,22 @@ namespace verifier {
 }  // namespace verifier
 class ArenaPool;
 class ArtMethod;
-class ClassHierarchyAnalysis;
+enum class CalleeSaveType: uint32_t;
 class ClassLinker;
-class Closure;
 class CompilerCallbacks;
 class DexFile;
 class InternTable;
+class IsMarkedVisitor;
 class JavaVMExt;
 class LinearAlloc;
+class MemMap;
 class MonitorList;
 class MonitorPool;
 class NullPointerHandler;
 class OatFileManager;
 class Plugin;
 struct RuntimeArgumentMap;
+class RuntimeCallbacks;
 class SignalCatcher;
 class StackOverflowHandler;
 class SuspensionHandler;
@@ -234,6 +232,7 @@ class Runtime {
   // Detaches the current native thread from the runtime.
   void DetachCurrentThread() REQUIRES(!Locks::mutator_lock_);
 
+  void DumpDeoptimizations(std::ostream& os);
   void DumpForSigQuit(std::ostream& os);
   void DumpLockHolders(std::ostream& os);
 
@@ -304,7 +303,7 @@ class Runtime {
   }
 
   bool IsMethodHandlesEnabled() const {
-    return experimental_flags_ & ExperimentalFlags::kMethodHandles;
+    return true;
   }
 
   void DisallowNewSystemWeaks() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -337,11 +336,6 @@ class Runtime {
   void VisitTransactionRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Flip thread roots from from-space refs to to-space refs.
-  size_t FlipThreadRoots(Closure* thread_flip_visitor, Closure* flip_callback,
-                         gc::collector::GarbageCollector* collector)
-      REQUIRES(!Locks::mutator_lock_);
-
   // Sweep system weaks, the system weak is deleted if the visitor return null. Otherwise, the
   // system weak is updated to be the visitor's returned value.
   void SweepSystemWeaks(IsMarkedVisitor* visitor)
@@ -355,6 +349,9 @@ class Runtime {
   }
 
   void SetResolutionMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ClearResolutionMethod() {
+    resolution_method_ = nullptr;
+  }
 
   ArtMethod* CreateResolutionMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -366,6 +363,10 @@ class Runtime {
     return imt_conflict_method_ != nullptr;
   }
 
+  void ClearImtConflictMethod() {
+    imt_conflict_method_ = nullptr;
+  }
+
   void FixupConflictTables();
   void SetImtConflictMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtUnimplementedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -373,17 +374,12 @@ class Runtime {
   ArtMethod* CreateImtConflictMethod(LinearAlloc* linear_alloc)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Returns a special method that describes all callee saves being spilled to the stack.
-  enum CalleeSaveType {
-    kSaveAllCalleeSaves,  // All callee-save registers.
-    kSaveRefsOnly,        // Only those callee-save registers that can hold references.
-    kSaveRefsAndArgs,     // References (see above) and arguments (usually caller-save registers).
-    kSaveEverything,      // All registers, including both callee-save and caller-save.
-    kLastCalleeSaveType   // Value used for iteration
-  };
+  void ClearImtUnimplementedMethod() {
+    imt_unimplemented_method_ = nullptr;
+  }
 
   bool HasCalleeSaveMethod(CalleeSaveType type) const {
-    return callee_save_methods_[type] != 0u;
+    return callee_save_methods_[static_cast<size_t>(type)] != 0u;
   }
 
   ArtMethod* GetCalleeSaveMethod(CalleeSaveType type)
@@ -393,14 +389,14 @@ class Runtime {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   QuickMethodFrameInfo GetCalleeSaveMethodFrameInfo(CalleeSaveType type) const {
-    return callee_save_method_frame_infos_[type];
+    return callee_save_method_frame_infos_[static_cast<size_t>(type)];
   }
 
   QuickMethodFrameInfo GetRuntimeMethodFrameInfo(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static size_t GetCalleeSaveMethodOffset(CalleeSaveType type) {
-    return OFFSETOF_MEMBER(Runtime, callee_save_methods_[type]);
+    return OFFSETOF_MEMBER(Runtime, callee_save_methods_[static_cast<size_t>(type)]);
   }
 
   InstructionSet GetInstructionSet() const {
@@ -408,8 +404,10 @@ class Runtime {
   }
 
   void SetInstructionSet(InstructionSet instruction_set);
+  void ClearInstructionSet();
 
   void SetCalleeSaveMethod(ArtMethod* method, CalleeSaveType type);
+  void ClearCalleeSaveMethods();
 
   ArtMethod* CreateCalleeSaveMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -433,7 +431,7 @@ class Runtime {
     kInitialize
   };
 
-  jit::Jit* GetJit() {
+  jit::Jit* GetJit() const {
     return jit_.get();
   }
 
@@ -453,18 +451,20 @@ class Runtime {
   }
 
   void RegisterAppInfo(const std::vector<std::string>& code_paths,
-                       const std::string& profile_output_filename,
-                       const std::string& foreign_dex_profile_path,
-                       const std::string& app_dir);
-  void NotifyDexLoaded(const std::string& dex_location);
+                       const std::string& profile_output_filename);
 
   // Transaction support.
-  bool IsActiveTransaction() const {
-    return preinitialization_transaction_ != nullptr;
-  }
-  void EnterTransactionMode(Transaction* transaction);
+  bool IsActiveTransaction() const;
+  void EnterTransactionMode();
+  void EnterTransactionMode(bool strict, mirror::Class* root);
   void ExitTransactionMode();
+  void RollbackAllTransactions() REQUIRES_SHARED(Locks::mutator_lock_);
+  // Transaction rollback and exit transaction are always done together, it's convenience to
+  // do them in one function.
+  void RollbackAndExitTransactionMode() REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsTransactionAborted() const;
+  const std::unique_ptr<Transaction>& GetTransaction() const;
+  bool IsActiveStrictTransactionMode() const;
 
   void AbortTransactionAndThrowAbortError(Thread* self, const std::string& abort_message)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -514,6 +514,7 @@ class Runtime {
     return !implicit_so_checks_;
   }
 
+  void DisableVerifier();
   bool IsVerificationEnabled() const;
   bool IsVerificationSoftFail() const;
 
@@ -568,15 +569,14 @@ class Runtime {
     return jit_options_.get();
   }
 
-  bool IsDebuggable() const;
-
-  bool IsFullyDeoptable() const {
-    return is_fully_deoptable_;
+  bool IsJavaDebuggable() const {
+    return is_java_debuggable_;
   }
 
-  void SetFullyDeoptable(bool value) {
-    is_fully_deoptable_ = value;
-  }
+  void SetJavaDebuggable(bool value);
+
+  // Deoptimize the boot image, called for Java debuggable apps.
+  void DeoptimizeBootImage();
 
   bool IsNativeDebuggable() const {
     return is_native_debuggable_;
@@ -638,9 +638,9 @@ class Runtime {
     return zygote_no_threads_;
   }
 
-  // Returns if the code can be deoptimized. Code may be compiled with some
+  // Returns if the code can be deoptimized asynchronously. Code may be compiled with some
   // optimization that makes it impossible to deoptimize.
-  bool IsDeoptimizeable(uintptr_t code) const REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsAsyncDeoptimizeable(uintptr_t code) const REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns a saved copy of the environment (getenv/setenv values).
   // Used by Fork to protect against overwriting LD_LIBRARY_PATH, etc.
@@ -651,14 +651,42 @@ class Runtime {
   void AddSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
   void RemoveSystemWeakHolder(gc::AbstractSystemWeakHolder* holder);
 
-  ClassHierarchyAnalysis* GetClassHierarchyAnalysis() {
-    return cha_;
+  void AttachAgent(const std::string& agent_arg);
+
+  const std::list<ti::Agent>& GetAgents() const {
+    return agents_;
   }
 
-  NO_RETURN
-  static void Aborter(const char* abort_message);
+  RuntimeCallbacks* GetRuntimeCallbacks();
 
-  void AttachAgent(const std::string& agent_arg);
+  bool HasLoadedPlugins() const {
+    return !plugins_.empty();
+  }
+
+  void InitThreadGroups(Thread* self);
+
+  void SetDumpGCPerformanceOnShutdown(bool value) {
+    dump_gc_performance_on_shutdown_ = value;
+  }
+
+  void IncrementDeoptimizationCount(DeoptimizationKind kind) {
+    DCHECK_LE(kind, DeoptimizationKind::kLast);
+    deoptimization_counts_[static_cast<size_t>(kind)]++;
+  }
+
+  uint32_t GetNumberOfDeoptimizations() const {
+    uint32_t result = 0;
+    for (size_t i = 0; i <= static_cast<size_t>(DeoptimizationKind::kLast); ++i) {
+      result += deoptimization_counts_[i];
+    }
+    return result;
+  }
+
+  // Whether or not we use MADV_RANDOM on files that are thought to have random access patterns.
+  // This is beneficial for low RAM devices since it reduces page cache thrashing.
+  bool MAdviseRandomAccess() const {
+    return madvise_random_access_;
+  }
 
  private:
   static void InitPlatformSignalHandlers();
@@ -670,7 +698,6 @@ class Runtime {
   bool Init(RuntimeArgumentMap&& runtime_options)
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
-  void InitThreadGroups(Thread* self);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
 
   void StartDaemonThreads();
@@ -698,8 +725,10 @@ class Runtime {
   static constexpr int kProfileForground = 0;
   static constexpr int kProfileBackground = 1;
 
+  static constexpr uint32_t kCalleeSaveSize = 6u;
+
   // 64 bit so that we can share the same asm offsets for both 32 and 64 bits.
-  uint64_t callee_save_methods_[kLastCalleeSaveType];
+  uint64_t callee_save_methods_[kCalleeSaveSize];
   GcRoot<mirror::Throwable> pre_allocated_OutOfMemoryError_;
   GcRoot<mirror::Throwable> pre_allocated_NoClassDefFoundError_;
   ArtMethod* resolution_method_;
@@ -713,7 +742,7 @@ class Runtime {
   GcRoot<mirror::Object> sentinel_;
 
   InstructionSet instruction_set_;
-  QuickMethodFrameInfo callee_save_method_frame_infos_[kLastCalleeSaveType];
+  QuickMethodFrameInfo callee_save_method_frame_infos_[kCalleeSaveSize];
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
@@ -733,7 +762,7 @@ class Runtime {
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
-  std::vector<ti::Agent> agents_;
+  std::list<ti::Agent> agents_;
   std::vector<Plugin> plugins_;
 
   // The default stack size for managed threads created by the runtime.
@@ -763,6 +792,13 @@ class Runtime {
   ClassLinker* class_linker_;
 
   SignalCatcher* signal_catcher_;
+
+  // If true, the runtime will connect to tombstoned via a socket to
+  // request an open file descriptor to write its traces to.
+  bool use_tombstoned_traces_;
+
+  // Location to which traces must be written on SIGQUIT. Only used if
+  // tombstoned_traces_ == false.
   std::string stack_trace_file_;
 
   std::unique_ptr<JavaVMExt> java_vm_;
@@ -817,8 +853,11 @@ class Runtime {
   // If true, then we dump the GC cumulative timings on shutdown.
   bool dump_gc_performance_on_shutdown_;
 
-  // Transaction used for pre-initializing classes at compilation time.
-  Transaction* preinitialization_transaction_;
+  // Transactions used for pre-initializing classes at compilation time.
+  // Support nested transactions, maintain a list containing all transactions. Transactions are
+  // handled under a stack discipline. Because GC needs to go over all transactions, we choose list
+  // as substantial data structure instead of stack.
+  std::list<std::unique_ptr<Transaction>> preinitialization_transactions_;
 
   // If kNone, verification is disabled. kEnable by default.
   verifier::VerifyMode verify_;
@@ -860,8 +899,8 @@ class Runtime {
   // Whether we are running under native debugger.
   bool is_native_debuggable_;
 
-  // Whether we are expected to be deoptable at all points.
-  bool is_fully_deoptable_;
+  // Whether Java code needs to be debuggable.
+  bool is_java_debuggable_;
 
   // The maximum number of failed boots we allow before pruning the dalvik cache
   // and trying again. This option is only inspected when we're running as a
@@ -882,6 +921,10 @@ class Runtime {
 
   // Whether or not we are on a low RAM device.
   bool is_low_memory_mode_;
+
+  // Whether or not we use MADV_RANDOM on files that are thought to have random access patterns.
+  // This is beneficial for low RAM devices since it reduces page cache thrashing.
+  bool madvise_random_access_;
 
   // Whether the application should run in safe mode, that is, interpreter only.
   bool safe_mode_;
@@ -915,11 +958,15 @@ class Runtime {
   // Generic system-weak holders.
   std::vector<gc::AbstractSystemWeakHolder*> system_weak_holders_;
 
-  ClassHierarchyAnalysis* cha_;
+  std::unique_ptr<RuntimeCallbacks> callbacks_;
+
+  std::atomic<uint32_t> deoptimization_counts_[
+      static_cast<uint32_t>(DeoptimizationKind::kLast) + 1];
+
+  std::unique_ptr<MemMap> protected_fault_page_;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };
-std::ostream& operator<<(std::ostream& os, const Runtime::CalleeSaveType& rhs);
 
 }  // namespace art
 

@@ -17,15 +17,17 @@
 
 #include <cfloat>
 
+#include "art_method-inl.h"
+#include "base/bit_utils.h"
+#include "base/bit_vector-inl.h"
+#include "base/stl_util.h"
+#include "class_linker-inl.h"
 #include "code_generator.h"
 #include "common_dominator.h"
-#include "ssa_builder.h"
-#include "base/bit_vector-inl.h"
-#include "base/bit_utils.h"
-#include "base/stl_util.h"
 #include "intrinsics.h"
 #include "mirror/class-inl.h"
 #include "scoped_thread_state_change-inl.h"
+#include "ssa_builder.h"
 
 namespace art {
 
@@ -53,14 +55,18 @@ void HGraph::FindBackEdges(ArenaBitVector* visited) {
   // "visited" must be empty on entry, it's an output argument for all visited (i.e. live) blocks.
   DCHECK_EQ(visited->GetHighestBitSet(), -1);
 
+  // Allocate memory from local ScopedArenaAllocator.
+  ScopedArenaAllocator allocator(GetArenaStack());
   // Nodes that we're currently visiting, indexed by block id.
-  ArenaBitVector visiting(arena_, blocks_.size(), false, kArenaAllocGraphBuilder);
+  ArenaBitVector visiting(
+      &allocator, blocks_.size(), /* expandable */ false, kArenaAllocGraphBuilder);
+  visiting.ClearAllBits();
   // Number of successors visited from a given node, indexed by block id.
-  ArenaVector<size_t> successors_visited(blocks_.size(),
-                                         0u,
-                                         arena_->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<size_t> successors_visited(blocks_.size(),
+                                               0u,
+                                               allocator.Adapter(kArenaAllocGraphBuilder));
   // Stack of nodes that we're currently visiting (same as marked in "visiting" above).
-  ArenaVector<HBasicBlock*> worklist(arena_->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<HBasicBlock*> worklist(allocator.Adapter(kArenaAllocGraphBuilder));
   constexpr size_t kDefaultWorklistSize = 8;
   worklist.reserve(kDefaultWorklistSize);
   visited->SetBit(entry_block_->GetBlockId());
@@ -88,13 +94,43 @@ void HGraph::FindBackEdges(ArenaBitVector* visited) {
   }
 }
 
-static void RemoveEnvironmentUses(HInstruction* instruction) {
+// Remove the environment use records of the instruction for users.
+void RemoveEnvironmentUses(HInstruction* instruction) {
   for (HEnvironment* environment = instruction->GetEnvironment();
        environment != nullptr;
        environment = environment->GetParent()) {
     for (size_t i = 0, e = environment->Size(); i < e; ++i) {
       if (environment->GetInstructionAt(i) != nullptr) {
         environment->RemoveAsUserOfInput(i);
+      }
+    }
+  }
+}
+
+// Return whether the instruction has an environment and it's used by others.
+bool HasEnvironmentUsedByOthers(HInstruction* instruction) {
+  for (HEnvironment* environment = instruction->GetEnvironment();
+       environment != nullptr;
+       environment = environment->GetParent()) {
+    for (size_t i = 0, e = environment->Size(); i < e; ++i) {
+      HInstruction* user = environment->GetInstructionAt(i);
+      if (user != nullptr) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// Reset environment records of the instruction itself.
+void ResetEnvironmentInputRecords(HInstruction* instruction) {
+  for (HEnvironment* environment = instruction->GetEnvironment();
+       environment != nullptr;
+       environment = environment->GetParent()) {
+    for (size_t i = 0, e = environment->Size(); i < e; ++i) {
+      DCHECK(environment->GetHolder() == instruction);
+      if (environment->GetInstructionAt(i) != nullptr) {
+        environment->SetRawEnvAt(i, nullptr);
       }
     }
   }
@@ -141,7 +177,11 @@ void HGraph::RemoveDeadBlocks(const ArenaBitVector& visited) {
 }
 
 GraphAnalysisResult HGraph::BuildDominatorTree() {
-  ArenaBitVector visited(arena_, blocks_.size(), false, kArenaAllocGraphBuilder);
+  // Allocate memory from local ScopedArenaAllocator.
+  ScopedArenaAllocator allocator(GetArenaStack());
+
+  ArenaBitVector visited(&allocator, blocks_.size(), false, kArenaAllocGraphBuilder);
+  visited.ClearAllBits();
 
   // (1) Find the back edges in the graph doing a DFS traversal.
   FindBackEdges(&visited);
@@ -226,14 +266,16 @@ void HGraph::ComputeDominanceInformation() {
   reverse_post_order_.reserve(blocks_.size());
   reverse_post_order_.push_back(entry_block_);
 
+  // Allocate memory from local ScopedArenaAllocator.
+  ScopedArenaAllocator allocator(GetArenaStack());
   // Number of visits of a given node, indexed by block id.
-  ArenaVector<size_t> visits(blocks_.size(), 0u, arena_->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<size_t> visits(blocks_.size(), 0u, allocator.Adapter(kArenaAllocGraphBuilder));
   // Number of successors visited from a given node, indexed by block id.
-  ArenaVector<size_t> successors_visited(blocks_.size(),
-                                         0u,
-                                         arena_->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<size_t> successors_visited(blocks_.size(),
+                                               0u,
+                                               allocator.Adapter(kArenaAllocGraphBuilder));
   // Nodes for which we need to visit successors.
-  ArenaVector<HBasicBlock*> worklist(arena_->Adapter(kArenaAllocGraphBuilder));
+  ScopedArenaVector<HBasicBlock*> worklist(allocator.Adapter(kArenaAllocGraphBuilder));
   constexpr size_t kDefaultWorklistSize = 8;
   worklist.reserve(kDefaultWorklistSize);
   worklist.push_back(entry_block_);
@@ -303,7 +345,7 @@ void HGraph::ComputeDominanceInformation() {
 }
 
 HBasicBlock* HGraph::SplitEdge(HBasicBlock* block, HBasicBlock* successor) {
-  HBasicBlock* new_block = new (arena_) HBasicBlock(this, successor->GetDexPc());
+  HBasicBlock* new_block = new (allocator_) HBasicBlock(this, successor->GetDexPc());
   AddBlock(new_block);
   // Use `InsertBetween` to ensure the predecessor index and successor index of
   // `block` and `successor` are preserved.
@@ -315,13 +357,42 @@ void HGraph::SplitCriticalEdge(HBasicBlock* block, HBasicBlock* successor) {
   // Insert a new node between `block` and `successor` to split the
   // critical edge.
   HBasicBlock* new_block = SplitEdge(block, successor);
-  new_block->AddInstruction(new (arena_) HGoto(successor->GetDexPc()));
+  new_block->AddInstruction(new (allocator_) HGoto(successor->GetDexPc()));
   if (successor->IsLoopHeader()) {
     // If we split at a back edge boundary, make the new block the back edge.
     HLoopInformation* info = successor->GetLoopInformation();
     if (info->IsBackEdge(*block)) {
       info->RemoveBackEdge(block);
       info->AddBackEdge(new_block);
+    }
+  }
+}
+
+// Reorder phi inputs to match reordering of the block's predecessors.
+static void FixPhisAfterPredecessorsReodering(HBasicBlock* block, size_t first, size_t second) {
+  for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
+    HPhi* phi = it.Current()->AsPhi();
+    HInstruction* first_instr = phi->InputAt(first);
+    HInstruction* second_instr = phi->InputAt(second);
+    phi->ReplaceInput(first_instr, second);
+    phi->ReplaceInput(second_instr, first);
+  }
+}
+
+// Make sure that the first predecessor of a loop header is the incoming block.
+void HGraph::OrderLoopHeaderPredecessors(HBasicBlock* header) {
+  DCHECK(header->IsLoopHeader());
+  HLoopInformation* info = header->GetLoopInformation();
+  if (info->IsBackEdge(*header->GetPredecessors()[0])) {
+    HBasicBlock* to_swap = header->GetPredecessors()[0];
+    for (size_t pred = 1, e = header->GetPredecessors().size(); pred < e; ++pred) {
+      HBasicBlock* predecessor = header->GetPredecessors()[pred];
+      if (!info->IsBackEdge(*predecessor)) {
+        header->predecessors_[pred] = to_swap;
+        header->predecessors_[0] = predecessor;
+        FixPhisAfterPredecessorsReodering(header, 0, pred);
+        break;
+      }
     }
   }
 }
@@ -335,9 +406,9 @@ void HGraph::SimplifyLoop(HBasicBlock* header) {
   // this graph.
   size_t number_of_incomings = header->GetPredecessors().size() - info->NumberOfBackEdges();
   if (number_of_incomings != 1 || (GetEntryBlock()->GetSingleSuccessor() == header)) {
-    HBasicBlock* pre_header = new (arena_) HBasicBlock(this, header->GetDexPc());
+    HBasicBlock* pre_header = new (allocator_) HBasicBlock(this, header->GetDexPc());
     AddBlock(pre_header);
-    pre_header->AddInstruction(new (arena_) HGoto(header->GetDexPc()));
+    pre_header->AddInstruction(new (allocator_) HGoto(header->GetDexPc()));
 
     for (size_t pred = 0; pred < header->GetPredecessors().size(); ++pred) {
       HBasicBlock* predecessor = header->GetPredecessors()[pred];
@@ -349,18 +420,7 @@ void HGraph::SimplifyLoop(HBasicBlock* header) {
     pre_header->AddSuccessor(header);
   }
 
-  // Make sure the first predecessor of a loop header is the incoming block.
-  if (info->IsBackEdge(*header->GetPredecessors()[0])) {
-    HBasicBlock* to_swap = header->GetPredecessors()[0];
-    for (size_t pred = 1, e = header->GetPredecessors().size(); pred < e; ++pred) {
-      HBasicBlock* predecessor = header->GetPredecessors()[pred];
-      if (!info->IsBackEdge(*predecessor)) {
-        header->predecessors_[pred] = to_swap;
-        header->predecessors_[0] = predecessor;
-        break;
-      }
-    }
-  }
+  OrderLoopHeaderPredecessors(header);
 
   HInstruction* first_instruction = header->GetFirstInstruction();
   if (first_instruction != nullptr && first_instruction->IsSuspendCheck()) {
@@ -390,7 +450,7 @@ void HGraph::ComputeTryBlockInformation() {
          try_entry != &block->GetTryCatchInformation()->GetTryEntry())) {
       // We are either setting try block membership for the first time or it
       // has changed.
-      block->SetTryCatchInformation(new (arena_) TryCatchInformation(*try_entry));
+      block->SetTryCatchInformation(new (allocator_) TryCatchInformation(*try_entry));
     }
   }
 }
@@ -497,7 +557,7 @@ HNullConstant* HGraph::GetNullConstant(uint32_t dex_pc) {
   // not null and not in a block. Otherwise, we need to clear the instruction
   // id and/or any invariants the graph is assuming when adding new instructions.
   if ((cached_null_constant_ == nullptr) || (cached_null_constant_->GetBlock() == nullptr)) {
-    cached_null_constant_ = new (arena_) HNullConstant(dex_pc);
+    cached_null_constant_ = new (allocator_) HNullConstant(dex_pc);
     cached_null_constant_->SetReferenceTypeInfo(inexact_object_rti_);
     InsertConstant(cached_null_constant_);
   }
@@ -513,8 +573,8 @@ HCurrentMethod* HGraph::GetCurrentMethod() {
   // not null and not in a block. Otherwise, we need to clear the instruction
   // id and/or any invariants the graph is assuming when adding new instructions.
   if ((cached_current_method_ == nullptr) || (cached_current_method_->GetBlock() == nullptr)) {
-    cached_current_method_ = new (arena_) HCurrentMethod(
-        Is64BitInstructionSet(instruction_set_) ? Primitive::kPrimLong : Primitive::kPrimInt,
+    cached_current_method_ = new (allocator_) HCurrentMethod(
+        Is64BitInstructionSet(instruction_set_) ? DataType::Type::kInt64 : DataType::Type::kInt32,
         entry_block_->GetDexPc());
     if (entry_block_->GetFirstInstruction() == nullptr) {
       entry_block_->AddInstruction(cached_current_method_);
@@ -526,19 +586,29 @@ HCurrentMethod* HGraph::GetCurrentMethod() {
   return cached_current_method_;
 }
 
-HConstant* HGraph::GetConstant(Primitive::Type type, int64_t value, uint32_t dex_pc) {
+const char* HGraph::GetMethodName() const {
+  const DexFile::MethodId& method_id = dex_file_.GetMethodId(method_idx_);
+  return dex_file_.GetMethodName(method_id);
+}
+
+std::string HGraph::PrettyMethod(bool with_signature) const {
+  return dex_file_.PrettyMethod(method_idx_, with_signature);
+}
+
+HConstant* HGraph::GetConstant(DataType::Type type, int64_t value, uint32_t dex_pc) {
   switch (type) {
-    case Primitive::Type::kPrimBoolean:
+    case DataType::Type::kBool:
       DCHECK(IsUint<1>(value));
       FALLTHROUGH_INTENDED;
-    case Primitive::Type::kPrimByte:
-    case Primitive::Type::kPrimChar:
-    case Primitive::Type::kPrimShort:
-    case Primitive::Type::kPrimInt:
-      DCHECK(IsInt(Primitive::ComponentSize(type) * kBitsPerByte, value));
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+      DCHECK(IsInt(DataType::Size(type) * kBitsPerByte, value));
       return GetIntConstant(static_cast<int32_t>(value), dex_pc);
 
-    case Primitive::Type::kPrimLong:
+    case DataType::Type::kInt64:
       return GetLongConstant(value, dex_pc);
 
     default:
@@ -650,10 +720,13 @@ void HLoopInformation::Populate() {
   bool is_irreducible_loop = HasBackEdgeNotDominatedByHeader();
 
   if (is_irreducible_loop) {
-    ArenaBitVector visited(graph->GetArena(),
+    // Allocate memory from local ScopedArenaAllocator.
+    ScopedArenaAllocator allocator(graph->GetArenaStack());
+    ArenaBitVector visited(&allocator,
                            graph->GetBlocks().size(),
                            /* expandable */ false,
                            kArenaAllocGraphBuilder);
+    visited.ClearAllBits();
     // Stop marking blocks at the loop header.
     visited.SetBit(header_->GetBlockId());
 
@@ -688,6 +761,7 @@ void HLoopInformation::Populate() {
     contains_irreducible_loop_ = true;
     graph->SetHasIrreducibleLoops(true);
   }
+  graph->SetHasLoops(true);
 }
 
 HBasicBlock* HLoopInformation::GetPreHeader() const {
@@ -778,9 +852,9 @@ void HBasicBlock::ReplaceAndRemoveInstructionWith(HInstruction* initial,
     // We can only replace a control flow instruction with another control flow instruction.
     DCHECK(replacement->IsControlFlow());
     DCHECK_EQ(replacement->GetId(), -1);
-    DCHECK_EQ(replacement->GetType(), Primitive::kPrimVoid);
+    DCHECK_EQ(replacement->GetType(), DataType::Type::kVoid);
     DCHECK_EQ(initial->GetBlock(), this);
-    DCHECK_EQ(initial->GetType(), Primitive::kPrimVoid);
+    DCHECK_EQ(initial->GetType(), DataType::Type::kVoid);
     DCHECK(initial->GetUses().empty());
     DCHECK(initial->GetEnvUses().empty());
     replacement->SetBlock(this);
@@ -881,7 +955,7 @@ void HBasicBlock::RemoveInstructionOrPhi(HInstruction* instruction, bool ensure_
   }
 }
 
-void HEnvironment::CopyFrom(const ArenaVector<HInstruction*>& locals) {
+void HEnvironment::CopyFrom(ArrayRef<HInstruction* const> locals) {
   for (size_t i = 0; i < locals.size(); i++) {
     HInstruction* instruction = locals[i];
     SetRawEnvAt(i, instruction);
@@ -955,6 +1029,7 @@ void HInstructionList::AddInstruction(HInstruction* instruction) {
     DCHECK(last_instruction_ == nullptr);
     first_instruction_ = last_instruction_ = instruction;
   } else {
+    DCHECK(last_instruction_ != nullptr);
     last_instruction_->next_ = instruction;
     instruction->previous_ = last_instruction_;
     last_instruction_ = instruction;
@@ -1087,6 +1162,19 @@ void HInstruction::ReplaceWith(HInstruction* other) {
   DCHECK(env_uses_.empty());
 }
 
+void HInstruction::ReplaceUsesDominatedBy(HInstruction* dominator, HInstruction* replacement) {
+  const HUseList<HInstruction*>& uses = GetUses();
+  for (auto it = uses.begin(), end = uses.end(); it != end; /* ++it below */) {
+    HInstruction* user = it->GetUser();
+    size_t index = it->GetIndex();
+    // Increment `it` now because `*it` may disappear thanks to user->ReplaceInput().
+    ++it;
+    if (dominator->StrictlyDominates(user)) {
+      user->ReplaceInput(replacement, index);
+    }
+  }
+}
+
 void HInstruction::ReplaceInput(HInstruction* replacement, size_t index) {
   HUserRecord<HInstruction*> input_use = InputRecordAt(index);
   if (input_use.GetInstruction() == replacement) {
@@ -1134,6 +1222,142 @@ void HVariableInputSizeInstruction::RemoveInputAt(size_t index) {
   }
 }
 
+void HVariableInputSizeInstruction::RemoveAllInputs() {
+  RemoveAsUserOfAllInputs();
+  DCHECK(!HasNonEnvironmentUses());
+
+  inputs_.clear();
+  DCHECK_EQ(0u, InputCount());
+}
+
+size_t HConstructorFence::RemoveConstructorFences(HInstruction* instruction) {
+  DCHECK(instruction->GetBlock() != nullptr);
+  // Removing constructor fences only makes sense for instructions with an object return type.
+  DCHECK_EQ(DataType::Type::kReference, instruction->GetType());
+
+  // Return how many instructions were removed for statistic purposes.
+  size_t remove_count = 0;
+
+  // Efficient implementation that simultaneously (in one pass):
+  // * Scans the uses list for all constructor fences.
+  // * Deletes that constructor fence from the uses list of `instruction`.
+  // * Deletes `instruction` from the constructor fence's inputs.
+  // * Deletes the constructor fence if it now has 0 inputs.
+
+  const HUseList<HInstruction*>& uses = instruction->GetUses();
+  // Warning: Although this is "const", we might mutate the list when calling RemoveInputAt.
+  for (auto it = uses.begin(), end = uses.end(); it != end; ) {
+    const HUseListNode<HInstruction*>& use_node = *it;
+    HInstruction* const use_instruction = use_node.GetUser();
+
+    // Advance the iterator immediately once we fetch the use_node.
+    // Warning: If the input is removed, the current iterator becomes invalid.
+    ++it;
+
+    if (use_instruction->IsConstructorFence()) {
+      HConstructorFence* ctor_fence = use_instruction->AsConstructorFence();
+      size_t input_index = use_node.GetIndex();
+
+      // Process the candidate instruction for removal
+      // from the graph.
+
+      // Constructor fence instructions are never
+      // used by other instructions.
+      //
+      // If we wanted to make this more generic, it
+      // could be a runtime if statement.
+      DCHECK(!ctor_fence->HasUses());
+
+      // A constructor fence's return type is "kPrimVoid"
+      // and therefore it can't have any environment uses.
+      DCHECK(!ctor_fence->HasEnvironmentUses());
+
+      // Remove the inputs first, otherwise removing the instruction
+      // will try to remove its uses while we are already removing uses
+      // and this operation will fail.
+      DCHECK_EQ(instruction, ctor_fence->InputAt(input_index));
+
+      // Removing the input will also remove the `use_node`.
+      // (Do not look at `use_node` after this, it will be a dangling reference).
+      ctor_fence->RemoveInputAt(input_index);
+
+      // Once all inputs are removed, the fence is considered dead and
+      // is removed.
+      if (ctor_fence->InputCount() == 0u) {
+        ctor_fence->GetBlock()->RemoveInstruction(ctor_fence);
+        ++remove_count;
+      }
+    }
+  }
+
+  if (kIsDebugBuild) {
+    // Post-condition checks:
+    // * None of the uses of `instruction` are a constructor fence.
+    // * The `instruction` itself did not get removed from a block.
+    for (const HUseListNode<HInstruction*>& use_node : instruction->GetUses()) {
+      CHECK(!use_node.GetUser()->IsConstructorFence());
+    }
+    CHECK(instruction->GetBlock() != nullptr);
+  }
+
+  return remove_count;
+}
+
+void HConstructorFence::Merge(HConstructorFence* other) {
+  // Do not delete yourself from the graph.
+  DCHECK(this != other);
+  // Don't try to merge with an instruction not associated with a block.
+  DCHECK(other->GetBlock() != nullptr);
+  // A constructor fence's return type is "kPrimVoid"
+  // and therefore it cannot have any environment uses.
+  DCHECK(!other->HasEnvironmentUses());
+
+  auto has_input = [](HInstruction* haystack, HInstruction* needle) {
+    // Check if `haystack` has `needle` as any of its inputs.
+    for (size_t input_count = 0; input_count < haystack->InputCount(); ++input_count) {
+      if (haystack->InputAt(input_count) == needle) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  // Add any inputs from `other` into `this` if it wasn't already an input.
+  for (size_t input_count = 0; input_count < other->InputCount(); ++input_count) {
+    HInstruction* other_input = other->InputAt(input_count);
+    if (!has_input(this, other_input)) {
+      AddInput(other_input);
+    }
+  }
+
+  other->GetBlock()->RemoveInstruction(other);
+}
+
+HInstruction* HConstructorFence::GetAssociatedAllocation(bool ignore_inputs) {
+  HInstruction* new_instance_inst = GetPrevious();
+  // Check if the immediately preceding instruction is a new-instance/new-array.
+  // Otherwise this fence is for protecting final fields.
+  if (new_instance_inst != nullptr &&
+      (new_instance_inst->IsNewInstance() || new_instance_inst->IsNewArray())) {
+    if (ignore_inputs) {
+      // If inputs are ignored, simply check if the predecessor is
+      // *any* HNewInstance/HNewArray.
+      //
+      // Inputs are normally only ignored for prepare_for_register_allocation,
+      // at which point *any* prior HNewInstance/Array can be considered
+      // associated.
+      return new_instance_inst;
+    } else {
+      // Normal case: There must be exactly 1 input and the previous instruction
+      // must be that input.
+      if (InputCount() == 1u && InputAt(0) == new_instance_inst) {
+        return new_instance_inst;
+      }
+    }
+  }
+  return nullptr;
+}
+
 #define DEFINE_ACCEPT(name, super)                                             \
 void H##name::Accept(HGraphVisitor* visitor) {                                 \
   visitor->Visit##name(this);                                                  \
@@ -1172,11 +1396,11 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
   if (GetInput()->IsIntConstant()) {
     int32_t value = GetInput()->AsIntConstant()->GetValue();
     switch (GetResultType()) {
-      case Primitive::kPrimLong:
+      case DataType::Type::kInt64:
         return graph->GetLongConstant(static_cast<int64_t>(value), GetDexPc());
-      case Primitive::kPrimFloat:
+      case DataType::Type::kFloat32:
         return graph->GetFloatConstant(static_cast<float>(value), GetDexPc());
-      case Primitive::kPrimDouble:
+      case DataType::Type::kFloat64:
         return graph->GetDoubleConstant(static_cast<double>(value), GetDexPc());
       default:
         return nullptr;
@@ -1184,11 +1408,11 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
   } else if (GetInput()->IsLongConstant()) {
     int64_t value = GetInput()->AsLongConstant()->GetValue();
     switch (GetResultType()) {
-      case Primitive::kPrimInt:
+      case DataType::Type::kInt32:
         return graph->GetIntConstant(static_cast<int32_t>(value), GetDexPc());
-      case Primitive::kPrimFloat:
+      case DataType::Type::kFloat32:
         return graph->GetFloatConstant(static_cast<float>(value), GetDexPc());
-      case Primitive::kPrimDouble:
+      case DataType::Type::kFloat64:
         return graph->GetDoubleConstant(static_cast<double>(value), GetDexPc());
       default:
         return nullptr;
@@ -1196,7 +1420,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
   } else if (GetInput()->IsFloatConstant()) {
     float value = GetInput()->AsFloatConstant()->GetValue();
     switch (GetResultType()) {
-      case Primitive::kPrimInt:
+      case DataType::Type::kInt32:
         if (std::isnan(value))
           return graph->GetIntConstant(0, GetDexPc());
         if (value >= kPrimIntMax)
@@ -1204,7 +1428,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
         if (value <= kPrimIntMin)
           return graph->GetIntConstant(kPrimIntMin, GetDexPc());
         return graph->GetIntConstant(static_cast<int32_t>(value), GetDexPc());
-      case Primitive::kPrimLong:
+      case DataType::Type::kInt64:
         if (std::isnan(value))
           return graph->GetLongConstant(0, GetDexPc());
         if (value >= kPrimLongMax)
@@ -1212,7 +1436,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
         if (value <= kPrimLongMin)
           return graph->GetLongConstant(kPrimLongMin, GetDexPc());
         return graph->GetLongConstant(static_cast<int64_t>(value), GetDexPc());
-      case Primitive::kPrimDouble:
+      case DataType::Type::kFloat64:
         return graph->GetDoubleConstant(static_cast<double>(value), GetDexPc());
       default:
         return nullptr;
@@ -1220,7 +1444,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
   } else if (GetInput()->IsDoubleConstant()) {
     double value = GetInput()->AsDoubleConstant()->GetValue();
     switch (GetResultType()) {
-      case Primitive::kPrimInt:
+      case DataType::Type::kInt32:
         if (std::isnan(value))
           return graph->GetIntConstant(0, GetDexPc());
         if (value >= kPrimIntMax)
@@ -1228,7 +1452,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
         if (value <= kPrimLongMin)
           return graph->GetIntConstant(kPrimIntMin, GetDexPc());
         return graph->GetIntConstant(static_cast<int32_t>(value), GetDexPc());
-      case Primitive::kPrimLong:
+      case DataType::Type::kInt64:
         if (std::isnan(value))
           return graph->GetLongConstant(0, GetDexPc());
         if (value >= kPrimLongMax)
@@ -1236,7 +1460,7 @@ HConstant* HTypeConversion::TryStaticEvaluation() const {
         if (value <= kPrimLongMin)
           return graph->GetLongConstant(kPrimLongMin, GetDexPc());
         return graph->GetLongConstant(static_cast<int64_t>(value), GetDexPc());
-      case Primitive::kPrimFloat:
+      case DataType::Type::kFloat32:
         return graph->GetFloatConstant(static_cast<float>(value), GetDexPc());
       default:
         return nullptr;
@@ -1354,13 +1578,15 @@ std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& 
   return os;
 }
 
-void HInstruction::MoveBefore(HInstruction* cursor) {
-  DCHECK(!IsPhi());
-  DCHECK(!IsControlFlow());
-  DCHECK(CanBeMoved() ||
-         // HShouldDeoptimizeFlag can only be moved by CHAGuardOptimization.
-         IsShouldDeoptimizeFlag());
-  DCHECK(!cursor->IsPhi());
+void HInstruction::MoveBefore(HInstruction* cursor, bool do_checks) {
+  if (do_checks) {
+    DCHECK(!IsPhi());
+    DCHECK(!IsControlFlow());
+    DCHECK(CanBeMoved() ||
+           // HShouldDeoptimizeFlag can only be moved by CHAGuardOptimization.
+           IsShouldDeoptimizeFlag());
+    DCHECK(!cursor->IsPhi());
+  }
 
   next_->previous_ = previous_;
   if (previous_ != nullptr) {
@@ -1442,8 +1668,8 @@ HBasicBlock* HBasicBlock::SplitBefore(HInstruction* cursor) {
   DCHECK(!graph_->IsInSsaForm()) << "Support for SSA form not implemented.";
   DCHECK_EQ(cursor->GetBlock(), this);
 
-  HBasicBlock* new_block = new (GetGraph()->GetArena()) HBasicBlock(GetGraph(),
-                                                                    cursor->GetDexPc());
+  HBasicBlock* new_block =
+      new (GetGraph()->GetAllocator()) HBasicBlock(GetGraph(), cursor->GetDexPc());
   new_block->instructions_.first_instruction_ = cursor;
   new_block->instructions_.last_instruction_ = instructions_.last_instruction_;
   instructions_.last_instruction_ = cursor->previous_;
@@ -1455,7 +1681,7 @@ HBasicBlock* HBasicBlock::SplitBefore(HInstruction* cursor) {
   }
 
   new_block->instructions_.SetBlockOfInstructions(new_block);
-  AddInstruction(new (GetGraph()->GetArena()) HGoto(new_block->GetDexPc()));
+  AddInstruction(new (GetGraph()->GetAllocator()) HGoto(new_block->GetDexPc()));
 
   for (HBasicBlock* successor : GetSuccessors()) {
     successor->predecessors_[successor->GetPredecessorIndexOf(this)] = new_block;
@@ -1472,7 +1698,7 @@ HBasicBlock* HBasicBlock::CreateImmediateDominator() {
   DCHECK(!graph_->IsInSsaForm()) << "Support for SSA form not implemented.";
   DCHECK(!IsCatchBlock()) << "Support for updating try/catch information not implemented.";
 
-  HBasicBlock* new_block = new (GetGraph()->GetArena()) HBasicBlock(GetGraph(), GetDexPc());
+  HBasicBlock* new_block = new (GetGraph()->GetAllocator()) HBasicBlock(GetGraph(), GetDexPc());
 
   for (HBasicBlock* predecessor : GetPredecessors()) {
     predecessor->successors_[predecessor->GetSuccessorIndexOf(this)] = new_block;
@@ -1488,8 +1714,8 @@ HBasicBlock* HBasicBlock::CreateImmediateDominator() {
 HBasicBlock* HBasicBlock::SplitBeforeForInlining(HInstruction* cursor) {
   DCHECK_EQ(cursor->GetBlock(), this);
 
-  HBasicBlock* new_block = new (GetGraph()->GetArena()) HBasicBlock(GetGraph(),
-                                                                    cursor->GetDexPc());
+  HBasicBlock* new_block =
+      new (GetGraph()->GetAllocator()) HBasicBlock(GetGraph(), cursor->GetDexPc());
   new_block->instructions_.first_instruction_ = cursor;
   new_block->instructions_.last_instruction_ = instructions_.last_instruction_;
   instructions_.last_instruction_ = cursor->previous_;
@@ -1521,7 +1747,7 @@ HBasicBlock* HBasicBlock::SplitAfterForInlining(HInstruction* cursor) {
   DCHECK_NE(instructions_.last_instruction_, cursor);
   DCHECK_EQ(cursor->GetBlock(), this);
 
-  HBasicBlock* new_block = new (GetGraph()->GetArena()) HBasicBlock(GetGraph(), GetDexPc());
+  HBasicBlock* new_block = new (GetGraph()->GetAllocator()) HBasicBlock(GetGraph(), GetDexPc());
   new_block->instructions_.first_instruction_ = cursor->GetNext();
   new_block->instructions_.last_instruction_ = instructions_.last_instruction_;
   cursor->next_->previous_ = nullptr;
@@ -1578,6 +1804,10 @@ static bool HasOnlyOneInstruction(const HBasicBlock& block) {
 
 bool HBasicBlock::IsSingleGoto() const {
   return HasOnlyOneInstruction(*this) && GetLastInstruction()->IsGoto();
+}
+
+bool HBasicBlock::IsSingleReturn() const {
+  return HasOnlyOneInstruction(*this) && GetLastInstruction()->IsReturn();
 }
 
 bool HBasicBlock::IsSingleTryBoundary() const {
@@ -1813,7 +2043,7 @@ void HBasicBlock::DisconnectAndDelete() {
              last_instruction->IsPackedSwitch() ||
              (last_instruction->IsTryBoundary() && IsCatchBlock()));
       predecessor->RemoveInstruction(last_instruction);
-      predecessor->AddInstruction(new (graph_->GetArena()) HGoto(last_instruction->GetDexPc()));
+      predecessor->AddInstruction(new (graph_->GetAllocator()) HGoto(last_instruction->GetDexPc()));
     } else if (num_pred_successors == 0u) {
       // The predecessor has no remaining successors and therefore must be dead.
       // We deliberately leave it without a control-flow instruction so that the
@@ -1853,6 +2083,14 @@ void HBasicBlock::DisconnectAndDelete() {
   SetGraph(nullptr);
 }
 
+void HBasicBlock::MergeInstructionsWith(HBasicBlock* other) {
+  DCHECK(EndsWithControlFlowInstruction());
+  RemoveInstruction(GetLastInstruction());
+  instructions_.Add(other->GetInstructions());
+  other->instructions_.SetBlockOfInstructions(this);
+  other->instructions_.Clear();
+}
+
 void HBasicBlock::MergeWith(HBasicBlock* other) {
   DCHECK_EQ(GetGraph(), other->GetGraph());
   DCHECK(ContainsElement(dominated_blocks_, other));
@@ -1861,11 +2099,7 @@ void HBasicBlock::MergeWith(HBasicBlock* other) {
   DCHECK(other->GetPhis().IsEmpty());
 
   // Move instructions from `other` to `this`.
-  DCHECK(EndsWithControlFlowInstruction());
-  RemoveInstruction(GetLastInstruction());
-  instructions_.Add(other->GetInstructions());
-  other->instructions_.SetBlockOfInstructions(this);
-  other->instructions_.Clear();
+  MergeInstructionsWith(other);
 
   // Remove `other` from the loops it is included in.
   for (HLoopInformationOutwardIterator it(*other); !it.Done(); it.Advance()) {
@@ -2020,18 +2254,33 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
         if (current->NeedsEnvironment()) {
           DCHECK(current->HasEnvironment());
           current->GetEnvironment()->SetAndCopyParentChain(
-              outer_graph->GetArena(), invoke->GetEnvironment());
+              outer_graph->GetAllocator(), invoke->GetEnvironment());
         }
       }
     }
   }
   outer_graph->UpdateMaximumNumberOfOutVRegs(GetMaximumNumberOfOutVRegs());
+
   if (HasBoundsChecks()) {
     outer_graph->SetHasBoundsChecks(true);
+  }
+  if (HasLoops()) {
+    outer_graph->SetHasLoops(true);
+  }
+  if (HasIrreducibleLoops()) {
+    outer_graph->SetHasIrreducibleLoops(true);
+  }
+  if (HasTryCatch()) {
+    outer_graph->SetHasTryCatch(true);
+  }
+  if (HasSIMD()) {
+    outer_graph->SetHasSIMD(true);
   }
 
   HInstruction* return_value = nullptr;
   if (GetBlocks().size() == 3) {
+    // Inliner already made sure we don't inline methods that always throw.
+    DCHECK(!GetBlocks()[1]->GetLastInstruction()->IsThrow());
     // Simple case of an entry block, a body block, and an exit block.
     // Put the body block's instruction into `invoke`'s block.
     HBasicBlock* body = GetBlocks()[1];
@@ -2058,7 +2307,7 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
     // into two blocks, merge the first block of the inlined graph into
     // the first half, and replace the exit block of the inlined graph
     // with the second half.
-    ArenaAllocator* allocator = outer_graph->GetArena();
+    ArenaAllocator* allocator = outer_graph->GetAllocator();
     HBasicBlock* at = invoke->GetBlock();
     // Note that we split before the invoke only to simplify polymorphic inlining.
     HBasicBlock* to = at->SplitBeforeForInlining(invoke);
@@ -2113,32 +2362,62 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
     UpdateLoopAndTryInformationOfNewBlock(to, at, /* replace_if_back_edge */ true);
 
     // Update all predecessors of the exit block (now the `to` block)
-    // to not `HReturn` but `HGoto` instead.
-    bool returns_void = to->GetPredecessors()[0]->GetLastInstruction()->IsReturnVoid();
-    if (to->GetPredecessors().size() == 1) {
-      HBasicBlock* predecessor = to->GetPredecessors()[0];
+    // to not `HReturn` but `HGoto` instead. Special case throwing blocks
+    // to now get the outer graph exit block as successor. Note that the inliner
+    // currently doesn't support inlining methods with try/catch.
+    HPhi* return_value_phi = nullptr;
+    bool rerun_dominance = false;
+    bool rerun_loop_analysis = false;
+    for (size_t pred = 0; pred < to->GetPredecessors().size(); ++pred) {
+      HBasicBlock* predecessor = to->GetPredecessors()[pred];
       HInstruction* last = predecessor->GetLastInstruction();
-      if (!returns_void) {
-        return_value = last->InputAt(0);
-      }
-      predecessor->AddInstruction(new (allocator) HGoto(last->GetDexPc()));
-      predecessor->RemoveInstruction(last);
-    } else {
-      if (!returns_void) {
-        // There will be multiple returns.
-        return_value = new (allocator) HPhi(
-            allocator, kNoRegNumber, 0, HPhi::ToPhiType(invoke->GetType()), to->GetDexPc());
-        to->AddPhi(return_value->AsPhi());
-      }
-      for (HBasicBlock* predecessor : to->GetPredecessors()) {
-        HInstruction* last = predecessor->GetLastInstruction();
-        if (!returns_void) {
+      if (last->IsThrow()) {
+        DCHECK(!at->IsTryBlock());
+        predecessor->ReplaceSuccessor(to, outer_graph->GetExitBlock());
+        --pred;
+        // We need to re-run dominance information, as the exit block now has
+        // a new dominator.
+        rerun_dominance = true;
+        if (predecessor->GetLoopInformation() != nullptr) {
+          // The exit block and blocks post dominated by the exit block do not belong
+          // to any loop. Because we do not compute the post dominators, we need to re-run
+          // loop analysis to get the loop information correct.
+          rerun_loop_analysis = true;
+        }
+      } else {
+        if (last->IsReturnVoid()) {
+          DCHECK(return_value == nullptr);
+          DCHECK(return_value_phi == nullptr);
+        } else {
           DCHECK(last->IsReturn());
-          return_value->AsPhi()->AddInput(last->InputAt(0));
+          if (return_value_phi != nullptr) {
+            return_value_phi->AddInput(last->InputAt(0));
+          } else if (return_value == nullptr) {
+            return_value = last->InputAt(0);
+          } else {
+            // There will be multiple returns.
+            return_value_phi = new (allocator) HPhi(
+                allocator, kNoRegNumber, 0, HPhi::ToPhiType(invoke->GetType()), to->GetDexPc());
+            to->AddPhi(return_value_phi);
+            return_value_phi->AddInput(return_value);
+            return_value_phi->AddInput(last->InputAt(0));
+            return_value = return_value_phi;
+          }
         }
         predecessor->AddInstruction(new (allocator) HGoto(last->GetDexPc()));
         predecessor->RemoveInstruction(last);
       }
+    }
+    if (rerun_loop_analysis) {
+      DCHECK(!outer_graph->HasIrreducibleLoops())
+          << "Recomputing loop information in graphs with irreducible loops "
+          << "is unsupported, as it could lead to loop header changes";
+      outer_graph->ClearLoopInformation();
+      outer_graph->ClearDominanceInformation();
+      outer_graph->BuildDominatorTree();
+    } else if (rerun_dominance) {
+      outer_graph->ClearDominanceInformation();
+      outer_graph->ComputeDominanceInformation();
     }
   }
 
@@ -2212,10 +2491,10 @@ void HGraph::TransformLoopHeaderForBCE(HBasicBlock* header) {
   HBasicBlock* old_pre_header = header->GetDominator();
 
   // Need extra block to avoid critical edge.
-  HBasicBlock* if_block = new (arena_) HBasicBlock(this, header->GetDexPc());
-  HBasicBlock* true_block = new (arena_) HBasicBlock(this, header->GetDexPc());
-  HBasicBlock* false_block = new (arena_) HBasicBlock(this, header->GetDexPc());
-  HBasicBlock* new_pre_header = new (arena_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* if_block = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* true_block = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* false_block = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* new_pre_header = new (allocator_) HBasicBlock(this, header->GetDexPc());
   AddBlock(if_block);
   AddBlock(true_block);
   AddBlock(false_block);
@@ -2263,6 +2542,68 @@ void HGraph::TransformLoopHeaderForBCE(HBasicBlock* header) {
       new_pre_header, old_pre_header, /* replace_if_back_edge */ false);
 }
 
+HBasicBlock* HGraph::TransformLoopForVectorization(HBasicBlock* header,
+                                                   HBasicBlock* body,
+                                                   HBasicBlock* exit) {
+  DCHECK(header->IsLoopHeader());
+  HLoopInformation* loop = header->GetLoopInformation();
+
+  // Add new loop blocks.
+  HBasicBlock* new_pre_header = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* new_header = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  HBasicBlock* new_body = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  AddBlock(new_pre_header);
+  AddBlock(new_header);
+  AddBlock(new_body);
+
+  // Set up control flow.
+  header->ReplaceSuccessor(exit, new_pre_header);
+  new_pre_header->AddSuccessor(new_header);
+  new_header->AddSuccessor(exit);
+  new_header->AddSuccessor(new_body);
+  new_body->AddSuccessor(new_header);
+
+  // Set up dominators.
+  header->ReplaceDominatedBlock(exit, new_pre_header);
+  new_pre_header->SetDominator(header);
+  new_pre_header->dominated_blocks_.push_back(new_header);
+  new_header->SetDominator(new_pre_header);
+  new_header->dominated_blocks_.push_back(new_body);
+  new_body->SetDominator(new_header);
+  new_header->dominated_blocks_.push_back(exit);
+  exit->SetDominator(new_header);
+
+  // Fix reverse post order.
+  size_t index_of_header = IndexOfElement(reverse_post_order_, header);
+  MakeRoomFor(&reverse_post_order_, 2, index_of_header);
+  reverse_post_order_[++index_of_header] = new_pre_header;
+  reverse_post_order_[++index_of_header] = new_header;
+  size_t index_of_body = IndexOfElement(reverse_post_order_, body);
+  MakeRoomFor(&reverse_post_order_, 1, index_of_body - 1);
+  reverse_post_order_[index_of_body] = new_body;
+
+  // Add gotos and suspend check (client must add conditional in header).
+  new_pre_header->AddInstruction(new (allocator_) HGoto());
+  HSuspendCheck* suspend_check = new (allocator_) HSuspendCheck(header->GetDexPc());
+  new_header->AddInstruction(suspend_check);
+  new_body->AddInstruction(new (allocator_) HGoto());
+  suspend_check->CopyEnvironmentFromWithLoopPhiAdjustment(
+      loop->GetSuspendCheck()->GetEnvironment(), header);
+
+  // Update loop information.
+  new_header->AddBackEdge(new_body);
+  new_header->GetLoopInformation()->SetSuspendCheck(suspend_check);
+  new_header->GetLoopInformation()->Populate();
+  new_pre_header->SetLoopInformation(loop->GetPreHeader()->GetLoopInformation());  // outward
+  HLoopInformationOutwardIterator it(*new_header);
+  for (it.Advance(); !it.Done(); it.Advance()) {
+    it.Current()->Add(new_pre_header);
+    it.Current()->Add(new_header);
+    it.Current()->Add(new_body);
+  }
+  return new_pre_header;
+}
+
 static void CheckAgainstUpperBound(ReferenceTypeInfo rti, ReferenceTypeInfo upper_bound_rti)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (rti.IsValid()) {
@@ -2277,7 +2618,7 @@ static void CheckAgainstUpperBound(ReferenceTypeInfo rti, ReferenceTypeInfo uppe
 
 void HInstruction::SetReferenceTypeInfo(ReferenceTypeInfo rti) {
   if (kIsDebugBuild) {
-    DCHECK_EQ(GetType(), Primitive::kPrimNot);
+    DCHECK_EQ(GetType(), DataType::Type::kReference);
     ScopedObjectAccess soa(Thread::Current());
     DCHECK(rti.IsValid()) << "Invalid RTI for " << DebugName();
     if (IsBoundType()) {
@@ -2387,8 +2728,16 @@ bool HInvoke::NeedsEnvironment() const {
   return !opt.GetDoesNotNeedEnvironment();
 }
 
+const DexFile& HInvokeStaticOrDirect::GetDexFileForPcRelativeDexCache() const {
+  ArtMethod* caller = GetEnvironment()->GetMethod();
+  ScopedObjectAccess soa(Thread::Current());
+  // `caller` is null for a top-level graph representing a method whose declaring
+  // class was not resolved.
+  return caller == nullptr ? GetBlock()->GetGraph()->GetDexFile() : *caller->GetDexFile();
+}
+
 bool HInvokeStaticOrDirect::NeedsDexCacheOfDeclaringClass() const {
-  if (GetMethodLoadKind() != MethodLoadKind::kDexCacheViaMethod) {
+  if (GetMethodLoadKind() != MethodLoadKind::kRuntimeCall) {
     return false;
   }
   if (!IsIntrinsic()) {
@@ -2401,15 +2750,17 @@ bool HInvokeStaticOrDirect::NeedsDexCacheOfDeclaringClass() const {
 std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind rhs) {
   switch (rhs) {
     case HInvokeStaticOrDirect::MethodLoadKind::kStringInit:
-      return os << "string_init";
+      return os << "StringInit";
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      return os << "recursive";
+      return os << "Recursive";
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative:
+      return os << "BootImageLinkTimePcRelative";
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      return os << "direct";
-    case HInvokeStaticOrDirect::MethodLoadKind::kDexCachePcRelative:
-      return os << "dex_cache_pc_relative";
-    case HInvokeStaticOrDirect::MethodLoadKind::kDexCacheViaMethod:
-      return os << "dex_cache_via_method";
+      return os << "DirectAddress";
+    case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry:
+      return os << "BssEntry";
+    case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall:
+      return os << "RuntimeCall";
     default:
       LOG(FATAL) << "Unknown MethodLoadKind: " << static_cast<int>(rhs);
       UNREACHABLE();
@@ -2430,17 +2781,6 @@ std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::ClinitCheckReq
   }
 }
 
-// Helper for InstructionDataEquals to fetch the mirror Class out
-// from a kJitTableAddress LoadClass kind.
-// NO_THREAD_SAFETY_ANALYSIS because even though we're accessing
-// mirrors, they are stored in a variable size handle scope which is always
-// visited during a pause. Also, the only caller of this helper
-// only uses the mirror for pointer comparison.
-static inline mirror::Class* AsMirrorInternal(uint64_t address)
-    NO_THREAD_SAFETY_ANALYSIS {
-  return reinterpret_cast<StackReference<mirror::Class>*>(address)->AsMirrorPtr();
-}
-
 bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   const HLoadClass* other_load_class = other->AsLoadClass();
   // TODO: To allow GVN for HLoadClass from different dex files, we should compare the type
@@ -2451,25 +2791,26 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   }
   switch (GetLoadKind()) {
     case LoadKind::kBootImageAddress:
-      return GetAddress() == other_load_class->GetAddress();
-    case LoadKind::kJitTableAddress:
-      return AsMirrorInternal(GetAddress()) == AsMirrorInternal(other_load_class->GetAddress());
+    case LoadKind::kBootImageClassTable:
+    case LoadKind::kJitTableAddress: {
+      ScopedObjectAccess soa(Thread::Current());
+      return GetClass().Get() == other_load_class->GetClass().Get();
+    }
     default:
-      DCHECK(HasTypeReference(GetLoadKind()) || HasDexCacheReference(GetLoadKind()));
+      DCHECK(HasTypeReference(GetLoadKind()));
       return IsSameDexFile(GetDexFile(), other_load_class->GetDexFile());
   }
 }
 
-void HLoadClass::SetLoadKindInternal(LoadKind load_kind) {
-  // Once sharpened, the load kind should not be changed again.
-  // Also, kReferrersClass should never be overwritten.
-  DCHECK_EQ(GetLoadKind(), LoadKind::kDexCacheViaMethod);
+void HLoadClass::SetLoadKind(LoadKind load_kind) {
   SetPackedField<LoadKindField>(load_kind);
 
-  if (load_kind != LoadKind::kDexCacheViaMethod) {
+  if (load_kind != LoadKind::kRuntimeCall &&
+      load_kind != LoadKind::kReferrersClass) {
     RemoveAsUserOfInput(0u);
     SetRawInputAt(0u, nullptr);
   }
+
   if (!NeedsEnvironment()) {
     RemoveEnvironment();
     SetSideEffects(SideEffects::None());
@@ -2480,33 +2821,22 @@ std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs) {
   switch (rhs) {
     case HLoadClass::LoadKind::kReferrersClass:
       return os << "ReferrersClass";
-    case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
-      return os << "BootImageLinkTimeAddress";
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
       return os << "BootImageLinkTimePcRelative";
     case HLoadClass::LoadKind::kBootImageAddress:
       return os << "BootImageAddress";
+    case HLoadClass::LoadKind::kBootImageClassTable:
+      return os << "BootImageClassTable";
+    case HLoadClass::LoadKind::kBssEntry:
+      return os << "BssEntry";
     case HLoadClass::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
-    case HLoadClass::LoadKind::kDexCachePcRelative:
-      return os << "DexCachePcRelative";
-    case HLoadClass::LoadKind::kDexCacheViaMethod:
-      return os << "DexCacheViaMethod";
+    case HLoadClass::LoadKind::kRuntimeCall:
+      return os << "RuntimeCall";
     default:
       LOG(FATAL) << "Unknown HLoadClass::LoadKind: " << static_cast<int>(rhs);
       UNREACHABLE();
   }
-}
-
-// Helper for InstructionDataEquals to fetch the mirror String out
-// from a kJitTableAddress LoadString kind.
-// NO_THREAD_SAFETY_ANALYSIS because even though we're accessing
-// mirrors, they are stored in a variable size handle scope which is always
-// visited during a pause. Also, the only caller of this helper
-// only uses the mirror for pointer comparison.
-static inline mirror::String* AsMirrorInternal(Handle<mirror::String> handle)
-    NO_THREAD_SAFETY_ANALYSIS {
-  return handle.Get();
 }
 
 bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
@@ -2519,8 +2849,11 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
   }
   switch (GetLoadKind()) {
     case LoadKind::kBootImageAddress:
-    case LoadKind::kJitTableAddress:
-      return AsMirrorInternal(GetString()) == AsMirrorInternal(other_load_string->GetString());
+    case LoadKind::kBootImageInternTable:
+    case LoadKind::kJitTableAddress: {
+      ScopedObjectAccess soa(Thread::Current());
+      return GetString().Get() == other_load_string->GetString().Get();
+    }
     default:
       return IsSameDexFile(GetDexFile(), other_load_string->GetDexFile());
   }
@@ -2528,10 +2861,10 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
 
 void HLoadString::SetLoadKind(LoadKind load_kind) {
   // Once sharpened, the load kind should not be changed again.
-  DCHECK_EQ(GetLoadKind(), LoadKind::kDexCacheViaMethod);
+  DCHECK_EQ(GetLoadKind(), LoadKind::kRuntimeCall);
   SetPackedField<LoadKindField>(load_kind);
 
-  if (load_kind != LoadKind::kDexCacheViaMethod) {
+  if (load_kind != LoadKind::kRuntimeCall) {
     RemoveAsUserOfInput(0u);
     SetRawInputAt(0u, nullptr);
   }
@@ -2543,18 +2876,18 @@ void HLoadString::SetLoadKind(LoadKind load_kind) {
 
 std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs) {
   switch (rhs) {
-    case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      return os << "BootImageLinkTimeAddress";
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
       return os << "BootImageLinkTimePcRelative";
     case HLoadString::LoadKind::kBootImageAddress:
       return os << "BootImageAddress";
+    case HLoadString::LoadKind::kBootImageInternTable:
+      return os << "BootImageInternTable";
     case HLoadString::LoadKind::kBssEntry:
       return os << "BssEntry";
-    case HLoadString::LoadKind::kDexCacheViaMethod:
-      return os << "DexCacheViaMethod";
     case HLoadString::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
+    case HLoadString::LoadKind::kRuntimeCall:
+      return os << "RuntimeCall";
     default:
       LOG(FATAL) << "Unknown HLoadString::LoadKind: " << static_cast<int>(rhs);
       UNREACHABLE();
@@ -2571,10 +2904,10 @@ void HInstruction::RemoveEnvironmentUsers() {
 
 // Returns an instruction with the opposite Boolean value from 'cond'.
 HInstruction* HGraph::InsertOppositeCondition(HInstruction* cond, HInstruction* cursor) {
-  ArenaAllocator* allocator = GetArena();
+  ArenaAllocator* allocator = GetAllocator();
 
   if (cond->IsCondition() &&
-      !Primitive::IsFloatingPointType(cond->InputAt(0)->GetType())) {
+      !DataType::IsFloatingPointType(cond->InputAt(0)->GetType())) {
     // Can't reverse floating point conditions.  We have to use HBooleanNot in that case.
     HInstruction* lhs = cond->InputAt(0);
     HInstruction* rhs = cond->InputAt(1);

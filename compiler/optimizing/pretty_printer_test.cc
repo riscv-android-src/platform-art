@@ -14,28 +14,30 @@
  * limitations under the License.
  */
 
+#include "pretty_printer.h"
+
 #include "base/arena_allocator.h"
 #include "builder.h"
 #include "dex_file.h"
 #include "dex_instruction.h"
 #include "nodes.h"
 #include "optimizing_unit_test.h"
-#include "pretty_printer.h"
 
 #include "gtest/gtest.h"
 
 namespace art {
 
-static void TestCode(const uint16_t* data, const char* expected) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateCFG(&allocator, data);
+class PrettyPrinterTest : public OptimizingUnitTest {
+ protected:
+  void TestCode(const uint16_t* data, const char* expected);
+};
+
+void PrettyPrinterTest::TestCode(const uint16_t* data, const char* expected) {
+  HGraph* graph = CreateCFG(data);
   StringPrettyPrinter printer(graph);
   printer.VisitInsertionOrder();
   ASSERT_STREQ(expected, printer.str().c_str());
 }
-
-class PrettyPrinterTest : public CommonCompilerTest {};
 
 TEST_F(PrettyPrinterTest, ReturnVoid) {
   const uint16_t data[] = ZERO_REGISTER_CODE_ITEM(

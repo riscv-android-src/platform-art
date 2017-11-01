@@ -17,6 +17,7 @@
 #include "elf_file.h"
 
 #include <inttypes.h>
+#include <sys/mman.h>  // For the PROT_* and MAP_* constants.
 #include <sys/types.h>
 #include <unistd.h>
 
@@ -1697,7 +1698,7 @@ ElfFile* ElfFile::Open(File* file,
                                               low_4gb,
                                               file->GetPath().c_str(),
                                               error_msg));
-  if (map == nullptr && map->Size() != EI_NIDENT) {
+  if (map == nullptr || map->Size() != EI_NIDENT) {
     return nullptr;
   }
   uint8_t* header = map->Begin();
@@ -1748,7 +1749,7 @@ ElfFile* ElfFile::Open(File* file, int mmap_prot, int mmap_flags, std::string* e
                                               low_4gb,
                                               file->GetPath().c_str(),
                                               error_msg));
-  if (map == nullptr && map->Size() != EI_NIDENT) {
+  if (map == nullptr || map->Size() != EI_NIDENT) {
     return nullptr;
   }
   uint8_t* header = map->Begin();

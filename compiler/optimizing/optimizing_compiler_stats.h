@@ -17,11 +17,13 @@
 #ifndef ART_COMPILER_OPTIMIZING_OPTIMIZING_COMPILER_STATS_H_
 #define ART_COMPILER_OPTIMIZING_OPTIMIZING_COMPILER_STATS_H_
 
+#include <atomic>
 #include <iomanip>
 #include <string>
 #include <type_traits>
 
 #include "atomic.h"
+#include "globals.h"
 
 namespace art {
 
@@ -61,20 +63,48 @@ enum MethodCompilationStat {
   kBooleanSimplified,
   kIntrinsicRecognized,
   kLoopInvariantMoved,
+  kLoopVectorized,
+  kLoopVectorizedIdiom,
   kSelectGenerated,
   kRemovedInstanceOf,
   kInlinedInvokeVirtualOrInterface,
   kImplicitNullCheckGenerated,
   kExplicitNullCheckGenerated,
   kSimplifyIf,
+  kInstructionSunk,
+  kNotInlinedUnresolvedEntrypoint,
+  kNotInlinedDexCache,
+  kNotInlinedStackMaps,
+  kNotInlinedEnvironmentBudget,
+  kNotInlinedInstructionBudget,
+  kNotInlinedLoopWithoutExit,
+  kNotInlinedIrreducibleLoop,
+  kNotInlinedAlwaysThrows,
+  kNotInlinedInfiniteLoop,
+  kNotInlinedTryCatch,
+  kNotInlinedRegisterAllocator,
+  kNotInlinedCannotBuild,
+  kNotInlinedNotVerified,
+  kNotInlinedCodeItem,
+  kNotInlinedWont,
+  kNotInlinedRecursiveBudget,
+  kNotInlinedProxy,
+  kConstructorFenceGeneratedNew,
+  kConstructorFenceGeneratedFinal,
+  kConstructorFenceRemovedLSE,
+  kConstructorFenceRemovedPFRA,
+  kConstructorFenceRemovedCFRE,
   kLastStat
 };
 
 class OptimizingCompilerStats {
  public:
-  OptimizingCompilerStats() {}
+  OptimizingCompilerStats() {
+    // The std::atomic<> default constructor leaves values uninitialized, so initialize them now.
+    Reset();
+  }
 
-  void RecordStat(MethodCompilationStat stat, size_t count = 1) {
+  void RecordStat(MethodCompilationStat stat, uint32_t count = 1) {
     compile_stats_[stat] += count;
   }
 
@@ -93,12 +123,27 @@ class OptimizingCompilerStats {
           << " methods: " << std::fixed << std::setprecision(2)
           << compiled_percent << "% (" << compile_stats_[kCompiled] << ") compiled.";
 
-      for (int i = 0; i < kLastStat; i++) {
+      for (size_t i = 0; i < kLastStat; i++) {
         if (compile_stats_[i] != 0) {
           LOG(INFO) << PrintMethodCompilationStat(static_cast<MethodCompilationStat>(i)) << ": "
               << compile_stats_[i];
         }
       }
+    }
+  }
+
+  void AddTo(OptimizingCompilerStats* other_stats) {
+    for (size_t i = 0; i != kLastStat; ++i) {
+      uint32_t count = compile_stats_[i];
+      if (count != 0) {
+        other_stats->RecordStat(static_cast<MethodCompilationStat>(i), count);
+      }
+    }
+  }
+
+  void Reset() {
+    for (size_t i = 0; i != kLastStat; ++i) {
+      compile_stats_[i] = 0u;
     }
   }
 
@@ -141,12 +186,37 @@ class OptimizingCompilerStats {
       case kBooleanSimplified : name = "BooleanSimplified"; break;
       case kIntrinsicRecognized : name = "IntrinsicRecognized"; break;
       case kLoopInvariantMoved : name = "LoopInvariantMoved"; break;
+      case kLoopVectorized : name = "LoopVectorized"; break;
+      case kLoopVectorizedIdiom : name = "LoopVectorizedIdiom"; break;
       case kSelectGenerated : name = "SelectGenerated"; break;
       case kRemovedInstanceOf: name = "RemovedInstanceOf"; break;
       case kInlinedInvokeVirtualOrInterface: name = "InlinedInvokeVirtualOrInterface"; break;
       case kImplicitNullCheckGenerated: name = "ImplicitNullCheckGenerated"; break;
       case kExplicitNullCheckGenerated: name = "ExplicitNullCheckGenerated"; break;
       case kSimplifyIf: name = "SimplifyIf"; break;
+      case kInstructionSunk: name = "InstructionSunk"; break;
+      case kNotInlinedUnresolvedEntrypoint: name = "NotInlinedUnresolvedEntrypoint"; break;
+      case kNotInlinedDexCache: name = "NotInlinedDexCache"; break;
+      case kNotInlinedStackMaps: name = "NotInlinedStackMaps"; break;
+      case kNotInlinedEnvironmentBudget: name = "NotInlinedEnvironmentBudget"; break;
+      case kNotInlinedInstructionBudget: name = "NotInlinedInstructionBudget"; break;
+      case kNotInlinedLoopWithoutExit: name = "NotInlinedLoopWithoutExit"; break;
+      case kNotInlinedIrreducibleLoop: name = "NotInlinedIrreducibleLoop"; break;
+      case kNotInlinedAlwaysThrows: name = "NotInlinedAlwaysThrows"; break;
+      case kNotInlinedInfiniteLoop: name = "NotInlinedInfiniteLoop"; break;
+      case kNotInlinedTryCatch: name = "NotInlinedTryCatch"; break;
+      case kNotInlinedRegisterAllocator: name = "NotInlinedRegisterAllocator"; break;
+      case kNotInlinedCannotBuild: name = "NotInlinedCannotBuild"; break;
+      case kNotInlinedNotVerified: name = "NotInlinedNotVerified"; break;
+      case kNotInlinedCodeItem: name = "NotInlinedCodeItem"; break;
+      case kNotInlinedWont: name = "NotInlinedWont"; break;
+      case kNotInlinedRecursiveBudget: name = "NotInlinedRecursiveBudget"; break;
+      case kNotInlinedProxy: name = "NotInlinedProxy"; break;
+      case kConstructorFenceGeneratedNew: name = "ConstructorFenceGeneratedNew"; break;
+      case kConstructorFenceGeneratedFinal: name = "ConstructorFenceGeneratedFinal"; break;
+      case kConstructorFenceRemovedLSE: name = "ConstructorFenceRemovedLSE"; break;
+      case kConstructorFenceRemovedPFRA: name = "ConstructorFenceRemovedPFRA"; break;
+      case kConstructorFenceRemovedCFRE: name = "ConstructorFenceRemovedCFRE"; break;
 
       case kLastStat:
         LOG(FATAL) << "invalid stat "
@@ -156,10 +226,18 @@ class OptimizingCompilerStats {
     return "OptStat#" + name;
   }
 
-  AtomicInteger compile_stats_[kLastStat];
+  std::atomic<uint32_t> compile_stats_[kLastStat];
 
   DISALLOW_COPY_AND_ASSIGN(OptimizingCompilerStats);
 };
+
+inline void MaybeRecordStat(OptimizingCompilerStats* compiler_stats,
+                            MethodCompilationStat stat,
+                            uint32_t count = 1) {
+  if (compiler_stats != nullptr) {
+    compiler_stats->RecordStat(stat, count);
+  }
+}
 
 }  // namespace art
 

@@ -17,6 +17,7 @@
 #include "linker/x86_64/relative_patcher_x86_64.h"
 
 #include "compiled_method.h"
+#include "linker/linker_patch.h"
 
 namespace art {
 namespace linker {
@@ -32,6 +33,12 @@ void X86_64RelativePatcher::PatchPcRelativeReference(std::vector<uint8_t>* code,
 
   typedef __attribute__((__aligned__(1))) int32_t unaligned_int32_t;
   reinterpret_cast<unaligned_int32_t*>(&(*code)[patch.LiteralOffset()])[0] = displacement;
+}
+
+void X86_64RelativePatcher::PatchBakerReadBarrierBranch(std::vector<uint8_t>* code ATTRIBUTE_UNUSED,
+                                                        const LinkerPatch& patch ATTRIBUTE_UNUSED,
+                                                        uint32_t patch_offset ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "UNIMPLEMENTED";
 }
 
 }  // namespace linker

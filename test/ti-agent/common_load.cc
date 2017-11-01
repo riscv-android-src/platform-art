@@ -16,21 +16,35 @@
 
 #include <jni.h>
 #include <stdio.h>
-// TODO I don't know?
-#include "openjdkjvmti/jvmti.h"
 
-#include "art_method-inl.h"
 #include "base/logging.h"
 #include "base/macros.h"
-#include "common_load.h"
-#include "common_helper.h"
+
+#include "jni_binder.h"
+#include "jvmti_helper.h"
+#include "test_env.h"
 
 #include "901-hello-ti-agent/basics.h"
 #include "909-attach-agent/attach.h"
+#include "936-search-onload/search_onload.h"
+#include "983-source-transform-verify/source_transform.h"
+#include "1919-vminit-thread-start-timing/vminit.h"
 
 namespace art {
 
-jvmtiEnv* jvmti_env;
+namespace common_redefine {
+jint OnLoad(JavaVM* vm, char* options, void* reserved);
+}  // namespace common_redefine
+
+namespace common_retransform {
+jint OnLoad(JavaVM* vm, char* options, void* reserved);
+}  // namespace common_retransform
+
+namespace common_transform {
+jint OnLoad(JavaVM* vm, char* options, void* reserved);
+}  // namespace common_transform
+
+namespace {
 
 using OnLoad   = jint (*)(JavaVM* vm, char* options, void* reserved);
 using OnAttach = jint (*)(JavaVM* vm, char* options, void* reserved);
@@ -45,26 +59,31 @@ struct AgentLib {
 static jint MinimalOnLoad(JavaVM* vm,
                           char* options ATTRIBUTE_UNUSED,
                           void* reserved ATTRIBUTE_UNUSED) {
-  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0)) {
+  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0) != 0) {
     printf("Unable to get jvmti env!\n");
     return 1;
   }
-  SetAllCapabilities(jvmti_env);
+  SetStandardCapabilities(jvmti_env);
   return 0;
 }
 
 // A list of all non-standard the agents we have for testing. All other agents will use
 // MinimalOnLoad.
-AgentLib agents[] = {
+static AgentLib agents[] = {
   { "901-hello-ti-agent", Test901HelloTi::OnLoad, nullptr },
-  { "902-hello-transformation", common_redefine::OnLoad, nullptr },
   { "909-attach-agent", nullptr, Test909AttachAgent::OnAttach },
-  { "914-hello-obsolescence", common_redefine::OnLoad, nullptr },
-  { "915-obsolete-2", common_redefine::OnLoad, nullptr },
   { "916-obsolete-jit", common_redefine::OnLoad, nullptr },
-  { "917-fields-transformation", common_redefine::OnLoad, nullptr },
-  { "919-obsolete-fields", common_redefine::OnLoad, nullptr },
-  { "921-hello-failure", common_redefine::OnLoad, nullptr },
+  { "921-hello-failure", common_retransform::OnLoad, nullptr },
+  { "934-load-transform", common_retransform::OnLoad, nullptr },
+  { "935-non-retransformable", common_transform::OnLoad, nullptr },
+  { "936-search-onload", Test936SearchOnload::OnLoad, nullptr },
+  { "937-hello-retransform-package", common_retransform::OnLoad, nullptr },
+  { "938-load-transform-bcp", common_retransform::OnLoad, nullptr },
+  { "939-hello-transformation-bcp", common_redefine::OnLoad, nullptr },
+  { "941-recursive-obsolete-jit", common_redefine::OnLoad, nullptr },
+  { "943-private-recursive-jit", common_redefine::OnLoad, nullptr },
+  { "983-source-transform-verify", Test983SourceTransformVerify::OnLoad, nullptr },
+  { "1919-vminit-thread-start-timing", Test1919VMInitThreadStart::OnLoad, nullptr },
 };
 
 static AgentLib* FindAgent(char* name) {
@@ -94,9 +113,11 @@ static bool FindAgentNameAndOptions(char* options,
   return true;
 }
 
-static void SetIsJVM(char* options) {
-  RuntimeIsJVM = strncmp(options, "jvm", 3) == 0;
+static void SetIsJVM(const char* options) {
+  SetJVM(strncmp(options, "jvm", 3) == 0);
 }
+
+}  // namespace
 
 extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm, char* options, void* reserved) {
   char* remaining_options = nullptr;
@@ -129,6 +150,7 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM* vm, char* options, void
     printf("Unable to find agent name in options: %s\n", options);
     return -1;
   }
+
   AgentLib* lib = FindAgent(name_option);
   if (lib == nullptr) {
     printf("Unable to find agent named: %s, add it to the list in test/ti-agent/common_load.cc\n",

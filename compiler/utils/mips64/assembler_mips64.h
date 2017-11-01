@@ -21,11 +21,14 @@
 #include <utility>
 #include <vector>
 
+#include "arch/mips64/instruction_set_features_mips64.h"
 #include "base/arena_containers.h"
 #include "base/enums.h"
 #include "base/macros.h"
+#include "base/stl_util_identity.h"
 #include "constants_mips64.h"
 #include "globals.h"
+#include "heap_poisoning.h"
 #include "managed_register_mips64.h"
 #include "offsets.h"
 #include "utils/assembler.h"
@@ -84,7 +87,7 @@ static inline int InstrCountForLoadReplicatedConst32(int64_t value) {
   int32_t y = High32Bits(value);
 
   if (x == y) {
-    return (IsUint<16>(x) || IsInt<16>(x) || ((x & 0xFFFF) == 0 && IsInt<16>(value >> 16))) ? 2 : 3;
+    return (IsUint<16>(x) || IsInt<16>(x) || ((x & 0xFFFF) == 0)) ? 2 : 3;
   }
 
   return INT_MAX;
@@ -266,6 +269,7 @@ void TemplateLoadConst64(Asm* a, Rtype rd, Vtype value) {
   }
 }
 
+static constexpr size_t kMips64HalfwordSize = 2;
 static constexpr size_t kMips64WordSize = 4;
 static constexpr size_t kMips64DoublewordSize = 8;
 
@@ -276,14 +280,16 @@ enum LoadOperandType {
   kLoadUnsignedHalfword,
   kLoadWord,
   kLoadUnsignedWord,
-  kLoadDoubleword
+  kLoadDoubleword,
+  kLoadQuadword
 };
 
 enum StoreOperandType {
   kStoreByte,
   kStoreHalfword,
   kStoreWord,
-  kStoreDoubleword
+  kStoreDoubleword,
+  kStoreQuadword
 };
 
 // Used to test the values returned by ClassS/ClassD.
@@ -412,16 +418,18 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
  public:
   using JNIBase = JNIMacroAssembler<PointerSize::k64>;
 
-  explicit Mips64Assembler(ArenaAllocator* arena)
-      : Assembler(arena),
+  explicit Mips64Assembler(ArenaAllocator* allocator,
+                           const Mips64InstructionSetFeatures* instruction_set_features = nullptr)
+      : Assembler(allocator),
         overwriting_(false),
         overwrite_location_(0),
-        literals_(arena->Adapter(kArenaAllocAssembler)),
-        long_literals_(arena->Adapter(kArenaAllocAssembler)),
-        jump_tables_(arena->Adapter(kArenaAllocAssembler)),
+        literals_(allocator->Adapter(kArenaAllocAssembler)),
+        long_literals_(allocator->Adapter(kArenaAllocAssembler)),
+        jump_tables_(allocator->Adapter(kArenaAllocAssembler)),
         last_position_adjustment_(0),
         last_old_position_(0),
-        last_branch_id_(0) {
+        last_branch_id_(0),
+        has_msa_(instruction_set_features != nullptr ? instruction_set_features->HasMsa() : false) {
     cfi().DelayEmittingAdvancePCs();
   }
 
@@ -512,6 +520,7 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Ldpc(GpuRegister rs, uint32_t imm18);  // MIPS64
   void Lui(GpuRegister rt, uint16_t imm16);
   void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
+  void Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16);  // MIPS64
   void Dahi(GpuRegister rs, uint16_t imm16);  // MIPS64
   void Dati(GpuRegister rs, uint16_t imm16);  // MIPS64
   void Sync(uint32_t stype);
@@ -555,6 +564,14 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Bnezc(GpuRegister rs, uint32_t imm21);
   void Bc1eqz(FpuRegister ft, uint16_t imm16);
   void Bc1nez(FpuRegister ft, uint16_t imm16);
+  void Beq(GpuRegister rs, GpuRegister rt, uint16_t imm16);  // R2
+  void Bne(GpuRegister rs, GpuRegister rt, uint16_t imm16);  // R2
+  void Beqz(GpuRegister rt, uint16_t imm16);  // R2
+  void Bnez(GpuRegister rt, uint16_t imm16);  // R2
+  void Bltz(GpuRegister rt, uint16_t imm16);  // R2
+  void Bgez(GpuRegister rt, uint16_t imm16);  // R2
+  void Blez(GpuRegister rt, uint16_t imm16);  // R2
+  void Bgtz(GpuRegister rt, uint16_t imm16);  // R2
 
   void AddS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SubS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
@@ -590,6 +607,10 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void FloorWD(FpuRegister fd, FpuRegister fs);
   void SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SelD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SeleqzS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SeleqzD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SelnezS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void RintS(FpuRegister fd, FpuRegister fs);
   void RintD(FpuRegister fd, FpuRegister fs);
   void ClassS(FpuRegister fd, FpuRegister fs);
@@ -643,6 +664,196 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Clear(GpuRegister rd);
   void Not(GpuRegister rd, GpuRegister rs);
 
+  // MSA instructions.
+  void AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void Ffint_sW(VectorRegister wd, VectorRegister ws);
+  void Ffint_sD(VectorRegister wd, VectorRegister ws);
+  void Ftint_sW(VectorRegister wd, VectorRegister ws);
+  void Ftint_sD(VectorRegister wd, VectorRegister ws);
+
+  void SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  // Immediate shift instructions, where shamtN denotes shift amount (must be between 0 and 2^N-1).
+  void SlliB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SlliH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SlliW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SlliD(VectorRegister wd, VectorRegister ws, int shamt6);
+  void SraiB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SraiH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SraiW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SraiD(VectorRegister wd, VectorRegister ws, int shamt6);
+  void SrliB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SrliH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SrliW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SrliD(VectorRegister wd, VectorRegister ws, int shamt6);
+
+  void MoveV(VectorRegister wd, VectorRegister ws);
+  void SplatiB(VectorRegister wd, VectorRegister ws, int n4);
+  void SplatiH(VectorRegister wd, VectorRegister ws, int n3);
+  void SplatiW(VectorRegister wd, VectorRegister ws, int n2);
+  void SplatiD(VectorRegister wd, VectorRegister ws, int n1);
+  void Copy_sB(GpuRegister rd, VectorRegister ws, int n4);
+  void Copy_sH(GpuRegister rd, VectorRegister ws, int n3);
+  void Copy_sW(GpuRegister rd, VectorRegister ws, int n2);
+  void Copy_sD(GpuRegister rd, VectorRegister ws, int n1);
+  void Copy_uB(GpuRegister rd, VectorRegister ws, int n4);
+  void Copy_uH(GpuRegister rd, VectorRegister ws, int n3);
+  void Copy_uW(GpuRegister rd, VectorRegister ws, int n2);
+  void InsertB(VectorRegister wd, GpuRegister rs, int n4);
+  void InsertH(VectorRegister wd, GpuRegister rs, int n3);
+  void InsertW(VectorRegister wd, GpuRegister rs, int n2);
+  void InsertD(VectorRegister wd, GpuRegister rs, int n1);
+  void FillB(VectorRegister wd, GpuRegister rs);
+  void FillH(VectorRegister wd, GpuRegister rs);
+  void FillW(VectorRegister wd, GpuRegister rs);
+  void FillD(VectorRegister wd, GpuRegister rs);
+
+  void LdiB(VectorRegister wd, int imm8);
+  void LdiH(VectorRegister wd, int imm10);
+  void LdiW(VectorRegister wd, int imm10);
+  void LdiD(VectorRegister wd, int imm10);
+  void LdB(VectorRegister wd, GpuRegister rs, int offset);
+  void LdH(VectorRegister wd, GpuRegister rs, int offset);
+  void LdW(VectorRegister wd, GpuRegister rs, int offset);
+  void LdD(VectorRegister wd, GpuRegister rs, int offset);
+  void StB(VectorRegister wd, GpuRegister rs, int offset);
+  void StH(VectorRegister wd, GpuRegister rs, int offset);
+  void StW(VectorRegister wd, GpuRegister rs, int offset);
+  void StD(VectorRegister wd, GpuRegister rs, int offset);
+
+  void IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  // Helper for replicating floating point value in all destination elements.
+  void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
+
   // Higher level composite instructions.
   int InstrCountForLoadReplicatedConst32(int64_t);
   void LoadConst32(GpuRegister rd, int32_t value);
@@ -653,6 +864,44 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
 
   void Addiu32(GpuRegister rt, GpuRegister rs, int32_t value);
   void Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);  // MIPS64
+
+  //
+  // Heap poisoning.
+  //
+
+  // Poison a heap reference contained in `src` and store it in `dst`.
+  void PoisonHeapReference(GpuRegister dst, GpuRegister src) {
+    // dst = -src.
+    // Negate the 32-bit ref.
+    Dsubu(dst, ZERO, src);
+    // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64.
+    Dext(dst, dst, 0, 32);
+  }
+  // Poison a heap reference contained in `reg`.
+  void PoisonHeapReference(GpuRegister reg) {
+    // reg = -reg.
+    PoisonHeapReference(reg, reg);
+  }
+  // Unpoison a heap reference contained in `reg`.
+  void UnpoisonHeapReference(GpuRegister reg) {
+    // reg = -reg.
+    // Negate the 32-bit ref.
+    Dsubu(reg, ZERO, reg);
+    // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64.
+    Dext(reg, reg, 0, 32);
+  }
+  // Poison a heap reference contained in `reg` if heap poisoning is enabled.
+  void MaybePoisonHeapReference(GpuRegister reg) {
+    if (kPoisonHeapReferences) {
+      PoisonHeapReference(reg);
+    }
+  }
+  // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
+  void MaybeUnpoisonHeapReference(GpuRegister reg) {
+    if (kPoisonHeapReferences) {
+      UnpoisonHeapReference(reg);
+    }
+  }
 
   void Bind(Label* label) OVERRIDE {
     Bind(down_cast<Mips64Label*>(label));
@@ -715,24 +964,331 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   // the table data) and should be loaded using LoadLabelAddress().
   JumpTable* CreateJumpTable(std::vector<Mips64Label*>&& labels);
 
-  void Bc(Mips64Label* label);
-  void Balc(Mips64Label* label);
-  void Bltc(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Bltzc(GpuRegister rt, Mips64Label* label);
-  void Bgtzc(GpuRegister rt, Mips64Label* label);
-  void Bgec(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Bgezc(GpuRegister rt, Mips64Label* label);
-  void Blezc(GpuRegister rt, Mips64Label* label);
-  void Bltuc(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Bgeuc(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Beqc(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Bnec(GpuRegister rs, GpuRegister rt, Mips64Label* label);
-  void Beqzc(GpuRegister rs, Mips64Label* label);
-  void Bnezc(GpuRegister rs, Mips64Label* label);
-  void Bc1eqz(FpuRegister ft, Mips64Label* label);
-  void Bc1nez(FpuRegister ft, Mips64Label* label);
+  // When `is_bare` is false, the branches will promote to long (if the range
+  // of the individual branch instruction is insufficient) and the delay/
+  // forbidden slots will be taken care of.
+  // Use `is_bare = false` when the branch target may be out of reach of the
+  // individual branch instruction. IOW, this is for general purpose use.
+  //
+  // When `is_bare` is true, just the branch instructions will be generated
+  // leaving delay/forbidden slot filling up to the caller and the branches
+  // won't promote to long if the range is insufficient (you'll get a
+  // compilation error when the range is exceeded).
+  // Use `is_bare = true` when the branch target is known to be within reach
+  // of the individual branch instruction. This is intended for small local
+  // optimizations around delay/forbidden slots.
+  // Also prefer using `is_bare = true` if the code near the branch is to be
+  // patched or analyzed at run time (e.g. introspection) to
+  // - show the intent and
+  // - fail during compilation rather than during patching/execution if the
+  //   bare branch range is insufficent but the code size and layout are
+  //   expected to remain unchanged
+  //
+  // R6 compact branches without delay/forbidden slots.
+  void Bc(Mips64Label* label, bool is_bare = false);
+  void Balc(Mips64Label* label, bool is_bare = false);
+  // R6 compact branches with forbidden slots.
+  void Bltc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bltzc(GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bgtzc(GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bgec(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bgezc(GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Blezc(GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bltuc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bgeuc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Beqc(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Bnec(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);
+  void Beqzc(GpuRegister rs, Mips64Label* label, bool is_bare = false);
+  void Bnezc(GpuRegister rs, Mips64Label* label, bool is_bare = false);
+  // R6 branches with delay slots.
+  void Bc1eqz(FpuRegister ft, Mips64Label* label, bool is_bare = false);
+  void Bc1nez(FpuRegister ft, Mips64Label* label, bool is_bare = false);
+  // R2 branches with delay slots that are also available on R6.
+  // The `is_bare` parameter exists and is checked in these branches only to
+  // prevent programming mistakes. These branches never promote to long, not
+  // even if `is_bare` is false.
+  void Bltz(GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Bgtz(GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Bgez(GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Blez(GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Beq(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Bne(GpuRegister rs, GpuRegister rt, Mips64Label* label, bool is_bare = false);  // R2
+  void Beqz(GpuRegister rs, Mips64Label* label, bool is_bare = false);  // R2
+  void Bnez(GpuRegister rs, Mips64Label* label, bool is_bare = false);  // R2
 
   void EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset, size_t size);
+  void AdjustBaseAndOffset(GpuRegister& base, int32_t& offset, bool is_doubleword);
+  // If element_size_shift is negative at entry, its value will be calculated based on the offset.
+  void AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
+                                           int32_t& offset,
+                                           int& element_size_shift);
+
+ private:
+  // This will be used as an argument for loads/stores
+  // when there is no need for implicit null checks.
+  struct NoImplicitNullChecker {
+    void operator()() const {}
+  };
+
+ public:
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void StoreConstToOffset(StoreOperandType type,
+                          int64_t value,
+                          GpuRegister base,
+                          int32_t offset,
+                          GpuRegister temp,
+                          ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    // We permit `base` and `temp` to coincide (however, we check that neither is AT),
+    // in which case the `base` register may be overwritten in the process.
+    CHECK_NE(temp, AT);  // Must not use AT as temp, so as not to overwrite the adjusted base.
+    AdjustBaseAndOffset(base, offset, /* is_doubleword */ (type == kStoreDoubleword));
+    GpuRegister reg;
+    // If the adjustment left `base` unchanged and equal to `temp`, we can't use `temp`
+    // to load and hold the value but we can use AT instead as AT hasn't been used yet.
+    // Otherwise, `temp` can be used for the value. And if `temp` is the same as the
+    // original `base` (that is, `base` prior to the adjustment), the original `base`
+    // register will be overwritten.
+    if (base == temp) {
+      temp = AT;
+    }
+
+    if (type == kStoreDoubleword && IsAligned<kMips64DoublewordSize>(offset)) {
+      if (value == 0) {
+        reg = ZERO;
+      } else {
+        reg = temp;
+        LoadConst64(reg, value);
+      }
+      Sd(reg, base, offset);
+      null_checker();
+    } else {
+      uint32_t low = Low32Bits(value);
+      uint32_t high = High32Bits(value);
+      if (low == 0) {
+        reg = ZERO;
+      } else {
+        reg = temp;
+        LoadConst32(reg, low);
+      }
+      switch (type) {
+        case kStoreByte:
+          Sb(reg, base, offset);
+          break;
+        case kStoreHalfword:
+          Sh(reg, base, offset);
+          break;
+        case kStoreWord:
+          Sw(reg, base, offset);
+          break;
+        case kStoreDoubleword:
+          // not aligned to kMips64DoublewordSize
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Sw(reg, base, offset);
+          null_checker();
+          if (high == 0) {
+            reg = ZERO;
+          } else {
+            reg = temp;
+            if (high != low) {
+              LoadConst32(reg, high);
+            }
+          }
+          Sw(reg, base, offset + kMips64WordSize);
+          break;
+        default:
+          LOG(FATAL) << "UNREACHABLE";
+      }
+      if (type != kStoreDoubleword) {
+        null_checker();
+      }
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void LoadFromOffset(LoadOperandType type,
+                      GpuRegister reg,
+                      GpuRegister base,
+                      int32_t offset,
+                      ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    AdjustBaseAndOffset(base, offset, /* is_doubleword */ (type == kLoadDoubleword));
+
+    switch (type) {
+      case kLoadSignedByte:
+        Lb(reg, base, offset);
+        break;
+      case kLoadUnsignedByte:
+        Lbu(reg, base, offset);
+        break;
+      case kLoadSignedHalfword:
+        Lh(reg, base, offset);
+        break;
+      case kLoadUnsignedHalfword:
+        Lhu(reg, base, offset);
+        break;
+      case kLoadWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lw(reg, base, offset);
+        break;
+      case kLoadUnsignedWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lwu(reg, base, offset);
+        break;
+      case kLoadDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Lwu(reg, base, offset);
+          null_checker();
+          Lwu(TMP2, base, offset + kMips64WordSize);
+          Dinsu(reg, TMP2, 32, 32);
+        } else {
+          Ld(reg, base, offset);
+          null_checker();
+        }
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+    if (type != kLoadDoubleword) {
+      null_checker();
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void LoadFpuFromOffset(LoadOperandType type,
+                         FpuRegister reg,
+                         GpuRegister base,
+                         int32_t offset,
+                         ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    int element_size_shift = -1;
+    if (type != kLoadQuadword) {
+      AdjustBaseAndOffset(base, offset, /* is_doubleword */ (type == kLoadDoubleword));
+    } else {
+      AdjustBaseOffsetAndElementSizeShift(base, offset, element_size_shift);
+    }
+
+    switch (type) {
+      case kLoadWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Lwc1(reg, base, offset);
+        null_checker();
+        break;
+      case kLoadDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Lwc1(reg, base, offset);
+          null_checker();
+          Lw(TMP2, base, offset + kMips64WordSize);
+          Mthc1(TMP2, reg);
+        } else {
+          Ldc1(reg, base, offset);
+          null_checker();
+        }
+        break;
+      case kLoadQuadword:
+        switch (element_size_shift) {
+          case TIMES_1: LdB(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_2: LdH(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_4: LdW(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_8: LdD(static_cast<VectorRegister>(reg), base, offset); break;
+          default:
+            LOG(FATAL) << "UNREACHABLE";
+        }
+        null_checker();
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void StoreToOffset(StoreOperandType type,
+                     GpuRegister reg,
+                     GpuRegister base,
+                     int32_t offset,
+                     ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    // Must not use AT as `reg`, so as not to overwrite the value being stored
+    // with the adjusted `base`.
+    CHECK_NE(reg, AT);
+    AdjustBaseAndOffset(base, offset, /* is_doubleword */ (type == kStoreDoubleword));
+
+    switch (type) {
+      case kStoreByte:
+        Sb(reg, base, offset);
+        break;
+      case kStoreHalfword:
+        Sh(reg, base, offset);
+        break;
+      case kStoreWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Sw(reg, base, offset);
+        break;
+      case kStoreDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Sw(reg, base, offset);
+          null_checker();
+          Dsrl32(TMP2, reg, 0);
+          Sw(TMP2, base, offset + kMips64WordSize);
+        } else {
+          Sd(reg, base, offset);
+          null_checker();
+        }
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+    if (type != kStoreDoubleword) {
+      null_checker();
+    }
+  }
+
+  template <typename ImplicitNullChecker = NoImplicitNullChecker>
+  void StoreFpuToOffset(StoreOperandType type,
+                        FpuRegister reg,
+                        GpuRegister base,
+                        int32_t offset,
+                        ImplicitNullChecker null_checker = NoImplicitNullChecker()) {
+    int element_size_shift = -1;
+    if (type != kStoreQuadword) {
+      AdjustBaseAndOffset(base, offset, /* is_doubleword */ (type == kStoreDoubleword));
+    } else {
+      AdjustBaseOffsetAndElementSizeShift(base, offset, element_size_shift);
+    }
+
+    switch (type) {
+      case kStoreWord:
+        CHECK_ALIGNED(offset, kMips64WordSize);
+        Swc1(reg, base, offset);
+        null_checker();
+        break;
+      case kStoreDoubleword:
+        if (!IsAligned<kMips64DoublewordSize>(offset)) {
+          CHECK_ALIGNED(offset, kMips64WordSize);
+          Mfhc1(TMP2, reg);
+          Swc1(reg, base, offset);
+          null_checker();
+          Sw(TMP2, base, offset + kMips64WordSize);
+        } else {
+          Sdc1(reg, base, offset);
+          null_checker();
+        }
+        break;
+      case kStoreQuadword:
+        switch (element_size_shift) {
+          case TIMES_1: StB(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_2: StH(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_4: StW(static_cast<VectorRegister>(reg), base, offset); break;
+          case TIMES_8: StD(static_cast<VectorRegister>(reg), base, offset); break;
+          default:
+            LOG(FATAL) << "UNREACHABLE";
+        }
+        null_checker();
+        break;
+      default:
+        LOG(FATAL) << "UNREACHABLE";
+    }
+  }
+
   void LoadFromOffset(LoadOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
   void LoadFpuFromOffset(LoadOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
   void StoreToOffset(StoreOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
@@ -752,7 +1308,9 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
                   const ManagedRegisterEntrySpills& entry_spills) OVERRIDE;
 
   // Emit code that will remove an activation from the stack.
-  void RemoveFrame(size_t frame_size, ArrayRef<const ManagedRegister> callee_save_regs) OVERRIDE;
+  void RemoveFrame(size_t frame_size,
+                   ArrayRef<const ManagedRegister> callee_save_regs,
+                   bool may_suspend) OVERRIDE;
 
   void IncreaseFrameSize(size_t adjust) OVERRIDE;
   void DecreaseFrameSize(size_t adjust) OVERRIDE;
@@ -900,10 +1458,16 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   class Branch {
    public:
     enum Type {
-      // Short branches.
+      // R6 short branches (can be promoted to long).
       kUncondBranch,
       kCondBranch,
       kCall,
+      // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+      kBareUncondBranch,
+      kBareCondBranch,
+      kBareCall,
+      // R2 short branches (can't be promoted to long), delay slots filled manually.
+      kR2BareCondBranch,
       // Near label.
       kLabel,
       // Near literals.
@@ -946,8 +1510,8 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
       // different origins, e.g. to PC or PC+4. Encode the origin distance (as a number of 4-byte
       // instructions) from the instruction containing the offset.
       uint32_t pc_org;
-      // How large (in bits) a PC-relative offset can be for a given type of branch (kCondBranch is
-      // an exception: use kOffset23 for beqzc/bnezc).
+      // How large (in bits) a PC-relative offset can be for a given type of branch (kCondBranch
+      // and kBareCondBranch are an exception: use kOffset23 for beqzc/bnezc).
       OffsetBits offset_size;
       // Some MIPS instructions with PC-relative offsets shift the offset by 2. Encode the shift
       // count.
@@ -956,13 +1520,15 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
     static const BranchInfo branch_info_[/* Type */];
 
     // Unconditional branch or call.
-    Branch(uint32_t location, uint32_t target, bool is_call);
+    Branch(uint32_t location, uint32_t target, bool is_call, bool is_bare);
     // Conditional branch.
-    Branch(uint32_t location,
+    Branch(bool is_r6,
+           uint32_t location,
            uint32_t target,
            BranchCondition condition,
            GpuRegister lhs_reg,
-           GpuRegister rhs_reg);
+           GpuRegister rhs_reg,
+           bool is_bare);
     // Label address (in literal area) or literal.
     Branch(uint32_t location, GpuRegister dest_reg, Type label_or_literal_type);
 
@@ -988,6 +1554,7 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
     uint32_t GetOldSize() const;
     uint32_t GetEndLocation() const;
     uint32_t GetOldEndLocation() const;
+    bool IsBare() const;
     bool IsLong() const;
     bool IsResolved() const;
 
@@ -1048,7 +1615,7 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
 
    private:
     // Completes branch construction by determining and recording its type.
-    void InitializeType(Type initial_type);
+    void InitializeType(Type initial_type, bool is_r6);
     // Helper for the above.
     void InitShortOrLong(OffsetBits ofs_size, Type short_type, Type long_type);
 
@@ -1075,14 +1642,29 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void EmitI26(int opcode, uint32_t imm26);
   void EmitFR(int opcode, int fmt, FpuRegister ft, FpuRegister fs, FpuRegister fd, int funct);
   void EmitFI(int opcode, int fmt, FpuRegister rt, uint16_t imm);
-  void EmitBcondc(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
+  void EmitBcondR6(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
+  void EmitBcondR2(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint16_t imm16);
+  void EmitMsa3R(int operation,
+                 int df,
+                 VectorRegister wt,
+                 VectorRegister ws,
+                 VectorRegister wd,
+                 int minor_opcode);
+  void EmitMsaBIT(int operation, int df_m, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsaELM(int operation, int df_n, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsaMI10(int s10, GpuRegister rs, VectorRegister wd, int minor_opcode, int df);
+  void EmitMsaI10(int operation, int df, int i10, VectorRegister wd, int minor_opcode);
+  void EmitMsa2R(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsa2RF(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
 
-  void Buncond(Mips64Label* label);
+  void Buncond(Mips64Label* label, bool is_bare);
   void Bcond(Mips64Label* label,
+             bool is_r6,
+             bool is_bare,
              BranchCondition condition,
              GpuRegister lhs,
              GpuRegister rhs = ZERO);
-  void Call(Mips64Label* label);
+  void Call(Mips64Label* label, bool is_bare);
   void FinalizeLabeledBranch(Mips64Label* label);
 
   Branch* GetBranch(uint32_t branch_id);
@@ -1098,6 +1680,10 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
 
   // Emits exception block.
   void EmitExceptionPoll(Mips64ExceptionSlowPath* exception);
+
+  bool HasMsa() const {
+    return has_msa_;
+  }
 
   // List of exception blocks to generate at the end of the code cache.
   std::vector<Mips64ExceptionSlowPath> exception_blocks_;
@@ -1121,6 +1707,8 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   uint32_t last_position_adjustment_;
   uint32_t last_old_position_;
   uint32_t last_branch_id_;
+
+  const bool has_msa_;
 
   DISALLOW_COPY_AND_ASSIGN(Mips64Assembler);
 };

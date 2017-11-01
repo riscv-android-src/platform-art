@@ -19,8 +19,8 @@
 #include "class-inl.h"
 #include "gc_root-inl.h"
 #include "jvalue-inl.h"
-#include "method_handles.h"
 #include "method_handles-inl.h"
+#include "method_handles.h"
 #include "reflection-inl.h"
 
 namespace art {
@@ -173,13 +173,13 @@ mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs(
 
   Handle<mirror::ObjectArray<mirror::Object>> references(hs.NewHandle(
       mirror::ObjectArray<mirror::Object>::Alloc(self, array_class, refs_size)));
-  if (references.Get() == nullptr) {
+  if (references == nullptr) {
     DCHECK(self->IsExceptionPending());
     return nullptr;
   }
 
   Handle<ByteArray> stack_frame(hs.NewHandle(ByteArray::Alloc(self, frame_size)));
-  if (stack_frame.Get() == nullptr) {
+  if (stack_frame == nullptr) {
     DCHECK(self->IsExceptionPending());
     return nullptr;
   }
@@ -195,6 +195,7 @@ mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs(
   // Step 5: Construct the EmulatedStackFrame object.
   Handle<EmulatedStackFrame> sf(hs.NewHandle(
       ObjPtr<EmulatedStackFrame>::DownCast(StaticClass()->AllocObject(self))));
+  sf->SetFieldObject<false>(CallsiteTypeOffset(), caller_type.Get());
   sf->SetFieldObject<false>(TypeOffset(), callee_type.Get());
   sf->SetFieldObject<false>(ReferencesOffset(), references.Get());
   sf->SetFieldObject<false>(StackFrameOffset(), stack_frame.Get());
@@ -288,7 +289,7 @@ void EmulatedStackFrame::VisitRoots(RootVisitor* visitor) {
   static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
-// Explicit DoInvokePolymorphic template function declarations.
+// Explicit CreateFromShadowFrameAndArgs template function declarations.
 #define EXPLICIT_CREATE_FROM_SHADOW_FRAME_AND_ARGS_DECL(_is_range)                         \
   template REQUIRES_SHARED(Locks::mutator_lock_)                                           \
   mirror::EmulatedStackFrame* EmulatedStackFrame::CreateFromShadowFrameAndArgs<_is_range>( \

@@ -80,7 +80,7 @@ class Instruction {
   };
 
   enum Code {  // private marker to avoid generate-operator-out.py from processing.
-#define INSTRUCTION_ENUM(opcode, cname, p, f, i, a, v) cname = (opcode),
+#define INSTRUCTION_ENUM(opcode, cname, p, f, i, a, e, v) cname = (opcode),
 #include "dex_instruction_list.h"
     DEX_INSTRUCTION_LIST(INSTRUCTION_ENUM)
 #undef DEX_INSTRUCTION_LIST
@@ -88,7 +88,7 @@ class Instruction {
     RSUB_INT_LIT16 = RSUB_INT,
   };
 
-  enum Format {
+  enum Format : uint8_t {
     k10x,  // op
     k12x,  // op vA, vB
     k11n,  // op vA, #+B
@@ -124,26 +124,34 @@ class Instruction {
     k51l,  // op vAA, #+BBBBBBBBBBBBBBBB
   };
 
-  enum IndexType {
+  enum IndexType : uint8_t {
     kIndexUnknown = 0,
-    kIndexNone,              // has no index
-    kIndexTypeRef,           // type reference index
-    kIndexStringRef,         // string reference index
-    kIndexMethodRef,         // method reference index
-    kIndexFieldRef,          // field reference index
-    kIndexFieldOffset,       // field offset (for static linked fields)
-    kIndexVtableOffset,      // vtable offset (for static linked methods)
-    kIndexMethodAndProtoRef  // method and a proto reference index (for invoke-polymorphic)
+    kIndexNone,               // has no index
+    kIndexTypeRef,            // type reference index
+    kIndexStringRef,          // string reference index
+    kIndexMethodRef,          // method reference index
+    kIndexFieldRef,           // field reference index
+    kIndexFieldOffset,        // field offset (for static linked fields)
+    kIndexVtableOffset,       // vtable offset (for static linked methods)
+    kIndexMethodAndProtoRef,  // method and a proto reference index (for invoke-polymorphic)
+    kIndexCallSiteRef,        // call site reference index
+    kIndexMethodHandleRef,    // constant method handle reference index
+    kIndexProtoRef,           // prototype reference index
   };
 
-  enum Flags {
-    kBranch              = 0x0000001,  // conditional or unconditional branch
-    kContinue            = 0x0000002,  // flow can continue to next statement
-    kSwitch              = 0x0000004,  // switch statement
-    kThrow               = 0x0000008,  // could cause an exception to be thrown
-    kReturn              = 0x0000010,  // returns, no additional statements
-    kInvoke              = 0x0000020,  // a flavor of invoke
-    kUnconditional       = 0x0000040,  // unconditional branch
+  enum Flags : uint8_t {
+    kBranch              = 0x01,  // conditional or unconditional branch
+    kContinue            = 0x02,  // flow can continue to next statement
+    kSwitch              = 0x04,  // switch statement
+    kThrow               = 0x08,  // could cause an exception to be thrown
+    kReturn              = 0x10,  // returns, no additional statements
+    kInvoke              = 0x20,  // a flavor of invoke
+    kUnconditional       = 0x40,  // unconditional branch
+    kExperimental        = 0x80,  // is an experimental opcode
+  };
+
+  // Old flags. Keeping them around in case we might need them again some day.
+  enum ExtendedFlags : uint32_t {
     kAdd                 = 0x0000080,  // addition
     kSubtract            = 0x0000100,  // subtract
     kMultiply            = 0x0000200,  // multiply
@@ -161,47 +169,66 @@ class Instruction {
     kClobber             = 0x0200000,  // clobbers memory in a big way (not just a write)
     kRegCFieldOrConstant = 0x0400000,  // is the third virtual register a field or literal constant (vC)
     kRegBFieldOrConstant = 0x0800000,  // is the second virtual register a field or literal constant (vB)
-    kExperimental        = 0x1000000,  // is an experimental opcode
   };
 
-  enum VerifyFlag {
-    kVerifyNone               = 0x000000,
-    kVerifyRegA               = 0x000001,
-    kVerifyRegAWide           = 0x000002,
-    kVerifyRegB               = 0x000004,
-    kVerifyRegBField          = 0x000008,
-    kVerifyRegBMethod         = 0x000010,
-    kVerifyRegBNewInstance    = 0x000020,
-    kVerifyRegBString         = 0x000040,
-    kVerifyRegBType           = 0x000080,
-    kVerifyRegBWide           = 0x000100,
-    kVerifyRegC               = 0x000200,
-    kVerifyRegCField          = 0x000400,
-    kVerifyRegCNewArray       = 0x000800,
-    kVerifyRegCType           = 0x001000,
-    kVerifyRegCWide           = 0x002000,
-    kVerifyArrayData          = 0x004000,
-    kVerifyBranchTarget       = 0x008000,
-    kVerifySwitchTargets      = 0x010000,
-    kVerifyVarArg             = 0x020000,
-    kVerifyVarArgNonZero      = 0x040000,
-    kVerifyVarArgRange        = 0x080000,
-    kVerifyVarArgRangeNonZero = 0x100000,
-    kVerifyRuntimeOnly        = 0x200000,
-    kVerifyError              = 0x400000,
-    kVerifyRegHPrototype      = 0x800000
+  enum VerifyFlag : uint32_t {
+    kVerifyNone               = 0x0000000,
+    kVerifyRegA               = 0x0000001,
+    kVerifyRegAWide           = 0x0000002,
+    kVerifyRegB               = 0x0000004,
+    kVerifyRegBField          = 0x0000008,
+    kVerifyRegBMethod         = 0x0000010,
+    kVerifyRegBNewInstance    = 0x0000020,
+    kVerifyRegBString         = 0x0000040,
+    kVerifyRegBType           = 0x0000080,
+    kVerifyRegBWide           = 0x0000100,
+    kVerifyRegC               = 0x0000200,
+    kVerifyRegCField          = 0x0000400,
+    kVerifyRegCNewArray       = 0x0000800,
+    kVerifyRegCType           = 0x0001000,
+    kVerifyRegCWide           = 0x0002000,
+    kVerifyArrayData          = 0x0004000,
+    kVerifyBranchTarget       = 0x0008000,
+    kVerifySwitchTargets      = 0x0010000,
+    kVerifyVarArg             = 0x0020000,
+    kVerifyVarArgNonZero      = 0x0040000,
+    kVerifyVarArgRange        = 0x0080000,
+    kVerifyVarArgRangeNonZero = 0x0100000,
+    kVerifyRuntimeOnly        = 0x0200000,
+    kVerifyError              = 0x0400000,
+    kVerifyRegHPrototype      = 0x0800000,
+    kVerifyRegBCallSite       = 0x1000000,
+    kVerifyRegBMethodHandle   = 0x2000000,
+    kVerifyRegBPrototype      = 0x4000000,
+  };
+
+  // Collect the enums in a struct for better locality.
+  struct InstructionDescriptor {
+    uint32_t verify_flags;         // Set of VerifyFlag.
+    Format format;
+    IndexType index_type;
+    uint8_t flags;                 // Set of Flags.
+    int8_t size_in_code_units;
   };
 
   static constexpr uint32_t kMaxVarArgRegs = 5;
 
+  static constexpr bool kHaveExperimentalInstructions = false;
+
   // Returns the size (in 2 byte code units) of this instruction.
   size_t SizeInCodeUnits() const {
-    int result = kInstructionSizeInCodeUnits[Opcode()];
+    int8_t result = kInstructionDescriptors[Opcode()].size_in_code_units;
     if (UNLIKELY(result < 0)) {
       return SizeInCodeUnitsComplexOpcode();
     } else {
       return static_cast<size_t>(result);
     }
+  }
+
+  // Code units required to calculate the size of the instruction.
+  size_t CodeUnitsRequiredForSizeComputation() const {
+    const int8_t result = kInstructionDescriptors[Opcode()].size_in_code_units;
+    return UNLIKELY(result < 0) ? CodeUnitsRequiredForSizeOfComplexOpcode() : 1;
   }
 
   // Reads an instruction out of the stream at the specified address.
@@ -495,32 +522,32 @@ class Instruction {
 
   // Returns the format of the given opcode.
   static Format FormatOf(Code opcode) {
-    return kInstructionFormats[opcode];
+    return kInstructionDescriptors[opcode].format;
   }
 
   // Returns the index type of the given opcode.
   static IndexType IndexTypeOf(Code opcode) {
-    return kInstructionIndexTypes[opcode];
+    return kInstructionDescriptors[opcode].index_type;
   }
 
   // Returns the flags for the given opcode.
-  static int FlagsOf(Code opcode) {
-    return kInstructionFlags[opcode];
+  static uint8_t FlagsOf(Code opcode) {
+    return kInstructionDescriptors[opcode].flags;
   }
 
   // Return the verify flags for the given opcode.
-  static int VerifyFlagsOf(Code opcode) {
-    return kInstructionVerifyFlags[opcode];
+  static uint32_t VerifyFlagsOf(Code opcode) {
+    return kInstructionDescriptors[opcode].verify_flags;
   }
 
   // Returns true if this instruction is a branch.
   bool IsBranch() const {
-    return (kInstructionFlags[Opcode()] & kBranch) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kBranch) != 0;
   }
 
   // Returns true if this instruction is a unconditional branch.
   bool IsUnconditional() const {
-    return (kInstructionFlags[Opcode()] & kUnconditional) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kUnconditional) != 0;
   }
 
   // Returns the branch offset if this instruction is a branch.
@@ -531,23 +558,23 @@ class Instruction {
 
   // Returns true if the instruction is a quickened instruction.
   bool IsQuickened() const {
-    return (kInstructionIndexTypes[Opcode()] == kIndexFieldOffset) ||
-        (kInstructionIndexTypes[Opcode()] == kIndexVtableOffset);
+    return (kInstructionDescriptors[Opcode()].index_type == kIndexFieldOffset) ||
+        (kInstructionDescriptors[Opcode()].index_type == kIndexVtableOffset);
   }
 
   // Returns true if this instruction is a switch.
   bool IsSwitch() const {
-    return (kInstructionFlags[Opcode()] & kSwitch) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kSwitch) != 0;
   }
 
   // Returns true if this instruction can throw.
   bool IsThrow() const {
-    return (kInstructionFlags[Opcode()] & kThrow) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kThrow) != 0;
   }
 
   // Determine if the instruction is any of 'return' instructions.
   bool IsReturn() const {
-    return (kInstructionFlags[Opcode()] & kReturn) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kReturn) != 0;
   }
 
   // Determine if this instruction ends execution of its basic block.
@@ -557,41 +584,41 @@ class Instruction {
 
   // Determine if this instruction is an invoke.
   bool IsInvoke() const {
-    return (kInstructionFlags[Opcode()] & kInvoke) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kInvoke) != 0;
   }
 
   // Determine if this instruction is experimental.
   bool IsExperimental() const {
-    return (kInstructionFlags[Opcode()] & kExperimental) != 0;
+    return (kInstructionDescriptors[Opcode()].flags & kExperimental) != 0;
   }
 
   int GetVerifyTypeArgumentA() const {
-    return (kInstructionVerifyFlags[Opcode()] & (kVerifyRegA | kVerifyRegAWide));
+    return (kInstructionDescriptors[Opcode()].verify_flags & (kVerifyRegA | kVerifyRegAWide));
   }
 
   int GetVerifyTypeArgumentB() const {
-    return (kInstructionVerifyFlags[Opcode()] & (kVerifyRegB | kVerifyRegBField |
+    return (kInstructionDescriptors[Opcode()].verify_flags & (kVerifyRegB | kVerifyRegBField |
         kVerifyRegBMethod | kVerifyRegBNewInstance | kVerifyRegBString | kVerifyRegBType |
         kVerifyRegBWide));
   }
 
   int GetVerifyTypeArgumentC() const {
-    return (kInstructionVerifyFlags[Opcode()] & (kVerifyRegC | kVerifyRegCField |
+    return (kInstructionDescriptors[Opcode()].verify_flags & (kVerifyRegC | kVerifyRegCField |
         kVerifyRegCNewArray | kVerifyRegCType | kVerifyRegCWide));
   }
 
   int GetVerifyTypeArgumentH() const {
-    return (kInstructionVerifyFlags[Opcode()] & kVerifyRegHPrototype);
+    return (kInstructionDescriptors[Opcode()].verify_flags & kVerifyRegHPrototype);
   }
 
   int GetVerifyExtraFlags() const {
-    return (kInstructionVerifyFlags[Opcode()] & (kVerifyArrayData | kVerifyBranchTarget |
-        kVerifySwitchTargets | kVerifyVarArg | kVerifyVarArgNonZero | kVerifyVarArgRange |
-        kVerifyVarArgRangeNonZero | kVerifyError));
+    return (kInstructionDescriptors[Opcode()].verify_flags & (kVerifyArrayData |
+        kVerifyBranchTarget | kVerifySwitchTargets | kVerifyVarArg | kVerifyVarArgNonZero |
+        kVerifyVarArgRange | kVerifyVarArgRangeNonZero | kVerifyError));
   }
 
   bool GetVerifyIsRuntimeOnly() const {
-    return (kInstructionVerifyFlags[Opcode()] & kVerifyRuntimeOnly) != 0;
+    return (kInstructionDescriptors[Opcode()].verify_flags & kVerifyRuntimeOnly) != 0;
   }
 
   // Get the dex PC of this instruction as a offset in code units from the beginning of insns.
@@ -616,6 +643,9 @@ class Instruction {
 
  private:
   size_t SizeInCodeUnitsComplexOpcode() const;
+
+  // Return how many code unit words are required to compute the size of the opcode.
+  size_t CodeUnitsRequiredForSizeOfComplexOpcode() const;
 
   uint32_t Fetch32(size_t offset) const {
     return (Fetch16(offset) | ((uint32_t) Fetch16(offset + 1) << 16));
@@ -649,11 +679,9 @@ class Instruction {
   }
 
   static const char* const kInstructionNames[];
-  static Format const kInstructionFormats[];
-  static IndexType const kInstructionIndexTypes[];
-  static int const kInstructionFlags[];
-  static int const kInstructionVerifyFlags[];
-  static int const kInstructionSizeInCodeUnits[];
+
+  static const InstructionDescriptor kInstructionDescriptors[];
+
   DISALLOW_IMPLICIT_CONSTRUCTORS(Instruction);
 };
 std::ostream& operator<<(std::ostream& os, const Instruction::Code& code);

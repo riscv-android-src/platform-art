@@ -16,18 +16,19 @@
 
 #include <stdio.h>
 
-#include "base/macros.h"
+#include "android-base/macros.h"
 #include "jni.h"
-#include "openjdkjvmti/jvmti.h"
-#include "ScopedLocalRef.h"
+#include "jvmti.h"
+#include "scoped_local_ref.h"
 
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+// Test infrastructure
+#include "jni_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test918Fields {
 
-extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getFieldName(
+extern "C" JNIEXPORT jobjectArray JNICALL Java_art_Test918_getFieldName(
     JNIEnv* env, jclass klass, jobject field) {
   jfieldID id = env->FromReflectedField(field);
 
@@ -79,7 +80,7 @@ extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getFieldName(
   return ret;
 }
 
-extern "C" JNIEXPORT jclass JNICALL Java_Main_getFieldDeclaringClass(
+extern "C" JNIEXPORT jclass JNICALL Java_art_Test918_getFieldDeclaringClass(
     JNIEnv* env, jclass klass, jobject field) {
   jfieldID id = env->FromReflectedField(field);
 
@@ -96,7 +97,7 @@ extern "C" JNIEXPORT jclass JNICALL Java_Main_getFieldDeclaringClass(
   return declaring_class;
 }
 
-extern "C" JNIEXPORT jint JNICALL Java_Main_getFieldModifiers(
+extern "C" JNIEXPORT jint JNICALL Java_art_Test918_getFieldModifiers(
     JNIEnv* env, jclass klass, jobject field) {
   jfieldID id = env->FromReflectedField(field);
 
@@ -113,7 +114,7 @@ extern "C" JNIEXPORT jint JNICALL Java_Main_getFieldModifiers(
   return modifiers;
 }
 
-extern "C" JNIEXPORT jboolean JNICALL Java_Main_isFieldSynthetic(
+extern "C" JNIEXPORT jboolean JNICALL Java_art_Test918_isFieldSynthetic(
     JNIEnv* env, jclass klass, jobject field) {
   jfieldID id = env->FromReflectedField(field);
 

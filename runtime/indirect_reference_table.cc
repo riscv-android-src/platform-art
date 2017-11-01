@@ -18,6 +18,7 @@
 
 #include "base/dumpable-inl.h"
 #include "base/systrace.h"
+#include "java_vm_ext.h"
 #include "jni_internal.h"
 #include "nth_caller_visitor.h"
 #include "reference_table.h"
@@ -25,7 +26,6 @@
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils.h"
-#include "verify_object-inl.h"
 
 #include <cstdlib>
 
@@ -33,6 +33,9 @@ namespace art {
 
 static constexpr bool kDumpStackOnNonLocalReference = false;
 static constexpr bool kDebugIRT = false;
+
+// Maximum table size we allow.
+static constexpr size_t kMaxTableSizeInBytes = 128 * MB;
 
 const char* GetIndirectRefKindString(const IndirectRefKind& kind) {
   switch (kind) {
@@ -70,6 +73,9 @@ IndirectReferenceTable::IndirectReferenceTable(size_t max_count,
       resizable_(resizable) {
   CHECK(error_msg != nullptr);
   CHECK_NE(desired_kind, kHandleScopeOrInvalid);
+
+  // Overflow and maximum check.
+  CHECK_LE(max_count, kMaxTableSizeInBytes / sizeof(IrtEntry));
 
   const size_t table_bytes = max_count * sizeof(IrtEntry);
   table_mem_map_.reset(MemMap::MapAnonymous("indirect ref table", nullptr, table_bytes,
@@ -203,6 +209,13 @@ static inline void CheckHoleCount(IrtEntry* table,
 bool IndirectReferenceTable::Resize(size_t new_size, std::string* error_msg) {
   CHECK_GT(new_size, max_entries_);
 
+  constexpr size_t kMaxEntries = kMaxTableSizeInBytes / sizeof(IrtEntry);
+  if (new_size > kMaxEntries) {
+    *error_msg = android::base::StringPrintf("Requested size exceeds maximum: %zu", new_size);
+    return false;
+  }
+  // Note: the above check also ensures that there is no overflow below.
+
   const size_t table_bytes = new_size * sizeof(IrtEntry);
   std::unique_ptr<MemMap> new_map(MemMap::MapAnonymous("indirect ref table",
                                                        nullptr,
@@ -224,7 +237,8 @@ bool IndirectReferenceTable::Resize(size_t new_size, std::string* error_msg) {
 }
 
 IndirectRef IndirectReferenceTable::Add(IRTSegmentState previous_state,
-                                        ObjPtr<mirror::Object> obj) {
+                                        ObjPtr<mirror::Object> obj,
+                                        std::string* error_msg) {
   if (kDebugIRT) {
     LOG(INFO) << "+++ Add: previous_state=" << previous_state.top_index
               << " top_index=" << segment_state_.top_index
@@ -240,20 +254,34 @@ IndirectRef IndirectReferenceTable::Add(IRTSegmentState previous_state,
 
   if (top_index == max_entries_) {
     if (resizable_ == ResizableCapacity::kNo) {
-      LOG(FATAL) << "JNI ERROR (app bug): " << kind_ << " table overflow "
-                 << "(max=" << max_entries_ << ")\n"
-                 << MutatorLockedDumpable<IndirectReferenceTable>(*this);
-      UNREACHABLE();
+      std::ostringstream oss;
+      oss << "JNI ERROR (app bug): " << kind_ << " table overflow "
+          << "(max=" << max_entries_ << ")"
+          << MutatorLockedDumpable<IndirectReferenceTable>(*this);
+      *error_msg = oss.str();
+      return nullptr;
     }
 
     // Try to double space.
-    std::string error_msg;
-    if (!Resize(max_entries_ * 2, &error_msg)) {
-      LOG(FATAL) << "JNI ERROR (app bug): " << kind_ << " table overflow "
-                 << "(max=" << max_entries_ << ")" << std::endl
-                 << MutatorLockedDumpable<IndirectReferenceTable>(*this)
-                 << " Resizing failed: " << error_msg;
-      UNREACHABLE();
+    if (std::numeric_limits<size_t>::max() / 2 < max_entries_) {
+      std::ostringstream oss;
+      oss << "JNI ERROR (app bug): " << kind_ << " table overflow "
+          << "(max=" << max_entries_ << ")" << std::endl
+          << MutatorLockedDumpable<IndirectReferenceTable>(*this)
+          << " Resizing failed: exceeds size_t";
+      *error_msg = oss.str();
+      return nullptr;
+    }
+
+    std::string inner_error_msg;
+    if (!Resize(max_entries_ * 2, &inner_error_msg)) {
+      std::ostringstream oss;
+      oss << "JNI ERROR (app bug): " << kind_ << " table overflow "
+          << "(max=" << max_entries_ << ")" << std::endl
+          << MutatorLockedDumpable<IndirectReferenceTable>(*this)
+          << " Resizing failed: " << inner_error_msg;
+      *error_msg = oss.str();
+      return nullptr;
     }
   }
 
@@ -451,6 +479,40 @@ void IndirectReferenceTable::SetSegmentState(IRTSegmentState new_state) {
               << new_state.top_index;
   }
   segment_state_ = new_state;
+}
+
+bool IndirectReferenceTable::EnsureFreeCapacity(size_t free_capacity, std::string* error_msg) {
+  size_t top_index = segment_state_.top_index;
+  if (top_index < max_entries_ && top_index + free_capacity <= max_entries_) {
+    return true;
+  }
+
+  // We're only gonna do a simple best-effort here, ensuring the asked-for capacity at the end.
+  if (resizable_ == ResizableCapacity::kNo) {
+    *error_msg = "Table is not resizable";
+    return false;
+  }
+
+  // Try to increase the table size.
+
+  // Would this overflow?
+  if (std::numeric_limits<size_t>::max() - free_capacity < top_index) {
+    *error_msg = "Cannot resize table, overflow.";
+    return false;
+  }
+
+  if (!Resize(top_index + free_capacity, error_msg)) {
+    LOG(WARNING) << "JNI ERROR: Unable to reserve space in EnsureFreeCapacity (" << free_capacity
+                 << "): " << std::endl
+                 << MutatorLockedDumpable<IndirectReferenceTable>(*this)
+                 << " Resizing failed: " << *error_msg;
+    return false;
+  }
+  return true;
+}
+
+size_t IndirectReferenceTable::FreeCapacity() const {
+  return max_entries_ - segment_state_.top_index;
 }
 
 }  // namespace art

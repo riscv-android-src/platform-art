@@ -25,9 +25,6 @@ namespace mirror {
   template<class MirrorType> class HeapReference;
 }  // namespace mirror
 
-// A callback for visiting an object in the heap.
-typedef void (ObjectCallback)(mirror::Object* obj, void* arg);
-
 class IsMarkedVisitor {
  public:
   virtual ~IsMarkedVisitor() {}
@@ -43,7 +40,8 @@ class MarkObjectVisitor {
   // May return the same address as the input if the object did not move.
   virtual mirror::Object* MarkObject(mirror::Object* obj) = 0;
   // Mark an object and update the value stored in the heap reference if the object moved.
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj) = 0;
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj,
+                                 bool do_atomic_update) = 0;
 };
 
 }  // namespace art

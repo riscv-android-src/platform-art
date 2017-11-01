@@ -17,13 +17,15 @@
 #ifndef ART_COMPILER_DRIVER_COMPILER_DRIVER_H_
 #define ART_COMPILER_DRIVER_COMPILER_DRIVER_H_
 
+#include <atomic>
 #include <set>
 #include <string>
 #include <unordered_set>
 #include <vector>
 
+#include "android-base/strings.h"
+
 #include "arch/instruction_set.h"
-#include "base/arena_allocator.h"
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/mutex.h"
@@ -33,15 +35,13 @@
 #include "dex_file.h"
 #include "dex_file_types.h"
 #include "driver/compiled_method_storage.h"
-#include "jit/offline_profiling_info.h"
-#include "invoke_type.h"
+#include "jit/profile_compilation_info.h"
 #include "method_reference.h"
 #include "mirror/class.h"  // For mirror::Class::Status.
 #include "os.h"
-#include "runtime.h"
 #include "safe_map.h"
 #include "thread_pool.h"
-#include "utils/atomic_method_ref_map.h"
+#include "utils/atomic_dex_ref_map.h"
 #include "utils/dex_cache_arrays_layout.h"
 
 namespace art {
@@ -56,17 +56,16 @@ class VerifierDepsTest;
 }  // namespace verifier
 
 class BitVector;
-class CompiledClass;
 class CompiledMethod;
 class CompilerOptions;
 class DexCompilationUnit;
 struct InlineIGetIPutData;
 class InstructionSetFeatures;
+class InternTable;
+enum InvokeType : uint32_t;
 class ParallelCompilationManager;
 class ScopedObjectAccess;
 template <class Allocator> class SrcMap;
-class SrcMapElem;
-using SwapSrcMap = SrcMap<SwapAllocator<SrcMapElem>>;
 template<class T> class Handle;
 class TimingLogger;
 class VdexFile;
@@ -107,37 +106,27 @@ class CompilerDriver {
   ~CompilerDriver();
 
   // Set dex files that will be stored in the oat file after being compiled.
-  void SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files) {
-    dex_files_for_oat_file_ = &dex_files;
-  }
+  void SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files);
+
+  // Set dex files classpath.
+  void SetClasspathDexFiles(const std::vector<const DexFile*>& dex_files);
 
   // Get dex file that will be stored in the oat file after being compiled.
   ArrayRef<const DexFile* const> GetDexFilesForOatFile() const {
-    return (dex_files_for_oat_file_ != nullptr)
-        ? ArrayRef<const DexFile* const>(*dex_files_for_oat_file_)
-        : ArrayRef<const DexFile* const>();
+    return ArrayRef<const DexFile* const>(dex_files_for_oat_file_);
   }
 
   void CompileAll(jobject class_loader,
                   const std::vector<const DexFile*>& dex_files,
                   TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_, !dex_to_dex_references_lock_);
-
-  void CompileAll(jobject class_loader,
-                  const std::vector<const DexFile*>& dex_files,
-                  VdexFile* vdex_file,
-                  TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_, !dex_to_dex_references_lock_);
+      REQUIRES(!Locks::mutator_lock_, !dex_to_dex_references_lock_);
 
   // Compile a single Method.
   void CompileOne(Thread* self, ArtMethod* method, TimingLogger* timings)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!compiled_classes_lock_, !dex_to_dex_references_lock_);
+      REQUIRES(!dex_to_dex_references_lock_);
 
-  VerificationResults* GetVerificationResults() const {
-    DCHECK(Runtime::Current()->IsAotCompiler());
-    return verification_results_;
-  }
+  VerificationResults* GetVerificationResults() const;
 
   InstructionSet GetInstructionSet() const {
     return instruction_set_;
@@ -166,8 +155,8 @@ class CompilerDriver {
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickResolutionTrampoline() const;
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickToInterpreterBridge() const;
 
-  CompiledClass* GetCompiledClass(ClassReference ref) const
-      REQUIRES(!compiled_classes_lock_);
+  mirror::Class::Status GetClassStatus(const ClassReference& ref) const;
+  bool GetCompiledClass(const ClassReference& ref, mirror::Class::Status* status) const;
 
   CompiledMethod* GetCompiledMethod(MethodReference ref) const;
   size_t GetNonRelativeLinkerPatchCount() const;
@@ -181,22 +170,54 @@ class CompilerDriver {
                                      uint16_t class_def_index,
                                      bool requires)
       REQUIRES(!requires_constructor_barrier_lock_);
+
+  // Do the <init> methods for this class require a constructor barrier (prior to the return)?
+  // The answer is "yes", if and only if this class has any instance final fields.
+  // (This must not be called for any non-<init> methods; the answer would be "no").
+  //
+  // ---
+  //
+  // JLS 17.5.1 "Semantics of final fields" mandates that all final fields are frozen at the end
+  // of the invoked constructor. The constructor barrier is a conservative implementation means of
+  // enforcing the freezes happen-before the object being constructed is observable by another
+  // thread.
+  //
+  // Note: This question only makes sense for instance constructors;
+  // static constructors (despite possibly having finals) never need
+  // a barrier.
+  //
+  // JLS 12.4.2 "Detailed Initialization Procedure" approximately describes
+  // class initialization as:
+  //
+  //   lock(class.lock)
+  //     class.state = initializing
+  //   unlock(class.lock)
+  //
+  //   invoke <clinit>
+  //
+  //   lock(class.lock)
+  //     class.state = initialized
+  //   unlock(class.lock)              <-- acts as a release
+  //
+  // The last operation in the above example acts as an atomic release
+  // for any stores in <clinit>, which ends up being stricter
+  // than what a constructor barrier needs.
+  //
+  // See also QuasiAtomic::ThreadFenceForConstructor().
   bool RequiresConstructorBarrier(Thread* self,
                                   const DexFile* dex_file,
                                   uint16_t class_def_index)
       REQUIRES(!requires_constructor_barrier_lock_);
 
   // Are runtime access checks necessary in the compiled code?
-  bool CanAccessTypeWithoutChecks(uint32_t referrer_idx,
-                                  Handle<mirror::DexCache> dex_cache,
-                                  dex::TypeIndex type_idx)
+  bool CanAccessTypeWithoutChecks(ObjPtr<mirror::Class> referrer_class,
+                                  ObjPtr<mirror::Class> resolved_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Are runtime access and instantiable checks necessary in the code?
   // out_is_finalizable is set to whether the type is finalizable.
-  bool CanAccessInstantiableTypeWithoutChecks(uint32_t referrer_idx,
-                                              Handle<mirror::DexCache> dex_cache,
-                                              dex::TypeIndex type_idx,
+  bool CanAccessInstantiableTypeWithoutChecks(ObjPtr<mirror::Class> referrer_class,
+                                              ObjPtr<mirror::Class> resolved_class,
                                               bool* out_is_finalizable)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -233,32 +254,14 @@ class CompilerDriver {
       ArtField* resolved_field, uint16_t field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Can we fast-path an SGET/SPUT access to a static field? If yes, compute the type index
-  // of the declaring class in the referrer's dex file.
-  std::pair<bool, bool> IsFastStaticField(mirror::DexCache* dex_cache,
-                                          mirror::Class* referrer_class,
-                                          ArtField* resolved_field,
-                                          uint16_t field_idx,
-                                          dex::TypeIndex* storage_index)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Return whether the declaring class of `resolved_method` is
-  // available to `referrer_class`. If this is true, compute the type
-  // index of the declaring class in the referrer's dex file and
-  // return it through the out argument `storage_index`; otherwise
-  // return DexFile::kDexNoIndex through `storage_index`.
-  bool IsClassOfStaticMethodAvailableToReferrer(mirror::DexCache* dex_cache,
-                                                mirror::Class* referrer_class,
-                                                ArtMethod* resolved_method,
-                                                uint16_t method_idx,
-                                                dex::TypeIndex* storage_index)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Resolve a method. Returns null on failure, including incompatible class change.
   ArtMethod* ResolveMethod(
-      ScopedObjectAccess& soa, Handle<mirror::DexCache> dex_cache,
-      Handle<mirror::ClassLoader> class_loader, const DexCompilationUnit* mUnit,
-      uint32_t method_idx, InvokeType invoke_type, bool check_incompatible_class_change = true)
+      ScopedObjectAccess& soa,
+      Handle<mirror::DexCache> dex_cache,
+      Handle<mirror::ClassLoader> class_loader,
+      const DexCompilationUnit* mUnit,
+      uint32_t method_idx,
+      InvokeType invoke_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void ProcessedInstanceField(bool resolved);
@@ -336,8 +339,7 @@ class CompilerDriver {
   // according to the profile file.
   bool ShouldVerifyClassBasedOnProfile(const DexFile& dex_file, uint16_t class_idx) const;
 
-  void RecordClassStatus(ClassReference ref, mirror::Class::Status status)
-      REQUIRES(!compiled_classes_lock_);
+  void RecordClassStatus(const ClassReference& ref, mirror::Class::Status status);
 
   // Checks if the specified method has been verified without failures. Returns
   // false if the method is not in the verification results (GetVerificationResults).
@@ -350,6 +352,9 @@ class CompilerDriver {
 
   void SetHadHardVerifierFailure() {
     had_hard_verifier_failure_ = true;
+  }
+  void AddSoftVerifierFailure() {
+    number_of_soft_verifier_failures_++;
   }
 
   Compiler::Kind GetCompilerKind() {
@@ -378,43 +383,23 @@ class CompilerDriver {
     return current_dex_to_dex_methods_;
   }
 
- private:
-  // Return whether the declaring class of `resolved_member` is
-  // available to `referrer_class` for read or write access using two
-  // Boolean values returned as a pair. If is true at least for read
-  // access, compute the type index of the declaring class in the
-  // referrer's dex file and return it through the out argument
-  // `storage_index`; otherwise return DexFile::kDexNoIndex through
-  // `storage_index`.
-  template <typename ArtMember>
-  std::pair<bool, bool> IsClassOfStaticMemberAvailableToReferrer(mirror::DexCache* dex_cache,
-                                                                 mirror::Class* referrer_class,
-                                                                 ArtMember* resolved_member,
-                                                                 uint16_t member_idx,
-                                                                 dex::TypeIndex* storage_index)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  const ProfileCompilationInfo* GetProfileCompilationInfo() const {
+    return profile_compilation_info_;
+  }
 
-  // Can `referrer_class` access the resolved `member`?
-  // Dispatch call to mirror::Class::CanAccessResolvedField or
-  // mirror::Class::CanAccessResolvedMember depending on the value of
-  // ArtMember.
-  template <typename ArtMember>
-  static bool CanAccessResolvedMember(mirror::Class* referrer_class,
-                                      mirror::Class* access_to,
-                                      ArtMember* member,
-                                      mirror::DexCache* dex_cache,
-                                      uint32_t field_idx)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  mirror::ClassLoader* GetClassLoader(const ScopedObjectAccess& soa,
-                                      const DexCompilationUnit* mUnit)
-    REQUIRES_SHARED(Locks::mutator_lock_);
+  // Is `boot_image_filename` the name of a core image (small boot
+  // image used for ART testing only)?
+  static bool IsCoreImageFilename(const std::string& boot_image_filename) {
+    // TODO: This is under-approximating...
+    return android::base::EndsWith(boot_image_filename, "core.art")
+        || android::base::EndsWith(boot_image_filename, "core-optimizing.art");
+  }
 
  private:
   void PreCompile(jobject class_loader,
                   const std::vector<const DexFile*>& dex_files,
                   TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_);
+      REQUIRES(!Locks::mutator_lock_);
 
   void LoadImageClasses(TimingLogger* timings) REQUIRES(!Locks::mutator_lock_);
 
@@ -433,12 +418,15 @@ class CompilerDriver {
                       TimingLogger* timings)
       REQUIRES(!Locks::mutator_lock_);
 
-  // NO_THREAD_SAFETY_ANALYSIS as the method accesses a guarded value in a
-  // single-threaded way.
+  // Do fast verification through VerifierDeps if possible. Return whether
+  // verification was successful.
+  bool FastVerify(jobject class_loader,
+                  const std::vector<const DexFile*>& dex_files,
+                  TimingLogger* timings);
+
   void Verify(jobject class_loader,
               const std::vector<const DexFile*>& dex_files,
-              TimingLogger* timings)
-    NO_THREAD_SAFETY_ANALYSIS;
+              TimingLogger* timings);
 
   void VerifyDexFile(jobject class_loader,
                      const DexFile& dex_file,
@@ -462,12 +450,12 @@ class CompilerDriver {
   void InitializeClasses(jobject class_loader,
                          const std::vector<const DexFile*>& dex_files,
                          TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_);
+      REQUIRES(!Locks::mutator_lock_);
   void InitializeClasses(jobject class_loader,
                          const DexFile& dex_file,
                          const std::vector<const DexFile*>& dex_files,
                          TimingLogger* timings)
-      REQUIRES(!Locks::mutator_lock_, !compiled_classes_lock_);
+      REQUIRES(!Locks::mutator_lock_);
 
   void UpdateImageClasses(TimingLogger* timings) REQUIRES(!Locks::mutator_lock_);
 
@@ -505,12 +493,13 @@ class CompilerDriver {
   std::map<ClassReference, bool> requires_constructor_barrier_
       GUARDED_BY(requires_constructor_barrier_lock_);
 
-  typedef SafeMap<const ClassReference, CompiledClass*> ClassTable;
-  // All class references that this compiler has compiled.
-  mutable Mutex compiled_classes_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  ClassTable compiled_classes_ GUARDED_BY(compiled_classes_lock_);
+  // All class references that this compiler has compiled. Indexed by class defs.
+  using ClassStateTable = AtomicDexRefMap<ClassReference, mirror::Class::Status>;
+  ClassStateTable compiled_classes_;
+  // All class references that are in the classpath. Indexed by class defs.
+  ClassStateTable classpath_classes_;
 
-  typedef AtomicMethodRefMap<CompiledMethod*> MethodTable;
+  typedef AtomicDexRefMap<MethodReference, CompiledMethod*> MethodTable;
 
  private:
   // All method references that this compiler has compiled.
@@ -534,6 +523,7 @@ class CompilerDriver {
   // This option may be restricted to the boot image, depending on a flag in the implementation.
   std::unique_ptr<std::unordered_set<std::string>> methods_to_compile_;
 
+  std::atomic<uint32_t> number_of_soft_verifier_failures_;
   bool had_hard_verifier_failure_;
 
   // A thread pool that can (potentially) run tasks in parallel.
@@ -559,7 +549,7 @@ class CompilerDriver {
   bool support_boot_image_fixup_;
 
   // List of dex files that will be stored in the oat file.
-  const std::vector<const DexFile*>* dex_files_for_oat_file_;
+  std::vector<const DexFile*> dex_files_for_oat_file_;
 
   CompiledMethodStorage compiled_method_storage_;
 

@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "large_object_space.h"
+
 #include "base/time_utils.h"
 #include "space_test.h"
-#include "large_object_space.h"
 
 namespace art {
 namespace gc {
@@ -37,11 +38,18 @@ void LargeObjectSpaceTest::LargeObjectTest() {
   Thread* const self = Thread::Current();
   for (size_t i = 0; i < 2; ++i) {
     LargeObjectSpace* los = nullptr;
+    const size_t capacity = 128 * MB;
     if (i == 0) {
       los = space::LargeObjectMapSpace::Create("large object space");
     } else {
-      los = space::FreeListSpace::Create("large object space", nullptr, 128 * MB);
+      los = space::FreeListSpace::Create("large object space", nullptr, capacity);
     }
+
+    // Make sure the bitmap is not empty and actually covers at least how much we expect.
+    CHECK_LT(static_cast<uintptr_t>(los->GetLiveBitmap()->HeapBegin()),
+             static_cast<uintptr_t>(los->GetLiveBitmap()->HeapLimit()));
+    CHECK_LE(static_cast<uintptr_t>(los->GetLiveBitmap()->HeapBegin() + capacity),
+             static_cast<uintptr_t>(los->GetLiveBitmap()->HeapLimit()));
 
     static const size_t num_allocations = 64;
     static const size_t max_allocation_size = 0x100000;

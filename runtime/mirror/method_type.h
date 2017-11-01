@@ -17,9 +17,9 @@
 #ifndef ART_RUNTIME_MIRROR_METHOD_TYPE_H_
 #define ART_RUNTIME_MIRROR_METHOD_TYPE_H_
 
+#include "object_array.h"
 #include "object.h"
 #include "string.h"
-#include "mirror/object_array.h"
 #include "utils.h"
 
 namespace art {
@@ -43,6 +43,10 @@ class MANAGED MethodType : public Object {
   ObjectArray<Class>* GetPTypes() REQUIRES_SHARED(Locks::mutator_lock_) {
     return GetFieldObject<ObjectArray<Class>>(OFFSET_OF_OBJECT_MEMBER(MethodType, p_types_));
   }
+
+  // Number of virtual registers required to hold the parameters for
+  // this method type.
+  size_t NumberOfVRegs() REQUIRES_SHARED(Locks::mutator_lock_);
 
   Class* GetRType() REQUIRES_SHARED(Locks::mutator_lock_) {
     return GetFieldObject<Class>(OFFSET_OF_OBJECT_MEMBER(MethodType, r_type_));

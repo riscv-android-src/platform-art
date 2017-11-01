@@ -39,8 +39,6 @@ enum class ArenaFreeTag : uint8_t {
   kFree,
 };
 
-static constexpr size_t kArenaAlignment = 8;
-
 // Holds a list of Arenas for use by ScopedArenaAllocator stack.
 // The memory is returned to the ArenaPool when the ArenaStack is destroyed.
 class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryTool {
@@ -56,6 +54,7 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
   void Reset();
 
   size_t PeakBytesAllocated() {
+    DebugStackRefCounter::CheckNoRefs();
     return PeakStats()->BytesAllocated();
   }
 
@@ -66,6 +65,9 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
     DCHECK(kIsDebugBuild) << "Only debug builds have tags";
     return *(reinterpret_cast<ArenaFreeTag*>(ptr) - 1);
   }
+
+  // The alignment guaranteed for individual allocations.
+  static constexpr size_t kAlignment = 8u;
 
  private:
   struct Peak;
@@ -80,6 +82,10 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
     return static_cast<TaggedStats<Peak>*>(&stats_and_pool_);
   }
 
+  const ArenaAllocatorStats* PeakStats() const {
+    return static_cast<const TaggedStats<Peak>*>(&stats_and_pool_);
+  }
+
   ArenaAllocatorStats* CurrentStats() {
     return static_cast<TaggedStats<Current>*>(&stats_and_pool_);
   }
@@ -89,8 +95,8 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
     if (UNLIKELY(IsRunningOnMemoryTool())) {
       return AllocWithMemoryTool(bytes, kind);
     }
-    // Add kArenaAlignment for the free or used tag. Required to preserve alignment.
-    size_t rounded_bytes = RoundUp(bytes + (kIsDebugBuild ? kArenaAlignment : 0u), kArenaAlignment);
+    // Add kAlignment for the free or used tag. Required to preserve alignment.
+    size_t rounded_bytes = RoundUp(bytes + (kIsDebugBuild ? kAlignment : 0u), kAlignment);
     uint8_t* ptr = top_ptr_;
     if (UNLIKELY(static_cast<size_t>(top_end_ - ptr) < rounded_bytes)) {
       ptr = AllocateFromNextArena(rounded_bytes);
@@ -98,7 +104,7 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
     CurrentStats()->RecordAlloc(bytes, kind);
     top_ptr_ = ptr + rounded_bytes;
     if (kIsDebugBuild) {
-      ptr += kArenaAlignment;
+      ptr += kAlignment;
       ArenaTagForAllocation(ptr) = ArenaFreeTag::kUsed;
     }
     return ptr;
@@ -131,18 +137,13 @@ class ArenaStack : private DebugStackRefCounter, private ArenaAllocatorMemoryToo
 class ScopedArenaAllocator
     : private DebugStackReference, private DebugStackRefCounter, private ArenaAllocatorStats {
  public:
-  // Create a ScopedArenaAllocator directly on the ArenaStack when the scope of
-  // the allocator is not exactly a C++ block scope. For example, an optimization
-  // pass can create the scoped allocator in Start() and destroy it in End().
-  static ScopedArenaAllocator* Create(ArenaStack* arena_stack) {
-    void* addr = arena_stack->Alloc(sizeof(ScopedArenaAllocator), kArenaAllocMisc);
-    ScopedArenaAllocator* allocator = new(addr) ScopedArenaAllocator(arena_stack);
-    allocator->mark_ptr_ = reinterpret_cast<uint8_t*>(addr);
-    return allocator;
-  }
-
+  ScopedArenaAllocator(ScopedArenaAllocator&& other);
   explicit ScopedArenaAllocator(ArenaStack* arena_stack);
   ~ScopedArenaAllocator();
+
+  ArenaStack* GetArenaStack() const {
+    return arena_stack_;
+  }
 
   void Reset();
 
@@ -168,7 +169,7 @@ class ScopedArenaAllocator
   static void operator delete(void* ptr ATTRIBUTE_UNUSED) {}
 
  private:
-  ArenaStack* const arena_stack_;
+  ArenaStack* arena_stack_;
   Arena* mark_arena_;
   uint8_t* mark_ptr_;
   uint8_t* mark_end_;

@@ -31,57 +31,46 @@ namespace art {
 using android::base::StringPrintf;
 
 const char* const Instruction::kInstructionNames[] = {
-#define INSTRUCTION_NAME(o, c, pname, f, i, a, v) pname,
+#define INSTRUCTION_NAME(o, c, pname, f, i, a, e, v) pname,
 #include "dex_instruction_list.h"
   DEX_INSTRUCTION_LIST(INSTRUCTION_NAME)
 #undef DEX_INSTRUCTION_LIST
 #undef INSTRUCTION_NAME
 };
 
-Instruction::Format const Instruction::kInstructionFormats[] = {
-#define INSTRUCTION_FORMAT(o, c, p, format, i, a, v) format,
-#include "dex_instruction_list.h"
-  DEX_INSTRUCTION_LIST(INSTRUCTION_FORMAT)
-#undef DEX_INSTRUCTION_LIST
-#undef INSTRUCTION_FORMAT
-};
+static_assert(sizeof(Instruction::InstructionDescriptor) == 8u, "Unexpected descriptor size");
 
-Instruction::IndexType const Instruction::kInstructionIndexTypes[] = {
-#define INSTRUCTION_INDEX_TYPE(o, c, p, f, index, a, v) index,
-#include "dex_instruction_list.h"
-  DEX_INSTRUCTION_LIST(INSTRUCTION_INDEX_TYPE)
-#undef DEX_INSTRUCTION_LIST
-#undef INSTRUCTION_FLAGS
-};
+static constexpr int8_t InstructionSizeInCodeUnitsByOpcode(Instruction::Code opcode,
+                                                           Instruction::Format format) {
+  if (opcode == Instruction::Code::NOP) {
+    return -1;
+  } else if ((format >= Instruction::Format::k10x) && (format <= Instruction::Format::k10t)) {
+    return 1;
+  } else if ((format >= Instruction::Format::k20t) && (format <= Instruction::Format::k22c)) {
+    return 2;
+  } else if ((format >= Instruction::Format::k32x) && (format <= Instruction::Format::k3rc)) {
+    return 3;
+  } else if ((format >= Instruction::Format::k45cc) && (format <= Instruction::Format::k4rcc)) {
+    return 4;
+  } else if (format == Instruction::Format::k51l) {
+    return 5;
+  } else {
+    return -1;
+  }
+}
 
-int const Instruction::kInstructionFlags[] = {
-#define INSTRUCTION_FLAGS(o, c, p, f, i, flags, v) flags,
+Instruction::InstructionDescriptor const Instruction::kInstructionDescriptors[] = {
+#define INSTRUCTION_DESCR(opcode, c, p, format, index, flags, eflags, vflags) \
+    { vflags, \
+      format, \
+      index, \
+      flags, \
+      InstructionSizeInCodeUnitsByOpcode((c), (format)), \
+    },
 #include "dex_instruction_list.h"
-  DEX_INSTRUCTION_LIST(INSTRUCTION_FLAGS)
+  DEX_INSTRUCTION_LIST(INSTRUCTION_DESCR)
 #undef DEX_INSTRUCTION_LIST
-#undef INSTRUCTION_FLAGS
-};
-
-int const Instruction::kInstructionVerifyFlags[] = {
-#define INSTRUCTION_VERIFY_FLAGS(o, c, p, f, i, a, vflags) vflags,
-#include "dex_instruction_list.h"
-  DEX_INSTRUCTION_LIST(INSTRUCTION_VERIFY_FLAGS)
-#undef DEX_INSTRUCTION_LIST
-#undef INSTRUCTION_VERIFY_FLAGS
-};
-
-int const Instruction::kInstructionSizeInCodeUnits[] = {
-#define INSTRUCTION_SIZE(opcode, c, p, format, i, a, v) \
-    (((opcode) == NOP) ? -1 : \
-     (((format) >= k10x) && ((format) <= k10t)) ?  1 : \
-     (((format) >= k20t) && ((format) <= k22c)) ?  2 : \
-     (((format) >= k32x) && ((format) <= k3rc)) ?  3 : \
-     (((format) >= k45cc) && ((format) <= k4rcc)) ? 4 : \
-      ((format) == k51l) ?  5 : -1),
-#include "dex_instruction_list.h"
-  DEX_INSTRUCTION_LIST(INSTRUCTION_SIZE)
-#undef DEX_INSTRUCTION_LIST
-#undef INSTRUCTION_SIZE
+#undef INSTRUCTION_DESCR
 };
 
 int32_t Instruction::GetTargetOffset() const {
@@ -120,6 +109,26 @@ size_t Instruction::SizeInCodeUnitsComplexOpcode() const {
       // The plus 1 is to round up for odd size and width.
       return (4 + (element_size * length + 1) / 2);
     }
+    default:
+      if ((*insns & 0xFF) == 0) {
+        return 1;  // NOP.
+      } else {
+        LOG(FATAL) << "Unreachable: " << DumpString(nullptr);
+        UNREACHABLE();
+      }
+  }
+}
+
+size_t Instruction::CodeUnitsRequiredForSizeOfComplexOpcode() const {
+  const uint16_t* insns = reinterpret_cast<const uint16_t*>(this);
+  // Handle special NOP encoded variable length sequences.
+  switch (*insns) {
+    case kPackedSwitchSignature:
+      FALLTHROUGH_INTENDED;
+    case kSparseSwitchSignature:
+      return 2;
+    case kArrayDataSignature:
+      return 4;
     default:
       if ((*insns & 0xFF) == 0) {
         return 1;  // NOP.
@@ -358,19 +367,21 @@ std::string Instruction::DumpString(const DexFile* file) const {
       }
       break;
     case k35c: {
-      uint32_t arg[5];
+      uint32_t arg[kMaxVarArgRegs];
       GetVarArgs(arg);
+      auto DumpArgs = [&](size_t count) {
+        for (size_t i = 0; i < count; ++i) {
+          if (i != 0) {
+            os << ", ";
+          }
+          os << "v" << arg[i];
+        }
+      };
       switch (Opcode()) {
         case FILLED_NEW_ARRAY:
         {
-          const int32_t a = VRegA_35c();
           os << opcode << " {";
-          for (int i = 0; i < a; ++i) {
-            if (i > 0) {
-              os << ", ";
-            }
-            os << "v" << arg[i];
-          }
+          DumpArgs(VRegA_35c());
           os << "}, type@" << VRegB_35c();
         }
         break;
@@ -383,12 +394,7 @@ std::string Instruction::DumpString(const DexFile* file) const {
           if (file != nullptr) {
             os << opcode << " {";
             uint32_t method_idx = VRegB_35c();
-            for (size_t i = 0; i < VRegA_35c(); ++i) {
-              if (i != 0) {
-                os << ", ";
-              }
-              os << "v" << arg[i];
-            }
+            DumpArgs(VRegA_35c());
             os << "}, " << file->PrettyMethod(method_idx) << " // method@" << method_idx;
             break;
           }
@@ -397,24 +403,31 @@ std::string Instruction::DumpString(const DexFile* file) const {
           if (file != nullptr) {
             os << opcode << " {";
             uint32_t method_idx = VRegB_35c();
-            for (size_t i = 0; i < VRegA_35c(); ++i) {
-              if (i != 0) {
-                os << ", ";
-              }
-              os << "v" << arg[i];
-            }
+            DumpArgs(VRegA_35c());
             os << "},  // vtable@" << method_idx;
             break;
           }
           FALLTHROUGH_INTENDED;
+        case INVOKE_CUSTOM:
+          if (file != nullptr) {
+            os << opcode << " {";
+            uint32_t call_site_idx = VRegB_35c();
+            DumpArgs(VRegA_35c());
+            os << "},  // call_site@" << call_site_idx;
+            break;
+          }
+          FALLTHROUGH_INTENDED;
         default:
-          os << opcode << " {v" << arg[0] << ", v" << arg[1] << ", v" << arg[2]
-                       << ", v" << arg[3] << ", v" << arg[4] << "}, thing@" << VRegB_35c();
+          os << opcode << " {";
+          DumpArgs(VRegA_35c());
+          os << "}, thing@" << VRegB_35c();
           break;
       }
       break;
     }
     case k3rc: {
+      uint16_t first_reg = VRegC_3rc();
+      uint16_t last_reg =  VRegC_3rc() + VRegA_3rc() - 1;
       switch (Opcode()) {
         case INVOKE_VIRTUAL_RANGE:
         case INVOKE_SUPER_RANGE:
@@ -423,7 +436,7 @@ std::string Instruction::DumpString(const DexFile* file) const {
         case INVOKE_INTERFACE_RANGE:
           if (file != nullptr) {
             uint32_t method_idx = VRegB_3rc();
-            os << StringPrintf("%s, {v%d .. v%d}, ", opcode, VRegC_3rc(), (VRegC_3rc() + VRegA_3rc() - 1))
+            os << StringPrintf("%s, {v%d .. v%d}, ", opcode, first_reg, last_reg)
                << file->PrettyMethod(method_idx) << " // method@" << method_idx;
             break;
           }
@@ -431,23 +444,105 @@ std::string Instruction::DumpString(const DexFile* file) const {
         case INVOKE_VIRTUAL_RANGE_QUICK:
           if (file != nullptr) {
             uint32_t method_idx = VRegB_3rc();
-            os << StringPrintf("%s, {v%d .. v%d}, ", opcode, VRegC_3rc(), (VRegC_3rc() + VRegA_3rc() - 1))
+            os << StringPrintf("%s, {v%d .. v%d}, ", opcode, first_reg, last_reg)
                << "// vtable@" << method_idx;
             break;
           }
           FALLTHROUGH_INTENDED;
+        case INVOKE_CUSTOM_RANGE:
+          if (file != nullptr) {
+            uint32_t call_site_idx = VRegB_3rc();
+            os << StringPrintf("%s, {v%d .. v%d}, ", opcode, first_reg, last_reg)
+               << "// call_site@" << call_site_idx;
+            break;
+          }
+          FALLTHROUGH_INTENDED;
         default:
-          os << StringPrintf("%s, {v%d .. v%d}, thing@%d", opcode, VRegC_3rc(),
-                             (VRegC_3rc() + VRegA_3rc() - 1), VRegB_3rc());
+          os << StringPrintf("%s, {v%d .. v%d}, ", opcode, first_reg, last_reg)
+             << "thing@" << VRegB_3rc();
           break;
       }
       break;
     }
+    case k45cc: {
+      uint32_t arg[kMaxVarArgRegs];
+      GetVarArgs(arg);
+      uint32_t method_idx = VRegB_45cc();
+      uint32_t proto_idx = VRegH_45cc();
+      os << opcode << " {";
+      for (int i = 0; i < VRegA_45cc(); ++i) {
+        if (i != 0) {
+          os << ", ";
+        }
+        os << "v" << arg[i];
+      }
+      os << "}";
+      if (file != nullptr) {
+        os << ", " << file->PrettyMethod(method_idx) << ", " << file->GetShorty(proto_idx)
+           << " // ";
+      } else {
+        os << ", ";
+      }
+      os << "method@" << method_idx << ", proto@" << proto_idx;
+      break;
+    }
+    case k4rcc:
+      switch (Opcode()) {
+        case INVOKE_POLYMORPHIC_RANGE: {
+          if (file != nullptr) {
+            uint32_t method_idx = VRegB_4rcc();
+            uint32_t proto_idx = VRegH_4rcc();
+            os << opcode << ", {v" << VRegC_4rcc() << " .. v" << (VRegC_4rcc() + VRegA_4rcc())
+               << "}, " << file->PrettyMethod(method_idx) << ", " << file->GetShorty(proto_idx)
+               << " // method@" << method_idx << ", proto@" << proto_idx;
+            break;
+          }
+        }
+        FALLTHROUGH_INTENDED;
+        default: {
+          uint32_t method_idx = VRegB_4rcc();
+          uint32_t proto_idx = VRegH_4rcc();
+          os << opcode << ", {v" << VRegC_4rcc() << " .. v" << (VRegC_4rcc() + VRegA_4rcc())
+             << "}, method@" << method_idx << ", proto@" << proto_idx;
+        }
+      }
+      break;
     case k51l: os << StringPrintf("%s v%d, #%+" PRId64, opcode, VRegA_51l(), VRegB_51l()); break;
-    default: os << " unknown format (" << DumpHex(5) << ")"; break;
   }
   return os.str();
 }
+
+// Add some checks that ensure the flags make sense. We need a subclass to be in the context of
+// Instruction. Otherwise the flags from the instruction list don't work.
+struct InstructionStaticAsserts : private Instruction {
+  #define IMPLIES(a, b) (!(a) || (b))
+
+  #define VAR_ARGS_CHECK(o, c, pname, f, i, a, e, v) \
+    static_assert(IMPLIES((f) == k35c || (f) == k45cc, \
+                          ((v) & (kVerifyVarArg | kVerifyVarArgNonZero)) != 0), \
+                  "Missing var-arg verification");
+  #include "dex_instruction_list.h"
+    DEX_INSTRUCTION_LIST(VAR_ARGS_CHECK)
+  #undef DEX_INSTRUCTION_LIST
+  #undef VAR_ARGS_CHECK
+
+  #define VAR_ARGS_RANGE_CHECK(o, c, pname, f, i, a, e, v) \
+    static_assert(IMPLIES((f) == k3rc || (f) == k4rcc, \
+                          ((v) & (kVerifyVarArgRange | kVerifyVarArgRangeNonZero)) != 0), \
+                  "Missing var-arg verification");
+  #include "dex_instruction_list.h"
+    DEX_INSTRUCTION_LIST(VAR_ARGS_RANGE_CHECK)
+  #undef DEX_INSTRUCTION_LIST
+  #undef VAR_ARGS_RANGE_CHECK
+
+  #define EXPERIMENTAL_CHECK(o, c, pname, f, i, a, e, v) \
+    static_assert(kHaveExperimentalInstructions || (((a) & kExperimental) == 0), \
+                  "Unexpected experimental instruction.");
+    #include "dex_instruction_list.h"
+  DEX_INSTRUCTION_LIST(EXPERIMENTAL_CHECK)
+  #undef DEX_INSTRUCTION_LIST
+  #undef EXPERIMENTAL_CHECK
+};
 
 std::ostream& operator<<(std::ostream& os, const Instruction::Code& code) {
   return os << Instruction::Name(code);

@@ -29,7 +29,7 @@
 #include "jni.h"
 #include "method_reference.h"
 #include "oat_file.h"
-#include "object_callbacks.h"
+#include "profile_compilation_info.h"
 #include "safe_map.h"
 #include "thread_pool.h"
 
@@ -38,6 +38,8 @@ namespace art {
 class ArtMethod;
 class LinearAlloc;
 class InlineCache;
+class IsMarkedVisitor;
+class OatQuickMethodHeader;
 class ProfilingInfo;
 
 namespace jit {
@@ -104,6 +106,7 @@ class JitCodeCache {
   uint8_t* CommitCode(Thread* self,
                       ArtMethod* method,
                       uint8_t* stack_map,
+                      uint8_t* method_info,
                       uint8_t* roots_data,
                       size_t frame_size_in_bytes,
                       size_t core_spill_mask,
@@ -128,10 +131,12 @@ class JitCodeCache {
   // for storing `number_of_roots` roots. Returns null if there is no more room.
   // Return the number of bytes allocated.
   size_t ReserveData(Thread* self,
-                     size_t size,
+                     size_t stack_map_size,
+                     size_t method_info_size,
                      size_t number_of_roots,
                      ArtMethod* method,
                      uint8_t** stack_map_data,
+                     uint8_t** method_info_data,
                      uint8_t** roots_data)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!lock_);
@@ -166,6 +171,13 @@ class JitCodeCache {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Removes method from the cache for testing purposes. The caller
+  // must ensure that all threads are suspended and the method should
+  // not be in any thread's stack.
+  bool RemoveMethod(ArtMethod* method, bool release_memory)
+      REQUIRES(!lock_)
+      REQUIRES(Locks::mutator_lock_);
+
   // Remove all methods in our cache that were allocated by 'alloc'.
   void RemoveMethodsIn(Thread* self, const LinearAlloc& alloc)
       REQUIRES(!lock_)
@@ -192,7 +204,7 @@ class JitCodeCache {
 
   // Adds to `methods` all profiled methods which are part of any of the given dex locations.
   void GetProfiledMethods(const std::set<std::string>& dex_base_locations,
-                          std::vector<MethodReference>& methods)
+                          std::vector<ProfileMethodInfo>& methods)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -228,6 +240,12 @@ class JitCodeCache {
   void MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_method)
       REQUIRES(!lock_) REQUIRES(Locks::mutator_lock_);
 
+  // Dynamically change whether we want to garbage collect code. Should only be used
+  // by tests.
+  void SetGarbageCollectCode(bool value) {
+    garbage_collect_code_ = value;
+  }
+
  private:
   // Take ownership of maps.
   JitCodeCache(MemMap* code_map,
@@ -242,6 +260,7 @@ class JitCodeCache {
   uint8_t* CommitCodeInternal(Thread* self,
                               ArtMethod* method,
                               uint8_t* stack_map,
+                              uint8_t* method_info,
                               uint8_t* roots_data,
                               size_t frame_size_in_bytes,
                               size_t core_spill_mask,
@@ -304,7 +323,8 @@ class JitCodeCache {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool CheckLiveCompiledCodeHasProfilingInfo()
-      REQUIRES(lock_);
+      REQUIRES(lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void FreeCode(uint8_t* code) REQUIRES(lock_);
   uint8_t* AllocateCode(size_t code_size) REQUIRES(lock_);
@@ -358,8 +378,8 @@ class JitCodeCache {
   // It is atomic to avoid locking when reading it.
   Atomic<uint64_t> last_update_time_ns_;
 
-  // Whether we can do garbage collection.
-  const bool garbage_collect_code_;
+  // Whether we can do garbage collection. Not 'const' as tests may override this.
+  bool garbage_collect_code_;
 
   // The size in bytes of used memory for the data portion of the code cache.
   size_t used_memory_for_data_ GUARDED_BY(lock_);
@@ -372,9 +392,6 @@ class JitCodeCache {
 
   // Number of compilations for on-stack-replacement done throughout the lifetime of the JIT.
   size_t number_of_osr_compilations_ GUARDED_BY(lock_);
-
-  // Number of deoptimizations done throughout the lifetime of the JIT.
-  size_t number_of_deoptimizations_ GUARDED_BY(lock_);
 
   // Number of code cache collections done throughout the lifetime of the JIT.
   size_t number_of_collections_ GUARDED_BY(lock_);

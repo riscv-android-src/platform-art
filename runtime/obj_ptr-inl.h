@@ -17,32 +17,33 @@
 #ifndef ART_RUNTIME_OBJ_PTR_INL_H_
 #define ART_RUNTIME_OBJ_PTR_INL_H_
 
+#include "base/bit_utils.h"
 #include "obj_ptr.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 
-template<class MirrorType, bool kPoison>
-inline bool ObjPtr<MirrorType, kPoison>::IsValid() const {
-  if (!kPoison || IsNull()) {
+template<class MirrorType>
+inline bool ObjPtr<MirrorType>::IsValid() const {
+  if (!kObjPtrPoisoning || IsNull()) {
     return true;
   }
   return GetCookie() == TrimCookie(Thread::Current()->GetPoisonObjectCookie());
 }
 
-template<class MirrorType, bool kPoison>
-inline void ObjPtr<MirrorType, kPoison>::AssertValid() const {
-  if (kPoison) {
+template<class MirrorType>
+inline void ObjPtr<MirrorType>::AssertValid() const {
+  if (kObjPtrPoisoning) {
     CHECK(IsValid()) << "Stale object pointer " << PtrUnchecked() << " , expected cookie "
         << TrimCookie(Thread::Current()->GetPoisonObjectCookie()) << " but got " << GetCookie();
   }
 }
 
-template<class MirrorType, bool kPoison>
-inline uintptr_t ObjPtr<MirrorType, kPoison>::Encode(MirrorType* ptr) {
+template<class MirrorType>
+inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
   uintptr_t ref = reinterpret_cast<uintptr_t>(ptr);
   DCHECK_ALIGNED(ref, kObjectAlignment);
-  if (kPoison && ref != 0) {
+  if (kObjPtrPoisoning && ref != 0) {
     DCHECK_LE(ref, 0xFFFFFFFFU);
     ref >>= kObjectAlignmentShift;
     // Put cookie in high bits.
@@ -53,8 +54,8 @@ inline uintptr_t ObjPtr<MirrorType, kPoison>::Encode(MirrorType* ptr) {
   return ref;
 }
 
-template<class MirrorType, bool kPoison>
-inline std::ostream& operator<<(std::ostream& os, ObjPtr<MirrorType, kPoison> ptr) {
+template<class MirrorType>
+inline std::ostream& operator<<(std::ostream& os, ObjPtr<MirrorType> ptr) {
   // May be used for dumping bad pointers, do not use the checked version.
   return os << ptr.PtrUnchecked();
 }

@@ -25,8 +25,8 @@
 #include "nodes.h"
 #include "parallel_move_resolver.h"
 #include "string_reference.h"
+#include "type_reference.h"
 #include "utils/arm64/assembler_arm64.h"
-#include "utils/type_reference.h"
 
 // TODO(VIXL): Make VIXL compile with -Wshadow.
 #pragma GCC diagnostic push
@@ -42,6 +42,11 @@ class CodeGeneratorARM64;
 
 // Use a local definition to prevent copying mistakes.
 static constexpr size_t kArm64WordSize = static_cast<size_t>(kArm64PointerSize);
+
+// These constants are used as an approximate margin when emission of veneer and literal pools
+// must be blocked.
+static constexpr int kMaxMacroInstructionSizeInBytes = 15 * vixl::aarch64::kInstructionSize;
+static constexpr int kInvokeCodeMarginSizeInBytes = 6 * kMaxMacroInstructionSizeInBytes;
 
 static const vixl::aarch64::Register kParameterCoreRegisters[] = {
   vixl::aarch64::x1,
@@ -65,26 +70,37 @@ static const vixl::aarch64::FPRegister kParameterFPRegisters[] = {
 };
 static constexpr size_t kParameterFPRegistersLength = arraysize(kParameterFPRegisters);
 
-// Thread Register
+// Thread Register.
 const vixl::aarch64::Register tr = vixl::aarch64::x19;
+// Marking Register.
+const vixl::aarch64::Register mr = vixl::aarch64::x20;
 // Method register on invoke.
 static const vixl::aarch64::Register kArtMethodRegister = vixl::aarch64::x0;
 const vixl::aarch64::CPURegList vixl_reserved_core_registers(vixl::aarch64::ip0,
                                                              vixl::aarch64::ip1);
 const vixl::aarch64::CPURegList vixl_reserved_fp_registers(vixl::aarch64::d31);
 
-const vixl::aarch64::CPURegList runtime_reserved_core_registers(tr, vixl::aarch64::lr);
+const vixl::aarch64::CPURegList runtime_reserved_core_registers =
+    vixl::aarch64::CPURegList(
+        tr,
+        // Reserve X20 as Marking Register when emitting Baker read barriers.
+        ((kEmitCompilerReadBarrier && kUseBakerReadBarrier) ? mr : vixl::aarch64::NoCPUReg),
+        vixl::aarch64::lr);
 
-// Callee-saved registers AAPCS64 (without x19 - Thread Register)
-const vixl::aarch64::CPURegList callee_saved_core_registers(vixl::aarch64::CPURegister::kRegister,
-                                                            vixl::aarch64::kXRegSize,
-                                                            vixl::aarch64::x20.GetCode(),
-                                                            vixl::aarch64::x30.GetCode());
+// Callee-save registers AAPCS64, without x19 (Thread Register) (nor
+// x20 (Marking Register) when emitting Baker read barriers).
+const vixl::aarch64::CPURegList callee_saved_core_registers(
+    vixl::aarch64::CPURegister::kRegister,
+    vixl::aarch64::kXRegSize,
+    ((kEmitCompilerReadBarrier && kUseBakerReadBarrier)
+         ? vixl::aarch64::x21.GetCode()
+         : vixl::aarch64::x20.GetCode()),
+     vixl::aarch64::x30.GetCode());
 const vixl::aarch64::CPURegList callee_saved_fp_registers(vixl::aarch64::CPURegister::kFPRegister,
                                                           vixl::aarch64::kDRegSize,
                                                           vixl::aarch64::d8.GetCode(),
                                                           vixl::aarch64::d15.GetCode());
-Location ARM64ReturnLocation(Primitive::Type return_type);
+Location ARM64ReturnLocation(DataType::Type return_type);
 
 class SlowPathCodeARM64 : public SlowPathCode {
  public:
@@ -155,7 +171,7 @@ class InvokeRuntimeCallingConvention : public CallingConvention<vixl::aarch64::R
                           kRuntimeParameterFpuRegistersLength,
                           kArm64PointerSize) {}
 
-  Location GetReturnLocation(Primitive::Type return_type);
+  Location GetReturnLocation(DataType::Type return_type);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
@@ -171,7 +187,7 @@ class InvokeDexCallingConvention : public CallingConvention<vixl::aarch64::Regis
                           kParameterFPRegistersLength,
                           kArm64PointerSize) {}
 
-  Location GetReturnLocation(Primitive::Type return_type) const {
+  Location GetReturnLocation(DataType::Type return_type) const {
     return ARM64ReturnLocation(return_type);
   }
 
@@ -185,8 +201,8 @@ class InvokeDexCallingConventionVisitorARM64 : public InvokeDexCallingConvention
   InvokeDexCallingConventionVisitorARM64() {}
   virtual ~InvokeDexCallingConventionVisitorARM64() {}
 
-  Location GetNextLocation(Primitive::Type type) OVERRIDE;
-  Location GetReturnLocation(Primitive::Type return_type) const OVERRIDE {
+  Location GetNextLocation(DataType::Type type) OVERRIDE;
+  Location GetReturnLocation(DataType::Type return_type) const OVERRIDE {
     return calling_convention.GetReturnLocation(return_type);
   }
   Location GetMethodLocation() const OVERRIDE;
@@ -207,17 +223,16 @@ class FieldAccessCallingConventionARM64 : public FieldAccessCallingConvention {
   Location GetFieldIndexLocation() const OVERRIDE {
     return helpers::LocationFrom(vixl::aarch64::x0);
   }
-  Location GetReturnLocation(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+  Location GetReturnLocation(DataType::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
     return helpers::LocationFrom(vixl::aarch64::x0);
   }
-  Location GetSetValueLocation(Primitive::Type type, bool is_instance) const OVERRIDE {
-    return Primitive::Is64BitType(type)
+  Location GetSetValueLocation(DataType::Type type ATTRIBUTE_UNUSED,
+                               bool is_instance) const OVERRIDE {
+    return is_instance
         ? helpers::LocationFrom(vixl::aarch64::x2)
-        : (is_instance
-            ? helpers::LocationFrom(vixl::aarch64::x2)
-            : helpers::LocationFrom(vixl::aarch64::x1));
+        : helpers::LocationFrom(vixl::aarch64::x1);
   }
-  Location GetFpuLocation(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+  Location GetFpuLocation(DataType::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
     return helpers::LocationFrom(vixl::aarch64::d0);
   }
 
@@ -314,6 +329,14 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
+  vixl::aarch64::MemOperand VecAddress(
+      HVecMemoryOperation* instruction,
+      // This function may acquire a scratch register.
+      vixl::aarch64::UseScratchRegisterScope* temps_scope,
+      size_t size,
+      bool is_string_char_at,
+      /*out*/ vixl::aarch64::Register* scratch);
+
   Arm64Assembler* const assembler_;
   CodeGeneratorARM64* const codegen_;
 
@@ -342,7 +365,7 @@ class LocationsBuilderARM64 : public HGraphVisitor {
  private:
   void HandleBinaryOp(HBinaryOperation* instr);
   void HandleFieldSet(HInstruction* instruction);
-  void HandleFieldGet(HInstruction* instruction);
+  void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleInvoke(HInvoke* instr);
   void HandleCondition(HCondition* instruction);
   void HandleShift(HBinaryOperation* instr);
@@ -403,8 +426,9 @@ class CodeGeneratorARM64 : public CodeGenerator {
   }
 
   size_t GetFloatingPointSpillSlotSize() const OVERRIDE {
-    // Allocated in D registers, which are word sized.
-    return kArm64WordSize;
+    return GetGraph()->HasSIMD()
+        ? 2 * kArm64WordSize   // 16 bytes == 2 arm64 words for each spill
+        : 1 * kArm64WordSize;  //  8 bytes == 1 arm64 words for each spill
   }
 
   uintptr_t GetAddressOf(HBasicBlock* block) OVERRIDE {
@@ -465,7 +489,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
   uint32_t GetPreferredSlotsAlignment() const OVERRIDE { return vixl::aarch64::kXRegSizeInBytes; }
 
   JumpTableARM64* CreateJumpTable(HPackedSwitch* switch_instr) {
-    jump_tables_.emplace_back(new (GetGraph()->GetArena()) JumpTableARM64(switch_instr));
+    jump_tables_.emplace_back(new (GetGraph()->GetAllocator()) JumpTableARM64(switch_instr));
     return jump_tables_.back().get();
   }
 
@@ -474,22 +498,24 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // Code generation helpers.
   void MoveConstant(vixl::aarch64::CPURegister destination, HConstant* constant);
   void MoveConstant(Location destination, int32_t value) OVERRIDE;
-  void MoveLocation(Location dst, Location src, Primitive::Type dst_type) OVERRIDE;
+  void MoveLocation(Location dst, Location src, DataType::Type dst_type) OVERRIDE;
   void AddLocationAsTemp(Location location, LocationSummary* locations) OVERRIDE;
 
-  void Load(Primitive::Type type,
+  void Load(DataType::Type type,
             vixl::aarch64::CPURegister dst,
             const vixl::aarch64::MemOperand& src);
-  void Store(Primitive::Type type,
+  void Store(DataType::Type type,
              vixl::aarch64::CPURegister src,
              const vixl::aarch64::MemOperand& dst);
   void LoadAcquire(HInstruction* instruction,
                    vixl::aarch64::CPURegister dst,
                    const vixl::aarch64::MemOperand& src,
                    bool needs_null_check);
-  void StoreRelease(Primitive::Type type,
+  void StoreRelease(HInstruction* instruction,
+                    DataType::Type type,
                     vixl::aarch64::CPURegister src,
-                    const vixl::aarch64::MemOperand& dst);
+                    const vixl::aarch64::MemOperand& dst,
+                    bool needs_null_check);
 
   // Generate code to invoke a runtime entry point.
   void InvokeRuntime(QuickEntrypointEnum entrypoint,
@@ -503,11 +529,9 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                            HInstruction* instruction,
                                            SlowPathCode* slow_path);
 
-  void GenerateInvokeRuntime(int32_t entry_point_offset);
-
   ParallelMoveResolverARM64* GetMoveResolver() OVERRIDE { return &move_resolver_; }
 
-  bool NeedsTwoRegisters(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+  bool NeedsTwoRegisters(DataType::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
     return false;
   }
 
@@ -527,21 +551,29 @@ class CodeGeneratorARM64 : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       HInvokeStaticOrDirect* invoke) OVERRIDE;
 
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp) OVERRIDE;
-  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+  void GenerateStaticOrDirectCall(
+      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
+  void GenerateVirtualCall(
+      HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
   void MoveFromReturnRegister(Location trg ATTRIBUTE_UNUSED,
-                              Primitive::Type type ATTRIBUTE_UNUSED) OVERRIDE {
+                              DataType::Type type ATTRIBUTE_UNUSED) OVERRIDE {
     UNIMPLEMENTED(FATAL);
   }
 
-  // Add a new PC-relative string patch for an instruction and return the label
+  // Add a new PC-relative method patch for an instruction and return the label
   // to be bound before the instruction. The instruction will be either the
   // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
   // to the associated ADRP patch label).
-  vixl::aarch64::Label* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                 uint32_t string_index,
+  vixl::aarch64::Label* NewPcRelativeMethodPatch(MethodReference target_method,
                                                  vixl::aarch64::Label* adrp_label = nullptr);
+
+  // Add a new .bss entry method patch for an instruction and return
+  // the label to be bound before the instruction. The instruction will be
+  // either the ADRP (pass `adrp_label = null`) or the LDR (pass `adrp_label`
+  // pointing to the associated ADRP patch label).
+  vixl::aarch64::Label* NewMethodBssEntryPatch(MethodReference target_method,
+                                               vixl::aarch64::Label* adrp_label = nullptr);
 
   // Add a new PC-relative type patch for an instruction and return the label
   // to be bound before the instruction. The instruction will be either the
@@ -551,27 +583,41 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                                dex::TypeIndex type_index,
                                                vixl::aarch64::Label* adrp_label = nullptr);
 
-  // Add a new PC-relative dex cache array patch for an instruction and return
-  // the label to be bound before the instruction. The instruction will be
-  // either the ADRP (pass `adrp_label = null`) or the LDR (pass `adrp_label`
-  // pointing to the associated ADRP patch label).
-  vixl::aarch64::Label* NewPcRelativeDexCacheArrayPatch(
-      const DexFile& dex_file,
-      uint32_t element_offset,
-      vixl::aarch64::Label* adrp_label = nullptr);
+  // Add a new .bss entry type patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewBssEntryTypePatch(const DexFile& dex_file,
+                                             dex::TypeIndex type_index,
+                                             vixl::aarch64::Label* adrp_label = nullptr);
 
-  vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageStringLiteral(
-      const DexFile& dex_file,
-      dex::StringIndex string_index);
-  vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageTypeLiteral(const DexFile& dex_file,
-                                                                    dex::TypeIndex type_index);
+  // Add a new PC-relative string patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewPcRelativeStringPatch(const DexFile& dex_file,
+                                                 dex::StringIndex string_index,
+                                                 vixl::aarch64::Label* adrp_label = nullptr);
+
+  // Add a new .bss entry string patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewStringBssEntryPatch(const DexFile& dex_file,
+                                               dex::StringIndex string_index,
+                                               vixl::aarch64::Label* adrp_label = nullptr);
+
+  // Add a new baker read barrier patch and return the label to be bound
+  // before the CBNZ instruction.
+  vixl::aarch64::Label* NewBakerReadBarrierPatch(uint32_t custom_data);
+
   vixl::aarch64::Literal<uint32_t>* DeduplicateBootImageAddressLiteral(uint64_t address);
   vixl::aarch64::Literal<uint32_t>* DeduplicateJitStringLiteral(const DexFile& dex_file,
                                                                 dex::StringIndex string_index,
                                                                 Handle<mirror::String> handle);
   vixl::aarch64::Literal<uint32_t>* DeduplicateJitClassLiteral(const DexFile& dex_file,
                                                                dex::TypeIndex string_index,
-                                                               uint64_t address);
+                                                               Handle<mirror::Class> handle);
 
   void EmitAdrpPlaceholder(vixl::aarch64::Label* fixup_label, vixl::aarch64::Register reg);
   void EmitAddPlaceholder(vixl::aarch64::Label* fixup_label,
@@ -581,7 +627,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                 vixl::aarch64::Register out,
                                 vixl::aarch64::Register base);
 
-  void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
+  void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) OVERRIDE;
 
   void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) OVERRIDE;
 
@@ -591,7 +637,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                              Location ref,
                                              vixl::aarch64::Register obj,
                                              uint32_t offset,
-                                             vixl::aarch64::Register temp,
+                                             Location maybe_temp,
                                              bool needs_null_check,
                                              bool use_load_acquire);
   // Fast path implementation of ReadBarrier::Barrier for a heap
@@ -603,15 +649,12 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                              Location index,
                                              vixl::aarch64::Register temp,
                                              bool needs_null_check);
-  // Factored implementation used by GenerateFieldLoadWithBakerReadBarrier
-  // and GenerateArrayLoadWithBakerReadBarrier.
+  // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
+  // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
   //
   // Load the object reference located at the address
   // `obj + offset + (index << scale_factor)`, held by object `obj`, into
   // `ref`, and mark it if needed.
-  //
-  // If `always_update_field` is true, the value of the reference is
-  // atomically updated in the holder (`obj`).
   void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
                                                  Location ref,
                                                  vixl::aarch64::Register obj,
@@ -620,8 +663,53 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                                  size_t scale_factor,
                                                  vixl::aarch64::Register temp,
                                                  bool needs_null_check,
-                                                 bool use_load_acquire,
-                                                 bool always_update_field = false);
+                                                 bool use_load_acquire);
+
+  // Generate code checking whether the the reference field at the
+  // address `obj + field_offset`, held by object `obj`, needs to be
+  // marked, and if so, marking it and updating the field within `obj`
+  // with the marked value.
+  //
+  // This routine is used for the implementation of the
+  // UnsafeCASObject intrinsic with Baker read barriers.
+  //
+  // This method has a structure similar to
+  // GenerateReferenceLoadWithBakerReadBarrier, but note that argument
+  // `ref` is only as a temporary here, and thus its value should not
+  // be used afterwards.
+  void UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
+                                                Location ref,
+                                                vixl::aarch64::Register obj,
+                                                Location field_offset,
+                                                vixl::aarch64::Register temp,
+                                                bool needs_null_check,
+                                                bool use_load_acquire);
+
+  // Generate a heap reference load (with no read barrier).
+  void GenerateRawReferenceLoad(HInstruction* instruction,
+                                Location ref,
+                                vixl::aarch64::Register obj,
+                                uint32_t offset,
+                                Location index,
+                                size_t scale_factor,
+                                bool needs_null_check,
+                                bool use_load_acquire);
+
+  // Emit code checking the status of the Marking Register, and
+  // aborting the program if MR does not match the value stored in the
+  // art::Thread object. Code is only emitted in debug mode and if
+  // CompilerOptions::EmitRunTimeChecksInDebugMode returns true.
+  //
+  // Argument `code` is used to identify the different occurrences of
+  // MaybeGenerateMarkingRegisterCheck in the code generator, and is
+  // passed to the BRK instruction.
+  //
+  // If `temp_loc` is a valid location, it is expected to be a
+  // register and will be used as a temporary to generate code;
+  // otherwise, a temporary will be fetched from the core register
+  // scratch pool.
+  virtual void MaybeGenerateMarkingRegisterCheck(int code,
+                                                 Location temp_loc = Location::NoLocation());
 
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
@@ -679,9 +767,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
  private:
   using Uint64ToLiteralMap = ArenaSafeMap<uint64_t, vixl::aarch64::Literal<uint64_t>*>;
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, vixl::aarch64::Literal<uint32_t>*>;
-  using MethodToLiteralMap = ArenaSafeMap<MethodReference,
-                                          vixl::aarch64::Literal<uint64_t>*,
-                                          MethodReferenceComparator>;
   using StringToLiteralMap = ArenaSafeMap<StringReference,
                                           vixl::aarch64::Literal<uint32_t>*,
                                           StringReferenceValueComparator>;
@@ -689,11 +774,8 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                         vixl::aarch64::Literal<uint32_t>*,
                                         TypeReferenceValueComparator>;
 
-  vixl::aarch64::Literal<uint32_t>* DeduplicateUint32Literal(uint32_t value,
-                                                             Uint32ToLiteralMap* map);
+  vixl::aarch64::Literal<uint32_t>* DeduplicateUint32Literal(uint32_t value);
   vixl::aarch64::Literal<uint64_t>* DeduplicateUint64Literal(uint64_t value);
-  vixl::aarch64::Literal<uint64_t>* DeduplicateMethodLiteral(MethodReference target_method,
-                                                             MethodToLiteralMap* map);
 
   // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays
   // and boot image strings/types. The only difference is the interpretation of the
@@ -709,6 +791,13 @@ class CodeGeneratorARM64 : public CodeGenerator {
     vixl::aarch64::Label* pc_insn_label;
   };
 
+  struct BakerReadBarrierPatchInfo {
+    explicit BakerReadBarrierPatchInfo(uint32_t data) : label(), custom_data(data) { }
+
+    vixl::aarch64::Label label;
+    uint32_t custom_data;
+  };
+
   vixl::aarch64::Label* NewPcRelativePatch(const DexFile& dex_file,
                                            uint32_t offset_or_index,
                                            vixl::aarch64::Label* adrp_label,
@@ -716,9 +805,9 @@ class CodeGeneratorARM64 : public CodeGenerator {
 
   void EmitJumpTables();
 
-  template <LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
+  template <linker::LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
   static void EmitPcRelativeLinkerPatches(const ArenaDeque<PcRelativePatchInfo>& infos,
-                                          ArenaVector<LinkerPatch>* linker_patches);
+                                          ArenaVector<linker::LinkerPatch>* linker_patches);
 
   // Labels for each block that will be compiled.
   // We use a deque so that the `vixl::aarch64::Label` objects do not move in memory.
@@ -736,18 +825,20 @@ class CodeGeneratorARM64 : public CodeGenerator {
   Uint32ToLiteralMap uint32_literals_;
   // Deduplication map for 64-bit literals, used for non-patchable method address or method code.
   Uint64ToLiteralMap uint64_literals_;
-  // PC-relative DexCache access info.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
-  StringToLiteralMap boot_image_string_patches_;
-  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
-  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  TypeToLiteralMap boot_image_type_patches_;
-  // PC-relative type patch info.
+  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
+  // PC-relative method patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
+  // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
+  // PC-relative type patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative String patch info; type depends on configuration (intern table or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // PC-relative String patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
+  // Baker read barrier patch info.
+  ArenaDeque<BakerReadBarrierPatchInfo> baker_read_barrier_patches_;
 
   // Patches for string literals in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

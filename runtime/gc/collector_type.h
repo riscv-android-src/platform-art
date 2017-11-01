@@ -55,8 +55,14 @@ enum CollectorType {
   kCollectorTypeClassLinker,
   // JIT Code cache fake collector.
   kCollectorTypeJitCodeCache,
+  // Hprof fake collector.
+  kCollectorTypeHprof,
   // Fake collector for installing/removing a system-weak holder.
   kCollectorTypeAddRemoveSystemWeakHolder,
+  // Fake collector type for GetObjectsAllocated
+  kCollectorTypeGetObjectsAllocated,
+  // Fake collector type for ScopedGCCriticalSection
+  kCollectorTypeCriticalSection,
 };
 std::ostream& operator<<(std::ostream& os, const CollectorType& collector_type);
 

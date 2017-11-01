@@ -1,4 +1,4 @@
-/*
+  /*
  * Copyright (C) 2016 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,17 +22,17 @@
 
 #include "dexlayout.h"
 
+#include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
-#include <unistd.h>
-#include <sys/types.h>
 #include <sys/stat.h>
-#include <fcntl.h>
+#include <sys/types.h>
+#include <unistd.h>
 
 #include "base/logging.h"
-#include "jit/offline_profiling_info.h"
-#include "runtime.h"
+#include "jit/profile_compilation_info.h"
 #include "mem_map.h"
+#include "runtime.h"
 
 namespace art {
 
@@ -44,7 +44,7 @@ static const char* kProgramName = "dexlayout";
 static void Usage(void) {
   fprintf(stderr, "Copyright (C) 2016 The Android Open Source Project\n\n");
   fprintf(stderr, "%s: [-a] [-c] [-d] [-e] [-f] [-h] [-i] [-l layout] [-o outfile] [-p profile]"
-                  " [-s] [-w directory] dexfile...\n\n", kProgramName);
+                  " [-s] [-t] [-v] [-w directory] dexfile...\n\n", kProgramName);
   fprintf(stderr, " -a : display annotations\n");
   fprintf(stderr, " -b : build dex_ir\n");
   fprintf(stderr, " -c : verify checksum and exit\n");
@@ -57,6 +57,8 @@ static void Usage(void) {
   fprintf(stderr, " -o : output file name (defaults to stdout)\n");
   fprintf(stderr, " -p : profile file name (defaults to no profile)\n");
   fprintf(stderr, " -s : visualize reference pattern\n");
+  fprintf(stderr, " -t : display file section sizes\n");
+  fprintf(stderr, " -v : verify output file is canonical to input (IR level comparison)\n");
   fprintf(stderr, " -w : output dex directory \n");
 }
 
@@ -65,7 +67,7 @@ static void Usage(void) {
  */
 int DexlayoutDriver(int argc, char** argv) {
   // Art specific set up.
-  InitLogging(argv, Runtime::Aborter);
+  InitLogging(argv, Runtime::Abort);
   MemMap::Init();
 
   Options options;
@@ -75,7 +77,7 @@ int DexlayoutDriver(int argc, char** argv) {
 
   // Parse all arguments.
   while (1) {
-    const int ic = getopt(argc, argv, "abcdefghil:mo:p:sw:");
+    const int ic = getopt(argc, argv, "abcdefghil:mo:p:stvw:");
     if (ic < 0) {
       break;  // done
     }
@@ -127,6 +129,13 @@ int DexlayoutDriver(int argc, char** argv) {
         options.visualize_pattern_ = true;
         options.verbose_ = false;
         break;
+      case 't':  // display section statistics
+        options.show_section_statistics_ = true;
+        options.verbose_ = false;
+        break;
+      case 'v':  // verify output
+        options.verify_output_ = true;
+        break;
       case 'w':  // output dex files directory
         options.output_dex_directory_ = optarg;
         break;
@@ -161,14 +170,14 @@ int DexlayoutDriver(int argc, char** argv) {
   }
 
   // Open profile file.
-  ProfileCompilationInfo* profile_info = nullptr;
+  std::unique_ptr<ProfileCompilationInfo> profile_info;
   if (options.profile_file_name_) {
     int profile_fd = open(options.profile_file_name_, O_RDONLY);
     if (profile_fd < 0) {
       fprintf(stderr, "Can't open %s\n", options.profile_file_name_);
       return 1;
     }
-    profile_info = new ProfileCompilationInfo();
+    profile_info.reset(new ProfileCompilationInfo());
     if (!profile_info->Load(profile_fd)) {
       fprintf(stderr, "Can't read profile info from %s\n", options.profile_file_name_);
       return 1;
@@ -176,13 +185,19 @@ int DexlayoutDriver(int argc, char** argv) {
   }
 
   // Create DexLayout instance.
-  DexLayout dex_layout(options, profile_info, out_file);
+  DexLayout dex_layout(options, profile_info.get(), out_file);
 
   // Process all files supplied on command line.
   int result = 0;
   while (optind < argc) {
     result |= dex_layout.ProcessFile(argv[optind++]);
   }  // while
+
+  if (options.output_file_name_) {
+    CHECK(out_file != nullptr && out_file != stdout);
+    fclose(out_file);
+  }
+
   return result != 0;
 }
 

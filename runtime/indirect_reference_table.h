@@ -28,7 +28,6 @@
 #include "base/mutex.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "read_barrier_option.h"
 
@@ -245,8 +244,10 @@ class IndirectReferenceTable {
   bool IsValid() const;
 
   // Add a new entry. "obj" must be a valid non-null object reference. This function will
-  // abort if the table is full (max entries reached, or expansion failed).
-  IndirectRef Add(IRTSegmentState previous_state, ObjPtr<mirror::Object> obj)
+  // return null if an error happened (with an appropriate error message set).
+  IndirectRef Add(IRTSegmentState previous_state,
+                  ObjPtr<mirror::Object> obj,
+                  std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Given an IndirectRef in the table, return the Object it refers to.
@@ -277,13 +278,22 @@ class IndirectReferenceTable {
 
   void AssertEmpty() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void Dump(std::ostream& os) const REQUIRES_SHARED(Locks::mutator_lock_);
+  void Dump(std::ostream& os) const
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::alloc_tracker_lock_);
 
   // Return the #of entries in the entire table.  This includes holes, and
   // so may be larger than the actual number of "live" entries.
   size_t Capacity() const {
     return segment_state_.top_index;
   }
+
+  // Ensure that at least free_capacity elements are available, or return false.
+  bool EnsureFreeCapacity(size_t free_capacity, std::string* error_msg)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  // See implementation of EnsureFreeCapacity. We'll only state here how much is trivially free,
+  // without recovering holes. Thus this is a conservative estimate.
+  size_t FreeCapacity() const;
 
   // Note IrtIterator does not have a read barrier as it's used to visit roots.
   IrtIterator begin() {

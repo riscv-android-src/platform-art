@@ -17,15 +17,16 @@
 #include "image.h"
 
 #include "base/bit_utils.h"
-#include "mirror/object_array.h"
-#include "mirror/object_array-inl.h"
+#include "base/length_prefixed_array.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-inl.h"
+#include "mirror/object_array.h"
 #include "utils.h"
 
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '3', '4', '\0' };  // mirror::Class update
+const uint8_t ImageHeader::kImageVersion[] = { '0', '4', 'A', '\0' };  // VarHandle fence intrinsics
 
 ImageHeader::ImageHeader(uint32_t image_begin,
                          uint32_t image_size,
@@ -139,13 +140,21 @@ void ImageHeader::SetImageMethod(ImageMethod index, ArtMethod* method) {
   image_methods_[index] = reinterpret_cast<uint64_t>(method);
 }
 
-const ImageSection& ImageHeader::GetImageSection(ImageSections index) const {
-  CHECK_LT(static_cast<size_t>(index), kSectionCount);
-  return sections_[index];
-}
-
 std::ostream& operator<<(std::ostream& os, const ImageSection& section) {
   return os << "size=" << section.Size() << " range=" << section.Offset() << "-" << section.End();
+}
+
+void ImageHeader::VisitObjects(ObjectVisitor* visitor,
+                               uint8_t* base,
+                               PointerSize pointer_size) const {
+  DCHECK_EQ(pointer_size, GetPointerSize());
+  const ImageSection& objects = GetObjectsSection();
+  static const size_t kStartPos = RoundUp(sizeof(ImageHeader), kObjectAlignment);
+  for (size_t pos = kStartPos; pos < objects.Size(); ) {
+    mirror::Object* object = reinterpret_cast<mirror::Object*>(base + objects.Offset() + pos);
+    visitor->Visit(object);
+    pos += RoundUp(object->SizeOf(), kObjectAlignment);
+  }
 }
 
 void ImageHeader::VisitPackedArtFields(ArtFieldVisitor* visitor, uint8_t* base) const {

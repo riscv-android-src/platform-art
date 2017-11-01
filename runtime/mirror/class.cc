@@ -20,18 +20,19 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "class-inl.h"
 #include "class_ext.h"
 #include "class_linker-inl.h"
 #include "class_loader.h"
-#include "class-inl.h"
 #include "dex_cache.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
 #include "gc/accounting/card_table-inl.h"
 #include "handle_scope-inl.h"
 #include "method.h"
-#include "object_array-inl.h"
 #include "object-inl.h"
+#include "object-refvisitor-inl.h"
+#include "object_array-inl.h"
 #include "object_lock.h"
 #include "runtime.h"
 #include "thread.h"
@@ -45,6 +46,23 @@ namespace mirror {
 using android::base::StringPrintf;
 
 GcRoot<Class> Class::java_lang_Class_;
+
+constexpr Class::Status Class::kStatusRetired;
+constexpr Class::Status Class::kStatusErrorResolved;
+constexpr Class::Status Class::kStatusErrorUnresolved;
+constexpr Class::Status Class::kStatusNotReady;
+constexpr Class::Status Class::kStatusIdx;
+constexpr Class::Status Class::kStatusLoaded;
+constexpr Class::Status Class::kStatusResolving;
+constexpr Class::Status Class::kStatusResolved;
+constexpr Class::Status Class::kStatusVerifying;
+constexpr Class::Status Class::kStatusRetryVerificationAtRuntime;
+constexpr Class::Status Class::kStatusVerifyingAtRuntime;
+constexpr Class::Status Class::kStatusVerified;
+constexpr Class::Status Class::kStatusSuperclassValidated;
+constexpr Class::Status Class::kStatusInitializing;
+constexpr Class::Status Class::kStatusInitialized;
+constexpr Class::Status Class::kStatusMax;
 
 void Class::SetClassClass(ObjPtr<Class> java_lang_Class) {
   CHECK(java_lang_Class_.IsNull())
@@ -64,10 +82,6 @@ void Class::VisitRoots(RootVisitor* visitor) {
   java_lang_Class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
-ClassExt* Class::GetExtData() {
-  return GetFieldObject<ClassExt>(OFFSET_OF_OBJECT_MEMBER(Class, ext_data_));
-}
-
 ClassExt* Class::EnsureExtDataPresent(Thread* self) {
   ObjPtr<ClassExt> existing(GetExtData());
   if (!existing.IsNull()) {
@@ -81,7 +95,7 @@ ClassExt* Class::EnsureExtDataPresent(Thread* self) {
   self->ClearException();
   // Allocate the ClassExt
   Handle<ClassExt> new_ext(hs.NewHandle(ClassExt::Alloc(self)));
-  if (new_ext.Get() == nullptr) {
+  if (new_ext == nullptr) {
     // OOM allocating the classExt.
     // TODO Should we restore the suppressed exception?
     self->AssertPendingOOMException();
@@ -103,7 +117,7 @@ ClassExt* Class::EnsureExtDataPresent(Thread* self) {
     DCHECK(!set || h_this->GetExtData() == new_ext.Get());
     CHECK(!ret.IsNull());
     // Restore the exception if there was one.
-    if (throwable.Get() != nullptr) {
+    if (throwable != nullptr) {
       self->SetException(throwable.Get());
     }
     return ret.Ptr();
@@ -115,7 +129,9 @@ void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   bool class_linker_initialized = class_linker != nullptr && class_linker->IsInitialized();
   if (LIKELY(class_linker_initialized)) {
-    if (UNLIKELY(new_status <= old_status && new_status != kStatusError &&
+    if (UNLIKELY(new_status <= old_status &&
+                 new_status != kStatusErrorUnresolved &&
+                 new_status != kStatusErrorResolved &&
                  new_status != kStatusRetired)) {
       LOG(FATAL) << "Unexpected change back of class status for " << h_this->PrettyClass()
                  << " " << old_status << " -> " << new_status;
@@ -127,10 +143,12 @@ void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
             << h_this->PrettyClass() << " " << old_status << " -> " << new_status;
     }
   }
-  if (UNLIKELY(new_status == kStatusError)) {
-    CHECK_NE(h_this->GetStatus(), kStatusError)
+  if (UNLIKELY(IsErroneous(new_status))) {
+    CHECK(!h_this->IsErroneous())
         << "Attempt to set as erroneous an already erroneous class "
-        << h_this->PrettyClass();
+        << h_this->PrettyClass()
+        << " old_status: " << old_status << " new_status: " << new_status;
+    CHECK_EQ(new_status == kStatusErrorResolved, old_status >= kStatusResolved);
     if (VLOG_IS_ON(class_linker)) {
       LOG(ERROR) << "Setting " << h_this->PrettyDescriptor() << " to erroneous.";
       if (self->IsExceptionPending()) {
@@ -177,7 +195,7 @@ void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
       // Class is a temporary one, ensure that waiters for resolution get notified of retirement
       // so that they can grab the new version of the class from the class linker's table.
       CHECK_LT(new_status, kStatusResolved) << h_this->PrettyDescriptor();
-      if (new_status == kStatusRetired || new_status == kStatusError) {
+      if (new_status == kStatusRetired || new_status == kStatusErrorUnresolved) {
         h_this->NotifyAll(self);
       }
     } else {
@@ -190,7 +208,7 @@ void Class::SetStatus(Handle<Class> h_this, Status new_status, Thread* self) {
 }
 
 void Class::SetDexCache(ObjPtr<DexCache> new_dex_cache) {
-  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_), new_dex_cache);
+  SetFieldObjectTransaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_cache_), new_dex_cache);
 }
 
 void Class::SetClassSize(uint32_t new_class_size) {
@@ -199,8 +217,7 @@ void Class::SetClassSize(uint32_t new_class_size) {
     LOG(FATAL_WITHOUT_ABORT) << new_class_size << " vs " << GetClassSize();
     LOG(FATAL) << "class=" << PrettyTypeOf();
   }
-  // Not called within a transaction.
-  SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_size_), new_class_size);
+  SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, class_size_), new_class_size);
 }
 
 // Return the class' name. The exact format is bizarre, but it's the specified behavior for
@@ -265,10 +282,10 @@ void Class::DumpClass(std::ostream& os, int flags) {
   os << "----- " << (IsInterface() ? "interface" : "class") << " "
      << "'" << GetDescriptor(&temp) << "' cl=" << GetClassLoader() << " -----\n",
   os << "  objectSize=" << SizeOf() << " "
-     << "(" << (h_super.Get() != nullptr ? h_super->SizeOf() : -1) << " from super)\n",
+     << "(" << (h_super != nullptr ? h_super->SizeOf() : -1) << " from super)\n",
   os << StringPrintf("  access=0x%04x.%04x\n",
       GetAccessFlags() >> 16, GetAccessFlags() & kAccJavaFlagsMask);
-  if (h_super.Get() != nullptr) {
+  if (h_super != nullptr) {
     os << "  super='" << h_super->PrettyClass() << "' (cl=" << h_super->GetClassLoader()
        << ")\n";
   }
@@ -293,7 +310,7 @@ void Class::DumpClass(std::ostream& os, int flags) {
   } else {
     // After this point, this may have moved due to GetDirectInterface.
     os << "  vtable (" << h_this->NumVirtualMethods() << " entries, "
-        << (h_super.Get() != nullptr ? h_super->NumVirtualMethods() : 0) << " in super):\n";
+        << (h_super != nullptr ? h_super->NumVirtualMethods() : 0) << " in super):\n";
     for (size_t i = 0; i < NumVirtualMethods(); ++i) {
       os << StringPrintf("    %2zd: %s\n", i, ArtMethod::PrettyMethod(
           h_this->GetVirtualMethodDuringLinking(i, image_pointer_size)).c_str());
@@ -305,7 +322,7 @@ void Class::DumpClass(std::ostream& os, int flags) {
     }
     if (h_this->NumStaticFields() > 0) {
       os << "  static fields (" << h_this->NumStaticFields() << " entries):\n";
-      if (h_this->IsResolved() || h_this->IsErroneous()) {
+      if (h_this->IsResolved()) {
         for (size_t i = 0; i < h_this->NumStaticFields(); ++i) {
           os << StringPrintf("    %2zd: %s\n", i,
                              ArtField::PrettyField(h_this->GetStaticField(i)).c_str());
@@ -316,7 +333,7 @@ void Class::DumpClass(std::ostream& os, int flags) {
     }
     if (h_this->NumInstanceFields() > 0) {
       os << "  instance fields (" << h_this->NumInstanceFields() << " entries):\n";
-      if (h_this->IsResolved() || h_this->IsErroneous()) {
+      if (h_this->IsResolved()) {
         for (size_t i = 0; i < h_this->NumInstanceFields(); ++i) {
           os << StringPrintf("    %2zd: %s\n", i,
                              ArtField::PrettyField(h_this->GetInstanceField(i)).c_str());
@@ -396,95 +413,44 @@ void Class::SetClassLoader(ObjPtr<ClassLoader> new_class_loader) {
   }
 }
 
-ArtMethod* Class::FindInterfaceMethod(const StringPiece& name,
-                                      const StringPiece& signature,
-                                      PointerSize pointer_size) {
-  // Check the current class before checking the interfaces.
-  ArtMethod* method = FindDeclaredVirtualMethod(name, signature, pointer_size);
-  if (method != nullptr) {
-    return method;
-  }
-
-  int32_t iftable_count = GetIfTableCount();
-  ObjPtr<IfTable> iftable = GetIfTable();
-  for (int32_t i = 0; i < iftable_count; ++i) {
-    method = iftable->GetInterface(i)->FindDeclaredVirtualMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
+template <typename SignatureType>
+static inline ArtMethod* FindInterfaceMethodWithSignature(ObjPtr<Class> klass,
+                                                          const StringPiece& name,
+                                                          const SignatureType& signature,
+                                                          PointerSize pointer_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // If the current class is not an interface, skip the search of its declared methods;
+  // such lookup is used only to distinguish between IncompatibleClassChangeError and
+  // NoSuchMethodError and the caller has already tried to search methods in the class.
+  if (LIKELY(klass->IsInterface())) {
+    // Search declared methods, both direct and virtual.
+    // (This lookup is used also for invoke-static on interface classes.)
+    for (ArtMethod& method : klass->GetDeclaredMethodsSlice(pointer_size)) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        return &method;
+      }
     }
   }
-  return nullptr;
-}
 
-ArtMethod* Class::FindInterfaceMethod(const StringPiece& name,
-                                      const Signature& signature,
-                                      PointerSize pointer_size) {
-  // Check the current class before checking the interfaces.
-  ArtMethod* method = FindDeclaredVirtualMethod(name, signature, pointer_size);
-  if (method != nullptr) {
-    return method;
-  }
-
-  int32_t iftable_count = GetIfTableCount();
-  ObjPtr<IfTable> iftable = GetIfTable();
-  for (int32_t i = 0; i < iftable_count; ++i) {
-    method = iftable->GetInterface(i)->FindDeclaredVirtualMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
+  // TODO: If there is a unique maximally-specific non-abstract superinterface method,
+  // we should return it, otherwise an arbitrary one can be returned.
+  ObjPtr<IfTable> iftable = klass->GetIfTable();
+  for (int32_t i = 0, iftable_count = iftable->Count(); i < iftable_count; ++i) {
+    ObjPtr<Class> iface = iftable->GetInterface(i);
+    for (ArtMethod& method : iface->GetVirtualMethodsSlice(pointer_size)) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        return &method;
+      }
     }
   }
-  return nullptr;
-}
 
-ArtMethod* Class::FindInterfaceMethod(ObjPtr<DexCache> dex_cache,
-                                      uint32_t dex_method_idx,
-                                      PointerSize pointer_size) {
-  // Check the current class before checking the interfaces.
-  ArtMethod* method = FindDeclaredVirtualMethod(dex_cache, dex_method_idx, pointer_size);
-  if (method != nullptr) {
-    return method;
-  }
-
-  int32_t iftable_count = GetIfTableCount();
-  ObjPtr<IfTable> iftable = GetIfTable();
-  for (int32_t i = 0; i < iftable_count; ++i) {
-    method = iftable->GetInterface(i)->FindDeclaredVirtualMethod(
-        dex_cache, dex_method_idx, pointer_size);
-    if (method != nullptr) {
-      return method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindDeclaredDirectMethod(const StringPiece& name,
-                                           const StringPiece& signature,
-                                           PointerSize pointer_size) {
-  for (auto& method : GetDirectMethods(pointer_size)) {
-    if (name == method.GetName() && method.GetSignature() == signature) {
-      return &method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindDeclaredDirectMethod(const StringPiece& name,
-                                           const Signature& signature,
-                                           PointerSize pointer_size) {
-  for (auto& method : GetDirectMethods(pointer_size)) {
-    if (name == method.GetName() && signature == method.GetSignature()) {
-      return &method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindDeclaredDirectMethod(ObjPtr<DexCache> dex_cache,
-                                           uint32_t dex_method_idx,
-                                           PointerSize pointer_size) {
-  if (GetDexCache() == dex_cache) {
-    for (auto& method : GetDirectMethods(pointer_size)) {
-      if (method.GetDexMethodIndex() == dex_method_idx) {
+  // Then search for public non-static methods in the java.lang.Object.
+  if (LIKELY(klass->IsInterface())) {
+    ObjPtr<Class> object_class = klass->GetSuperClass();
+    DCHECK(object_class->IsObjectClass());
+    for (ArtMethod& method : object_class->GetDeclaredMethodsSlice(pointer_size)) {
+      if (method.IsPublic() && !method.IsStatic() &&
+          method.GetName() == name && method.GetSignature() == signature) {
         return &method;
       }
     }
@@ -492,37 +458,231 @@ ArtMethod* Class::FindDeclaredDirectMethod(ObjPtr<DexCache> dex_cache,
   return nullptr;
 }
 
-ArtMethod* Class::FindDirectMethod(const StringPiece& name,
-                                   const StringPiece& signature,
-                                   PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredDirectMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
-    }
-  }
-  return nullptr;
+ArtMethod* Class::FindInterfaceMethod(const StringPiece& name,
+                                      const StringPiece& signature,
+                                      PointerSize pointer_size) {
+  return FindInterfaceMethodWithSignature(this, name, signature, pointer_size);
 }
 
-ArtMethod* Class::FindDirectMethod(const StringPiece& name,
-                                   const Signature& signature,
-                                   PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredDirectMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
-    }
-  }
-  return nullptr;
+ArtMethod* Class::FindInterfaceMethod(const StringPiece& name,
+                                      const Signature& signature,
+                                      PointerSize pointer_size) {
+  return FindInterfaceMethodWithSignature(this, name, signature, pointer_size);
 }
 
-ArtMethod* Class::FindDirectMethod(ObjPtr<DexCache> dex_cache,
-                                   uint32_t dex_method_idx,
-                                   PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredDirectMethod(dex_cache, dex_method_idx, pointer_size);
-    if (method != nullptr) {
-      return method;
+ArtMethod* Class::FindInterfaceMethod(ObjPtr<DexCache> dex_cache,
+                                      uint32_t dex_method_idx,
+                                      PointerSize pointer_size) {
+  // We always search by name and signature, ignoring the type index in the MethodId.
+  const DexFile& dex_file = *dex_cache->GetDexFile();
+  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  StringPiece name = dex_file.StringDataByIdx(method_id.name_idx_);
+  const Signature signature = dex_file.GetMethodSignature(method_id);
+  return FindInterfaceMethod(name, signature, pointer_size);
+}
+
+static inline bool IsValidInheritanceCheck(ObjPtr<mirror::Class> klass,
+                                           ObjPtr<mirror::Class> declaring_class)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (klass->IsArrayClass()) {
+    return declaring_class->IsObjectClass();
+  } else if (klass->IsInterface()) {
+    return declaring_class->IsObjectClass() || declaring_class == klass;
+  } else {
+    return klass->IsSubClass(declaring_class);
+  }
+}
+
+static inline bool IsInheritedMethod(ObjPtr<mirror::Class> klass,
+                                     ObjPtr<mirror::Class> declaring_class,
+                                     ArtMethod& method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK_EQ(declaring_class, method.GetDeclaringClass());
+  DCHECK_NE(klass, declaring_class);
+  DCHECK(IsValidInheritanceCheck(klass, declaring_class));
+  uint32_t access_flags = method.GetAccessFlags();
+  if ((access_flags & (kAccPublic | kAccProtected)) != 0) {
+    return true;
+  }
+  if ((access_flags & kAccPrivate) != 0) {
+    return false;
+  }
+  for (; klass != declaring_class; klass = klass->GetSuperClass()) {
+    if (!klass->IsInSamePackage(declaring_class)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+template <typename SignatureType>
+static inline ArtMethod* FindClassMethodWithSignature(ObjPtr<Class> this_klass,
+                                                      const StringPiece& name,
+                                                      const SignatureType& signature,
+                                                      PointerSize pointer_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Search declared methods first.
+  for (ArtMethod& method : this_klass->GetDeclaredMethodsSlice(pointer_size)) {
+    ArtMethod* np_method = method.GetInterfaceMethodIfProxy(pointer_size);
+    if (np_method->GetName() == name && np_method->GetSignature() == signature) {
+      return &method;
+    }
+  }
+
+  // Then search the superclass chain. If we find an inherited method, return it.
+  // If we find a method that's not inherited because of access restrictions,
+  // try to find a method inherited from an interface in copied methods.
+  ObjPtr<Class> klass = this_klass->GetSuperClass();
+  ArtMethod* uninherited_method = nullptr;
+  for (; klass != nullptr; klass = klass->GetSuperClass()) {
+    DCHECK(!klass->IsProxyClass());
+    for (ArtMethod& method : klass->GetDeclaredMethodsSlice(pointer_size)) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        if (IsInheritedMethod(this_klass, klass, method)) {
+          return &method;
+        }
+        uninherited_method = &method;
+        break;
+      }
+    }
+    if (uninherited_method != nullptr) {
+      break;
+    }
+  }
+
+  // Then search copied methods.
+  // If we found a method that's not inherited, stop the search in its declaring class.
+  ObjPtr<Class> end_klass = klass;
+  DCHECK_EQ(uninherited_method != nullptr, end_klass != nullptr);
+  klass = this_klass;
+  if (UNLIKELY(klass->IsProxyClass())) {
+    DCHECK(klass->GetCopiedMethodsSlice(pointer_size).empty());
+    klass = klass->GetSuperClass();
+  }
+  for (; klass != end_klass; klass = klass->GetSuperClass()) {
+    DCHECK(!klass->IsProxyClass());
+    for (ArtMethod& method : klass->GetCopiedMethodsSlice(pointer_size)) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        return &method;  // No further check needed, copied methods are inherited by definition.
+      }
+    }
+  }
+  return uninherited_method;  // Return the `uninherited_method` if any.
+}
+
+
+ArtMethod* Class::FindClassMethod(const StringPiece& name,
+                                  const StringPiece& signature,
+                                  PointerSize pointer_size) {
+  return FindClassMethodWithSignature(this, name, signature, pointer_size);
+}
+
+ArtMethod* Class::FindClassMethod(const StringPiece& name,
+                                  const Signature& signature,
+                                  PointerSize pointer_size) {
+  return FindClassMethodWithSignature(this, name, signature, pointer_size);
+}
+
+ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
+                                  uint32_t dex_method_idx,
+                                  PointerSize pointer_size) {
+  // FIXME: Hijacking a proxy class by a custom class loader can break this assumption.
+  DCHECK(!IsProxyClass());
+
+  // First try to find a declared method by dex_method_idx if we have a dex_cache match.
+  ObjPtr<DexCache> this_dex_cache = GetDexCache();
+  if (this_dex_cache == dex_cache) {
+    // Lookup is always performed in the class referenced by the MethodId.
+    DCHECK_EQ(dex_type_idx_, GetDexFile().GetMethodId(dex_method_idx).class_idx_.index_);
+    for (ArtMethod& method : GetDeclaredMethodsSlice(pointer_size)) {
+      if (method.GetDexMethodIndex() == dex_method_idx) {
+        return &method;
+      }
+    }
+  }
+  // If not found, we need to search by name and signature.
+  const DexFile& dex_file = *dex_cache->GetDexFile();
+  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const Signature signature = dex_file.GetMethodSignature(method_id);
+  StringPiece name;  // Delay strlen() until actually needed.
+  // If we do not have a dex_cache match, try to find the declared method in this class now.
+  if (this_dex_cache != dex_cache && !GetDeclaredMethodsSlice(pointer_size).empty()) {
+    DCHECK(name.empty());
+    name = dex_file.StringDataByIdx(method_id.name_idx_);
+    for (ArtMethod& method : GetDeclaredMethodsSlice(pointer_size)) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        return &method;
+      }
+    }
+  }
+
+  // Then search the superclass chain. If we find an inherited method, return it.
+  // If we find a method that's not inherited because of access restrictions,
+  // try to find a method inherited from an interface in copied methods.
+  ArtMethod* uninherited_method = nullptr;
+  ObjPtr<Class> klass = GetSuperClass();
+  for (; klass != nullptr; klass = klass->GetSuperClass()) {
+    ArtMethod* candidate_method = nullptr;
+    ArraySlice<ArtMethod> declared_methods = klass->GetDeclaredMethodsSlice(pointer_size);
+    if (klass->GetDexCache() == dex_cache) {
+      // Matching dex_cache. We cannot compare the `dex_method_idx` anymore because
+      // the type index differs, so compare the name index and proto index.
+      for (ArtMethod& method : declared_methods) {
+        const DexFile::MethodId& cmp_method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
+        if (cmp_method_id.name_idx_ == method_id.name_idx_ &&
+            cmp_method_id.proto_idx_ == method_id.proto_idx_) {
+          candidate_method = &method;
+          break;
+        }
+      }
+    } else {
+      if (!declared_methods.empty() && name.empty()) {
+        name = dex_file.StringDataByIdx(method_id.name_idx_);
+      }
+      for (ArtMethod& method : declared_methods) {
+        if (method.GetName() == name && method.GetSignature() == signature) {
+          candidate_method = &method;
+          break;
+        }
+      }
+    }
+    if (candidate_method != nullptr) {
+      if (IsInheritedMethod(this, klass, *candidate_method)) {
+        return candidate_method;
+      } else {
+        uninherited_method = candidate_method;
+        break;
+      }
+    }
+  }
+
+  // Then search copied methods.
+  // If we found a method that's not inherited, stop the search in its declaring class.
+  ObjPtr<Class> end_klass = klass;
+  DCHECK_EQ(uninherited_method != nullptr, end_klass != nullptr);
+  // After we have searched the declared methods of the super-class chain,
+  // search copied methods which can contain methods from interfaces.
+  for (klass = this; klass != end_klass; klass = klass->GetSuperClass()) {
+    ArraySlice<ArtMethod> copied_methods = klass->GetCopiedMethodsSlice(pointer_size);
+    if (!copied_methods.empty() && name.empty()) {
+      name = dex_file.StringDataByIdx(method_id.name_idx_);
+    }
+    for (ArtMethod& method : copied_methods) {
+      if (method.GetName() == name && method.GetSignature() == signature) {
+        return &method;  // No further check needed, copied methods are inherited by definition.
+      }
+    }
+  }
+  return uninherited_method;  // Return the `uninherited_method` if any.
+}
+
+ArtMethod* Class::FindConstructor(const StringPiece& signature, PointerSize pointer_size) {
+  // Internal helper, never called on proxy classes. We can skip GetInterfaceMethodIfProxy().
+  DCHECK(!IsProxyClass());
+  StringPiece name("<init>");
+  for (ArtMethod& method : GetDirectMethodsSliceUnchecked(pointer_size)) {
+    if (method.GetName() == name && method.GetSignature() == signature) {
+      return &method;
     }
   }
   return nullptr;
@@ -539,89 +699,12 @@ ArtMethod* Class::FindDeclaredDirectMethodByName(const StringPiece& name,
   return nullptr;
 }
 
-// TODO These should maybe be changed to be named FindOwnedVirtualMethod or something similar
-// because they do not only find 'declared' methods and will return copied methods. This behavior is
-// desired and correct but the naming can lead to confusion because in the java language declared
-// excludes interface methods which might be found by this.
-ArtMethod* Class::FindDeclaredVirtualMethod(const StringPiece& name,
-                                            const StringPiece& signature,
-                                            PointerSize pointer_size) {
-  for (auto& method : GetVirtualMethods(pointer_size)) {
-    ArtMethod* const np_method = method.GetInterfaceMethodIfProxy(pointer_size);
-    if (name == np_method->GetName() && np_method->GetSignature() == signature) {
-      return &method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindDeclaredVirtualMethod(const StringPiece& name,
-                                            const Signature& signature,
-                                            PointerSize pointer_size) {
-  for (auto& method : GetVirtualMethods(pointer_size)) {
-    ArtMethod* const np_method = method.GetInterfaceMethodIfProxy(pointer_size);
-    if (name == np_method->GetName() && signature == np_method->GetSignature()) {
-      return &method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindDeclaredVirtualMethod(ObjPtr<DexCache> dex_cache,
-                                            uint32_t dex_method_idx,
-                                            PointerSize pointer_size) {
-  if (GetDexCache() == dex_cache) {
-    for (auto& method : GetDeclaredVirtualMethods(pointer_size)) {
-      if (method.GetDexMethodIndex() == dex_method_idx) {
-        return &method;
-      }
-    }
-  }
-  return nullptr;
-}
-
 ArtMethod* Class::FindDeclaredVirtualMethodByName(const StringPiece& name,
                                                   PointerSize pointer_size) {
   for (auto& method : GetVirtualMethods(pointer_size)) {
     ArtMethod* const np_method = method.GetInterfaceMethodIfProxy(pointer_size);
     if (name == np_method->GetName()) {
       return &method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindVirtualMethod(const StringPiece& name,
-                                    const StringPiece& signature,
-                                    PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredVirtualMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindVirtualMethod(const StringPiece& name,
-                                    const Signature& signature,
-                                    PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredVirtualMethod(name, signature, pointer_size);
-    if (method != nullptr) {
-      return method;
-    }
-  }
-  return nullptr;
-}
-
-ArtMethod* Class::FindVirtualMethod(ObjPtr<DexCache> dex_cache,
-                                    uint32_t dex_method_idx,
-                                    PointerSize pointer_size) {
-  for (ObjPtr<Class> klass = this; klass != nullptr; klass = klass->GetSuperClass()) {
-    ArtMethod* method = klass->FindDeclaredVirtualMethod(dex_cache, dex_method_idx, pointer_size);
-    if (method != nullptr) {
-      return method;
     }
   }
   return nullptr;
@@ -942,12 +1025,13 @@ ObjPtr<Class> Class::GetDirectInterface(Thread* self, ObjPtr<Class> klass, uint3
     DCHECK(interface != nullptr);
     return interface;
   } else if (klass->IsProxyClass()) {
-    ObjPtr<ObjectArray<Class>> interfaces = klass->GetInterfaces();
+    ObjPtr<ObjectArray<Class>> interfaces = klass->GetProxyInterfaces();
     DCHECK(interfaces != nullptr);
     return interfaces->Get(idx);
   } else {
     dex::TypeIndex type_idx = klass->GetDirectInterfaceTypeIdx(idx);
-    ObjPtr<Class> interface = klass->GetDexCache()->GetResolvedType(type_idx);
+    ObjPtr<Class> interface = ClassLinker::LookupResolvedType(
+        type_idx, klass->GetDexCache(), klass->GetClassLoader());
     return interface;
   }
 }
@@ -967,7 +1051,7 @@ ObjPtr<Class> Class::ResolveDirectInterface(Thread* self, Handle<Class> klass, u
 }
 
 ObjPtr<Class> Class::GetCommonSuperClass(Handle<Class> klass) {
-  DCHECK(klass.Get() != nullptr);
+  DCHECK(klass != nullptr);
   DCHECK(!klass->IsInterface());
   DCHECK(!IsInterface());
   ObjPtr<Class> common_super_class = this;
@@ -1141,9 +1225,7 @@ uint32_t Class::Depth() {
 dex::TypeIndex Class::FindTypeIndexInOtherDexFile(const DexFile& dex_file) {
   std::string temp;
   const DexFile::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
-  return (type_id == nullptr)
-      ? dex::TypeIndex(DexFile::kDexNoIndex)
-      : dex_file.GetIndexForTypeId(*type_id);
+  return (type_id == nullptr) ? dex::TypeIndex() : dex_file.GetIndexForTypeId(*type_id);
 }
 
 template <PointerSize kPointerSize, bool kTransactionActive>
@@ -1161,7 +1243,7 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
   constexpr uint32_t kSkipModifiers = kAccMiranda | kAccSynthetic;
   StackHandleScope<3> hs(self);
   auto h_method_name = hs.NewHandle(name);
-  if (UNLIKELY(h_method_name.Get() == nullptr)) {
+  if (UNLIKELY(h_method_name == nullptr)) {
     ThrowNullPointerException("name == null");
     return nullptr;
   }
@@ -1340,6 +1422,27 @@ std::string Class::PrettyClassAndClassLoader() {
   result += ">";
   return result;
 }
+
+template<VerifyObjectFlags kVerifyFlags> void Class::GetAccessFlagsDCheck() {
+  // Check class is loaded/retired or this is java.lang.String that has a
+  // circularity issue during loading the names of its members
+  DCHECK(IsIdxLoaded<kVerifyFlags>() || IsRetired<kVerifyFlags>() ||
+         IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>() ||
+         this == String::GetJavaLangString())
+              << "IsIdxLoaded=" << IsIdxLoaded<kVerifyFlags>()
+              << " IsRetired=" << IsRetired<kVerifyFlags>()
+              << " IsErroneous=" <<
+              IsErroneous<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>()
+              << " IsString=" << (this == String::GetJavaLangString())
+              << " status= " << GetStatus<kVerifyFlags>()
+              << " descriptor=" << PrettyDescriptor();
+}
+// Instantiate the common cases.
+template void Class::GetAccessFlagsDCheck<kVerifyNone>();
+template void Class::GetAccessFlagsDCheck<kVerifyThis>();
+template void Class::GetAccessFlagsDCheck<kVerifyReads>();
+template void Class::GetAccessFlagsDCheck<kVerifyWrites>();
+template void Class::GetAccessFlagsDCheck<kVerifyAll>();
 
 }  // namespace mirror
 }  // namespace art

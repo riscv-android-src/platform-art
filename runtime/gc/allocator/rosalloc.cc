@@ -16,8 +16,8 @@
 
 #include "rosalloc.h"
 
-#include <map>
 #include <list>
+#include <map>
 #include <sstream>
 #include <vector>
 
@@ -28,9 +28,9 @@
 #include "gc/space/memory_tool_settings.h"
 #include "mem_map.h"
 #include "mirror/class-inl.h"
-#include "mirror/object.h"
 #include "mirror/object-inl.h"
-#include "thread-inl.h"
+#include "mirror/object.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {

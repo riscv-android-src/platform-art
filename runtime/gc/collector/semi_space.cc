@@ -32,8 +32,8 @@
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/heap.h"
 #include "gc/reference_processor.h"
-#include "gc/space/bump_pointer_space.h"
 #include "gc/space/bump_pointer_space-inl.h"
+#include "gc/space/bump_pointer_space.h"
 #include "gc/space/image_space.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
@@ -41,9 +41,10 @@
 #include "intern_table.h"
 #include "jni_internal.h"
 #include "mark_sweep-inl.h"
-#include "monitor.h"
-#include "mirror/reference-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object-refvisitor-inl.h"
+#include "mirror/reference-inl.h"
+#include "monitor.h"
 #include "runtime.h"
 #include "thread-inl.h"
 #include "thread_list.h"
@@ -192,6 +193,7 @@ void SemiSpace::MarkingPhase() {
   if (generational_) {
     if (GetCurrentIteration()->GetGcCause() == kGcCauseExplicit ||
         GetCurrentIteration()->GetGcCause() == kGcCauseForNativeAlloc ||
+        GetCurrentIteration()->GetGcCause() == kGcCauseForNativeAllocBlocking ||
         GetCurrentIteration()->GetClearSoftReferences()) {
       // If an explicit, native allocation-triggered, or last attempt
       // collection, collect the whole heap.
@@ -606,7 +608,8 @@ mirror::Object* SemiSpace::MarkObject(mirror::Object* root) {
   return ref.AsMirrorPtr();
 }
 
-void SemiSpace::MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr) {
+void SemiSpace::MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr,
+                                  bool do_atomic_update ATTRIBUTE_UNUSED) {
   MarkObject(obj_ptr);
 }
 
@@ -723,7 +726,9 @@ class SemiSpace::MarkObjectVisitor {
 void SemiSpace::ScanObject(Object* obj) {
   DCHECK(!from_space_->HasAddress(obj)) << "Scanning object " << obj << " in from space";
   MarkObjectVisitor visitor(this);
-  obj->VisitReferences(visitor, visitor);
+  // Turn off read barrier. ZygoteCompactingCollector doesn't use it (even in the CC build.)
+  obj->VisitReferences</*kVisitNativeRoots*/true, kDefaultVerifyFlags, kWithoutReadBarrier>(
+      visitor, visitor);
 }
 
 // Scan anything that's on the mark stack.

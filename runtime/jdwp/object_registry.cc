@@ -19,6 +19,7 @@
 #include "handle_scope-inl.h"
 #include "jni_internal.h"
 #include "mirror/class.h"
+#include "mirror/throwable.h"
 #include "obj_ptr-inl.h"
 #include "scoped_thread_state_change-inl.h"
 
@@ -34,6 +35,11 @@ std::ostream& operator<<(std::ostream& os, const ObjectRegistryEntry& rhs) {
 
 ObjectRegistry::ObjectRegistry()
     : lock_("ObjectRegistry lock", kJdwpObjectRegistryLock), next_id_(1) {
+  Locks::AddToExpectedMutexesOnWeakRefAccess(&lock_);
+}
+
+ObjectRegistry::~ObjectRegistry() {
+  Locks::RemoveFromExpectedMutexesOnWeakRefAccess(&lock_);
 }
 
 JDWP::RefTypeId ObjectRegistry::AddRefType(ObjPtr<mirror::Class> c) {
@@ -56,7 +62,7 @@ JDWP::ObjectId ObjectRegistry::Add(ObjPtr<mirror::Object> o) {
 // Template instantiations must be declared below.
 template<class T>
 JDWP::ObjectId ObjectRegistry::Add(Handle<T> obj_h) {
-  if (obj_h.Get() == nullptr) {
+  if (obj_h == nullptr) {
     return 0;
   }
   return InternalAdd(obj_h);
@@ -75,7 +81,7 @@ JDWP::ObjectId ObjectRegistry::Add(Handle<mirror::Throwable> obj_h);
 
 template<class T>
 JDWP::ObjectId ObjectRegistry::InternalAdd(Handle<T> obj_h) {
-  CHECK(obj_h.Get() != nullptr);
+  CHECK(obj_h != nullptr);
 
   Thread* const self = Thread::Current();
   self->AssertNoPendingException();
