@@ -24,11 +24,10 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "garbage_collector.h"
-#include "gc_root.h"
 #include "gc/accounting/heap_bitmap.h"
+#include "gc_root.h"
 #include "immune_spaces.h"
 #include "lock_word.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 
 namespace art {
@@ -170,7 +169,8 @@ class MarkCompact : public GarbageCollector {
   // Mark a single object.
   virtual mirror::Object* MarkObject(mirror::Object* obj) OVERRIDE
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr) OVERRIDE
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr,
+                                 bool do_atomic_update) OVERRIDE
       REQUIRES(Locks::heap_bitmap_lock_, Locks::mutator_lock_);
   virtual mirror::Object* IsMarked(mirror::Object* obj) OVERRIDE
       REQUIRES_SHARED(Locks::heap_bitmap_lock_)

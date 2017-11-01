@@ -16,20 +16,22 @@
 
 #include "large_object_space.h"
 
-#include <valgrind.h>
-#include <memory>
-#include <memcheck/memcheck.h>
+#include <sys/mman.h>
 
-#include "gc/accounting/heap_bitmap-inl.h"
-#include "gc/accounting/space_bitmap-inl.h"
+#include <memory>
+
 #include "base/logging.h"
+#include "base/memory_tool.h"
 #include "base/mutex-inl.h"
 #include "base/stl_util.h"
+#include "gc/accounting/heap_bitmap-inl.h"
+#include "gc/accounting/space_bitmap-inl.h"
+#include "gc/heap.h"
 #include "image.h"
 #include "os.h"
 #include "scoped_thread_state_change-inl.h"
 #include "space-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 namespace art {
 namespace gc {
@@ -141,16 +143,6 @@ mirror::Object* LargeObjectMapSpace::Alloc(Thread* self, size_t num_bytes,
     return nullptr;
   }
   mirror::Object* const obj = reinterpret_cast<mirror::Object*>(mem_map->Begin());
-  if (kIsDebugBuild) {
-    ReaderMutexLock mu2(Thread::Current(), *Locks::heap_bitmap_lock_);
-    auto* heap = Runtime::Current()->GetHeap();
-    auto* live_bitmap = heap->GetLiveBitmap();
-    auto* space_bitmap = live_bitmap->GetContinuousSpaceBitmap(obj);
-    CHECK(space_bitmap == nullptr) << obj << " overlaps with bitmap " << *space_bitmap;
-    auto* obj_end = reinterpret_cast<mirror::Object*>(mem_map->End());
-    space_bitmap = live_bitmap->GetContinuousSpaceBitmap(obj_end - 1);
-    CHECK(space_bitmap == nullptr) << obj_end << " overlaps with bitmap " << *space_bitmap;
-  }
   MutexLock mu(self, lock_);
   large_objects_.Put(obj, LargeObject {mem_map, false /* not zygote */});
   const size_t allocation_size = mem_map->BaseSize();
@@ -461,7 +453,7 @@ size_t FreeListSpace::Free(Thread* self, mirror::Object* obj) {
   madvise(obj, allocation_size, MADV_DONTNEED);
   if (kIsDebugBuild) {
     // Can't disallow reads since we use them to find next chunks during coalescing.
-    mprotect(obj, allocation_size, PROT_READ);
+    CheckedCall(mprotect, __FUNCTION__, obj, allocation_size, PROT_READ);
   }
   return allocation_size;
 }
@@ -527,7 +519,7 @@ mirror::Object* FreeListSpace::Alloc(Thread* self, size_t num_bytes, size_t* byt
   // We always put our object at the start of the free block, there cannot be another free block
   // before it.
   if (kIsDebugBuild) {
-    mprotect(obj, allocation_size, PROT_READ | PROT_WRITE);
+    CheckedCall(mprotect, __FUNCTION__, obj, allocation_size, PROT_READ | PROT_WRITE);
   }
   new_info->SetPrevFreeBytes(0);
   new_info->SetByteSize(allocation_size, false);

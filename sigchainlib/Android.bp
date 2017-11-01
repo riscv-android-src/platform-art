@@ -25,12 +25,15 @@ cc_library {
         srcs: ["sigchain.cc"],
     },
     target: {
-        host: {
-            host_ldlibs: ["-ldl"],
-        },
         android: {
             shared_libs: ["liblog"],
         },
+    },
+    // Sigchainlib is whole-statically linked into binaries. For Android.mk-based binaries,
+    // this will drag ASAN symbols into the binary, even for modules using LOCAL_SANITIZE := never.
+    // So disable sanitization for now. b/38456126
+    sanitize: {
+        never: true,
     },
 }
 
@@ -43,9 +46,6 @@ cc_library_static {
     defaults: ["art_defaults"],
     srcs: ["sigchain_dummy.cc"],
     target: {
-        host: {
-            host_ldlibs: ["-ldl"],
-        },
         android: {
             shared_libs: ["liblog"],
         },

@@ -25,27 +25,29 @@
 #include "allocator_type.h"
 #include "arch/instruction_set.h"
 #include "atomic.h"
+#include "base/logging.h"
+#include "base/mutex.h"
 #include "base/time_utils.h"
-#include "gc/accounting/atomic_stack.h"
-#include "gc/accounting/card_table.h"
-#include "gc/accounting/read_barrier_table.h"
-#include "gc/gc_cause.h"
 #include "gc/collector/gc_type.h"
+#include "gc/collector/iteration.h"
 #include "gc/collector_type.h"
+#include "gc/gc_cause.h"
 #include "gc/space/large_object_space.h"
 #include "globals.h"
 #include "handle.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "offsets.h"
 #include "process_state.h"
+#include "read_barrier_config.h"
 #include "safe_map.h"
 #include "verify_object.h"
 
 namespace art {
 
 class ConditionVariable;
+class IsMarkedVisitor;
 class Mutex;
+class RootVisitor;
 class StackVisitor;
 class Thread;
 class ThreadPool;
@@ -64,10 +66,15 @@ class AllocRecordObjectMap;
 class GcPauseListener;
 class ReferenceProcessor;
 class TaskProcessor;
+class Verification;
 
 namespace accounting {
+  template <typename T> class AtomicStack;
+  typedef AtomicStack<mirror::Object> ObjectStack;
+  class CardTable;
   class HeapBitmap;
   class ModUnionTable;
+  class ReadBarrierTable;
   class RememberedSet;
 }  // namespace accounting
 
@@ -97,13 +104,6 @@ namespace space {
   class Space;
   class ZygoteSpace;
 }  // namespace space
-
-class AgeCardVisitor {
- public:
-  uint8_t operator()(uint8_t card) const {
-    return (card == accounting::CardTable::kCardDirty) ? card - 1 : 0;
-  }
-};
 
 enum HomogeneousSpaceCompactResult {
   // Success.
@@ -156,6 +156,9 @@ class Heap {
   static constexpr uint64_t kHeapTrimWait = MsToNs(5000);
   // How long we wait after a transition request to perform a collector transition (nanoseconds).
   static constexpr uint64_t kCollectorTransitionWait = MsToNs(5000);
+  // Whether the transition-wait applies or not. Zero wait will stress the
+  // transition code and collector, but increases jank probability.
+  DECLARE_RUNTIME_DEBUG_FLAG(kStressCollectorTransition);
 
   // Create a heap with the requested sizes. The possible empty
   // image_file_names names specify Spaces to load based on
@@ -250,19 +253,20 @@ class Heap {
   }
 
   // Visit all of the live objects in the heap.
-  void VisitObjects(ObjectCallback callback, void* arg)
+  template <typename Visitor>
+  ALWAYS_INLINE void VisitObjects(Visitor&& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_);
-  void VisitObjectsPaused(ObjectCallback callback, void* arg)
+  template <typename Visitor>
+  ALWAYS_INLINE void VisitObjectsPaused(Visitor&& visitor)
       REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
 
   void CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte_count)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void RegisterNativeAllocation(JNIEnv* env, size_t bytes)
-      REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !native_histogram_lock_);
-  void RegisterNativeFree(JNIEnv* env, size_t bytes)
-      REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !native_histogram_lock_);
+      REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !*native_blocking_gc_lock_);
+  void RegisterNativeFree(JNIEnv* env, size_t bytes);
 
   // Change the allocator, updates entrypoints.
   void ChangeAllocator(AllocatorType allocator)
@@ -331,7 +335,7 @@ class Heap {
 
   // Does a concurrent GC, should only be called by the GC daemon thread
   // through runtime.
-  void ConcurrentGC(Thread* self, bool force_full)
+  void ConcurrentGC(Thread* self, GcCause cause, bool force_full)
       REQUIRES(!Locks::runtime_shutdown_lock_, !*gc_complete_lock_, !*pending_task_lock_);
 
   // Implements VMDebug.countInstancesOfClass and JDWP VM_InstanceCount.
@@ -562,7 +566,7 @@ class Heap {
   space::Space* FindSpaceFromAddress(const void* ptr) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void DumpForSigQuit(std::ostream& os) REQUIRES(!*gc_complete_lock_, !native_histogram_lock_);
+  void DumpForSigQuit(std::ostream& os) REQUIRES(!*gc_complete_lock_);
 
   // Do a pending collector transition.
   void DoPendingCollectorTransition() REQUIRES(!*gc_complete_lock_, !*pending_task_lock_);
@@ -679,7 +683,7 @@ class Heap {
 
   // GC performance measuring
   void DumpGcPerformanceInfo(std::ostream& os)
-      REQUIRES(!*gc_complete_lock_, !native_histogram_lock_);
+      REQUIRES(!*gc_complete_lock_);
   void ResetGcPerformanceInfo() REQUIRES(!*gc_complete_lock_);
 
   // Thread pool.
@@ -744,7 +748,8 @@ class Heap {
   void RequestTrim(Thread* self) REQUIRES(!*pending_task_lock_);
 
   // Request asynchronous GC.
-  void RequestConcurrentGC(Thread* self, bool force_full) REQUIRES(!*pending_task_lock_);
+  void RequestConcurrentGC(Thread* self, GcCause cause, bool force_full)
+      REQUIRES(!*pending_task_lock_);
 
   // Whether or not we may use a garbage collector, used so that we only create collectors we need.
   bool MayUseCollector(CollectorType type) const;
@@ -820,6 +825,8 @@ class Heap {
   // Remove a gc pause listener. Note: the listener must not be deleted, as for performance
   // reasons, we assume it stays valid when we read it (so that we don't require a lock).
   void RemoveGcPauseListener();
+
+  const Verification* GetVerification() const;
 
  private:
   class ConcurrentGCTask;
@@ -979,10 +986,6 @@ class Heap {
   void PostGcVerificationPaused(collector::GarbageCollector* gc)
       REQUIRES(Locks::mutator_lock_, !*gc_complete_lock_);
 
-  // Update the watermark for the native allocated bytes based on the current number of native
-  // bytes allocated and the target utilization ratio.
-  void UpdateMaxNativeFootprint();
-
   // Find a collector based on GC type.
   collector::GarbageCollector* FindCollectorByGcType(collector::GcType gc_type);
 
@@ -1008,9 +1011,6 @@ class Heap {
                           uint64_t bytes_allocated_before_gc = 0);
 
   size_t GetPercentFree();
-
-  static void VerificationCallback(mirror::Object* obj, void* arg)
-      REQUIRES_SHARED(Locks::heap_bitmap_lock_);
 
   // Swap the allocation stack with the live stack.
   void SwapStacks() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1053,10 +1053,12 @@ class Heap {
   // Trim 0 pages at the end of reference tables.
   void TrimIndirectReferenceTables(Thread* self);
 
-  void VisitObjectsInternal(ObjectCallback callback, void* arg)
+  template <typename Visitor>
+  ALWAYS_INLINE void VisitObjectsInternal(Visitor&& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_);
-  void VisitObjectsInternalRegionSpace(ObjectCallback callback, void* arg)
+  template <typename Visitor>
+  ALWAYS_INLINE void VisitObjectsInternalRegionSpace(Visitor&& visitor)
       REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
 
   void UpdateGcCountRateHistograms() REQUIRES(gc_complete_lock_);
@@ -1065,6 +1067,33 @@ class Heap {
   void CheckGcStressMode(Thread* self, ObjPtr<mirror::Object>* obj)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !*backtrace_lock_);
+
+  collector::GcType NonStickyGcType() const {
+    return HasZygoteSpace() ? collector::kGcTypePartial : collector::kGcTypeFull;
+  }
+
+  // How large new_native_bytes_allocated_ can grow before we trigger a new
+  // GC.
+  ALWAYS_INLINE size_t NativeAllocationGcWatermark() const {
+    // Reuse max_free_ for the native allocation gc watermark, so that the
+    // native heap is treated in the same way as the Java heap in the case
+    // where the gc watermark update would exceed max_free_. Using max_free_
+    // instead of the target utilization means the watermark doesn't depend on
+    // the current number of registered native allocations.
+    return max_free_;
+  }
+
+  // How large new_native_bytes_allocated_ can grow while GC is in progress
+  // before we block the allocating thread to allow GC to catch up.
+  ALWAYS_INLINE size_t NativeAllocationBlockingGcWatermark() const {
+    // Historically the native allocations were bounded by growth_limit_. This
+    // uses that same value, dividing growth_limit_ by 2 to account for
+    // the fact that now the bound is relative to the number of retained
+    // registered native allocations rather than absolute.
+    return growth_limit_ / 2;
+  }
+
+  void TraceHeapSize(size_t heap_size);
 
   // All-known continuous spaces, where objects lie within fixed bounds.
   std::vector<space::ContinuousSpace*> continuous_spaces_ GUARDED_BY(Locks::mutator_lock_);
@@ -1166,8 +1195,14 @@ class Heap {
   // Task processor, proxies heap trim requests to the daemon threads.
   std::unique_ptr<TaskProcessor> task_processor_;
 
-  // True while the garbage collector is running.
+  // Collector type of the running GC.
   volatile CollectorType collector_type_running_ GUARDED_BY(gc_complete_lock_);
+
+  // Cause of the last running GC.
+  volatile GcCause last_gc_cause_ GUARDED_BY(gc_complete_lock_);
+
+  // The thread currently running the GC.
+  volatile Thread* thread_running_gc_ GUARDED_BY(gc_complete_lock_);
 
   // Last Gc type we ran. Used by WaitForConcurrentGc to know which Gc was waited on.
   volatile collector::GcType last_gc_type_ GUARDED_BY(gc_complete_lock_);
@@ -1184,12 +1219,6 @@ class Heap {
   // a GC should be triggered.
   size_t max_allowed_footprint_;
 
-  // The watermark at which a concurrent GC is requested by registerNativeAllocation.
-  size_t native_footprint_gc_watermark_;
-
-  // Whether or not we need to run finalizers in the next native allocation.
-  bool native_need_to_run_finalization_;
-
   // When num_bytes_allocated_ exceeds this amount then a concurrent GC should be requested so that
   // it completes ahead of an allocation failing.
   size_t concurrent_start_bytes_;
@@ -1203,13 +1232,35 @@ class Heap {
   // Number of bytes allocated.  Adjusted after each allocation and free.
   Atomic<size_t> num_bytes_allocated_;
 
-  // Bytes which are allocated and managed by native code but still need to be accounted for.
-  Atomic<size_t> native_bytes_allocated_;
+  // Number of registered native bytes allocated since the last time GC was
+  // triggered. Adjusted after each RegisterNativeAllocation and
+  // RegisterNativeFree. Used to determine when to trigger GC for native
+  // allocations.
+  // See the REDESIGN section of go/understanding-register-native-allocation.
+  Atomic<size_t> new_native_bytes_allocated_;
 
-  // Native allocation stats.
-  Mutex native_histogram_lock_;
-  Histogram<uint64_t> native_allocation_histogram_;
-  Histogram<uint64_t> native_free_histogram_;
+  // Number of registered native bytes allocated prior to the last time GC was
+  // triggered, for debugging purposes. The current number of registered
+  // native bytes is determined by taking the sum of
+  // old_native_bytes_allocated_ and new_native_bytes_allocated_.
+  Atomic<size_t> old_native_bytes_allocated_;
+
+  // Used for synchronization when multiple threads call into
+  // RegisterNativeAllocation and require blocking GC.
+  // * If a previous blocking GC is in progress, all threads will wait for
+  // that GC to complete, then wait for one of the threads to complete another
+  // blocking GC.
+  // * If a blocking GC is assigned but not in progress, a thread has been
+  // assigned to run a blocking GC but has not started yet. Threads will wait
+  // for the assigned blocking GC to complete.
+  // * If a blocking GC is not assigned nor in progress, the first thread will
+  // run a blocking GC and signal to other threads that blocking GC has been
+  // assigned.
+  Mutex* native_blocking_gc_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  std::unique_ptr<ConditionVariable> native_blocking_gc_cond_ GUARDED_BY(native_blocking_gc_lock_);
+  bool native_blocking_gc_is_assigned_ GUARDED_BY(native_blocking_gc_lock_);
+  bool native_blocking_gc_in_progress_ GUARDED_BY(native_blocking_gc_lock_);
+  uint32_t native_blocking_gcs_finished_ GUARDED_BY(native_blocking_gc_lock_);
 
   // Number of bytes freed by thread local buffer revokes. This will
   // cancel out the ahead-of-time bulk counting of bytes allocated in
@@ -1402,6 +1453,8 @@ class Heap {
   Atomic<AllocationListener*> alloc_listener_;
   // An installed GC Pause listener.
   Atomic<GcPauseListener*> gc_pause_listener_;
+
+  std::unique_ptr<Verification> verification_;
 
   friend class CollectorTransitionTask;
   friend class collector::GarbageCollector;

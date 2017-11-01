@@ -18,9 +18,10 @@
 #define ART_RUNTIME_BASE_CASTS_H_
 
 #include <assert.h>
-#include <limits>
 #include <stdint.h>
 #include <string.h>
+
+#include <limits>
 #include <type_traits>
 
 #include "base/logging.h"
@@ -98,7 +99,9 @@ inline Dest dchecked_integral_cast(const Source source) {
       // Check that the value is within the upper limit of Dest.
       (static_cast<uintmax_t>(std::numeric_limits<Dest>::max()) >=
           static_cast<uintmax_t>(std::numeric_limits<Source>::max()) ||
-          source <= static_cast<Source>(std::numeric_limits<Dest>::max())));
+          source <= static_cast<Source>(std::numeric_limits<Dest>::max())))
+      << "dchecked_integral_cast failed for " << source
+      << " (would be " << static_cast<Dest>(source) << ")";
 
   return static_cast<Dest>(source);
 }

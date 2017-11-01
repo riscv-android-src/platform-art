@@ -135,14 +135,24 @@ class ArmVIXLMacroAssembler FINAL : public vixl32::MacroAssembler {
   // jumping within 2KB range. For B(cond, label), because the supported branch range is 256
   // bytes; we use the far_target hint to try to use 16-bit T1 encoding for short range jumps.
   void B(vixl32::Condition cond, vixl32::Label* label, bool is_far_target = true);
+
+  // Use literal for generating double constant if it doesn't fit VMOV encoding.
+  void Vmov(vixl32::DRegister rd, double imm) {
+    if (vixl::VFP::IsImmFP64(imm)) {
+      MacroAssembler::Vmov(rd, imm);
+    } else {
+      MacroAssembler::Vldr(rd, imm);
+    }
+  }
+  using MacroAssembler::Vmov;
 };
 
 class ArmVIXLAssembler FINAL : public Assembler {
  private:
   class ArmException;
  public:
-  explicit ArmVIXLAssembler(ArenaAllocator* arena)
-      : Assembler(arena) {
+  explicit ArmVIXLAssembler(ArenaAllocator* allocator)
+      : Assembler(allocator) {
     // Use Thumb2 instruction set.
     vixl_masm_.UseT32();
   }
@@ -168,6 +178,7 @@ class ArmVIXLAssembler FINAL : public Assembler {
   //
   // Heap poisoning.
   //
+
   // Poison a heap reference contained in `reg`.
   void PoisonHeapReference(vixl32::Register reg);
   // Unpoison a heap reference contained in `reg`.
@@ -176,6 +187,15 @@ class ArmVIXLAssembler FINAL : public Assembler {
   void MaybePoisonHeapReference(vixl32::Register reg);
   // Unpoison a heap reference contained in `reg` if heap poisoning is enabled.
   void MaybeUnpoisonHeapReference(vixl32::Register reg);
+
+  // Emit code checking the status of the Marking Register, and aborting
+  // the program if MR does not match the value stored in the art::Thread
+  // object.
+  //
+  // Argument `temp` is used as a temporary register to generate code.
+  // Argument `code` is used to identify the different occurrences of
+  // MaybeGenerateMarkingRegisterCheck and is passed to the BKPT instruction.
+  void GenerateMarkingRegisterCheck(vixl32::Register temp, int code = 0);
 
   void StoreToOffset(StoreOperandType type,
                      vixl32::Register reg,
@@ -231,6 +251,8 @@ class ArmVIXLAssembler FINAL : public Assembler {
 
 // Thread register declaration.
 extern const vixl32::Register tr;
+// Marking register declaration.
+extern const vixl32::Register mr;
 
 }  // namespace arm
 }  // namespace art

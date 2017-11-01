@@ -15,18 +15,23 @@
  */
 
 #include "sun_misc_Unsafe.h"
+
+#include <unistd.h>
+
+#include <cstdlib>
+#include <cstring>
+#include <atomic>
+
+#include "nativehelper/jni_macros.h"
+
 #include "common_throws.h"
 #include "gc/accounting/card_table-inl.h"
 #include "jni_internal.h"
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "native_util.h"
 #include "scoped_fast_native_object_access-inl.h"
-
-#include <unistd.h>
-#include <stdlib.h>
-#include <string.h>
-#include <atomic>
 
 namespace art {
 
@@ -62,10 +67,12 @@ static jboolean Unsafe_compareAndSwapObject(JNIEnv* env, jobject, jobject javaOb
   if (kUseReadBarrier) {
     // Need to make sure the reference stored in the field is a to-space one before attempting the
     // CAS or the CAS could fail incorrectly.
+    // Note that the read barrier load does NOT need to be volatile.
     mirror::HeapReference<mirror::Object>* field_addr =
         reinterpret_cast<mirror::HeapReference<mirror::Object>*>(
             reinterpret_cast<uint8_t*>(obj.Ptr()) + static_cast<size_t>(offset));
-    ReadBarrier::Barrier<mirror::Object, kWithReadBarrier, /* kAlwaysUpdateField */ true>(
+    ReadBarrier::Barrier<mirror::Object, /* kIsVolatile */ false, kWithReadBarrier,
+        /* kAlwaysUpdateField */ true>(
         obj.Ptr(),
         MemberOffset(offset),
         field_addr);
@@ -107,6 +114,7 @@ static void Unsafe_putOrderedInt(JNIEnv* env, jobject, jobject javaObj, jlong of
                                  jint newValue) {
   ScopedFastNativeObjectAccess soa(env);
   ObjPtr<mirror::Object> obj = soa.Decode<mirror::Object>(javaObj);
+  // TODO: A release store is likely to be faster on future processors.
   QuasiAtomic::ThreadFenceRelease();
   // JNI must use non transactional mode.
   obj->SetField32<false>(MemberOffset(offset), newValue);
@@ -492,69 +500,69 @@ static void Unsafe_fullFence(JNIEnv*, jobject) {
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Unsafe, compareAndSwapInt, "!(Ljava/lang/Object;JII)Z"),
-  NATIVE_METHOD(Unsafe, compareAndSwapLong, "!(Ljava/lang/Object;JJJ)Z"),
-  NATIVE_METHOD(Unsafe, compareAndSwapObject, "!(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(Unsafe, getIntVolatile, "!(Ljava/lang/Object;J)I"),
-  NATIVE_METHOD(Unsafe, putIntVolatile, "!(Ljava/lang/Object;JI)V"),
-  NATIVE_METHOD(Unsafe, getLongVolatile, "!(Ljava/lang/Object;J)J"),
-  NATIVE_METHOD(Unsafe, putLongVolatile, "!(Ljava/lang/Object;JJ)V"),
-  NATIVE_METHOD(Unsafe, getObjectVolatile, "!(Ljava/lang/Object;J)Ljava/lang/Object;"),
-  NATIVE_METHOD(Unsafe, putObjectVolatile, "!(Ljava/lang/Object;JLjava/lang/Object;)V"),
-  NATIVE_METHOD(Unsafe, getInt, "!(Ljava/lang/Object;J)I"),
-  NATIVE_METHOD(Unsafe, putInt, "!(Ljava/lang/Object;JI)V"),
-  NATIVE_METHOD(Unsafe, putOrderedInt, "!(Ljava/lang/Object;JI)V"),
-  NATIVE_METHOD(Unsafe, getLong, "!(Ljava/lang/Object;J)J"),
-  NATIVE_METHOD(Unsafe, putLong, "!(Ljava/lang/Object;JJ)V"),
-  NATIVE_METHOD(Unsafe, putOrderedLong, "!(Ljava/lang/Object;JJ)V"),
-  NATIVE_METHOD(Unsafe, getObject, "!(Ljava/lang/Object;J)Ljava/lang/Object;"),
-  NATIVE_METHOD(Unsafe, putObject, "!(Ljava/lang/Object;JLjava/lang/Object;)V"),
-  NATIVE_METHOD(Unsafe, putOrderedObject, "!(Ljava/lang/Object;JLjava/lang/Object;)V"),
-  NATIVE_METHOD(Unsafe, getArrayBaseOffsetForComponentType, "!(Ljava/lang/Class;)I"),
-  NATIVE_METHOD(Unsafe, getArrayIndexScaleForComponentType, "!(Ljava/lang/Class;)I"),
-  NATIVE_METHOD(Unsafe, addressSize, "!()I"),
-  NATIVE_METHOD(Unsafe, pageSize, "!()I"),
-  NATIVE_METHOD(Unsafe, allocateMemory, "!(J)J"),
-  NATIVE_METHOD(Unsafe, freeMemory, "!(J)V"),
-  NATIVE_METHOD(Unsafe, setMemory, "!(JJB)V"),
-  NATIVE_METHOD(Unsafe, copyMemory, "!(JJJ)V"),
-  NATIVE_METHOD(Unsafe, copyMemoryToPrimitiveArray, "!(JLjava/lang/Object;JJ)V"),
-  NATIVE_METHOD(Unsafe, copyMemoryFromPrimitiveArray, "!(Ljava/lang/Object;JJJ)V"),
-  NATIVE_METHOD(Unsafe, getBoolean, "!(Ljava/lang/Object;J)Z"),
+  FAST_NATIVE_METHOD(Unsafe, compareAndSwapInt, "(Ljava/lang/Object;JII)Z"),
+  FAST_NATIVE_METHOD(Unsafe, compareAndSwapLong, "(Ljava/lang/Object;JJJ)Z"),
+  FAST_NATIVE_METHOD(Unsafe, compareAndSwapObject, "(Ljava/lang/Object;JLjava/lang/Object;Ljava/lang/Object;)Z"),
+  FAST_NATIVE_METHOD(Unsafe, getIntVolatile, "(Ljava/lang/Object;J)I"),
+  FAST_NATIVE_METHOD(Unsafe, putIntVolatile, "(Ljava/lang/Object;JI)V"),
+  FAST_NATIVE_METHOD(Unsafe, getLongVolatile, "(Ljava/lang/Object;J)J"),
+  FAST_NATIVE_METHOD(Unsafe, putLongVolatile, "(Ljava/lang/Object;JJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, getObjectVolatile, "(Ljava/lang/Object;J)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Unsafe, putObjectVolatile, "(Ljava/lang/Object;JLjava/lang/Object;)V"),
+  FAST_NATIVE_METHOD(Unsafe, getInt, "(Ljava/lang/Object;J)I"),
+  FAST_NATIVE_METHOD(Unsafe, putInt, "(Ljava/lang/Object;JI)V"),
+  FAST_NATIVE_METHOD(Unsafe, putOrderedInt, "(Ljava/lang/Object;JI)V"),
+  FAST_NATIVE_METHOD(Unsafe, getLong, "(Ljava/lang/Object;J)J"),
+  FAST_NATIVE_METHOD(Unsafe, putLong, "(Ljava/lang/Object;JJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, putOrderedLong, "(Ljava/lang/Object;JJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, getObject, "(Ljava/lang/Object;J)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Unsafe, putObject, "(Ljava/lang/Object;JLjava/lang/Object;)V"),
+  FAST_NATIVE_METHOD(Unsafe, putOrderedObject, "(Ljava/lang/Object;JLjava/lang/Object;)V"),
+  FAST_NATIVE_METHOD(Unsafe, getArrayBaseOffsetForComponentType, "(Ljava/lang/Class;)I"),
+  FAST_NATIVE_METHOD(Unsafe, getArrayIndexScaleForComponentType, "(Ljava/lang/Class;)I"),
+  FAST_NATIVE_METHOD(Unsafe, addressSize, "()I"),
+  FAST_NATIVE_METHOD(Unsafe, pageSize, "()I"),
+  FAST_NATIVE_METHOD(Unsafe, allocateMemory, "(J)J"),
+  FAST_NATIVE_METHOD(Unsafe, freeMemory, "(J)V"),
+  FAST_NATIVE_METHOD(Unsafe, setMemory, "(JJB)V"),
+  FAST_NATIVE_METHOD(Unsafe, copyMemory, "(JJJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, copyMemoryToPrimitiveArray, "(JLjava/lang/Object;JJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, copyMemoryFromPrimitiveArray, "(Ljava/lang/Object;JJJ)V"),
+  FAST_NATIVE_METHOD(Unsafe, getBoolean, "(Ljava/lang/Object;J)Z"),
 
-  NATIVE_METHOD(Unsafe, getByte, "!(Ljava/lang/Object;J)B"),
-  NATIVE_METHOD(Unsafe, getChar, "!(Ljava/lang/Object;J)C"),
-  NATIVE_METHOD(Unsafe, getShort, "!(Ljava/lang/Object;J)S"),
-  NATIVE_METHOD(Unsafe, getFloat, "!(Ljava/lang/Object;J)F"),
-  NATIVE_METHOD(Unsafe, getDouble, "!(Ljava/lang/Object;J)D"),
-  NATIVE_METHOD(Unsafe, putBoolean, "!(Ljava/lang/Object;JZ)V"),
-  NATIVE_METHOD(Unsafe, putByte, "!(Ljava/lang/Object;JB)V"),
-  NATIVE_METHOD(Unsafe, putChar, "!(Ljava/lang/Object;JC)V"),
-  NATIVE_METHOD(Unsafe, putShort, "!(Ljava/lang/Object;JS)V"),
-  NATIVE_METHOD(Unsafe, putFloat, "!(Ljava/lang/Object;JF)V"),
-  NATIVE_METHOD(Unsafe, putDouble, "!(Ljava/lang/Object;JD)V"),
+  FAST_NATIVE_METHOD(Unsafe, getByte, "(Ljava/lang/Object;J)B"),
+  FAST_NATIVE_METHOD(Unsafe, getChar, "(Ljava/lang/Object;J)C"),
+  FAST_NATIVE_METHOD(Unsafe, getShort, "(Ljava/lang/Object;J)S"),
+  FAST_NATIVE_METHOD(Unsafe, getFloat, "(Ljava/lang/Object;J)F"),
+  FAST_NATIVE_METHOD(Unsafe, getDouble, "(Ljava/lang/Object;J)D"),
+  FAST_NATIVE_METHOD(Unsafe, putBoolean, "(Ljava/lang/Object;JZ)V"),
+  FAST_NATIVE_METHOD(Unsafe, putByte, "(Ljava/lang/Object;JB)V"),
+  FAST_NATIVE_METHOD(Unsafe, putChar, "(Ljava/lang/Object;JC)V"),
+  FAST_NATIVE_METHOD(Unsafe, putShort, "(Ljava/lang/Object;JS)V"),
+  FAST_NATIVE_METHOD(Unsafe, putFloat, "(Ljava/lang/Object;JF)V"),
+  FAST_NATIVE_METHOD(Unsafe, putDouble, "(Ljava/lang/Object;JD)V"),
 
   // Each of the getFoo variants are overloaded with a call that operates
   // directively on a native pointer.
-  OVERLOADED_NATIVE_METHOD(Unsafe, getByte, "!(J)B", getByteJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getChar, "!(J)C", getCharJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getShort, "!(J)S", getShortJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getInt, "!(J)I", getIntJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getLong, "!(J)J", getLongJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getFloat, "!(J)F", getFloatJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, getDouble, "!(J)D", getDoubleJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putByte, "!(JB)V", putByteJB),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putChar, "!(JC)V", putCharJC),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putShort, "!(JS)V", putShortJS),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putInt, "!(JI)V", putIntJI),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putLong, "!(JJ)V", putLongJJ),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putFloat, "!(JF)V", putFloatJF),
-  OVERLOADED_NATIVE_METHOD(Unsafe, putDouble, "!(JD)V", putDoubleJD),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getByte, "(J)B", getByteJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getChar, "(J)C", getCharJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getShort, "(J)S", getShortJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getInt, "(J)I", getIntJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getLong, "(J)J", getLongJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getFloat, "(J)F", getFloatJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, getDouble, "(J)D", getDoubleJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putByte, "(JB)V", putByteJB),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putChar, "(JC)V", putCharJC),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putShort, "(JS)V", putShortJS),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putInt, "(JI)V", putIntJI),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putLong, "(JJ)V", putLongJJ),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putFloat, "(JF)V", putFloatJF),
+  OVERLOADED_FAST_NATIVE_METHOD(Unsafe, putDouble, "(JD)V", putDoubleJD),
 
   // CAS
-  NATIVE_METHOD(Unsafe, loadFence, "!()V"),
-  NATIVE_METHOD(Unsafe, storeFence, "!()V"),
-  NATIVE_METHOD(Unsafe, fullFence, "!()V"),
+  FAST_NATIVE_METHOD(Unsafe, loadFence, "()V"),
+  FAST_NATIVE_METHOD(Unsafe, storeFence, "()V"),
+  FAST_NATIVE_METHOD(Unsafe, fullFence, "()V"),
 };
 
 void register_sun_misc_Unsafe(JNIEnv* env) {

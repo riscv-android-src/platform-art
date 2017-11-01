@@ -16,17 +16,29 @@
 
 #include "intrinsics.h"
 
-#include "art_method.h"
+#include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "class_linker.h"
 #include "driver/compiler_driver.h"
+#include "driver/compiler_options.h"
 #include "invoke_type.h"
 #include "mirror/dex_cache-inl.h"
 #include "nodes.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {
+
+// Check that intrinsic enum values fit within space set aside in ArtMethod modifier flags.
+#define CHECK_INTRINSICS_ENUM_VALUES(Name, IsStatic, NeedsEnvironmentOrCache, SideEffects, Exceptions, ...) \
+  static_assert( \
+      static_cast<uint32_t>(Intrinsics::k ## Name) <= (kAccIntrinsicBits >> CTZ(kAccIntrinsicBits)), \
+      "Instrinsics enumeration space overflow.");
+#include "intrinsics_list.h"
+  INTRINSICS_LIST(CHECK_INTRINSICS_ENUM_VALUES)
+#undef INTRINSICS_LIST
+#undef CHECK_INTRINSICS_ENUM_VALUES
 
 // Function that returns whether an intrinsic is static/direct or virtual.
 static inline InvokeType GetIntrinsicInvokeType(Intrinsics i) {
@@ -37,7 +49,7 @@ static inline InvokeType GetIntrinsicInvokeType(Intrinsics i) {
     case Intrinsics::k ## Name: \
       return IsStatic;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
   }
@@ -53,7 +65,7 @@ static inline IntrinsicNeedsEnvironmentOrCache NeedsEnvironmentOrCache(Intrinsic
     case Intrinsics::k ## Name: \
       return NeedsEnvironmentOrCache;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
   }
@@ -69,7 +81,7 @@ static inline IntrinsicSideEffects GetSideEffects(Intrinsics i) {
     case Intrinsics::k ## Name: \
       return SideEffects;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
   }
@@ -85,7 +97,7 @@ static inline IntrinsicExceptions GetExceptions(Intrinsics i) {
     case Intrinsics::k ## Name: \
       return Exceptions;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
   }
@@ -107,6 +119,7 @@ static bool CheckInvokeType(Intrinsics intrinsic, HInvoke* invoke) {
   // InvokeStaticOrDirect.
   InvokeType intrinsic_type = GetIntrinsicInvokeType(intrinsic);
   InvokeType invoke_type = invoke->GetInvokeType();
+
   switch (intrinsic_type) {
     case kStatic:
       return (invoke_type == kStatic);
@@ -144,15 +157,16 @@ void IntrinsicsRecognizer::Run() {
           Intrinsics intrinsic = static_cast<Intrinsics>(art_method->GetIntrinsic());
           if (!CheckInvokeType(intrinsic, invoke)) {
             LOG(WARNING) << "Found an intrinsic with unexpected invoke type: "
-                << intrinsic << " for "
-                << invoke->GetDexFile().PrettyMethod(invoke->GetDexMethodIndex())
+                << static_cast<uint32_t>(intrinsic) << " for "
+                << art_method->PrettyMethod()
                 << invoke->DebugName();
           } else {
             invoke->SetIntrinsic(intrinsic,
                                  NeedsEnvironmentOrCache(intrinsic),
                                  GetSideEffects(intrinsic),
                                  GetExceptions(intrinsic));
-            MaybeRecordStat(MethodCompilationStat::kIntrinsicRecognized);
+            MaybeRecordStat(stats_,
+                            MethodCompilationStat::kIntrinsicRecognized);
           }
         }
       }
@@ -170,12 +184,120 @@ std::ostream& operator<<(std::ostream& os, const Intrinsics& intrinsic) {
       os << # Name; \
       break;
 #include "intrinsics_list.h"
-INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
 #undef STATIC_INTRINSICS_LIST
 #undef VIRTUAL_INTRINSICS_LIST
 #undef OPTIMIZING_INTRINSICS
   }
   return os;
+}
+
+void IntrinsicVisitor::ComputeIntegerValueOfLocations(HInvoke* invoke,
+                                                      CodeGenerator* codegen,
+                                                      Location return_location,
+                                                      Location first_argument_location) {
+  if (Runtime::Current()->IsAotCompiler()) {
+    if (codegen->GetCompilerOptions().IsBootImage() ||
+        codegen->GetCompilerOptions().GetCompilePic()) {
+      // TODO(ngeoffray): Support boot image compilation.
+      return;
+    }
+  }
+
+  IntegerValueOfInfo info = ComputeIntegerValueOfInfo();
+
+  // Most common case is that we have found all we needed (classes are initialized
+  // and in the boot image). Bail if not.
+  if (info.integer_cache == nullptr ||
+      info.integer == nullptr ||
+      info.cache == nullptr ||
+      info.value_offset == 0 ||
+      // low and high cannot be 0, per the spec.
+      info.low == 0 ||
+      info.high == 0) {
+    LOG(INFO) << "Integer.valueOf will not be optimized";
+    return;
+  }
+
+  // The intrinsic will call if it needs to allocate a j.l.Integer.
+  LocationSummary* locations = new (invoke->GetBlock()->GetGraph()->GetAllocator()) LocationSummary(
+      invoke, LocationSummary::kCallOnMainOnly, kIntrinsified);
+  if (!invoke->InputAt(0)->IsConstant()) {
+    locations->SetInAt(0, Location::RequiresRegister());
+  }
+  locations->AddTemp(first_argument_location);
+  locations->SetOut(return_location);
+}
+
+IntrinsicVisitor::IntegerValueOfInfo IntrinsicVisitor::ComputeIntegerValueOfInfo() {
+  // Note that we could cache all of the data looked up here. but there's no good
+  // location for it. We don't want to add it to WellKnownClasses, to avoid creating global
+  // jni values. Adding it as state to the compiler singleton seems like wrong
+  // separation of concerns.
+  // The need for this data should be pretty rare though.
+
+  // The most common case is that the classes are in the boot image and initialized,
+  // which is easy to generate code for. We bail if not.
+  Thread* self = Thread::Current();
+  ScopedObjectAccess soa(self);
+  Runtime* runtime = Runtime::Current();
+  ClassLinker* class_linker = runtime->GetClassLinker();
+  gc::Heap* heap = runtime->GetHeap();
+  IntegerValueOfInfo info;
+  info.integer_cache = class_linker->FindSystemClass(self, "Ljava/lang/Integer$IntegerCache;");
+  if (info.integer_cache == nullptr) {
+    self->ClearException();
+    return info;
+  }
+  if (!heap->ObjectIsInBootImageSpace(info.integer_cache) || !info.integer_cache->IsInitialized()) {
+    // Optimization only works if the class is initialized and in the boot image.
+    return info;
+  }
+  info.integer = class_linker->FindSystemClass(self, "Ljava/lang/Integer;");
+  if (info.integer == nullptr) {
+    self->ClearException();
+    return info;
+  }
+  if (!heap->ObjectIsInBootImageSpace(info.integer) || !info.integer->IsInitialized()) {
+    // Optimization only works if the class is initialized and in the boot image.
+    return info;
+  }
+
+  ArtField* field = info.integer_cache->FindDeclaredStaticField("cache", "[Ljava/lang/Integer;");
+  if (field == nullptr) {
+    return info;
+  }
+  info.cache = static_cast<mirror::ObjectArray<mirror::Object>*>(
+      field->GetObject(info.integer_cache).Ptr());
+  if (info.cache == nullptr) {
+    return info;
+  }
+
+  if (!heap->ObjectIsInBootImageSpace(info.cache)) {
+    // Optimization only works if the object is in the boot image.
+    return info;
+  }
+
+  field = info.integer->FindDeclaredInstanceField("value", "I");
+  if (field == nullptr) {
+    return info;
+  }
+  info.value_offset = field->GetOffset().Int32Value();
+
+  field = info.integer_cache->FindDeclaredStaticField("low", "I");
+  if (field == nullptr) {
+    return info;
+  }
+  info.low = field->GetInt(info.integer_cache);
+
+  field = info.integer_cache->FindDeclaredStaticField("high", "I");
+  if (field == nullptr) {
+    return info;
+  }
+  info.high = field->GetInt(info.integer_cache);
+
+  DCHECK_EQ(info.cache->GetLength(), info.high - info.low + 1);
+  return info;
 }
 
 }  // namespace art

@@ -18,6 +18,7 @@
 #define ART_COMPILER_OPTIMIZING_COMMON_ARM_H_
 
 #include "debug/dwarf/register.h"
+#include "instruction_simplifier_shared.h"
 #include "locations.h"
 #include "nodes.h"
 #include "utils/arm/constants_arm.h"
@@ -29,6 +30,9 @@
 #pragma GCC diagnostic pop
 
 namespace art {
+
+using helpers::HasShifterOperand;
+
 namespace arm {
 namespace helpers {
 
@@ -62,13 +66,18 @@ inline vixl::aarch32::SRegister LowSRegisterFrom(Location location) {
   return vixl::aarch32::SRegister(location.AsFpuRegisterPairLow<vixl::aarch32::SRegister>());
 }
 
+inline vixl::aarch32::SRegister HighSRegisterFrom(Location location) {
+  DCHECK(location.IsFpuRegisterPair()) << location;
+  return vixl::aarch32::SRegister(location.AsFpuRegisterPairHigh<vixl::aarch32::SRegister>());
+}
+
 inline vixl::aarch32::Register RegisterFrom(Location location) {
   DCHECK(location.IsRegister()) << location;
   return vixl::aarch32::Register(location.reg());
 }
 
-inline vixl::aarch32::Register RegisterFrom(Location location, Primitive::Type type) {
-  DCHECK(type != Primitive::kPrimVoid && !Primitive::IsFloatingPointType(type)) << type;
+inline vixl::aarch32::Register RegisterFrom(Location location, DataType::Type type) {
+  DCHECK(type != DataType::Type::kVoid && !DataType::IsFloatingPointType(type)) << type;
   return RegisterFrom(location);
 }
 
@@ -85,20 +94,20 @@ inline vixl::aarch32::SRegister SRegisterFrom(Location location) {
 }
 
 inline vixl::aarch32::SRegister OutputSRegister(HInstruction* instr) {
-  Primitive::Type type = instr->GetType();
-  DCHECK_EQ(type, Primitive::kPrimFloat) << type;
+  DataType::Type type = instr->GetType();
+  DCHECK_EQ(type, DataType::Type::kFloat32) << type;
   return SRegisterFrom(instr->GetLocations()->Out());
 }
 
 inline vixl::aarch32::DRegister OutputDRegister(HInstruction* instr) {
-  Primitive::Type type = instr->GetType();
-  DCHECK_EQ(type, Primitive::kPrimDouble) << type;
+  DataType::Type type = instr->GetType();
+  DCHECK_EQ(type, DataType::Type::kFloat64) << type;
   return DRegisterFrom(instr->GetLocations()->Out());
 }
 
 inline vixl::aarch32::VRegister OutputVRegister(HInstruction* instr) {
-  Primitive::Type type = instr->GetType();
-  if (type == Primitive::kPrimFloat) {
+  DataType::Type type = instr->GetType();
+  if (type == DataType::Type::kFloat32) {
     return OutputSRegister(instr);
   } else {
     return OutputDRegister(instr);
@@ -106,23 +115,23 @@ inline vixl::aarch32::VRegister OutputVRegister(HInstruction* instr) {
 }
 
 inline vixl::aarch32::SRegister InputSRegisterAt(HInstruction* instr, int input_index) {
-  Primitive::Type type = instr->InputAt(input_index)->GetType();
-  DCHECK_EQ(type, Primitive::kPrimFloat) << type;
+  DataType::Type type = instr->InputAt(input_index)->GetType();
+  DCHECK_EQ(type, DataType::Type::kFloat32) << type;
   return SRegisterFrom(instr->GetLocations()->InAt(input_index));
 }
 
 inline vixl::aarch32::DRegister InputDRegisterAt(HInstruction* instr, int input_index) {
-  Primitive::Type type = instr->InputAt(input_index)->GetType();
-  DCHECK_EQ(type, Primitive::kPrimDouble) << type;
+  DataType::Type type = instr->InputAt(input_index)->GetType();
+  DCHECK_EQ(type, DataType::Type::kFloat64) << type;
   return DRegisterFrom(instr->GetLocations()->InAt(input_index));
 }
 
 inline vixl::aarch32::VRegister InputVRegisterAt(HInstruction* instr, int input_index) {
-  Primitive::Type type = instr->InputAt(input_index)->GetType();
-  if (type == Primitive::kPrimFloat) {
+  DataType::Type type = instr->InputAt(input_index)->GetType();
+  if (type == DataType::Type::kFloat32) {
     return InputSRegisterAt(instr, input_index);
   } else {
-    DCHECK_EQ(type, Primitive::kPrimDouble);
+    DCHECK_EQ(type, DataType::Type::kFloat64);
     return InputDRegisterAt(instr, input_index);
   }
 }
@@ -144,6 +153,12 @@ inline vixl::aarch32::Register InputRegisterAt(HInstruction* instr, int input_in
 inline vixl::aarch32::Register InputRegister(HInstruction* instr) {
   DCHECK_EQ(instr->InputCount(), 1u);
   return InputRegisterAt(instr, 0);
+}
+
+inline vixl::aarch32::DRegister DRegisterFromS(vixl::aarch32::SRegister s) {
+  vixl::aarch32::DRegister d = vixl::aarch32::DRegister(s.GetCode() / 2);
+  DCHECK(s.Is(d.GetLane(0)) || s.Is(d.GetLane(1)));
+  return d;
 }
 
 inline int32_t Int32ConstantFrom(HInstruction* instr) {
@@ -181,7 +196,7 @@ inline uint64_t Uint64ConstantFrom(HInstruction* instr) {
   return instr->AsConstant()->GetValueAsUint64();
 }
 
-inline vixl::aarch32::Operand OperandFrom(Location location, Primitive::Type type) {
+inline vixl::aarch32::Operand OperandFrom(Location location, DataType::Type type) {
   if (location.IsRegister()) {
     return vixl::aarch32::Operand(RegisterFrom(location, type));
   } else {

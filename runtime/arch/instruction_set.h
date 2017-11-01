@@ -68,12 +68,20 @@ static constexpr size_t kArmAlignment = 8;
 // ARM64 instruction alignment. This is the recommended alignment for maximum performance.
 static constexpr size_t kArm64Alignment = 16;
 
-// MIPS instruction alignment.  MIPS processors require code to be 4-byte aligned.
-// TODO: Can this be 4?
+// MIPS instruction alignment.  MIPS processors require code to be 4-byte aligned,
+// but 64-bit literals must be 8-byte aligned.
 static constexpr size_t kMipsAlignment = 8;
 
 // X86 instruction alignment. This is the recommended alignment for maximum performance.
 static constexpr size_t kX86Alignment = 16;
+
+// Different than code alignment since code alignment is only first instruction of method.
+static constexpr size_t kThumb2InstructionAlignment = 2;
+static constexpr size_t kArm64InstructionAlignment = 4;
+static constexpr size_t kX86InstructionAlignment = 1;
+static constexpr size_t kX86_64InstructionAlignment = 1;
+static constexpr size_t kMipsInstructionAlignment = 4;
+static constexpr size_t kMips64InstructionAlignment = 4;
 
 const char* GetInstructionSetString(InstructionSet isa);
 
@@ -85,7 +93,7 @@ InstructionSet GetInstructionSetFromELF(uint16_t e_machine, uint32_t e_flags);
 // Fatal logging out of line to keep the header clean of logging.h.
 NO_RETURN void InstructionSetAbort(InstructionSet isa);
 
-static inline PointerSize GetInstructionSetPointerSize(InstructionSet isa) {
+constexpr PointerSize GetInstructionSetPointerSize(InstructionSet isa) {
   switch (isa) {
     case kArm:
       // Fall-through.
@@ -101,12 +109,37 @@ static inline PointerSize GetInstructionSetPointerSize(InstructionSet isa) {
       return kMipsPointerSize;
     case kMips64:
       return kMips64PointerSize;
-    default:
-      InstructionSetAbort(isa);
+
+    case kNone:
+      break;
   }
+  InstructionSetAbort(isa);
 }
 
-static inline bool IsValidInstructionSet(InstructionSet isa) {
+constexpr size_t GetInstructionSetInstructionAlignment(InstructionSet isa) {
+  switch (isa) {
+    case kArm:
+      // Fall-through.
+    case kThumb2:
+      return kThumb2InstructionAlignment;
+    case kArm64:
+      return kArm64InstructionAlignment;
+    case kX86:
+      return kX86InstructionAlignment;
+    case kX86_64:
+      return kX86_64InstructionAlignment;
+    case kMips:
+      return kMipsInstructionAlignment;
+    case kMips64:
+      return kMips64InstructionAlignment;
+
+    case kNone:
+      break;
+  }
+  InstructionSetAbort(isa);
+}
+
+constexpr bool IsValidInstructionSet(InstructionSet isa) {
   switch (isa) {
     case kArm:
     case kThumb2:
@@ -116,15 +149,16 @@ static inline bool IsValidInstructionSet(InstructionSet isa) {
     case kMips:
     case kMips64:
       return true;
+
     case kNone:
-    default:
       return false;
   }
+  return false;
 }
 
 size_t GetInstructionSetAlignment(InstructionSet isa);
 
-static inline bool Is64BitInstructionSet(InstructionSet isa) {
+constexpr bool Is64BitInstructionSet(InstructionSet isa) {
   switch (isa) {
     case kArm:
     case kThumb2:
@@ -137,16 +171,17 @@ static inline bool Is64BitInstructionSet(InstructionSet isa) {
     case kMips64:
       return true;
 
-    default:
-      InstructionSetAbort(isa);
+    case kNone:
+      break;
   }
+  InstructionSetAbort(isa);
 }
 
-static inline PointerSize InstructionSetPointerSize(InstructionSet isa) {
+constexpr PointerSize InstructionSetPointerSize(InstructionSet isa) {
   return Is64BitInstructionSet(isa) ? PointerSize::k64 : PointerSize::k32;
 }
 
-static inline size_t GetBytesPerGprSpillLocation(InstructionSet isa) {
+constexpr size_t GetBytesPerGprSpillLocation(InstructionSet isa) {
   switch (isa) {
     case kArm:
       // Fall-through.
@@ -163,12 +198,13 @@ static inline size_t GetBytesPerGprSpillLocation(InstructionSet isa) {
     case kMips64:
       return 8;
 
-    default:
-      InstructionSetAbort(isa);
+    case kNone:
+      break;
   }
+  InstructionSetAbort(isa);
 }
 
-static inline size_t GetBytesPerFprSpillLocation(InstructionSet isa) {
+constexpr size_t GetBytesPerFprSpillLocation(InstructionSet isa) {
   switch (isa) {
     case kArm:
       // Fall-through.
@@ -185,9 +221,10 @@ static inline size_t GetBytesPerFprSpillLocation(InstructionSet isa) {
     case kMips64:
       return 8;
 
-    default:
-      InstructionSetAbort(isa);
+    case kNone:
+      break;
   }
+  InstructionSetAbort(isa);
 }
 
 size_t GetStackOverflowReservedBytes(InstructionSet isa);
@@ -224,7 +261,7 @@ static inline constexpr TwoWordReturn GetTwoWordFailureValue() {
 }
 
 // Use the lower 32b for the method pointer and the upper 32b for the code pointer.
-static inline TwoWordReturn GetTwoWordSuccessValue(uintptr_t hi, uintptr_t lo) {
+static inline constexpr TwoWordReturn GetTwoWordSuccessValue(uintptr_t hi, uintptr_t lo) {
   static_assert(sizeof(uint32_t) == sizeof(uintptr_t), "Unexpected size difference");
   uint32_t lo32 = lo;
   uint64_t hi64 = static_cast<uint64_t>(hi);
@@ -232,6 +269,10 @@ static inline TwoWordReturn GetTwoWordSuccessValue(uintptr_t hi, uintptr_t lo) {
 }
 
 #elif defined(__x86_64__) || defined(__aarch64__) || (defined(__mips__) && defined(__LP64__))
+
+// Note: TwoWordReturn can't be constexpr for 64-bit targets. We'd need a constexpr constructor,
+//       which would violate C-linkage in the entrypoint functions.
+
 struct TwoWordReturn {
   uintptr_t lo;
   uintptr_t hi;

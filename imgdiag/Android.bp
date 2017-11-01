@@ -38,8 +38,8 @@ cc_defaults {
             shared_libs: ["libziparchive"],
         },
     },
-    include_dirs: [
-        "art/cmdline",
+    header_libs: [
+        "art_cmdlineparser_headers",
     ],
     multilib: {
         lib32: {
@@ -64,8 +64,8 @@ art_cc_binary {
 art_cc_binary {
     name: "imgdiagd",
     defaults: [
-        "imgdiag-defaults",
         "art_debug_defaults",
+        "imgdiag-defaults",
     ],
     shared_libs: [
         "libartd",

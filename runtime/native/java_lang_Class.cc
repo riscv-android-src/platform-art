@@ -19,13 +19,13 @@
 #include <iostream>
 
 #include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "base/enums.h"
-#include "class_linker.h"
+#include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
 #include "jni_internal.h"
-#include "nth_caller_visitor.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/field-inl.h"
@@ -33,12 +33,15 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_utf_chars.h"
+#include "nth_caller_visitor.h"
 #include "obj_ptr-inl.h"
 #include "reflection.h"
-#include "scoped_thread_state_change-inl.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedUtfChars.h"
+#include "scoped_thread_state_change-inl.h"
 #include "utf.h"
 #include "well_known_classes.h"
 
@@ -81,7 +84,7 @@ static jclass Class_classForName(JNIEnv* env, jclass, jstring javaName, jboolean
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Handle<mirror::Class> c(
       hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor.c_str(), class_loader)));
-  if (c.Get() == nullptr) {
+  if (c == nullptr) {
     ScopedLocalRef<jthrowable> cause(env, env->ExceptionOccurred());
     env->ExceptionClear();
     jthrowable cnfe = reinterpret_cast<jthrowable>(
@@ -108,10 +111,50 @@ static jstring Class_getNameNative(JNIEnv* env, jobject javaThis) {
   return soa.AddLocalReference<jstring>(mirror::Class::ComputeName(hs.NewHandle(c)));
 }
 
-static jobjectArray Class_getProxyInterfaces(JNIEnv* env, jobject javaThis) {
+// TODO: Move this to mirror::Class ? Other mirror types that commonly appear
+// as arrays have a GetArrayClass() method.
+static ObjPtr<mirror::Class> GetClassArrayClass(Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
+  return Runtime::Current()->GetClassLinker()->FindArrayClass(self, &class_class);
+}
+
+static jobjectArray Class_getInterfacesInternal(JNIEnv* env, jobject javaThis) {
   ScopedFastNativeObjectAccess soa(env);
-  ObjPtr<mirror::Class> c = DecodeClass(soa, javaThis);
-  return soa.AddLocalReference<jobjectArray>(c->GetInterfaces()->Clone(soa.Self()));
+  StackHandleScope<4> hs(soa.Self());
+  Handle<mirror::Class> klass = hs.NewHandle(DecodeClass(soa, javaThis));
+
+  if (klass->IsProxyClass()) {
+    return soa.AddLocalReference<jobjectArray>(klass->GetProxyInterfaces()->Clone(soa.Self()));
+  }
+
+  const DexFile::TypeList* iface_list = klass->GetInterfaceTypeList();
+  if (iface_list == nullptr) {
+    return nullptr;
+  }
+
+  const uint32_t num_ifaces = iface_list->Size();
+  Handle<mirror::Class> class_array_class = hs.NewHandle(GetClassArrayClass(soa.Self()));
+  Handle<mirror::ObjectArray<mirror::Class>> ifaces = hs.NewHandle(
+      mirror::ObjectArray<mirror::Class>::Alloc(soa.Self(), class_array_class.Get(), num_ifaces));
+  if (ifaces.IsNull()) {
+    DCHECK(soa.Self()->IsExceptionPending());
+    return nullptr;
+  }
+
+  // Check that we aren't in an active transaction, we call SetWithoutChecks
+  // with kActiveTransaction == false.
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+
+  MutableHandle<mirror::Class> interface(hs.NewHandle<mirror::Class>(nullptr));
+  for (uint32_t i = 0; i < num_ifaces; ++i) {
+    const dex::TypeIndex type_idx = iface_list->GetTypeItem(i).type_idx_;
+    interface.Assign(ClassLinker::LookupResolvedType(
+        type_idx, klass->GetDexCache(), klass->GetClassLoader()));
+    ifaces->SetWithoutChecks<false>(i, interface.Get());
+  }
+
+  return soa.AddLocalReference<jobjectArray>(ifaces.Get());
 }
 
 static mirror::ObjectArray<mirror::Field>* GetDeclaredFields(
@@ -137,7 +180,7 @@ static mirror::ObjectArray<mirror::Field>* GetDeclaredFields(
   size_t array_idx = 0;
   auto object_array = hs.NewHandle(mirror::ObjectArray<mirror::Field>::Alloc(
       self, mirror::Field::ArrayClass(), array_size));
-  if (object_array.Get() == nullptr) {
+  if (object_array == nullptr) {
     return nullptr;
   }
   for (ArtField& field : ifields) {
@@ -267,7 +310,7 @@ static mirror::Field* GetPublicFieldRecursive(
   Handle<mirror::String> h_name(hs.NewHandle(name));
 
   // We search the current class, its direct interfaces then its superclass.
-  while (h_clazz.Get() != nullptr) {
+  while (h_clazz != nullptr) {
     mirror::Field* result = GetDeclaredField(self, h_clazz.Get(), h_name.Get());
     if ((result != nullptr) && (result->GetAccessFlags() & kAccPublic)) {
       return result;
@@ -319,14 +362,14 @@ static jobject Class_getDeclaredField(JNIEnv* env, jobject javaThis, jstring nam
   ScopedFastNativeObjectAccess soa(env);
   StackHandleScope<3> hs(soa.Self());
   Handle<mirror::String> h_string = hs.NewHandle(soa.Decode<mirror::String>(name));
-  if (h_string.Get() == nullptr) {
+  if (h_string == nullptr) {
     ThrowNullPointerException("name == null");
     return nullptr;
   }
   Handle<mirror::Class> h_klass = hs.NewHandle(DecodeClass(soa, javaThis));
   Handle<mirror::Field> result =
       hs.NewHandle(GetDeclaredField(soa.Self(), h_klass.Get(), h_string.Get()));
-  if (result.Get() == nullptr) {
+  if (result == nullptr) {
     std::string name_str = h_string->ToModifiedUtf8();
     if (name_str == "value" && h_klass->IsStringClass()) {
       // We log the error for this specific case, as the user might just swallow the exception.
@@ -377,7 +420,7 @@ static jobjectArray Class_getDeclaredConstructorsInternal(
   }
   auto h_constructors = hs.NewHandle(mirror::ObjectArray<mirror::Constructor>::Alloc(
       soa.Self(), mirror::Constructor::ArrayClass(), constructor_count));
-  if (UNLIKELY(h_constructors.Get() == nullptr)) {
+  if (UNLIKELY(h_constructors == nullptr)) {
     soa.Self()->AssertPendingException();
     return nullptr;
   }
@@ -428,6 +471,10 @@ static jobjectArray Class_getDeclaredMethodsUnchecked(JNIEnv* env, jobject javaT
   }
   auto ret = hs.NewHandle(mirror::ObjectArray<mirror::Method>::Alloc(
       soa.Self(), mirror::Method::ArrayClass(), num_methods));
+  if (ret == nullptr) {
+    soa.Self()->AssertPendingOOMException();
+    return nullptr;
+  }
   num_methods = 0;
   for (auto& m : klass->GetDeclaredMethods(kRuntimePointerSize)) {
     auto modifiers = m.GetAccessFlags();
@@ -497,9 +544,7 @@ static jobjectArray Class_getDeclaredClasses(JNIEnv* env, jobject javaThis) {
       // Pending exception from GetDeclaredClasses.
       return nullptr;
     }
-    ObjPtr<mirror::Class> class_class = mirror::Class::GetJavaLangClass();
-    ObjPtr<mirror::Class> class_array_class =
-        Runtime::Current()->GetClassLinker()->FindArrayClass(soa.Self(), &class_class);
+    ObjPtr<mirror::Class> class_array_class = GetClassArrayClass(soa.Self());
     if (class_array_class == nullptr) {
       return nullptr;
     }
@@ -641,7 +686,7 @@ static jobject Class_newInstance(JNIEnv* env, jobject javaThis) {
   // Verify that we can access the class.
   if (!klass->IsPublic()) {
     caller.Assign(GetCallingClass(soa.Self(), 1));
-    if (caller.Get() != nullptr && !caller->CanAccess(klass.Get())) {
+    if (caller != nullptr && !caller->CanAccess(klass.Get())) {
       soa.Self()->ThrowNewExceptionF(
           "Ljava/lang/IllegalAccessException;", "%s is not accessible from %s",
           klass->PrettyClass().c_str(), caller->PrettyClass().c_str());
@@ -669,17 +714,17 @@ static jobject Class_newInstance(JNIEnv* env, jobject javaThis) {
     }
   }
   auto receiver = hs.NewHandle(klass->AllocObject(soa.Self()));
-  if (UNLIKELY(receiver.Get() == nullptr)) {
+  if (UNLIKELY(receiver == nullptr)) {
     soa.Self()->AssertPendingOOMException();
     return nullptr;
   }
   // Verify that we can access the constructor.
   auto* declaring_class = constructor->GetDeclaringClass();
   if (!constructor->IsPublic()) {
-    if (caller.Get() == nullptr) {
+    if (caller == nullptr) {
       caller.Assign(GetCallingClass(soa.Self(), 1));
     }
-    if (UNLIKELY(caller.Get() != nullptr && !VerifyAccess(receiver.Get(),
+    if (UNLIKELY(caller != nullptr && !VerifyAccess(receiver.Get(),
                                                           declaring_class,
                                                           constructor->GetAccessFlags(),
                                                           caller.Get()))) {
@@ -709,36 +754,36 @@ static jobject Class_newInstance(JNIEnv* env, jobject javaThis) {
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Class, classForName,
-                "!(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getDeclaredAnnotation,
-                "!(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"),
-  NATIVE_METHOD(Class, getDeclaredAnnotations, "!()[Ljava/lang/annotation/Annotation;"),
-  NATIVE_METHOD(Class, getDeclaredClasses, "!()[Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getDeclaredConstructorInternal,
-                "!([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;"),
-  NATIVE_METHOD(Class, getDeclaredConstructorsInternal, "!(Z)[Ljava/lang/reflect/Constructor;"),
-  NATIVE_METHOD(Class, getDeclaredField, "!(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
-  NATIVE_METHOD(Class, getPublicFieldRecursive, "!(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
-  NATIVE_METHOD(Class, getDeclaredFields, "!()[Ljava/lang/reflect/Field;"),
-  NATIVE_METHOD(Class, getDeclaredFieldsUnchecked, "!(Z)[Ljava/lang/reflect/Field;"),
-  NATIVE_METHOD(Class, getDeclaredMethodInternal,
-                "!(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"),
-  NATIVE_METHOD(Class, getDeclaredMethodsUnchecked,
-                "!(Z)[Ljava/lang/reflect/Method;"),
-  NATIVE_METHOD(Class, getDeclaringClass, "!()Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getEnclosingClass, "!()Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getEnclosingConstructorNative, "!()Ljava/lang/reflect/Constructor;"),
-  NATIVE_METHOD(Class, getEnclosingMethodNative, "!()Ljava/lang/reflect/Method;"),
-  NATIVE_METHOD(Class, getInnerClassFlags, "!(I)I"),
-  NATIVE_METHOD(Class, getInnerClassName, "!()Ljava/lang/String;"),
-  NATIVE_METHOD(Class, getNameNative, "!()Ljava/lang/String;"),
-  NATIVE_METHOD(Class, getProxyInterfaces, "!()[Ljava/lang/Class;"),
-  NATIVE_METHOD(Class, getPublicDeclaredFields, "!()[Ljava/lang/reflect/Field;"),
-  NATIVE_METHOD(Class, getSignatureAnnotation, "!()[Ljava/lang/String;"),
-  NATIVE_METHOD(Class, isAnonymousClass, "!()Z"),
-  NATIVE_METHOD(Class, isDeclaredAnnotationPresent, "!(Ljava/lang/Class;)Z"),
-  NATIVE_METHOD(Class, newInstance, "!()Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Class, classForName,
+                "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredAnnotation,
+                "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredAnnotations, "()[Ljava/lang/annotation/Annotation;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredClasses, "()[Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredConstructorInternal,
+                "([Ljava/lang/Class;)Ljava/lang/reflect/Constructor;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredConstructorsInternal, "(Z)[Ljava/lang/reflect/Constructor;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredField, "(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
+  FAST_NATIVE_METHOD(Class, getPublicFieldRecursive, "(Ljava/lang/String;)Ljava/lang/reflect/Field;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredFields, "()[Ljava/lang/reflect/Field;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredFieldsUnchecked, "(Z)[Ljava/lang/reflect/Field;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredMethodInternal,
+                "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;"),
+  FAST_NATIVE_METHOD(Class, getDeclaredMethodsUnchecked,
+                "(Z)[Ljava/lang/reflect/Method;"),
+  FAST_NATIVE_METHOD(Class, getDeclaringClass, "()Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getEnclosingClass, "()Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getEnclosingConstructorNative, "()Ljava/lang/reflect/Constructor;"),
+  FAST_NATIVE_METHOD(Class, getEnclosingMethodNative, "()Ljava/lang/reflect/Method;"),
+  FAST_NATIVE_METHOD(Class, getInnerClassFlags, "(I)I"),
+  FAST_NATIVE_METHOD(Class, getInnerClassName, "()Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(Class, getInterfacesInternal, "()[Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Class, getNameNative, "()Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(Class, getPublicDeclaredFields, "()[Ljava/lang/reflect/Field;"),
+  FAST_NATIVE_METHOD(Class, getSignatureAnnotation, "()[Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(Class, isAnonymousClass, "()Z"),
+  FAST_NATIVE_METHOD(Class, isDeclaredAnnotationPresent, "(Ljava/lang/Class;)Z"),
+  FAST_NATIVE_METHOD(Class, newInstance, "()Ljava/lang/Object;"),
 };
 
 void register_java_lang_Class(JNIEnv* env) {

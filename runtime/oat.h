@@ -32,7 +32,8 @@ class InstructionSetFeatures;
 class PACKED(4) OatHeader {
  public:
   static constexpr uint8_t kOatMagic[] = { 'o', 'a', 't', '\n' };
-  static constexpr uint8_t kOatVersion[] = { '0', '9', '4', '\0' };
+  // Last oat version changed reason: Map boot image InternTable and ClassTable into app .bss.
+  static constexpr uint8_t kOatVersion[] = { '1', '3', '4', '\0' };
 
   static constexpr const char* kImageLocationKey = "image-location";
   static constexpr const char* kDex2OatCmdLineKey = "dex2oat-cmdline";
@@ -43,6 +44,7 @@ class PACKED(4) OatHeader {
   static constexpr const char* kCompilerFilter = "compiler-filter";
   static constexpr const char* kClassPathKey = "classpath";
   static constexpr const char* kBootClassPathKey = "bootclasspath";
+  static constexpr const char* kConcurrentCopying = "concurrent-copying";
 
   static constexpr const char kTrueValue[] = "true";
   static constexpr const char kFalseValue[] = "false";
@@ -63,6 +65,8 @@ class PACKED(4) OatHeader {
     DCHECK(IsValid());
     return dex_file_count_;
   }
+  uint32_t GetOatDexFilesOffset() const;
+  void SetOatDexFilesOffset(uint32_t oat_dex_files_offset);
   uint32_t GetExecutableOffset() const;
   void SetExecutableOffset(uint32_t executable_offset);
 
@@ -112,6 +116,7 @@ class PACKED(4) OatHeader {
   bool IsDebuggable() const;
   bool IsNativeDebuggable() const;
   CompilerFilter::Filter GetCompilerFilter() const;
+  bool IsConcurrentCopying() const;
 
  private:
   bool KeyHasValue(const char* key, const char* value, size_t value_size) const;
@@ -133,6 +138,7 @@ class PACKED(4) OatHeader {
   InstructionSet instruction_set_;
   uint32_t instruction_set_features_bitmap_;
   uint32_t dex_file_count_;
+  uint32_t oat_dex_files_offset_;
   uint32_t executable_offset_;
   uint32_t interpreter_to_interpreter_bridge_offset_;
   uint32_t interpreter_to_compiled_code_bridge_offset_;
@@ -173,6 +179,7 @@ class PACKED(4) OatMethodOffsets {
 
   ~OatMethodOffsets();
 
+  OatMethodOffsets(const OatMethodOffsets&) = default;
   OatMethodOffsets& operator=(const OatMethodOffsets&) = default;
 
   uint32_t code_offset_;

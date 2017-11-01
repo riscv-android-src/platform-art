@@ -25,12 +25,7 @@
  *  x3  JValue* result_register
  *
  */
-    .global ExecuteMterpImpl
-    .type   ExecuteMterpImpl, %function
-    .balign 16
-
-ExecuteMterpImpl:
-    .cfi_startproc
+ENTRY ExecuteMterpImpl
     SAVE_TWO_REGS_INCREASE_FRAME xPROFILE, x27, 80
     SAVE_TWO_REGS                xIBASE, xREFS, 16
     SAVE_TWO_REGS                xSELF, xINST, 32
@@ -60,6 +55,7 @@ ExecuteMterpImpl:
     /* Set up for backwards branches & osr profiling */
     ldr     x0, [xFP, #OFF_FP_METHOD]
     add     x1, xFP, #OFF_FP_SHADOWFRAME
+    mov     x2, xSELF
     bl      MterpSetUpHotnessCountdown
     mov     wPROFILE, w0                // Starting hotness countdown to xPROFILE
 

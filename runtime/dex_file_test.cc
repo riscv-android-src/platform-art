@@ -16,16 +16,19 @@
 
 #include "dex_file.h"
 
+#include <sys/mman.h>
+
 #include <memory>
 
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "common_runtime_test.h"
 #include "dex_file-inl.h"
+#include "dex_file_loader.h"
 #include "mem_map.h"
 #include "os.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {
@@ -73,7 +76,7 @@ static const char kRawDex[] =
   "AAACAAAAQAEAAAEgAAACAAAAVAEAAAYgAAACAAAAiAEAAAEQAAABAAAAqAEAAAIgAAAPAAAArgEA"
   "AAMgAAACAAAAiAIAAAQgAAADAAAAlAIAAAAgAAACAAAAqwIAAAAQAAABAAAAxAIAAA==";
 
-// kRawDex38 and 39 are dex'ed versions of the following Java source :
+// kRawDex{38,39,40,41} are dex'ed versions of the following Java source :
 //
 // public class Main {
 //     public static void main(String[] foo) {
@@ -96,6 +99,30 @@ static const char kRawDex38[] =
 
 static const char kRawDex39[] =
   "ZGV4CjAzOQC4OovJlJ1089ikzK6asMf/f8qp3Kve5VsgAgAAcAAAAHhWNBIAAAAAAAAAAIwBAAAI"
+  "AAAAcAAAAAQAAACQAAAAAgAAAKAAAAAAAAAAAAAAAAMAAAC4AAAAAQAAANAAAAAwAQAA8AAAACIB"
+  "AAAqAQAAMgEAAEYBAABRAQAAVAEAAFgBAABtAQAAAQAAAAIAAAAEAAAABgAAAAQAAAACAAAAAAAA"
+  "AAUAAAACAAAAHAEAAAAAAAAAAAAAAAABAAcAAAABAAAAAAAAAAAAAAABAAAAAQAAAAAAAAADAAAA"
+  "AAAAAH4BAAAAAAAAAQABAAEAAABzAQAABAAAAHAQAgAAAA4AAQABAAAAAAB4AQAAAQAAAA4AAAAB"
+  "AAAAAwAGPGluaXQ+AAZMTWFpbjsAEkxqYXZhL2xhbmcvT2JqZWN0OwAJTWFpbi5qYXZhAAFWAAJW"
+  "TAATW0xqYXZhL2xhbmcvU3RyaW5nOwAEbWFpbgABAAcOAAMBAAcOAAAAAgAAgYAE8AEBCYgCDAAA"
+  "AAAAAAABAAAAAAAAAAEAAAAIAAAAcAAAAAIAAAAEAAAAkAAAAAMAAAACAAAAoAAAAAUAAAADAAAA"
+  "uAAAAAYAAAABAAAA0AAAAAEgAAACAAAA8AAAAAEQAAABAAAAHAEAAAIgAAAIAAAAIgEAAAMgAAAC"
+  "AAAAcwEAAAAgAAABAAAAfgEAAAAQAAABAAAAjAEAAA==";
+
+static const char kRawDex40[] =
+  "ZGV4CjA0MAC4OovJlJ1089ikzK6asMf/f8qp3Kve5VsgAgAAcAAAAHhWNBIAAAAAAAAAAIwBAAAI"
+  "AAAAcAAAAAQAAACQAAAAAgAAAKAAAAAAAAAAAAAAAAMAAAC4AAAAAQAAANAAAAAwAQAA8AAAACIB"
+  "AAAqAQAAMgEAAEYBAABRAQAAVAEAAFgBAABtAQAAAQAAAAIAAAAEAAAABgAAAAQAAAACAAAAAAAA"
+  "AAUAAAACAAAAHAEAAAAAAAAAAAAAAAABAAcAAAABAAAAAAAAAAAAAAABAAAAAQAAAAAAAAADAAAA"
+  "AAAAAH4BAAAAAAAAAQABAAEAAABzAQAABAAAAHAQAgAAAA4AAQABAAAAAAB4AQAAAQAAAA4AAAAB"
+  "AAAAAwAGPGluaXQ+AAZMTWFpbjsAEkxqYXZhL2xhbmcvT2JqZWN0OwAJTWFpbi5qYXZhAAFWAAJW"
+  "TAATW0xqYXZhL2xhbmcvU3RyaW5nOwAEbWFpbgABAAcOAAMBAAcOAAAAAgAAgYAE8AEBCYgCDAAA"
+  "AAAAAAABAAAAAAAAAAEAAAAIAAAAcAAAAAIAAAAEAAAAkAAAAAMAAAACAAAAoAAAAAUAAAADAAAA"
+  "uAAAAAYAAAABAAAA0AAAAAEgAAACAAAA8AAAAAEQAAABAAAAHAEAAAIgAAAIAAAAIgEAAAMgAAAC"
+  "AAAAcwEAAAAgAAABAAAAfgEAAAAQAAABAAAAjAEAAA==";
+
+static const char kRawDex41[] =
+  "ZGV4CjA0MQC4OovJlJ1089ikzK6asMf/f8qp3Kve5VsgAgAAcAAAAHhWNBIAAAAAAAAAAIwBAAAI"
   "AAAAcAAAAAQAAACQAAAAAgAAAKAAAAAAAAAAAAAAAAMAAAC4AAAAAQAAANAAAAAwAQAA8AAAACIB"
   "AAAqAQAAMgEAAEYBAABRAQAAVAEAAFgBAABtAQAAAQAAAAIAAAAEAAAABgAAAAQAAAACAAAAAAAA"
   "AAUAAAACAAAAHAEAAAAAAAAAAAAAAAABAAcAAAABAAAAAAAAAAAAAAABAAAAAQAAAAAAAAADAAAA"
@@ -161,6 +188,27 @@ static const char kRawZipThreeDexFiles[] =
   "ACACAAALABgAAAAAAAAAAACgge4CAABjbGFzc2VzLmRleFVUBQADAWPlV3V4CwABBOQDAQAEiBMA"
   "AFBLBQYAAAAAAwADAPUAAABkBAAAAAA=";
 
+static const char kRawDexBadMapOffset[] =
+  "ZGV4CjAzNQAZKGSz85r+tXJ1I24FYi+FpQtWbXtelAmoAQAAcAAAAHhWNBIAAAAAAAAAAEAwIBAF"
+  "AAAAcAAAAAMAAACEAAAAAQAAAJAAAAAAAAAAAAAAAAIAAACcAAAAAQAAAKwAAADcAAAAzAAAAOQA"
+  "AADsAAAA9AAAAPkAAAANAQAAAgAAAAMAAAAEAAAABAAAAAIAAAAAAAAAAAAAAAAAAAABAAAAAAAA"
+  "AAAAAAABAAAAAQAAAAAAAAABAAAAAAAAABUBAAAAAAAAAQABAAEAAAAQAQAABAAAAHAQAQAAAA4A"
+  "Bjxpbml0PgAGQS5qYXZhAANMQTsAEkxqYXZhL2xhbmcvT2JqZWN0OwABVgABAAcOAAAAAQAAgYAE"
+  "zAEACwAAAAAAAAABAAAAAAAAAAEAAAAFAAAAcAAAAAIAAAADAAAAhAAAAAMAAAABAAAAkAAAAAUA"
+  "AAACAAAAnAAAAAYAAAABAAAArAAAAAEgAAABAAAAzAAAAAIgAAAFAAAA5AAAAAMgAAABAAAAEAEA"
+  "AAAgAAABAAAAFQEAAAAQAAABAAAAIAEAAA==";
+
+static const char kRawDexDebugInfoLocalNullType[] =
+    "ZGV4CjAzNQA+Kwj2g6OZMH88OvK9Ey6ycdIsFCt18ED8AQAAcAAAAHhWNBIAAAAAAAAAAHQBAAAI"
+    "AAAAcAAAAAQAAACQAAAAAgAAAKAAAAAAAAAAAAAAAAMAAAC4AAAAAQAAANAAAAAMAQAA8AAAABwB"
+    "AAAkAQAALAEAAC8BAAA0AQAASAEAAEsBAABOAQAAAgAAAAMAAAAEAAAABQAAAAIAAAAAAAAAAAAA"
+    "AAUAAAADAAAAAAAAAAEAAQAAAAAAAQAAAAYAAAACAAEAAAAAAAEAAAABAAAAAgAAAAAAAAABAAAA"
+    "AAAAAGMBAAAAAAAAAQABAAEAAABUAQAABAAAAHAQAgAAAA4AAgABAAAAAABZAQAAAgAAABIQDwAG"
+    "PGluaXQ+AAZBLmphdmEAAUkAA0xBOwASTGphdmEvbGFuZy9PYmplY3Q7AAFWAAFhAAR0aGlzAAEA"
+    "Bw4AAwAHDh4DAAcAAAAAAQEAgYAE8AEBAIgCAAAACwAAAAAAAAABAAAAAAAAAAEAAAAIAAAAcAAA"
+    "AAIAAAAEAAAAkAAAAAMAAAACAAAAoAAAAAUAAAADAAAAuAAAAAYAAAABAAAA0AAAAAEgAAACAAAA"
+    "8AAAAAIgAAAIAAAAHAEAAAMgAAACAAAAVAEAAAAgAAABAAAAYwEAAAAQAAABAAAAdAEAAA==";
+
 static void DecodeAndWriteDexFile(const char* base64, const char* location) {
   // decode base64
   CHECK(base64 != nullptr);
@@ -188,7 +236,8 @@ static bool OpenDexFilesBase64(const char* base64,
   ScopedObjectAccess soa(Thread::Current());
   static constexpr bool kVerifyChecksum = true;
   std::vector<std::unique_ptr<const DexFile>> tmp;
-  bool success = DexFile::Open(location, location, kVerifyChecksum, error_msg, &tmp);
+  bool success = DexFileLoader::Open(
+      location, location, /* verify */ true, kVerifyChecksum, error_msg, &tmp);
   if (success) {
     for (std::unique_ptr<const DexFile>& dex_file : tmp) {
       EXPECT_EQ(PROT_READ, dex_file->GetPermissions());
@@ -212,7 +261,8 @@ static std::unique_ptr<const DexFile> OpenDexFileBase64(const char* base64,
 
 static std::unique_ptr<const DexFile> OpenDexFileInMemoryBase64(const char* base64,
                                                                 const char* location,
-                                                                uint32_t location_checksum) {
+                                                                uint32_t location_checksum,
+                                                                bool expect_success) {
   CHECK(base64 != nullptr);
   std::vector<uint8_t> dex_bytes = DecodeBase64Vec(base64);
   CHECK_NE(dex_bytes.size(), 0u);
@@ -226,13 +276,17 @@ static std::unique_ptr<const DexFile> OpenDexFileInMemoryBase64(const char* base
                                                       /* reuse */ false,
                                                       &error_message));
   memcpy(region->Begin(), dex_bytes.data(), dex_bytes.size());
-  std::unique_ptr<const DexFile> dex_file(DexFile::Open(location,
-                                                        location_checksum,
-                                                        std::move(region),
-                                                        /* verify */ true,
-                                                        /* verify_checksum */ true,
-                                                        &error_message));
-  CHECK(dex_file != nullptr) << error_message;
+  std::unique_ptr<const DexFile> dex_file(DexFileLoader::Open(location,
+                                                              location_checksum,
+                                                              std::move(region),
+                                                              /* verify */ true,
+                                                              /* verify_checksum */ true,
+                                                              &error_message));
+  if (expect_success) {
+    CHECK(dex_file != nullptr) << error_message;
+  } else {
+    CHECK(dex_file == nullptr) << "Expected dex file open to fail.";
+  }
   return dex_file;
 }
 
@@ -282,7 +336,7 @@ TEST_F(DexFileTest, Header) {
 TEST_F(DexFileTest, HeaderInMemory) {
   ScratchFile tmp;
   std::unique_ptr<const DexFile> raw =
-      OpenDexFileInMemoryBase64(kRawDex, tmp.GetFilename().c_str(), 0x00d87910U);
+      OpenDexFileInMemoryBase64(kRawDex, tmp.GetFilename().c_str(), 0x00d87910U, true);
   ValidateDexFileHeader(std::move(raw));
 }
 
@@ -295,16 +349,39 @@ TEST_F(DexFileTest, Version38Accepted) {
   EXPECT_EQ(38u, header.GetVersion());
 }
 
-TEST_F(DexFileTest, Version39Rejected) {
+TEST_F(DexFileTest, Version39Accepted) {
+  ScratchFile tmp;
+  std::unique_ptr<const DexFile> raw(OpenDexFileBase64(kRawDex39, tmp.GetFilename().c_str()));
+  ASSERT_TRUE(raw.get() != nullptr);
+
+  const DexFile::Header& header = raw->GetHeader();
+  EXPECT_EQ(39u, header.GetVersion());
+}
+
+TEST_F(DexFileTest, Version40Rejected) {
   ScratchFile tmp;
   const char* location = tmp.GetFilename().c_str();
-  DecodeAndWriteDexFile(kRawDex39, location);
+  DecodeAndWriteDexFile(kRawDex40, location);
 
   ScopedObjectAccess soa(Thread::Current());
   static constexpr bool kVerifyChecksum = true;
   std::string error_msg;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  ASSERT_FALSE(DexFile::Open(location, location, kVerifyChecksum, &error_msg, &dex_files));
+  ASSERT_FALSE(DexFileLoader::Open(
+      location, location, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files));
+}
+
+TEST_F(DexFileTest, Version41Rejected) {
+  ScratchFile tmp;
+  const char* location = tmp.GetFilename().c_str();
+  DecodeAndWriteDexFile(kRawDex41, location);
+
+  ScopedObjectAccess soa(Thread::Current());
+  static constexpr bool kVerifyChecksum = true;
+  std::string error_msg;
+  std::vector<std::unique_ptr<const DexFile>> dex_files;
+  ASSERT_FALSE(DexFileLoader::Open(
+      location, location, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files));
 }
 
 TEST_F(DexFileTest, ZeroLengthDexRejected) {
@@ -316,7 +393,8 @@ TEST_F(DexFileTest, ZeroLengthDexRejected) {
   static constexpr bool kVerifyChecksum = true;
   std::string error_msg;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  ASSERT_FALSE(DexFile::Open(location, location, kVerifyChecksum, &error_msg, &dex_files));
+  ASSERT_FALSE(DexFileLoader::Open(
+      location, location, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files));
 }
 
 TEST_F(DexFileTest, GetLocationChecksum) {
@@ -326,25 +404,50 @@ TEST_F(DexFileTest, GetLocationChecksum) {
 }
 
 TEST_F(DexFileTest, GetChecksum) {
-  uint32_t checksum;
+  std::vector<uint32_t> checksums;
   ScopedObjectAccess soa(Thread::Current());
   std::string error_msg;
-  EXPECT_TRUE(DexFile::GetChecksum(GetLibCoreDexFileNames()[0].c_str(), &checksum, &error_msg))
+  EXPECT_TRUE(DexFileLoader::GetMultiDexChecksums(GetLibCoreDexFileNames()[0].c_str(),
+                                                  &checksums,
+                                                  &error_msg))
       << error_msg;
-  EXPECT_EQ(java_lang_dex_file_->GetLocationChecksum(), checksum);
+  ASSERT_EQ(1U, checksums.size());
+  EXPECT_EQ(java_lang_dex_file_->GetLocationChecksum(), checksums[0]);
+}
+
+TEST_F(DexFileTest, GetMultiDexChecksums) {
+  std::string error_msg;
+  std::vector<uint32_t> checksums;
+  std::string multidex_file = GetTestDexFileName("MultiDex");
+  EXPECT_TRUE(DexFileLoader::GetMultiDexChecksums(multidex_file.c_str(),
+                                                  &checksums,
+                                                  &error_msg)) << error_msg;
+
+  std::vector<std::unique_ptr<const DexFile>> dexes = OpenTestDexFiles("MultiDex");
+  ASSERT_EQ(2U, dexes.size());
+  ASSERT_EQ(2U, checksums.size());
+
+  EXPECT_EQ(dexes[0]->GetLocation(), DexFileLoader::GetMultiDexLocation(0, multidex_file.c_str()));
+  EXPECT_EQ(dexes[0]->GetLocationChecksum(), checksums[0]);
+
+  EXPECT_EQ(dexes[1]->GetLocation(), DexFileLoader::GetMultiDexLocation(1, multidex_file.c_str()));
+  EXPECT_EQ(dexes[1]->GetLocationChecksum(), checksums[1]);
 }
 
 TEST_F(DexFileTest, ClassDefs) {
   ScopedObjectAccess soa(Thread::Current());
   std::unique_ptr<const DexFile> raw(OpenTestDexFile("Nested"));
   ASSERT_TRUE(raw.get() != nullptr);
-  EXPECT_EQ(2U, raw->NumClassDefs());
+  EXPECT_EQ(3U, raw->NumClassDefs());
 
   const DexFile::ClassDef& c0 = raw->GetClassDef(0);
-  EXPECT_STREQ("LNested$Inner;", raw->GetClassDescriptor(c0));
+  EXPECT_STREQ("LNested$1;", raw->GetClassDescriptor(c0));
 
   const DexFile::ClassDef& c1 = raw->GetClassDef(1);
-  EXPECT_STREQ("LNested;", raw->GetClassDescriptor(c1));
+  EXPECT_STREQ("LNested$Inner;", raw->GetClassDescriptor(c1));
+
+  const DexFile::ClassDef& c2 = raw->GetClassDef(2);
+  EXPECT_STREQ("LNested;", raw->GetClassDescriptor(c2));
 }
 
 TEST_F(DexFileTest, GetMethodSignature) {
@@ -372,28 +475,83 @@ TEST_F(DexFileTest, GetMethodSignature) {
     ASSERT_EQ("()V", signature);
   }
 
-  // Check both virtual methods.
-  ASSERT_EQ(2U, it.NumVirtualMethods());
-  {
+  // Check all virtual methods.
+  struct Result {
+    const char* name;
+    const char* signature;
+    const char* pretty_method;
+  };
+  static const Result results[] = {
+      {
+          "m1",
+          "(IDJLjava/lang/Object;)Ljava/lang/Float;",
+          "java.lang.Float GetMethodSignature.m1(int, double, long, java.lang.Object)"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m2",
+          "(ZSC)LGetMethodSignature;",
+          "GetMethodSignature GetMethodSignature.m2(boolean, short, char)"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m3",
+          "()V",
+          "void GetMethodSignature.m3()"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m4",
+          "(I)V",
+          "void GetMethodSignature.m4(int)"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m5",
+          "(II)V",
+          "void GetMethodSignature.m5(int, int)"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m6",
+          "(II[[I)V",
+          "void GetMethodSignature.m6(int, int, int[][])"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m7",
+          "(II[[ILjava/lang/Object;)V",
+          "void GetMethodSignature.m7(int, int, int[][], java.lang.Object)"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m8",
+          "(II[[ILjava/lang/Object;[[Ljava/lang/Object;)V",
+          "void GetMethodSignature.m8(int, int, int[][], java.lang.Object, java.lang.Object[][])"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "m9",
+          "()I",
+          "int GetMethodSignature.m9()"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "mA",
+          "()[[I",
+          "int[][] GetMethodSignature.mA()"
+      },
+      {  // NOLINT [whitespace/braces] [4]
+          "mB",
+          "()[[Ljava/lang/Object;",
+          "java.lang.Object[][] GetMethodSignature.mB()"
+      },
+  };
+  ASSERT_EQ(arraysize(results), it.NumVirtualMethods());
+  for (const Result& r : results) {
     it.Next();
     const DexFile::MethodId& method_id = raw->GetMethodId(it.GetMemberIndex());
 
     const char* name = raw->StringDataByIdx(method_id.name_idx_);
-    ASSERT_STREQ("m1", name);
+    ASSERT_STREQ(r.name, name);
 
     std::string signature(raw->GetMethodSignature(method_id).ToString());
-    ASSERT_EQ("(IDJLjava/lang/Object;)Ljava/lang/Float;", signature);
-  }
+    ASSERT_EQ(r.signature, signature);
 
-  {
-    it.Next();
-    const DexFile::MethodId& method_id = raw->GetMethodId(it.GetMemberIndex());
-
-    const char* name = raw->StringDataByIdx(method_id.name_idx_);
-    ASSERT_STREQ("m2", name);
-
-    std::string signature(raw->GetMethodSignature(method_id).ToString());
-    ASSERT_EQ("(ZSC)LGetMethodSignature;", signature);
+    std::string plain_method = std::string("GetMethodSignature.") + r.name;
+    ASSERT_EQ(plain_method, raw->PrettyMethod(it.GetMemberIndex(), /* with_signature */ false));
+    ASSERT_EQ(r.pretty_method, raw->PrettyMethod(it.GetMemberIndex(), /* with_signature */ true));
   }
 }
 
@@ -474,20 +632,20 @@ TEST_F(DexFileTest, FindFieldId) {
 }
 
 TEST_F(DexFileTest, GetMultiDexClassesDexName) {
-  ASSERT_EQ("classes.dex", DexFile::GetMultiDexClassesDexName(0));
-  ASSERT_EQ("classes2.dex", DexFile::GetMultiDexClassesDexName(1));
-  ASSERT_EQ("classes3.dex", DexFile::GetMultiDexClassesDexName(2));
-  ASSERT_EQ("classes100.dex", DexFile::GetMultiDexClassesDexName(99));
+  ASSERT_EQ("classes.dex", DexFileLoader::GetMultiDexClassesDexName(0));
+  ASSERT_EQ("classes2.dex", DexFileLoader::GetMultiDexClassesDexName(1));
+  ASSERT_EQ("classes3.dex", DexFileLoader::GetMultiDexClassesDexName(2));
+  ASSERT_EQ("classes100.dex", DexFileLoader::GetMultiDexClassesDexName(99));
 }
 
 TEST_F(DexFileTest, GetMultiDexLocation) {
   std::string dex_location_str = "/system/app/framework.jar";
   const char* dex_location = dex_location_str.c_str();
-  ASSERT_EQ("/system/app/framework.jar", DexFile::GetMultiDexLocation(0, dex_location));
-  ASSERT_EQ("/system/app/framework.jar:classes2.dex",
-            DexFile::GetMultiDexLocation(1, dex_location));
-  ASSERT_EQ("/system/app/framework.jar:classes101.dex",
-            DexFile::GetMultiDexLocation(100, dex_location));
+  ASSERT_EQ("/system/app/framework.jar", DexFileLoader::GetMultiDexLocation(0, dex_location));
+  ASSERT_EQ("/system/app/framework.jar!classes2.dex",
+            DexFileLoader::GetMultiDexLocation(1, dex_location));
+  ASSERT_EQ("/system/app/framework.jar!classes101.dex",
+            DexFileLoader::GetMultiDexLocation(100, dex_location));
 }
 
 TEST_F(DexFileTest, GetDexCanonicalLocation) {
@@ -495,28 +653,30 @@ TEST_F(DexFileTest, GetDexCanonicalLocation) {
   UniqueCPtr<const char[]> dex_location_real(realpath(file.GetFilename().c_str(), nullptr));
   std::string dex_location(dex_location_real.get());
 
-  ASSERT_EQ(dex_location, DexFile::GetDexCanonicalLocation(dex_location.c_str()));
-  std::string multidex_location = DexFile::GetMultiDexLocation(1, dex_location.c_str());
-  ASSERT_EQ(multidex_location, DexFile::GetDexCanonicalLocation(multidex_location.c_str()));
+  ASSERT_EQ(dex_location, DexFileLoader::GetDexCanonicalLocation(dex_location.c_str()));
+  std::string multidex_location = DexFileLoader::GetMultiDexLocation(1, dex_location.c_str());
+  ASSERT_EQ(multidex_location, DexFileLoader::GetDexCanonicalLocation(multidex_location.c_str()));
 
   std::string dex_location_sym = dex_location + "symlink";
   ASSERT_EQ(0, symlink(dex_location.c_str(), dex_location_sym.c_str()));
 
-  ASSERT_EQ(dex_location, DexFile::GetDexCanonicalLocation(dex_location_sym.c_str()));
+  ASSERT_EQ(dex_location, DexFileLoader::GetDexCanonicalLocation(dex_location_sym.c_str()));
 
-  std::string multidex_location_sym = DexFile::GetMultiDexLocation(1, dex_location_sym.c_str());
-  ASSERT_EQ(multidex_location, DexFile::GetDexCanonicalLocation(multidex_location_sym.c_str()));
+  std::string multidex_location_sym = DexFileLoader::GetMultiDexLocation(
+      1, dex_location_sym.c_str());
+  ASSERT_EQ(multidex_location,
+            DexFileLoader::GetDexCanonicalLocation(multidex_location_sym.c_str()));
 
   ASSERT_EQ(0, unlink(dex_location_sym.c_str()));
 }
 
 TEST(DexFileUtilsTest, GetBaseLocationAndMultiDexSuffix) {
-  EXPECT_EQ("/foo/bar/baz.jar", DexFile::GetBaseLocation("/foo/bar/baz.jar"));
-  EXPECT_EQ("/foo/bar/baz.jar", DexFile::GetBaseLocation("/foo/bar/baz.jar:classes2.dex"));
-  EXPECT_EQ("/foo/bar/baz.jar", DexFile::GetBaseLocation("/foo/bar/baz.jar:classes8.dex"));
-  EXPECT_EQ("", DexFile::GetMultiDexSuffix("/foo/bar/baz.jar"));
-  EXPECT_EQ(":classes2.dex", DexFile::GetMultiDexSuffix("/foo/bar/baz.jar:classes2.dex"));
-  EXPECT_EQ(":classes8.dex", DexFile::GetMultiDexSuffix("/foo/bar/baz.jar:classes8.dex"));
+  EXPECT_EQ("/foo/bar/baz.jar", DexFileLoader::GetBaseLocation("/foo/bar/baz.jar"));
+  EXPECT_EQ("/foo/bar/baz.jar", DexFileLoader::GetBaseLocation("/foo/bar/baz.jar!classes2.dex"));
+  EXPECT_EQ("/foo/bar/baz.jar", DexFileLoader::GetBaseLocation("/foo/bar/baz.jar!classes8.dex"));
+  EXPECT_EQ("", DexFileLoader::GetMultiDexSuffix("/foo/bar/baz.jar"));
+  EXPECT_EQ("!classes2.dex", DexFileLoader::GetMultiDexSuffix("/foo/bar/baz.jar!classes2.dex"));
+  EXPECT_EQ("!classes8.dex", DexFileLoader::GetMultiDexSuffix("/foo/bar/baz.jar!classes8.dex"));
 }
 
 TEST_F(DexFileTest, ZipOpenClassesPresent) {
@@ -544,6 +704,33 @@ TEST_F(DexFileTest, ZipOpenThreeDexFiles) {
   ASSERT_TRUE(OpenDexFilesBase64(kRawZipThreeDexFiles, tmp.GetFilename().c_str(), &dex_files,
                                  &error_msg));
   EXPECT_EQ(dex_files.size(), 3u);
+}
+
+TEST_F(DexFileTest, OpenDexBadMapOffset) {
+  ScratchFile tmp;
+  std::unique_ptr<const DexFile> raw =
+      OpenDexFileInMemoryBase64(kRawDexBadMapOffset, tmp.GetFilename().c_str(), 0xb3642819U, false);
+  EXPECT_EQ(raw, nullptr);
+}
+
+TEST_F(DexFileTest, GetStringWithNoIndex) {
+  ScratchFile tmp;
+  std::unique_ptr<const DexFile> raw(OpenDexFileBase64(kRawDex, tmp.GetFilename().c_str()));
+  dex::TypeIndex idx;
+  EXPECT_EQ(raw->StringByTypeIdx(idx), nullptr);
+}
+
+static void Callback(void* context ATTRIBUTE_UNUSED,
+                     const DexFile::LocalInfo& entry ATTRIBUTE_UNUSED) {
+}
+
+TEST_F(DexFileTest, OpenDexDebugInfoLocalNullType) {
+  ScratchFile tmp;
+  std::unique_ptr<const DexFile> raw = OpenDexFileInMemoryBase64(
+      kRawDexDebugInfoLocalNullType, tmp.GetFilename().c_str(), 0xf25f2b38U, true);
+  const DexFile::ClassDef& class_def = raw->GetClassDef(0);
+  const DexFile::CodeItem* code_item = raw->GetCodeItem(raw->FindCodeItemOffset(class_def, 1));
+  ASSERT_TRUE(raw->DecodeDebugLocalInfo(code_item, true, 1, Callback, nullptr));
 }
 
 }  // namespace art

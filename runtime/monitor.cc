@@ -27,12 +27,14 @@
 #include "base/time_utils.h"
 #include "class_linker.h"
 #include "dex_file-inl.h"
+#include "dex_file_types.h"
 #include "dex_instruction-inl.h"
 #include "lock_word-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
-#include "mirror/object_array-inl.h"
+#include "object_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "verifier/method_verifier.h"
@@ -42,7 +44,8 @@ namespace art {
 
 using android::base::StringPrintf;
 
-static constexpr uint64_t kLongWaitMs = 100;
+static constexpr uint64_t kDebugThresholdFudgeFactor = kIsDebugBuild ? 10 : 1;
+static constexpr uint64_t kLongWaitMs = 100 * kDebugThresholdFudgeFactor;
 
 /*
  * Every Object has a monitor associated with it, but not every Object is actually locked.  Even
@@ -72,9 +75,16 @@ static constexpr uint64_t kLongWaitMs = 100;
  */
 
 uint32_t Monitor::lock_profiling_threshold_ = 0;
+uint32_t Monitor::stack_dump_lock_profiling_threshold_ = 0;
 
-void Monitor::Init(uint32_t lock_profiling_threshold) {
-  lock_profiling_threshold_ = lock_profiling_threshold;
+void Monitor::Init(uint32_t lock_profiling_threshold,
+                   uint32_t stack_dump_lock_profiling_threshold) {
+  // It isn't great to always include the debug build fudge factor for command-
+  // line driven arguments, but it's easier to adjust here than in the build.
+  lock_profiling_threshold_ =
+      lock_profiling_threshold * kDebugThresholdFudgeFactor;
+  stack_dump_lock_profiling_threshold_ =
+      stack_dump_lock_profiling_threshold * kDebugThresholdFudgeFactor;
 }
 
 Monitor::Monitor(Thread* self, Thread* owner, mirror::Object* obj, int32_t hash_code)
@@ -303,6 +313,7 @@ std::string Monitor::PrettyContentionInfo(const std::string& owner_name,
                                           ArtMethod* owners_method,
                                           uint32_t owners_dex_pc,
                                           size_t num_waiters) {
+  Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
   const char* owners_filename;
   int32_t owners_line_number = 0;
   if (owners_method != nullptr) {
@@ -341,11 +352,31 @@ bool Monitor::TryLock(Thread* self) {
   return TryLockLocked(self);
 }
 
+// Asserts that a mutex isn't held when the class comes into and out of scope.
+class ScopedAssertNotHeld {
+ public:
+  ScopedAssertNotHeld(Thread* self, Mutex& mu) : self_(self), mu_(mu) {
+    mu_.AssertNotHeld(self_);
+  }
+
+  ~ScopedAssertNotHeld() {
+    mu_.AssertNotHeld(self_);
+  }
+
+ private:
+  Thread* const self_;
+  Mutex& mu_;
+  DISALLOW_COPY_AND_ASSIGN(ScopedAssertNotHeld);
+};
+
+template <LockReason reason>
 void Monitor::Lock(Thread* self) {
-  MutexLock mu(self, monitor_lock_);
+  ScopedAssertNotHeld sanh(self, monitor_lock_);
+  bool called_monitors_callback = false;
+  monitor_lock_.Lock(self);
   while (true) {
     if (TryLockLocked(self)) {
-      return;
+      break;
     }
     // Contended.
     const bool log_contention = (lock_profiling_threshold_ != 0);
@@ -355,66 +386,137 @@ void Monitor::Lock(Thread* self) {
     // Do this before releasing the lock so that we don't get deflated.
     size_t num_waiters = num_waiters_;
     ++num_waiters_;
+
+    // If systrace logging is enabled, first look at the lock owner. Acquiring the monitor's
+    // lock and then re-acquiring the mutator lock can deadlock.
+    bool started_trace = false;
+    if (ATRACE_ENABLED()) {
+      if (owner_ != nullptr) {  // Did the owner_ give the lock up?
+        std::ostringstream oss;
+        std::string name;
+        owner_->GetThreadName(name);
+        oss << PrettyContentionInfo(name,
+                                    owner_->GetTid(),
+                                    owners_method,
+                                    owners_dex_pc,
+                                    num_waiters);
+        // Add info for contending thread.
+        uint32_t pc;
+        ArtMethod* m = self->GetCurrentMethod(&pc);
+        const char* filename;
+        int32_t line_number;
+        TranslateLocation(m, pc, &filename, &line_number);
+        oss << " blocking from "
+            << ArtMethod::PrettyMethod(m) << "(" << (filename != nullptr ? filename : "null")
+            << ":" << line_number << ")";
+        ATRACE_BEGIN(oss.str().c_str());
+        started_trace = true;
+      }
+    }
+
     monitor_lock_.Unlock(self);  // Let go of locks in order.
+    // Call the contended locking cb once and only once. Also only call it if we are locking for
+    // the first time, not during a Wait wakeup.
+    if (reason == LockReason::kForLock && !called_monitors_callback) {
+      called_monitors_callback = true;
+      Runtime::Current()->GetRuntimeCallbacks()->MonitorContendedLocking(this);
+    }
     self->SetMonitorEnterObject(GetObject());
     {
+      ScopedThreadSuspension tsc(self, kBlocked);  // Change to blocked and give up mutator_lock_.
       uint32_t original_owner_thread_id = 0u;
-      ScopedThreadStateChange tsc(self, kBlocked);  // Change to blocked and give up mutator_lock_.
       {
         // Reacquire monitor_lock_ without mutator_lock_ for Wait.
         MutexLock mu2(self, monitor_lock_);
         if (owner_ != nullptr) {  // Did the owner_ give the lock up?
           original_owner_thread_id = owner_->GetThreadId();
-          if (ATRACE_ENABLED()) {
-            std::ostringstream oss;
-            std::string name;
-            owner_->GetThreadName(name);
-            oss << PrettyContentionInfo(name,
-                                        owner_->GetTid(),
-                                        owners_method,
-                                        owners_dex_pc,
-                                        num_waiters);
-            // Add info for contending thread.
-            uint32_t pc;
-            ArtMethod* m = self->GetCurrentMethod(&pc);
-            const char* filename;
-            int32_t line_number;
-            TranslateLocation(m, pc, &filename, &line_number);
-            oss << " blocking from "
-                << ArtMethod::PrettyMethod(m) << "(" << (filename != nullptr ? filename : "null")
-                << ":" << line_number << ")";
-            ATRACE_BEGIN(oss.str().c_str());
-          }
           monitor_contenders_.Wait(self);  // Still contended so wait.
         }
       }
       if (original_owner_thread_id != 0u) {
         // Woken from contention.
         if (log_contention) {
-          uint32_t original_owner_tid = 0;
-          std::string original_owner_name;
-          {
-            MutexLock mu2(Thread::Current(), *Locks::thread_list_lock_);
-            // Re-find the owner in case the thread got killed.
-            Thread* original_owner = Runtime::Current()->GetThreadList()->FindThreadByThreadId(
-                original_owner_thread_id);
-            // Do not do any work that requires the mutator lock.
-            if (original_owner != nullptr) {
-              original_owner_tid = original_owner->GetTid();
-              original_owner->GetThreadName(original_owner_name);
-            }
+          uint64_t wait_ms = MilliTime() - wait_start_ms;
+          uint32_t sample_percent;
+          if (wait_ms >= lock_profiling_threshold_) {
+            sample_percent = 100;
+          } else {
+            sample_percent = 100 * wait_ms / lock_profiling_threshold_;
           }
+          if (sample_percent != 0 && (static_cast<uint32_t>(rand() % 100) < sample_percent)) {
+            // Reacquire mutator_lock_ for logging.
+            ScopedObjectAccess soa(self);
 
-          if (original_owner_tid != 0u) {
-            uint64_t wait_ms = MilliTime() - wait_start_ms;
-            uint32_t sample_percent;
-            if (wait_ms >= lock_profiling_threshold_) {
-              sample_percent = 100;
-            } else {
-              sample_percent = 100 * wait_ms / lock_profiling_threshold_;
+            bool owner_alive = false;
+            pid_t original_owner_tid = 0;
+            std::string original_owner_name;
+
+            const bool should_dump_stacks = stack_dump_lock_profiling_threshold_ > 0 &&
+                wait_ms > stack_dump_lock_profiling_threshold_;
+            std::string owner_stack_dump;
+
+            // Acquire thread-list lock to find thread and keep it from dying until we've got all
+            // the info we need.
+            {
+              Locks::thread_list_lock_->ExclusiveLock(Thread::Current());
+
+              // Re-find the owner in case the thread got killed.
+              Thread* original_owner = Runtime::Current()->GetThreadList()->FindThreadByThreadId(
+                  original_owner_thread_id);
+
+              if (original_owner != nullptr) {
+                owner_alive = true;
+                original_owner_tid = original_owner->GetTid();
+                original_owner->GetThreadName(original_owner_name);
+
+                if (should_dump_stacks) {
+                  // Very long contention. Dump stacks.
+                  struct CollectStackTrace : public Closure {
+                    void Run(art::Thread* thread) OVERRIDE
+                        REQUIRES_SHARED(art::Locks::mutator_lock_) {
+                      thread->DumpJavaStack(oss);
+                    }
+
+                    std::ostringstream oss;
+                  };
+                  CollectStackTrace owner_trace;
+                  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its
+                  // execution.
+                  original_owner->RequestSynchronousCheckpoint(&owner_trace);
+                  owner_stack_dump = owner_trace.oss.str();
+                } else {
+                  Locks::thread_list_lock_->ExclusiveUnlock(Thread::Current());
+                }
+              } else {
+                Locks::thread_list_lock_->ExclusiveUnlock(Thread::Current());
+              }
+              // This is all the data we need. Now drop the thread-list lock, it's OK for the
+              // owner to go away now.
             }
-            if (sample_percent != 0 && (static_cast<uint32_t>(rand() % 100) < sample_percent)) {
-              if (wait_ms > kLongWaitMs && owners_method != nullptr) {
+
+            // If we found the owner (and thus have owner data), go and log now.
+            if (owner_alive) {
+              // Give the detailed traces for really long contention.
+              if (should_dump_stacks) {
+                // This must be here (and not above) because we cannot hold the thread-list lock
+                // while running the checkpoint.
+                std::ostringstream self_trace_oss;
+                self->DumpJavaStack(self_trace_oss);
+
+                uint32_t pc;
+                ArtMethod* m = self->GetCurrentMethod(&pc);
+
+                LOG(WARNING) << "Long "
+                    << PrettyContentionInfo(original_owner_name,
+                                            original_owner_tid,
+                                            owners_method,
+                                            owners_dex_pc,
+                                            num_waiters)
+                    << " in " << ArtMethod::PrettyMethod(m) << " for "
+                    << PrettyDuration(MsToNs(wait_ms)) << "\n"
+                    << "Current owner stack:\n" << owner_stack_dump
+                    << "Contender stack:\n" << self_trace_oss.str();
+              } else if (wait_ms > kLongWaitMs && owners_method != nullptr) {
                 uint32_t pc;
                 ArtMethod* m = self->GetCurrentMethod(&pc);
                 // TODO: We should maybe check that original_owner is still a live thread.
@@ -427,28 +529,34 @@ void Monitor::Lock(Thread* self) {
                     << " in " << ArtMethod::PrettyMethod(m) << " for "
                     << PrettyDuration(MsToNs(wait_ms));
               }
-              const char* owners_filename;
-              int32_t owners_line_number;
-              TranslateLocation(owners_method,
-                                owners_dex_pc,
-                                &owners_filename,
-                                &owners_line_number);
               LogContentionEvent(self,
-                                 wait_ms,
-                                 sample_percent,
-                                 owners_filename,
-                                 owners_line_number);
+                                wait_ms,
+                                sample_percent,
+                                owners_method,
+                                owners_dex_pc);
             }
           }
         }
-        ATRACE_END();
       }
+    }
+    if (started_trace) {
+      ATRACE_END();
     }
     self->SetMonitorEnterObject(nullptr);
     monitor_lock_.Lock(self);  // Reacquire locks in order.
     --num_waiters_;
   }
+  monitor_lock_.Unlock(self);
+  // We need to pair this with a single contended locking call. NB we match the RI behavior and call
+  // this even if MonitorEnter failed.
+  if (called_monitors_callback) {
+    CHECK(reason == LockReason::kForLock);
+    Runtime::Current()->GetRuntimeCallbacks()->MonitorContendedLocked(this);
+  }
 }
+
+template void Monitor::Lock<LockReason::kForLock>(Thread* self);
+template void Monitor::Lock<LockReason::kForWait>(Thread* self);
 
 static void ThrowIllegalMonitorStateExceptionF(const char* fmt, ...)
                                               __attribute__((format(printf, 1, 2)));
@@ -630,6 +738,7 @@ void Monitor::Wait(Thread* self, int64_t ms, int32_t ns,
   AtraceMonitorLock(self, GetObject(), true /* is_wait */);
 
   bool was_interrupted = false;
+  bool timed_out = false;
   {
     // Update thread state. If the GC wakes up, it'll ignore us, knowing
     // that we won't touch any references in this state, and we'll check
@@ -650,7 +759,7 @@ void Monitor::Wait(Thread* self, int64_t ms, int32_t ns,
     monitor_lock_.Unlock(self);
 
     // Handle the case where the thread was interrupted before we called wait().
-    if (self->IsInterruptedLocked()) {
+    if (self->IsInterrupted()) {
       was_interrupted = true;
     } else {
       // Wait for a notification or a timeout to occur.
@@ -658,9 +767,9 @@ void Monitor::Wait(Thread* self, int64_t ms, int32_t ns,
         self->GetWaitConditionVariable()->Wait(self);
       } else {
         DCHECK(why == kTimedWaiting || why == kSleeping) << why;
-        self->GetWaitConditionVariable()->TimedWait(self, ms, ns);
+        timed_out = self->GetWaitConditionVariable()->TimedWait(self, ms, ns);
       }
-      was_interrupted = self->IsInterruptedLocked();
+      was_interrupted = self->IsInterrupted();
     }
   }
 
@@ -685,17 +794,17 @@ void Monitor::Wait(Thread* self, int64_t ms, int32_t ns,
      * The doc sayeth: "The interrupted status of the current thread is
      * cleared when this exception is thrown."
      */
-    {
-      MutexLock mu(self, *self->GetWaitMutex());
-      self->SetInterruptedLocked(false);
-    }
+    self->SetInterrupted(false);
     self->ThrowNewException("Ljava/lang/InterruptedException;", nullptr);
   }
 
   AtraceMonitorUnlock();  // End Wait().
 
+  // We just slept, tell the runtime callbacks about this.
+  Runtime::Current()->GetRuntimeCallbacks()->MonitorWaitFinished(this, timed_out);
+
   // Re-acquire the monitor and lock.
-  Lock(self);
+  Lock<LockReason::kForWait>(self);
   monitor_lock_.Lock(self);
   self->GetWaitMutex()->AssertNotHeld(self);
 
@@ -840,8 +949,10 @@ void Monitor::InflateThinLocked(Thread* self, Handle<mirror::Object> obj, LockWo
     bool timed_out;
     Thread* owner;
     {
-      ScopedThreadSuspension sts(self, kBlocked);
-      owner = thread_list->SuspendThreadByThreadId(owner_thread_id, false, &timed_out);
+      ScopedThreadSuspension sts(self, kWaitingForLockInflation);
+      owner = thread_list->SuspendThreadByThreadId(owner_thread_id,
+                                                   SuspendReason::kInternal,
+                                                   &timed_out);
     }
     if (owner != nullptr) {
       // We succeeded in suspending the thread, check the lock's status didn't change.
@@ -851,7 +962,8 @@ void Monitor::InflateThinLocked(Thread* self, Handle<mirror::Object> obj, LockWo
         // Go ahead and inflate the lock.
         Inflate(self, owner, obj.Get(), hash_code);
       }
-      thread_list->Resume(owner, false);
+      bool resumed = thread_list->Resume(owner, SuspendReason::kInternal);
+      DCHECK(resumed);
     }
     self->SetMonitorEnterObject(nullptr);
   }
@@ -929,10 +1041,10 @@ mirror::Object* Monitor::MonitorEnter(Thread* self, mirror::Object* obj, bool tr
           contention_count++;
           Runtime* runtime = Runtime::Current();
           if (contention_count <= runtime->GetMaxSpinsBeforeThinLockInflation()) {
-            // TODO: Consider switching the thread state to kBlocked when we are yielding.
-            // Use sched_yield instead of NanoSleep since NanoSleep can wait much longer than the
-            // parameter you pass in. This can cause thread suspension to take excessively long
-            // and make long pauses. See b/16307460.
+            // TODO: Consider switching the thread state to kWaitingForLockInflation when we are
+            // yielding.  Use sched_yield instead of NanoSleep since NanoSleep can wait much longer
+            // than the parameter you pass in. This can cause thread suspension to take excessively
+            // long and make long pauses. See b/16307460.
             // TODO: We should literally spin first, without sched_yield. Sched_yield either does
             // nothing (at significant expense), or guarantees that we wait at least microseconds.
             // If the owner is running, I would expect the median lock hold time to be hundreds
@@ -1038,7 +1150,16 @@ void Monitor::Wait(Thread* self, mirror::Object *obj, int64_t ms, int32_t ns,
                    bool interruptShouldThrow, ThreadState why) {
   DCHECK(self != nullptr);
   DCHECK(obj != nullptr);
-  LockWord lock_word = obj->GetLockWord(true);
+  StackHandleScope<1> hs(self);
+  Handle<mirror::Object> h_obj(hs.NewHandle(obj));
+
+  Runtime::Current()->GetRuntimeCallbacks()->ObjectWaitStart(h_obj, ms);
+  if (UNLIKELY(self->ObserveAsyncException() || self->IsExceptionPending())) {
+    // See b/65558434 for information on handling of exceptions here.
+    return;
+  }
+
+  LockWord lock_word = h_obj->GetLockWord(true);
   while (lock_word.GetState() != LockWord::kFatLocked) {
     switch (lock_word.GetState()) {
       case LockWord::kHashCode:
@@ -1055,8 +1176,8 @@ void Monitor::Wait(Thread* self, mirror::Object *obj, int64_t ms, int32_t ns,
         } else {
           // We own the lock, inflate to enqueue ourself on the Monitor. May fail spuriously so
           // re-load.
-          Inflate(self, self, obj, 0);
-          lock_word = obj->GetLockWord(true);
+          Inflate(self, self, h_obj.Get(), 0);
+          lock_word = h_obj->GetLockWord(true);
         }
         break;
       }
@@ -1143,8 +1264,9 @@ void Monitor::DescribeWait(std::ostream& os, const Thread* thread) {
     if (monitor != nullptr) {
       pretty_object = monitor->GetObject();
     }
-  } else if (state == kBlocked) {
-    wait_message = "  - waiting to lock ";
+  } else if (state == kBlocked || state == kWaitingForLockInflation) {
+    wait_message = (state == kBlocked) ? "  - waiting to lock "
+                                       : "  - waiting for lock inflation of ";
     pretty_object = thread->GetMonitorEnterObject();
     if (pretty_object != nullptr) {
       if (kUseReadBarrier && Thread::Current()->GetIsGcMarking()) {
@@ -1234,7 +1356,7 @@ void Monitor::VisitLocks(StackVisitor* stack_visitor, void (*callback)(mirror::O
   // find the dex pc, and instead return kDexNoIndex. Then bail out, as it indicates we have an
   // inconsistent stack anyways.
   uint32_t dex_pc = stack_visitor->GetDexPc(abort_on_failure);
-  if (!abort_on_failure && dex_pc == DexFile::kDexNoIndex) {
+  if (!abort_on_failure && dex_pc == dex::kDexNoIndex) {
     LOG(ERROR) << "Could not find dex_pc for " << m->PrettyMethod();
     return;
   }
@@ -1367,7 +1489,7 @@ void MonitorList::Add(Monitor* m) {
   while (!kUseReadBarrier && UNLIKELY(!allow_new_monitors_)) {
     // Check and run the empty checkpoint before blocking so the empty checkpoint will work in the
     // presence of threads blocking for weak ref access.
-    self->CheckEmptyCheckpoint();
+    self->CheckEmptyCheckpointFromWeakRefAccess(&monitor_list_lock_);
     monitor_add_condition_.WaitHoldingLocks(self);
   }
   list_.push_front(m);
@@ -1392,6 +1514,12 @@ void MonitorList::SweepMonitorList(IsMarkedVisitor* visitor) {
       ++it;
     }
   }
+}
+
+size_t MonitorList::Size() {
+  Thread* self = Thread::Current();
+  MutexLock mu(self, monitor_list_lock_);
+  return list_.size();
 }
 
 class MonitorDeflateVisitor : public IsMarkedVisitor {
@@ -1432,13 +1560,21 @@ MonitorInfo::MonitorInfo(mirror::Object* obj) : owner_(nullptr), entry_count_(0)
       break;
     case LockWord::kThinLocked:
       owner_ = Runtime::Current()->GetThreadList()->FindThreadByThreadId(lock_word.ThinLockOwner());
+      DCHECK(owner_ != nullptr) << "Thin-locked without owner!";
       entry_count_ = 1 + lock_word.ThinLockCount();
       // Thin locks have no waiters.
       break;
     case LockWord::kFatLocked: {
       Monitor* mon = lock_word.FatLockMonitor();
       owner_ = mon->owner_;
-      entry_count_ = 1 + mon->lock_count_;
+      // Here it is okay for the owner to be null since we don't reset the LockWord back to
+      // kUnlocked until we get a GC. In cases where this hasn't happened yet we will have a fat
+      // lock without an owner.
+      if (owner_ != nullptr) {
+        entry_count_ = 1 + mon->lock_count_;
+      } else {
+        DCHECK_EQ(mon->lock_count_, 0) << "Monitor is fat-locked without any owner!";
+      }
       for (Thread* waiter = mon->wait_set_; waiter != nullptr; waiter = waiter->GetWaitNext()) {
         waiters_.push_back(waiter);
       }

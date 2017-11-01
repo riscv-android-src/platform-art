@@ -26,7 +26,7 @@
 #include "class_reference.h"
 #include "method_reference.h"
 #include "safe_map.h"
-#include "utils/atomic_method_ref_map.h"
+#include "utils/atomic_dex_ref_map.h"
 
 namespace art {
 
@@ -64,10 +64,8 @@ class VerificationResults {
 
  private:
   // Verified methods. The method array is fixed to avoid needing a lock to extend it.
-  using AtomicMap = AtomicMethodRefMap<const VerifiedMethod*>;
-  using VerifiedMethodMap = SafeMap<MethodReference,
-                                    const VerifiedMethod*,
-                                    MethodReferenceComparator>;
+  using AtomicMap = AtomicDexRefMap<MethodReference, const VerifiedMethod*>;
+  using VerifiedMethodMap = SafeMap<MethodReference, const VerifiedMethod*>;
 
   VerifiedMethodMap verified_methods_ GUARDED_BY(verified_methods_lock_);
   const CompilerOptions* const compiler_options_;

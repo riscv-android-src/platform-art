@@ -20,20 +20,17 @@
 
 namespace art {
 
-bool CompilerFilter::IsBytecodeCompilationEnabled(Filter filter) {
+bool CompilerFilter::IsAotCompilationEnabled(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime:
-    case CompilerFilter::kVerifyProfile:
-    case CompilerFilter::kInterpretOnly: return false;
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify:
+    case CompilerFilter::kQuicken: return false;
 
     case CompilerFilter::kSpaceProfile:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeedProfile:
     case CompilerFilter::kSpeed:
-    case CompilerFilter::kLayoutProfile:
     case CompilerFilter::kEverythingProfile:
     case CompilerFilter::kEverything: return true;
   }
@@ -42,58 +39,55 @@ bool CompilerFilter::IsBytecodeCompilationEnabled(Filter filter) {
 
 bool CompilerFilter::IsJniCompilationEnabled(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime: return false;
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify: return false;
 
-    case CompilerFilter::kVerifyProfile:
-    case CompilerFilter::kInterpretOnly:
+    case CompilerFilter::kQuicken:
     case CompilerFilter::kSpaceProfile:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeedProfile:
     case CompilerFilter::kSpeed:
-    case CompilerFilter::kLayoutProfile:
     case CompilerFilter::kEverythingProfile:
     case CompilerFilter::kEverything: return true;
   }
   UNREACHABLE();
 }
 
-bool CompilerFilter::IsAnyMethodCompilationEnabled(Filter filter) {
+bool CompilerFilter::IsQuickeningCompilationEnabled(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime:
-    case CompilerFilter::kVerifyProfile: return false;
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify: return false;
 
-    case CompilerFilter::kInterpretOnly:
+    case CompilerFilter::kQuicken:
     case CompilerFilter::kSpaceProfile:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeedProfile:
     case CompilerFilter::kSpeed:
-    case CompilerFilter::kLayoutProfile:
     case CompilerFilter::kEverythingProfile:
     case CompilerFilter::kEverything: return true;
   }
   UNREACHABLE();
+}
+
+bool CompilerFilter::IsAnyCompilationEnabled(Filter filter) {
+  return IsJniCompilationEnabled(filter) ||
+      IsQuickeningCompilationEnabled(filter) ||
+      IsAotCompilationEnabled(filter);
 }
 
 bool CompilerFilter::IsVerificationEnabled(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime: return false;
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract: return false;
 
-    case CompilerFilter::kVerifyProfile:
-    case CompilerFilter::kInterpretOnly:
+    case CompilerFilter::kVerify:
+    case CompilerFilter::kQuicken:
     case CompilerFilter::kSpaceProfile:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeedProfile:
     case CompilerFilter::kSpeed:
-    case CompilerFilter::kLayoutProfile:
     case CompilerFilter::kEverythingProfile:
     case CompilerFilter::kEverything: return true;
   }
@@ -108,19 +102,16 @@ bool CompilerFilter::DependsOnImageChecksum(Filter filter) {
 
 bool CompilerFilter::DependsOnProfile(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime:
-    case CompilerFilter::kInterpretOnly:
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify:
+    case CompilerFilter::kQuicken:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeed:
     case CompilerFilter::kEverything: return false;
 
-    case CompilerFilter::kVerifyProfile:
     case CompilerFilter::kSpaceProfile:
     case CompilerFilter::kSpeedProfile:
-    case CompilerFilter::kLayoutProfile:
     case CompilerFilter::kEverythingProfile: return true;
   }
   UNREACHABLE();
@@ -128,24 +119,19 @@ bool CompilerFilter::DependsOnProfile(Filter filter) {
 
 CompilerFilter::Filter CompilerFilter::GetNonProfileDependentFilterFrom(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone:
-    case CompilerFilter::kVerifyAtRuntime:
-    case CompilerFilter::kInterpretOnly:
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify:
+    case CompilerFilter::kQuicken:
     case CompilerFilter::kSpace:
-    case CompilerFilter::kBalanced:
-    case CompilerFilter::kTime:
     case CompilerFilter::kSpeed:
     case CompilerFilter::kEverything:
       return filter;
-
-    case CompilerFilter::kVerifyProfile:
-      return CompilerFilter::kInterpretOnly;
 
     case CompilerFilter::kSpaceProfile:
       return CompilerFilter::kSpace;
 
     case CompilerFilter::kSpeedProfile:
-    case CompilerFilter::kLayoutProfile:
       return CompilerFilter::kSpeed;
 
     case CompilerFilter::kEverythingProfile:
@@ -154,24 +140,45 @@ CompilerFilter::Filter CompilerFilter::GetNonProfileDependentFilterFrom(Filter f
   UNREACHABLE();
 }
 
+CompilerFilter::Filter CompilerFilter::GetSafeModeFilterFrom(Filter filter) {
+  // For safe mode, we should not return a filter that generates AOT compiled
+  // code.
+  switch (filter) {
+    case CompilerFilter::kAssumeVerified:
+    case CompilerFilter::kExtract:
+    case CompilerFilter::kVerify:
+    case CompilerFilter::kQuicken:
+      return filter;
+
+    case CompilerFilter::kSpace:
+    case CompilerFilter::kSpeed:
+    case CompilerFilter::kEverything:
+    case CompilerFilter::kSpaceProfile:
+    case CompilerFilter::kSpeedProfile:
+    case CompilerFilter::kEverythingProfile:
+      return CompilerFilter::kQuicken;
+  }
+  UNREACHABLE();
+}
 
 bool CompilerFilter::IsAsGoodAs(Filter current, Filter target) {
   return current >= target;
 }
 
+bool CompilerFilter::IsBetter(Filter current, Filter target) {
+  return current > target;
+}
+
 std::string CompilerFilter::NameOfFilter(Filter filter) {
   switch (filter) {
-    case CompilerFilter::kVerifyNone: return "verify-none";
-    case CompilerFilter::kVerifyAtRuntime: return "verify-at-runtime";
-    case CompilerFilter::kVerifyProfile: return "verify-profile";
-    case CompilerFilter::kInterpretOnly: return "interpret-only";
+    case CompilerFilter::kAssumeVerified: return "assume-verified";
+    case CompilerFilter::kExtract: return "extract";
+    case CompilerFilter::kVerify: return "verify";
+    case CompilerFilter::kQuicken: return "quicken";
     case CompilerFilter::kSpaceProfile: return "space-profile";
     case CompilerFilter::kSpace: return "space";
-    case CompilerFilter::kBalanced: return "balanced";
-    case CompilerFilter::kTime: return "time";
     case CompilerFilter::kSpeedProfile: return "speed-profile";
     case CompilerFilter::kSpeed: return "speed";
-    case CompilerFilter::kLayoutProfile: return "layout-profile";
     case CompilerFilter::kEverythingProfile: return "everything-profile";
     case CompilerFilter::kEverything: return "everything";
   }
@@ -182,31 +189,49 @@ bool CompilerFilter::ParseCompilerFilter(const char* option, Filter* filter) {
   CHECK(filter != nullptr);
 
   if (strcmp(option, "verify-none") == 0) {
-    *filter = kVerifyNone;
+    LOG(WARNING) << "'verify-none' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'assume-verified' instead.";
+    *filter = kAssumeVerified;
   } else if (strcmp(option, "interpret-only") == 0) {
-    *filter = kInterpretOnly;
+    LOG(WARNING) << "'interpret-only' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'quicken' instead.";
+    *filter = kQuicken;
   } else if (strcmp(option, "verify-profile") == 0) {
-    *filter = kVerifyProfile;
+    LOG(WARNING) << "'verify-profile' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'verify' instead.";
+    *filter = kVerify;
   } else if (strcmp(option, "verify-at-runtime") == 0) {
-    *filter = kVerifyAtRuntime;
+    LOG(WARNING) << "'verify-at-runtime' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'extract' instead.";
+    *filter = kExtract;
+  } else if (strcmp(option, "balanced") == 0) {
+    LOG(WARNING) << "'balanced' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'speed' instead.";
+    *filter = kSpeed;
+  } else if (strcmp(option, "time") == 0) {
+    LOG(WARNING) << "'time' is an obsolete compiler filter name that will be "
+                 << "removed in future releases, please use 'space' instead.";
+    *filter = kSpace;
+  } else if (strcmp(option, "assume-verified") == 0) {
+    *filter = kAssumeVerified;
+  } else if (strcmp(option, "extract") == 0) {
+    *filter = kExtract;
+  } else if (strcmp(option, "verify") == 0) {
+    *filter = kVerify;
+  } else if (strcmp(option, "quicken") == 0) {
+    *filter = kQuicken;
   } else if (strcmp(option, "space") == 0) {
     *filter = kSpace;
   } else if (strcmp(option, "space-profile") == 0) {
     *filter = kSpaceProfile;
-  } else if (strcmp(option, "balanced") == 0) {
-    *filter = kBalanced;
   } else if (strcmp(option, "speed") == 0) {
     *filter = kSpeed;
   } else if (strcmp(option, "speed-profile") == 0) {
     *filter = kSpeedProfile;
-  } else if (strcmp(option, "layout-profile") == 0) {
-    *filter = kLayoutProfile;
   } else if (strcmp(option, "everything") == 0) {
     *filter = kEverything;
   } else if (strcmp(option, "everything-profile") == 0) {
     *filter = kEverythingProfile;
-  } else if (strcmp(option, "time") == 0) {
-    *filter = kTime;
   } else {
     return false;
   }

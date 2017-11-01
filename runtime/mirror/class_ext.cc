@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-#include "class_ext.h"
+#include "class_ext-inl.h"
 
 #include "art_method-inl.h"
 #include "base/casts.h"
@@ -24,7 +24,6 @@
 #include "gc/accounting/card_table-inl.h"
 #include "object-inl.h"
 #include "object_array.h"
-#include "object_array-inl.h"
 #include "stack_trace_element.h"
 #include "utils.h"
 #include "well_known_classes.h"
@@ -34,10 +33,13 @@ namespace mirror {
 
 GcRoot<Class> ClassExt::dalvik_system_ClassExt_;
 
+uint32_t ClassExt::ClassSize(PointerSize pointer_size) {
+  uint32_t vtable_entries = Object::kVTableLength;
+  return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 0, 0, pointer_size);
+}
+
 void ClassExt::SetObsoleteArrays(ObjPtr<PointerArray> methods,
                                  ObjPtr<ObjectArray<DexCache>> dex_caches) {
-  DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId())
-      << "Obsolete arrays are set without synchronization!";
   CHECK_EQ(methods.IsNull(), dex_caches.IsNull());
   auto obsolete_dex_cache_off = OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_dex_caches_);
   auto obsolete_methods_off = OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_methods_);
@@ -50,16 +52,15 @@ void ClassExt::SetObsoleteArrays(ObjPtr<PointerArray> methods,
 // these arrays are written into without all threads being suspended we have a race condition! This
 // race could cause obsolete methods to be missed.
 bool ClassExt::ExtendObsoleteArrays(Thread* self, uint32_t increase) {
-  DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId())
-      << "Obsolete arrays are set without synchronization!";
+  // TODO It would be good to check that we have locked the class associated with this ClassExt.
   StackHandleScope<5> hs(self);
   Handle<ClassExt> h_this(hs.NewHandle(this));
   Handle<PointerArray> old_methods(hs.NewHandle(h_this->GetObsoleteMethods()));
   Handle<ObjectArray<DexCache>> old_dex_caches(hs.NewHandle(h_this->GetObsoleteDexCaches()));
   ClassLinker* cl = Runtime::Current()->GetClassLinker();
   size_t new_len;
-  if (old_methods.Get() == nullptr) {
-    CHECK(old_dex_caches.Get() == nullptr);
+  if (old_methods == nullptr) {
+    CHECK(old_dex_caches == nullptr);
     new_len = increase;
   } else {
     CHECK_EQ(old_methods->GetLength(), old_dex_caches->GetLength());
@@ -111,6 +112,11 @@ void ClassExt::SetVerifyError(ObjPtr<Object> err) {
   } else {
     SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, verify_error_), err);
   }
+}
+
+void ClassExt::SetOriginalDexFile(ObjPtr<Object> bytes) {
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, original_dex_file_), bytes);
 }
 
 void ClassExt::SetClass(ObjPtr<Class> dalvik_system_ClassExt) {

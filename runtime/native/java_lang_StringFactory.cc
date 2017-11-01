@@ -20,10 +20,12 @@
 #include "jni_internal.h"
 #include "mirror/object-inl.h"
 #include "mirror/string.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_primitive_array.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
-#include "ScopedPrimitiveArray.h"
 
 namespace art {
 
@@ -87,9 +89,9 @@ static jstring StringFactory_newStringFromString(JNIEnv* env, jclass, jstring to
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(StringFactory, newStringFromBytes, "!([BIII)Ljava/lang/String;"),
-  NATIVE_METHOD(StringFactory, newStringFromChars, "!(II[C)Ljava/lang/String;"),
-  NATIVE_METHOD(StringFactory, newStringFromString, "!(Ljava/lang/String;)Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(StringFactory, newStringFromBytes, "([BIII)Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(StringFactory, newStringFromChars, "(II[C)Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(StringFactory, newStringFromString, "(Ljava/lang/String;)Ljava/lang/String;"),
 };
 
 void register_java_lang_StringFactory(JNIEnv* env) {

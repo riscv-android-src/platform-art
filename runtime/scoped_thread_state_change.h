@@ -17,17 +17,23 @@
 #ifndef ART_RUNTIME_SCOPED_THREAD_STATE_CHANGE_H_
 #define ART_RUNTIME_SCOPED_THREAD_STATE_CHANGE_H_
 
-#include "art_field.h"
-#include "base/casts.h"
+#include "jni.h"
+
+#include "base/macros.h"
+#include "base/mutex.h"
 #include "base/value_object.h"
-#include "java_vm_ext.h"
 #include "thread_state.h"
-#include "verify_object.h"
 
 namespace art {
 
+class JavaVMExt;
 struct JNIEnvExt;
-template<class MirrorType, bool kPoison> class ObjPtr;
+template<class MirrorType> class ObjPtr;
+class Thread;
+
+namespace mirror {
+class Object;
+}  // namespace mirror
 
 // Scoped change into and out of a particular state. Handles Runnable transitions that require
 // more complicated suspension checking. The subclasses ScopedObjectAccessUnchecked and
@@ -74,9 +80,7 @@ class ScopedObjectAccessAlreadyRunnable : public ValueObject {
     return vm_;
   }
 
-  bool ForceCopy() const {
-    return vm_->ForceCopy();
-  }
+  bool ForceCopy() const;
 
   /*
    * Add a local reference for an object to the indirect reference table associated with the
@@ -91,8 +95,8 @@ class ScopedObjectAccessAlreadyRunnable : public ValueObject {
   T AddLocalReference(ObjPtr<mirror::Object> obj) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<typename T, bool kPoison = kIsDebugBuild>
-  ObjPtr<T, kPoison> Decode(jobject obj) const REQUIRES_SHARED(Locks::mutator_lock_);
+  template<typename T>
+  ObjPtr<T> Decode(jobject obj) const REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE bool IsRunnable() const;
 
@@ -105,11 +109,16 @@ class ScopedObjectAccessAlreadyRunnable : public ValueObject {
 
   // Used when we want a scoped JNI thread state but have no thread/JNIEnv. Consequently doesn't
   // change into Runnable or acquire a share on the mutator_lock_.
+  // Note: The reinterpret_cast is backed by a static_assert in the cc file. Avoid a down_cast,
+  //       as it prevents forward declaration of JavaVMExt.
   explicit ScopedObjectAccessAlreadyRunnable(JavaVM* vm)
-      : self_(nullptr), env_(nullptr), vm_(down_cast<JavaVMExt*>(vm)) {}
+      : self_(nullptr), env_(nullptr), vm_(reinterpret_cast<JavaVMExt*>(vm)) {}
 
   // Here purely to force inlining.
   ALWAYS_INLINE ~ScopedObjectAccessAlreadyRunnable() {}
+
+  static void DCheckObjIsNotClearedJniWeakGlobal(ObjPtr<mirror::Object> obj)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Self thread, can be null.
   Thread* const self_;
@@ -141,6 +150,8 @@ class ScopedObjectAccessUnchecked : public ScopedObjectAccessAlreadyRunnable {
   ALWAYS_INLINE explicit ScopedObjectAccessUnchecked(Thread* self)
       REQUIRES(!Locks::thread_suspend_count_lock_);
 
+  ALWAYS_INLINE ~ScopedObjectAccessUnchecked() REQUIRES(!Locks::thread_suspend_count_lock_) {}
+
   // Used when we want a scoped JNI thread state but have no thread/JNIEnv. Consequently doesn't
   // change into Runnable or acquire a share on the mutator_lock_.
   explicit ScopedObjectAccessUnchecked(JavaVM* vm) ALWAYS_INLINE
@@ -159,16 +170,14 @@ class ScopedObjectAccess : public ScopedObjectAccessUnchecked {
  public:
   ALWAYS_INLINE explicit ScopedObjectAccess(JNIEnv* env)
       REQUIRES(!Locks::thread_suspend_count_lock_)
-      SHARED_LOCK_FUNCTION(Locks::mutator_lock_)
-      : ScopedObjectAccessUnchecked(env) {}
+      SHARED_LOCK_FUNCTION(Locks::mutator_lock_);
 
   ALWAYS_INLINE explicit ScopedObjectAccess(Thread* self)
       REQUIRES(!Locks::thread_suspend_count_lock_)
-      SHARED_LOCK_FUNCTION(Locks::mutator_lock_)
-      : ScopedObjectAccessUnchecked(self) {}
+      SHARED_LOCK_FUNCTION(Locks::mutator_lock_);
 
   // Base class will release share of lock. Invoked after this destructor.
-  ~ScopedObjectAccess() UNLOCK_FUNCTION(Locks::mutator_lock_) ALWAYS_INLINE {}
+  ~ScopedObjectAccess() UNLOCK_FUNCTION(Locks::mutator_lock_) ALWAYS_INLINE;
 
  private:
   // TODO: remove this constructor. It is used by check JNI's ScopedCheck to make it believe that

@@ -14,70 +14,8 @@
  * limitations under the License.
  */
 
-import java.util.ArrayList;
-import java.util.Arrays;
-
 public class Main {
   public static void main(String[] args) throws Exception {
-    System.loadLibrary(args[1]);
-
-    doTest();
+    art.Test905.run();
   }
-
-  public static void doTest() throws Exception {
-    // Use a list to ensure objects must be allocated.
-    ArrayList<Object> l = new ArrayList<>(100);
-
-    setupObjectFreeCallback();
-
-    enableFreeTracking(true);
-    run(l);
-
-    enableFreeTracking(false);
-    run(l);
-  }
-
-  private static void run(ArrayList<Object> l) {
-    allocate(l, 1);
-    l.clear();
-
-    Runtime.getRuntime().gc();
-
-    getAndPrintTags();
-    System.out.println("---");
-
-    // Note: the reporting will not depend on the heap layout (which could be unstable). Walking
-    //       the tag table should give us a stable output order.
-    for (int i = 10; i <= 1000; i *= 10) {
-      allocate(l, i);
-    }
-    l.clear();
-
-    Runtime.getRuntime().gc();
-
-    getAndPrintTags();
-    System.out.println("---");
-
-    Runtime.getRuntime().gc();
-
-    getAndPrintTags();
-    System.out.println("---");
-  }
-
-  private static void allocate(ArrayList<Object> l, long tag) {
-    Object obj = new Object();
-    l.add(obj);
-    setTag(obj, tag);
-  }
-
-  private static void getAndPrintTags() {
-    long[] freedTags = getCollectedTags();
-    Arrays.sort(freedTags);
-    System.out.println(Arrays.toString(freedTags));
-  }
-
-  private static native void setupObjectFreeCallback();
-  private static native void enableFreeTracking(boolean enable);
-  private static native void setTag(Object o, long tag);
-  private static native long[] getCollectedTags();
 }

@@ -21,7 +21,7 @@
 #include "arch/instruction_set_features.h"
 #include "base/array_ref.h"
 #include "base/macros.h"
-#include "compiled_method.h"
+#include "compiled_method-inl.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
@@ -31,6 +31,7 @@
 #include "method_reference.h"
 #include "oat.h"
 #include "oat_quick_method_header.h"
+#include "string_reference.h"
 #include "vector_output_stream.h"
 
 namespace art {
@@ -61,7 +62,7 @@ class RelativePatcherTest : public testing::Test {
         features_(InstructionSetFeatures::FromVariant(instruction_set, variant, &error_msg_)),
         method_offset_map_(),
         patcher_(RelativePatcher::Create(instruction_set, features_.get(), &method_offset_map_)),
-        dex_cache_arrays_begin_(0u),
+        bss_begin_(0u),
         compiled_method_refs_(),
         compiled_methods_(),
         patched_code_(),
@@ -76,9 +77,10 @@ class RelativePatcherTest : public testing::Test {
     return MethodReference(nullptr, method_idx);
   }
 
-  void AddCompiledMethod(MethodReference method_ref,
-                         const ArrayRef<const uint8_t>& code,
-                         const ArrayRef<const LinkerPatch>& patches) {
+  void AddCompiledMethod(
+      MethodReference method_ref,
+      const ArrayRef<const uint8_t>& code,
+      const ArrayRef<const LinkerPatch>& patches = ArrayRef<const LinkerPatch>()) {
     compiled_method_refs_.push_back(method_ref);
     compiled_methods_.emplace_back(new CompiledMethod(
         &driver_,
@@ -87,7 +89,7 @@ class RelativePatcherTest : public testing::Test {
         /* frame_size_in_bytes */ 0u,
         /* core_spill_mask */ 0u,
         /* fp_spill_mask */ 0u,
-        /* src_mapping_table */ ArrayRef<const SrcMapElem>(),
+        /* method_info */ ArrayRef<const uint8_t>(),
         /* vmap_table */ ArrayRef<const uint8_t>(),
         /* cfi_info */ ArrayRef<const uint8_t>(),
         patches));
@@ -156,8 +158,9 @@ class RelativePatcherTest : public testing::Test {
                 result.first ? result.second : kTrampolineOffset + compiled_method->CodeDelta();
             patcher_->PatchCall(&patched_code_, patch.LiteralOffset(),
                                 offset + patch.LiteralOffset(), target_offset);
-          } else if (patch.GetType() == LinkerPatch::Type::kDexCacheArray) {
-            uint32_t target_offset = dex_cache_arrays_begin_ + patch.TargetDexCacheElementOffset();
+          } else if (patch.GetType() == LinkerPatch::Type::kStringBssEntry) {
+            uint32_t target_offset =
+                bss_begin_ + string_index_to_offset_map_.Get(patch.TargetStringIndex().index_);
             patcher_->PatchPcRelativeReference(&patched_code_,
                                                patch,
                                                offset + patch.LiteralOffset(),
@@ -169,6 +172,10 @@ class RelativePatcherTest : public testing::Test {
                                                patch,
                                                offset + patch.LiteralOffset(),
                                                target_offset);
+          } else if (patch.GetType() == LinkerPatch::Type::kBakerReadBarrierBranch) {
+            patcher_->PatchBakerReadBarrierBranch(&patched_code_,
+                                                  patch,
+                                                  offset + patch.LiteralOffset());
           } else {
             LOG(FATAL) << "Bad patch type. " << patch.GetType();
             UNREACHABLE();
@@ -187,8 +194,7 @@ class RelativePatcherTest : public testing::Test {
     // Sanity check: original code size must match linked_code.size().
     size_t idx = 0u;
     for (auto ref : compiled_method_refs_) {
-      if (ref.dex_file == method_ref.dex_file &&
-          ref.dex_method_index == method_ref.dex_method_index) {
+      if (ref == method_ref) {
         break;
       }
       ++idx;
@@ -246,8 +252,8 @@ class RelativePatcherTest : public testing::Test {
   }
 
   // Map method reference to assinged offset.
-  // Wrap the map in a class implementing linker::RelativePatcherTargetProvider.
-  class MethodOffsetMap FINAL : public linker::RelativePatcherTargetProvider {
+  // Wrap the map in a class implementing RelativePatcherTargetProvider.
+  class MethodOffsetMap FINAL : public RelativePatcherTargetProvider {
    public:
     std::pair<bool, uint32_t> FindMethodOffset(MethodReference ref) OVERRIDE {
       auto it = map.find(ref);
@@ -257,7 +263,7 @@ class RelativePatcherTest : public testing::Test {
         return std::pair<bool, uint32_t>(true, it->second);
       }
     }
-    SafeMap<MethodReference, uint32_t, MethodReferenceComparator> map;
+    SafeMap<MethodReference, uint32_t> map;
   };
 
   static const uint32_t kTrampolineSize = 4u;
@@ -271,7 +277,7 @@ class RelativePatcherTest : public testing::Test {
   std::unique_ptr<const InstructionSetFeatures> features_;
   MethodOffsetMap method_offset_map_;
   std::unique_ptr<RelativePatcher> patcher_;
-  uint32_t dex_cache_arrays_begin_;
+  uint32_t bss_begin_;
   SafeMap<uint32_t, uint32_t> string_index_to_offset_map_;
   std::vector<MethodReference> compiled_method_refs_;
   std::vector<std::unique_ptr<CompiledMethod>> compiled_methods_;

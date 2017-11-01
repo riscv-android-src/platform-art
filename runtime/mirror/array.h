@@ -18,11 +18,10 @@
 #define ART_RUNTIME_MIRROR_ARRAY_H_
 
 #include "base/enums.h"
-#include "gc_root.h"
 #include "gc/allocator_type.h"
+#include "gc_root.h"
 #include "obj_ptr.h"
 #include "object.h"
-#include "object_callbacks.h"
 
 namespace art {
 
@@ -119,6 +118,10 @@ class MANAGED PrimitiveArray : public Array {
   static PrimitiveArray<T>* Alloc(Thread* self, size_t length)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
+  static PrimitiveArray<T>* AllocateAndFill(Thread* self, const T* data, size_t length)
+      REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
+
+
   const T* GetData() const ALWAYS_INLINE  REQUIRES_SHARED(Locks::mutator_lock_) {
     return reinterpret_cast<const T*>(GetRawData(sizeof(T), 0));
   }
@@ -185,6 +188,16 @@ class MANAGED PrimitiveArray : public Array {
   DISALLOW_IMPLICIT_CONSTRUCTORS(PrimitiveArray);
 };
 
+// Declare the different primitive arrays. Instantiations will be in array.cc.
+extern template class PrimitiveArray<uint8_t>;   // BooleanArray
+extern template class PrimitiveArray<int8_t>;    // ByteArray
+extern template class PrimitiveArray<uint16_t>;  // CharArray
+extern template class PrimitiveArray<double>;    // DoubleArray
+extern template class PrimitiveArray<float>;     // FloatArray
+extern template class PrimitiveArray<int32_t>;   // IntArray
+extern template class PrimitiveArray<int64_t>;   // LongArray
+extern template class PrimitiveArray<int16_t>;   // ShortArray
+
 // Either an IntArray or a LongArray.
 class PointerArray : public Array {
  public:
@@ -193,6 +206,13 @@ class PointerArray : public Array {
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   T GetElementPtrSize(uint32_t idx, PointerSize ptr_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void** ElementAddress(size_t index, PointerSize ptr_size) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK_LT(index, static_cast<size_t>(GetLength()));
+    return reinterpret_cast<void**>(reinterpret_cast<uint8_t*>(this) +
+                                    Array::DataOffset(static_cast<size_t>(ptr_size)).Uint32Value() +
+                                    static_cast<size_t>(ptr_size) * index);
+  }
 
   template<bool kTransactionActive = false, bool kUnchecked = false>
   void SetElementPtrSize(uint32_t idx, uint64_t element, PointerSize ptr_size)

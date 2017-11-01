@@ -29,9 +29,10 @@
 #include "gc/space/space-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object-refvisitor-inl.h"
 #include "runtime.h"
 #include "stack.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -52,8 +53,12 @@ void MarkCompact::BindBitmaps() {
 
 MarkCompact::MarkCompact(Heap* heap, const std::string& name_prefix)
     : GarbageCollector(heap, name_prefix + (name_prefix.empty() ? "" : " ") + "mark compact"),
+      mark_stack_(nullptr),
       space_(nullptr),
+      mark_bitmap_(nullptr),
       collector_name_(name_),
+      bump_pointer_(nullptr),
+      live_objects_in_space_(0),
       updating_references_(false) {}
 
 void MarkCompact::RunPhases() {
@@ -135,7 +140,7 @@ inline mirror::Object* MarkCompact::MarkObject(mirror::Object* obj) {
       }
     } else {
       DCHECK(!space_->HasAddress(obj));
-      auto slow_path = [this](const mirror::Object* ref)
+      auto slow_path = [](const mirror::Object* ref)
           REQUIRES_SHARED(Locks::mutator_lock_) {
         // Marking a large object, make sure its aligned as a sanity check.
         if (!IsAligned<kPageSize>(ref)) {
@@ -260,7 +265,8 @@ inline void MarkCompact::MarkStackPush(mirror::Object* obj) {
   mark_stack_->PushBack(obj);
 }
 
-void MarkCompact::MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr) {
+void MarkCompact::MarkHeapReference(mirror::HeapReference<mirror::Object>* obj_ptr,
+                                    bool do_atomic_update ATTRIBUTE_UNUSED) {
   if (updating_references_) {
     UpdateHeapReference(obj_ptr);
   } else {

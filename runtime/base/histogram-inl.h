@@ -48,7 +48,8 @@ template <class Value> inline Histogram<Value>::Histogram(const char* name)
     : kAdjust(0),
       kInitialBucketCount(0),
       name_(name),
-      max_buckets_(0) {
+      max_buckets_(0),
+      sample_size_(0) {
 }
 
 template <class Value>
@@ -197,7 +198,7 @@ inline void Histogram<Value>::PrintConfidenceIntervals(std::ostream &os, double 
                                                         kFractionalDigits)
      << "-" << FormatDuration(Percentile(per_1, data) * kAdjust, unit, kFractionalDigits) << " "
      << "Avg: " << FormatDuration(Mean() * kAdjust, unit, kFractionalDigits) << " Max: "
-     << FormatDuration(Max() * kAdjust, unit, kFractionalDigits) << "\n";
+     << FormatDuration(Max() * kAdjust, unit, kFractionalDigits) << std::endl;
 }
 
 template <class Value>

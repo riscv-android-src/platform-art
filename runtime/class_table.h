@@ -25,18 +25,25 @@
 #include "base/hash_set.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_file.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
-#include "object_callbacks.h"
-#include "runtime.h"
 
 namespace art {
 
 class OatFile;
 
+namespace linker {
+class ImageWriter;
+}  // namespace linker
+
+namespace linker {
+class OatWriter;
+}  // namespace linker
+
 namespace mirror {
+  class Class;
   class ClassLoader;
+  class Object;
 }  // namespace mirror
 
 // Each loader has a ClassTable
@@ -144,13 +151,23 @@ class ClassTable {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Returns the number of classes in previous snapshots.
+  // Returns the number of classes in previous snapshots defined by `defining_loader`.
   size_t NumZygoteClasses(ObjPtr<mirror::ClassLoader> defining_loader) const
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Returns all off the classes in the lastest snapshot.
+  // Returns all off the classes in the lastest snapshot defined by `defining_loader`.
   size_t NumNonZygoteClasses(ObjPtr<mirror::ClassLoader> defining_loader) const
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Returns the number of classes in previous snapshots no matter the defining loader.
+  size_t NumReferencedZygoteClasses() const
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Returns all off the classes in the lastest snapshot no matter the defining loader.
+  size_t NumReferencedNonZygoteClasses() const
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -189,6 +206,12 @@ class ClassTable {
 
   // Return the first class that matches the descriptor of klass. Returns null if there are none.
   mirror::Class* LookupByDescriptor(ObjPtr<mirror::Class> klass)
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Try to insert a class and return the inserted class if successful. If another class
+  // with the same descriptor is already in the table, return the existing entry.
+  ObjPtr<mirror::Class> TryInsert(ObjPtr<mirror::Class> klass)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -235,11 +258,19 @@ class ClassTable {
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Filter strong roots (other than classes themselves).
+  template <typename Filter>
+  void RemoveStrongRoots(const Filter& filter)
+      REQUIRES(!lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   ReaderWriterMutex& GetLock() {
     return lock_;
   }
 
  private:
+  // Only copies classes.
+  void CopyWithoutLocks(const ClassTable& source_table) NO_THREAD_SAFETY_ANALYSIS;
   void InsertWithoutLocks(ObjPtr<mirror::Class> klass) NO_THREAD_SAFETY_ANALYSIS;
 
   size_t CountDefiningLoaderClasses(ObjPtr<mirror::ClassLoader> defining_loader,
@@ -263,7 +294,8 @@ class ClassTable {
   // Keep track of oat files with GC roots associated with dex caches in `strong_roots_`.
   std::vector<const OatFile*> oat_files_ GUARDED_BY(lock_);
 
-  friend class ImageWriter;  // for InsertWithoutLocks.
+  friend class linker::ImageWriter;  // for InsertWithoutLocks.
+  friend class linker::OatWriter;  // for boot class TableSlot address lookup.
 };
 
 }  // namespace art

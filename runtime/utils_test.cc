@@ -16,18 +16,22 @@
 
 #include "utils.h"
 
+#include <libgen.h>
 #include <stdlib.h>
 
 #include "base/enums.h"
+#include "base/file_utils.h"
+#include "base/stl_util.h"
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
-#include "mirror/array.h"
+#include "exec_utils.h"
+#include "handle_scope-inl.h"
 #include "mirror/array-inl.h"
+#include "mirror/array.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string.h"
 #include "scoped_thread_state_change-inl.h"
-#include "handle_scope-inl.h"
 
 #include "base/memory_tool.h"
 
@@ -88,23 +92,6 @@ TEST_F(UtilsTest, PrettyDescriptor_PrimitiveScalars) {
   EXPECT_EQ("int", PrettyDescriptor("I"));
   EXPECT_EQ("long", PrettyDescriptor("J"));
   EXPECT_EQ("short", PrettyDescriptor("S"));
-}
-
-TEST_F(UtilsTest, PrettyArguments) {
-  EXPECT_EQ("()", PrettyArguments("()V"));
-  EXPECT_EQ("(int)", PrettyArguments("(I)V"));
-  EXPECT_EQ("(int, int)", PrettyArguments("(II)V"));
-  EXPECT_EQ("(int, int, int[][])", PrettyArguments("(II[[I)V"));
-  EXPECT_EQ("(int, int, int[][], java.lang.Poop)", PrettyArguments("(II[[ILjava/lang/Poop;)V"));
-  EXPECT_EQ("(int, int, int[][], java.lang.Poop, java.lang.Poop[][])", PrettyArguments("(II[[ILjava/lang/Poop;[[Ljava/lang/Poop;)V"));
-}
-
-TEST_F(UtilsTest, PrettyReturnType) {
-  EXPECT_EQ("void", PrettyReturnType("()V"));
-  EXPECT_EQ("int", PrettyReturnType("()I"));
-  EXPECT_EQ("int[][]", PrettyReturnType("()[[I"));
-  EXPECT_EQ("java.lang.Poop", PrettyReturnType("()Ljava/lang/Poop;"));
-  EXPECT_EQ("java.lang.Poop[][]", PrettyReturnType("()[[Ljava/lang/Poop;"));
 }
 
 TEST_F(UtilsTest, PrettyTypeOf) {
@@ -191,18 +178,21 @@ TEST_F(UtilsTest, JniShortName_JniLongName) {
   ASSERT_TRUE(c != nullptr);
   ArtMethod* m;
 
-  m = c->FindVirtualMethod("charAt", "(I)C", kRuntimePointerSize);
+  m = c->FindClassMethod("charAt", "(I)C", kRuntimePointerSize);
   ASSERT_TRUE(m != nullptr);
+  ASSERT_FALSE(m->IsDirect());
   EXPECT_EQ("Java_java_lang_String_charAt", m->JniShortName());
   EXPECT_EQ("Java_java_lang_String_charAt__I", m->JniLongName());
 
-  m = c->FindVirtualMethod("indexOf", "(Ljava/lang/String;I)I", kRuntimePointerSize);
+  m = c->FindClassMethod("indexOf", "(Ljava/lang/String;I)I", kRuntimePointerSize);
   ASSERT_TRUE(m != nullptr);
+  ASSERT_FALSE(m->IsDirect());
   EXPECT_EQ("Java_java_lang_String_indexOf", m->JniShortName());
   EXPECT_EQ("Java_java_lang_String_indexOf__Ljava_lang_String_2I", m->JniLongName());
 
-  m = c->FindDirectMethod("copyValueOf", "([CII)Ljava/lang/String;", kRuntimePointerSize);
+  m = c->FindClassMethod("copyValueOf", "([CII)Ljava/lang/String;", kRuntimePointerSize);
   ASSERT_TRUE(m != nullptr);
+  ASSERT_TRUE(m->IsStatic());
   EXPECT_EQ("Java_java_lang_String_copyValueOf", m->JniShortName());
   EXPECT_EQ("Java_java_lang_String_copyValueOf___3CII", m->JniLongName());
 }
@@ -405,6 +395,61 @@ TEST_F(UtilsTest, IsValidDescriptor) {
       { 'L', 'a', '/', 'b', '$', 0xed, 0xb0, 0x80, 0xf0, 0x9f, 0x8f, 0xa0, ';', 0x00 });
   EXPECT_FALSE(
       IsValidDescriptor(reinterpret_cast<char*>(&unpaired_surrogate_with_multibyte_sequence[0])));
+}
+
+TEST_F(UtilsTest, ArrayCount) {
+  int i[64];
+  EXPECT_EQ(ArrayCount(i), 64u);
+  char c[7];
+  EXPECT_EQ(ArrayCount(c), 7u);
+}
+
+TEST_F(UtilsTest, BoundsCheckedCast) {
+  char buffer[64];
+  const char* buffer_end = buffer + ArrayCount(buffer);
+  EXPECT_EQ(BoundsCheckedCast<const uint64_t*>(nullptr, buffer, buffer_end), nullptr);
+  EXPECT_EQ(BoundsCheckedCast<const uint64_t*>(buffer, buffer, buffer_end),
+            reinterpret_cast<const uint64_t*>(buffer));
+  EXPECT_EQ(BoundsCheckedCast<const uint64_t*>(buffer + 56, buffer, buffer_end),
+            reinterpret_cast<const uint64_t*>(buffer + 56));
+  EXPECT_EQ(BoundsCheckedCast<const uint64_t*>(buffer - 1, buffer, buffer_end), nullptr);
+  EXPECT_EQ(BoundsCheckedCast<const uint64_t*>(buffer + 57, buffer, buffer_end), nullptr);
+}
+
+TEST_F(UtilsTest, GetAndroidRootSafe) {
+  std::string error_msg;
+
+  // We don't expect null returns for most cases, so don't check and let std::string crash.
+
+  // CommonRuntimeTest sets ANDROID_ROOT, so expect this to be the same.
+  std::string android_root = GetAndroidRootSafe(&error_msg);
+  std::string android_root_env = getenv("ANDROID_ROOT");
+  EXPECT_EQ(android_root, android_root_env);
+
+  // Set ANDROID_ROOT to something else (but the directory must exist). So use dirname.
+  char* root_dup = strdup(android_root_env.c_str());
+  char* dir = dirname(root_dup);
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", dir, 1 /* overwrite */));
+  std::string android_root2 = GetAndroidRootSafe(&error_msg);
+  EXPECT_STREQ(dir, android_root2.c_str());
+  free(root_dup);
+
+  // Set a bogus value for ANDROID_ROOT. This should be an error.
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", "/this/is/obviously/bogus", 1 /* overwrite */));
+  EXPECT_TRUE(GetAndroidRootSafe(&error_msg) == nullptr);
+
+  // Unset ANDROID_ROOT and see that it still returns something (as libart code is running).
+  ASSERT_EQ(0, unsetenv("ANDROID_ROOT"));
+  std::string android_root3 = GetAndroidRootSafe(&error_msg);
+  // This should be the same as the other root (modulo realpath), otherwise the test setup is
+  // broken.
+  UniqueCPtr<char> real_root(realpath(android_root.c_str(), nullptr));
+  UniqueCPtr<char> real_root3(realpath(android_root3.c_str(), nullptr));
+  EXPECT_STREQ(real_root.get(), real_root3.get());
+
+
+  // Reset ANDROID_ROOT, as other things may depend on it.
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", android_root_env.c_str(), 1 /* overwrite */));
 }
 
 }  // namespace art

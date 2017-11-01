@@ -29,7 +29,10 @@
 
 namespace art {
 
-class SsaTest : public CommonCompilerTest {};
+class SsaTest : public OptimizingUnitTest {
+ protected:
+  void TestCode(const uint16_t* data, const char* expected);
+};
 
 class SsaPrettyPrinter : public HPrettyPrinter {
  public:
@@ -77,10 +80,8 @@ static void ReNumberInstructions(HGraph* graph) {
   }
 }
 
-static void TestCode(const uint16_t* data, const char* expected) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateCFG(&allocator, data);
+void SsaTest::TestCode(const uint16_t* data, const char* expected) {
+  HGraph* graph = CreateCFG(data);
   // Suspend checks implementation may change in the future, and this test relies
   // on how instructions are ordered.
   RemoveSuspendChecks(graph);
@@ -89,7 +90,7 @@ static void TestCode(const uint16_t* data, const char* expected) {
   // Test that phis had their type set.
   for (HBasicBlock* block : graph->GetBlocks()) {
     for (HInstructionIterator it(block->GetPhis()); !it.Done(); it.Advance()) {
-      ASSERT_NE(it.Current()->GetType(), Primitive::kPrimVoid);
+      ASSERT_NE(it.Current()->GetType(), DataType::Type::kVoid);
     }
   }
 

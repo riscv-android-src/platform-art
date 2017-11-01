@@ -15,6 +15,9 @@
  */
 
 #include "jni.h"
+#include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
+#include "mirror/dex_cache-inl.h"
 #include "object_lock.h"
 #include "scoped_thread_state_change-inl.h"
 
@@ -24,7 +27,8 @@ extern "C" JNIEXPORT void JNICALL Java_Main_nativeClearResolvedTypes(JNIEnv*, jc
   ScopedObjectAccess soa(Thread::Current());
   mirror::DexCache* dex_cache = soa.Decode<mirror::Class>(cls)->GetDexCache();
   for (size_t i = 0, num_types = dex_cache->NumResolvedTypes(); i != num_types; ++i) {
-    dex_cache->SetResolvedType(dex::TypeIndex(i), ObjPtr<mirror::Class>(nullptr));
+    mirror::TypeDexCachePair cleared(nullptr, mirror::TypeDexCachePair::InvalidIndexForSlot(i));
+    dex_cache->GetResolvedTypes()[i].store(cleared, std::memory_order_relaxed);
   }
 }
 
@@ -46,7 +50,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_nativeDumpClasses(JNIEnv*, jclass, j
   StackHandleScope<1> hs(soa.Self());
   Handle<mirror::ObjectArray<mirror::Object>> classes =
       hs.NewHandle(soa.Decode<mirror::ObjectArray<mirror::Object>>(array));
-  CHECK(classes.Get() != nullptr);
+  CHECK(classes != nullptr);
   for (size_t i = 0, length = classes->GetLength(); i != length; ++i) {
     CHECK(classes->Get(i) != nullptr) << i;
     CHECK(classes->Get(i)->IsClass())

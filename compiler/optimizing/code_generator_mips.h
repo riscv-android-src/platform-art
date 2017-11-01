@@ -23,8 +23,8 @@
 #include "nodes.h"
 #include "parallel_move_resolver.h"
 #include "string_reference.h"
+#include "type_reference.h"
 #include "utils/mips/assembler_mips.h"
-#include "utils/type_reference.h"
 
 namespace art {
 namespace mips {
@@ -61,6 +61,8 @@ static constexpr FRegister kFpuCalleeSaves[] =
 
 class CodeGeneratorMIPS;
 
+VectorRegister VectorRegisterFrom(Location location);
+
 class InvokeDexCallingConvention : public CallingConvention<Register, FRegister> {
  public:
   InvokeDexCallingConvention()
@@ -79,8 +81,8 @@ class InvokeDexCallingConventionVisitorMIPS : public InvokeDexCallingConventionV
   InvokeDexCallingConventionVisitorMIPS() {}
   virtual ~InvokeDexCallingConventionVisitorMIPS() {}
 
-  Location GetNextLocation(Primitive::Type type) OVERRIDE;
-  Location GetReturnLocation(Primitive::Type type) const OVERRIDE;
+  Location GetNextLocation(DataType::Type type) OVERRIDE;
+  Location GetReturnLocation(DataType::Type type) const OVERRIDE;
   Location GetMethodLocation() const OVERRIDE;
 
  private:
@@ -98,7 +100,7 @@ class InvokeRuntimeCallingConvention : public CallingConvention<Register, FRegis
                           kRuntimeParameterFpuRegistersLength,
                           kMipsPointerSize) {}
 
-  Location GetReturnLocation(Primitive::Type return_type);
+  Location GetReturnLocation(DataType::Type return_type);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(InvokeRuntimeCallingConvention);
@@ -114,17 +116,17 @@ class FieldAccessCallingConventionMIPS : public FieldAccessCallingConvention {
   Location GetFieldIndexLocation() const OVERRIDE {
     return Location::RegisterLocation(A0);
   }
-  Location GetReturnLocation(Primitive::Type type) const OVERRIDE {
-    return Primitive::Is64BitType(type)
+  Location GetReturnLocation(DataType::Type type) const OVERRIDE {
+    return DataType::Is64BitType(type)
         ? Location::RegisterPairLocation(V0, V1)
         : Location::RegisterLocation(V0);
   }
-  Location GetSetValueLocation(Primitive::Type type, bool is_instance) const OVERRIDE {
-    return Primitive::Is64BitType(type)
+  Location GetSetValueLocation(DataType::Type type, bool is_instance) const OVERRIDE {
+    return DataType::Is64BitType(type)
         ? Location::RegisterPairLocation(A2, A3)
         : (is_instance ? Location::RegisterLocation(A2) : Location::RegisterLocation(A1));
   }
-  Location GetFpuLocation(Primitive::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
+  Location GetFpuLocation(DataType::Type type ATTRIBUTE_UNUSED) const OVERRIDE {
     return Location::FpuRegisterLocation(F0);
   }
 
@@ -229,9 +231,10 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   // We switch to the table-based method starting with 7 cases.
   static constexpr uint32_t kPackedSwitchJumpTableThreshold = 6;
 
+  void GenerateMemoryBarrier(MemBarrierKind kind);
+
  private:
   void GenerateClassInitializationCheck(SlowPathCodeMIPS* slow_path, Register class_reg);
-  void GenerateMemoryBarrier(MemBarrierKind kind);
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
   void HandleBinaryOp(HBinaryOperation* operation);
   void HandleCondition(HCondition* instruction);
@@ -241,6 +244,38 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
                       uint32_t dex_pc,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info, uint32_t dex_pc);
+
+  // Generate a heap reference load using one register `out`:
+  //
+  //   out <- *(out + offset)
+  //
+  // while honoring heap poisoning and/or read barriers (if any).
+  //
+  // Location `maybe_temp` is used when generating a read barrier and
+  // shall be a register in that case; it may be an invalid location
+  // otherwise.
+  void GenerateReferenceLoadOneRegister(HInstruction* instruction,
+                                        Location out,
+                                        uint32_t offset,
+                                        Location maybe_temp,
+                                        ReadBarrierOption read_barrier_option);
+  // Generate a heap reference load using two different registers
+  // `out` and `obj`:
+  //
+  //   out <- *(obj + offset)
+  //
+  // while honoring heap poisoning and/or read barriers (if any).
+  //
+  // Location `maybe_temp` is used when generating a Baker's (fast
+  // path) read barrier and shall be a register in that case; it may
+  // be an invalid location otherwise.
+  void GenerateReferenceLoadTwoRegisters(HInstruction* instruction,
+                                         Location out,
+                                         Location obj,
+                                         uint32_t offset,
+                                         Location maybe_temp,
+                                         ReadBarrierOption read_barrier_option);
+
   // Generate a GC root reference load:
   //
   //   root <- *(obj + offset)
@@ -249,7 +284,10 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void GenerateGcRootFieldLoad(HInstruction* instruction,
                                Location root,
                                Register obj,
-                               uint32_t offset);
+                               uint32_t offset,
+                               ReadBarrierOption read_barrier_option,
+                               MipsLabel* label_low = nullptr);
+
   void GenerateIntCompare(IfCondition cond, LocationSummary* locations);
   // When the function returns `false` it means that the condition holds if `dst` is non-zero
   // and doesn't hold if `dst` is zero. If it returns `true`, the roles of zero and non-zero
@@ -260,19 +298,20 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void GenerateIntCompareAndBranch(IfCondition cond,
                                    LocationSummary* locations,
                                    MipsLabel* label);
+  void GenerateLongCompare(IfCondition cond, LocationSummary* locations);
   void GenerateLongCompareAndBranch(IfCondition cond,
                                     LocationSummary* locations,
                                     MipsLabel* label);
   void GenerateFpCompare(IfCondition cond,
                          bool gt_bias,
-                         Primitive::Type type,
+                         DataType::Type type,
                          LocationSummary* locations);
   // When the function returns `false` it means that the condition holds if the condition
   // code flag `cc` is non-zero and doesn't hold if `cc` is zero. If it returns `true`,
   // the roles of zero and non-zero values of the `cc` flag are exchanged.
   bool MaterializeFpCompareR2(IfCondition cond,
                               bool gt_bias,
-                              Primitive::Type type,
+                              DataType::Type type,
                               LocationSummary* input_locations,
                               int cc);
   // When the function returns `false` it means that the condition holds if `dst` is non-zero
@@ -280,12 +319,12 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   // `dst` are exchanged.
   bool MaterializeFpCompareR6(IfCondition cond,
                               bool gt_bias,
-                              Primitive::Type type,
+                              DataType::Type type,
                               LocationSummary* input_locations,
                               FRegister dst);
   void GenerateFpCompareAndBranch(IfCondition cond,
                                   bool gt_bias,
-                                  Primitive::Type type,
+                                  DataType::Type type,
                                   LocationSummary* locations,
                                   MipsLabel* label);
   void GenerateTestAndBranch(HInstruction* instruction,
@@ -297,7 +336,6 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
-  auto GetImplicitNullChecker(HInstruction* instruction);
   void GenPackedSwitchWithCompares(Register value_reg,
                                    int32_t lower_bound,
                                    uint32_t num_entries,
@@ -309,6 +347,10 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
                                  uint32_t num_entries,
                                  HBasicBlock* switch_block,
                                  HBasicBlock* default_block);
+
+  int32_t VecAddress(LocationSummary* locations,
+                     size_t size,
+                     /* out */ Register* adjusted_base);
   void GenConditionalMoveR2(HSelect* select);
   void GenConditionalMoveR6(HSelect* select);
 
@@ -333,13 +375,15 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   void Bind(HBasicBlock* block) OVERRIDE;
 
-  void Move32(Location destination, Location source);
-  void Move64(Location destination, Location source);
   void MoveConstant(Location location, HConstant* c);
 
   size_t GetWordSize() const OVERRIDE { return kMipsWordSize; }
 
-  size_t GetFloatingPointSpillSlotSize() const OVERRIDE { return kMipsDoublewordSize; }
+  size_t GetFloatingPointSpillSlotSize() const OVERRIDE {
+    return GetGraph()->HasSIMD()
+        ? 2 * kMipsDoublewordSize   // 16 bytes for each spill.
+        : 1 * kMipsDoublewordSize;  //  8 bytes for each spill.
+  }
 
   uintptr_t GetAddressOf(HBasicBlock* block) OVERRIDE {
     return assembler_.GetLabelLocation(GetLabelOf(block));
@@ -351,7 +395,93 @@ class CodeGeneratorMIPS : public CodeGenerator {
   const MipsAssembler& GetAssembler() const OVERRIDE { return assembler_; }
 
   // Emit linker patches.
-  void EmitLinkerPatches(ArenaVector<LinkerPatch>* linker_patches) OVERRIDE;
+  void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) OVERRIDE;
+  void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) OVERRIDE;
+
+  // Fast path implementation of ReadBarrier::Barrier for a heap
+  // reference field load when Baker's read barriers are used.
+  void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
+                                             Location ref,
+                                             Register obj,
+                                             uint32_t offset,
+                                             Location temp,
+                                             bool needs_null_check);
+  // Fast path implementation of ReadBarrier::Barrier for a heap
+  // reference array load when Baker's read barriers are used.
+  void GenerateArrayLoadWithBakerReadBarrier(HInstruction* instruction,
+                                             Location ref,
+                                             Register obj,
+                                             uint32_t data_offset,
+                                             Location index,
+                                             Location temp,
+                                             bool needs_null_check);
+
+  // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
+  // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
+  //
+  // Load the object reference located at the address
+  // `obj + offset + (index << scale_factor)`, held by object `obj`, into
+  // `ref`, and mark it if needed.
+  //
+  // If `always_update_field` is true, the value of the reference is
+  // atomically updated in the holder (`obj`).
+  void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
+                                                 Location ref,
+                                                 Register obj,
+                                                 uint32_t offset,
+                                                 Location index,
+                                                 ScaleFactor scale_factor,
+                                                 Location temp,
+                                                 bool needs_null_check,
+                                                 bool always_update_field = false);
+
+  // Generate a read barrier for a heap reference within `instruction`
+  // using a slow path.
+  //
+  // A read barrier for an object reference read from the heap is
+  // implemented as a call to the artReadBarrierSlow runtime entry
+  // point, which is passed the values in locations `ref`, `obj`, and
+  // `offset`:
+  //
+  //   mirror::Object* artReadBarrierSlow(mirror::Object* ref,
+  //                                      mirror::Object* obj,
+  //                                      uint32_t offset);
+  //
+  // The `out` location contains the value returned by
+  // artReadBarrierSlow.
+  //
+  // When `index` is provided (i.e. for array accesses), the offset
+  // value passed to artReadBarrierSlow is adjusted to take `index`
+  // into account.
+  void GenerateReadBarrierSlow(HInstruction* instruction,
+                               Location out,
+                               Location ref,
+                               Location obj,
+                               uint32_t offset,
+                               Location index = Location::NoLocation());
+
+  // If read barriers are enabled, generate a read barrier for a heap
+  // reference using a slow path. If heap poisoning is enabled, also
+  // unpoison the reference in `out`.
+  void MaybeGenerateReadBarrierSlow(HInstruction* instruction,
+                                    Location out,
+                                    Location ref,
+                                    Location obj,
+                                    uint32_t offset,
+                                    Location index = Location::NoLocation());
+
+  // Generate a read barrier for a GC root within `instruction` using
+  // a slow path.
+  //
+  // A read barrier for an object reference GC root is implemented as
+  // a call to the artReadBarrierForRootSlow runtime entry point,
+  // which is passed the value in location `root`:
+  //
+  //   mirror::Object* artReadBarrierForRootSlow(GcRoot<mirror::Object>* root);
+  //
+  // The `out` location contains the value returned by
+  // artReadBarrierForRootSlow.
+  void GenerateReadBarrierForRootSlow(HInstruction* instruction, Location out, Location root);
 
   void MarkGCCard(Register object, Register value, bool value_can_be_null);
 
@@ -388,7 +518,7 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   // Code generation helpers.
 
-  void MoveLocation(Location dst, Location src, Primitive::Type dst_type) OVERRIDE;
+  void MoveLocation(Location dst, Location src, DataType::Type dst_type) OVERRIDE;
 
   void MoveConstant(Location destination, int32_t value) OVERRIDE;
 
@@ -400,10 +530,19 @@ class CodeGeneratorMIPS : public CodeGenerator {
                      uint32_t dex_pc,
                      SlowPathCode* slow_path = nullptr) OVERRIDE;
 
+  // Generate code to invoke a runtime entry point, but do not record
+  // PC-related information in a stack map.
+  void InvokeRuntimeWithoutRecordingPcInfo(int32_t entry_point_offset,
+                                           HInstruction* instruction,
+                                           SlowPathCode* slow_path,
+                                           bool direct);
+
+  void GenerateInvokeRuntime(int32_t entry_point_offset, bool direct);
+
   ParallelMoveResolver* GetMoveResolver() OVERRIDE { return &move_resolver_; }
 
-  bool NeedsTwoRegisters(Primitive::Type type) const OVERRIDE {
-    return type == Primitive::kPrimLong;
+  bool NeedsTwoRegisters(DataType::Type type) const OVERRIDE {
+    return type == DataType::Type::kInt64;
   }
 
   // Check if the desired_string_load_kind is supported. If it is, return it,
@@ -422,11 +561,13 @@ class CodeGeneratorMIPS : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       HInvokeStaticOrDirect* invoke) OVERRIDE;
 
-  void GenerateStaticOrDirectCall(HInvokeStaticOrDirect* invoke, Location temp);
-  void GenerateVirtualCall(HInvokeVirtual* invoke, Location temp) OVERRIDE;
+  void GenerateStaticOrDirectCall(
+      HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
+  void GenerateVirtualCall(
+      HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
   void MoveFromReturnRegister(Location trg ATTRIBUTE_UNUSED,
-                              Primitive::Type type ATTRIBUTE_UNUSED) OVERRIDE {
+                              DataType::Type type ATTRIBUTE_UNUSED) OVERRIDE {
     UNIMPLEMENTED(FATAL) << "Not implemented on MIPS";
   }
 
@@ -436,54 +577,111 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays
   // and boot image strings. The only difference is the interpretation of the offset_or_index.
+  // The 16-bit halves of the 32-bit PC-relative offset are patched separately, necessitating
+  // two patches/infos. There can be more than two patches/infos if the instruction supplying
+  // the high half is shared with e.g. a slow path, while the low half is supplied by separate
+  // instructions, e.g.:
+  //     lui   r1, high       // patch
+  //     addu  r1, r1, rbase
+  //     lw    r2, low(r1)    // patch
+  //     beqz  r2, slow_path
+  //   back:
+  //     ...
+  //   slow_path:
+  //     ...
+  //     sw    r2, low(r1)    // patch
+  //     b     back
   struct PcRelativePatchInfo {
-    PcRelativePatchInfo(const DexFile& dex_file, uint32_t off_or_idx)
-        : target_dex_file(dex_file), offset_or_index(off_or_idx) { }
-    PcRelativePatchInfo(PcRelativePatchInfo&& other) = default;
+    PcRelativePatchInfo(const DexFile& dex_file,
+                        uint32_t off_or_idx,
+                        const PcRelativePatchInfo* info_high)
+        : target_dex_file(dex_file),
+          offset_or_index(off_or_idx),
+          label(),
+          pc_rel_label(),
+          patch_info_high(info_high) { }
 
     const DexFile& target_dex_file;
     // Either the dex cache array element offset or the string/type index.
     uint32_t offset_or_index;
-    // Label for the instruction loading the most significant half of the offset that's added to PC
-    // to form the base address (the least significant half is loaded with the instruction that
-    // follows).
-    MipsLabel high_label;
-    // Label for the instruction corresponding to PC+0.
+    // Label for the instruction to patch.
+    MipsLabel label;
+    // Label for the instruction corresponding to PC+0. Not bound or used in low half patches.
+    // Not bound in high half patches on R2 when using HMipsComputeBaseMethodAddress.
+    // Bound in high half patches on R2 when using the NAL instruction instead of
+    // HMipsComputeBaseMethodAddress.
+    // Bound in high half patches on R6.
     MipsLabel pc_rel_label;
+    // Pointer to the info for the high half patch or nullptr if this is the high half patch info.
+    const PcRelativePatchInfo* patch_info_high;
+
+   private:
+    PcRelativePatchInfo(PcRelativePatchInfo&& other) = delete;
+    DISALLOW_COPY_AND_ASSIGN(PcRelativePatchInfo);
   };
 
-  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file, uint32_t string_index);
-  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
-  PcRelativePatchInfo* NewPcRelativeDexCacheArrayPatch(const DexFile& dex_file,
-                                                       uint32_t element_offset);
-  Literal* DeduplicateBootImageStringLiteral(const DexFile& dex_file,
-                                             dex::StringIndex string_index);
-  Literal* DeduplicateBootImageTypeLiteral(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewPcRelativeMethodPatch(MethodReference target_method,
+                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method,
+                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file,
+                                              dex::TypeIndex type_index,
+                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file,
+                                            dex::TypeIndex type_index,
+                                            const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
+                                                dex::StringIndex string_index,
+                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewStringBssEntryPatch(const DexFile& dex_file,
+                                              dex::StringIndex string_index,
+                                              const PcRelativePatchInfo* info_high = nullptr);
   Literal* DeduplicateBootImageAddressLiteral(uint32_t address);
 
-  void EmitPcRelativeAddressPlaceholder(PcRelativePatchInfo* info, Register out, Register base);
+  void EmitPcRelativeAddressPlaceholderHigh(PcRelativePatchInfo* info_high,
+                                            Register out,
+                                            Register base);
+
+  // The JitPatchInfo is used for JIT string and class loads.
+  struct JitPatchInfo {
+    JitPatchInfo(const DexFile& dex_file, uint64_t idx)
+        : target_dex_file(dex_file), index(idx) { }
+    JitPatchInfo(JitPatchInfo&& other) = default;
+
+    const DexFile& target_dex_file;
+    // String/type index.
+    uint64_t index;
+    // Label for the instruction loading the most significant half of the address.
+    MipsLabel high_label;
+    // Label for the instruction supplying the least significant half of the address.
+    MipsLabel low_label;
+  };
+
+  void PatchJitRootUse(uint8_t* code,
+                       const uint8_t* roots_data,
+                       const JitPatchInfo& info,
+                       uint64_t index_in_table) const;
+  JitPatchInfo* NewJitRootStringPatch(const DexFile& dex_file,
+                                      dex::StringIndex string_index,
+                                      Handle<mirror::String> handle);
+  JitPatchInfo* NewJitRootClassPatch(const DexFile& dex_file,
+                                     dex::TypeIndex type_index,
+                                     Handle<mirror::Class> handle);
 
  private:
   Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke, Register temp);
 
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, Literal*>;
-  using MethodToLiteralMap = ArenaSafeMap<MethodReference, Literal*, MethodReferenceComparator>;
-  using BootStringToLiteralMap = ArenaSafeMap<StringReference,
-                                              Literal*,
-                                              StringReferenceValueComparator>;
-  using BootTypeToLiteralMap = ArenaSafeMap<TypeReference,
-                                            Literal*,
-                                            TypeReferenceValueComparator>;
 
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
-  Literal* DeduplicateMethodLiteral(MethodReference target_method, MethodToLiteralMap* map);
   PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
                                           uint32_t offset_or_index,
+                                          const PcRelativePatchInfo* info_high,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
 
-  template <LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
+  template <linker::LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
   void EmitPcRelativeLinkerPatches(const ArenaDeque<PcRelativePatchInfo>& infos,
-                                   ArenaVector<LinkerPatch>* linker_patches);
+                                   ArenaVector<linker::LinkerPatch>* linker_patches);
 
   // Labels for each block that will be compiled.
   MipsLabel* block_labels_;
@@ -496,18 +694,23 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
-  // PC-relative patch info for each HMipsDexCacheArraysBase.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_dex_cache_patches_;
-  // Deduplication map for boot string literals for kBootImageLinkTimeAddress.
-  BootStringToLiteralMap boot_image_string_patches_;
-  // PC-relative String patch info; type depends on configuration (app .bss or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
-  // Deduplication map for boot type literals for kBootImageLinkTimeAddress.
-  BootTypeToLiteralMap boot_image_type_patches_;
-  // PC-relative type patch info.
+  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
+  // PC-relative method patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
+  // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
-  // Deduplication map for patchable boot image addresses.
-  Uint32ToLiteralMap boot_image_address_patches_;
+  // PC-relative type patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative String patch info; type depends on configuration (intern table or boot image PIC).
+  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // PC-relative String patch info for kBssEntry.
+  ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
+
+  // Patches for string root accesses in JIT compiled code.
+  ArenaDeque<JitPatchInfo> jit_string_patches_;
+  // Patches for class root accesses in JIT compiled code.
+  ArenaDeque<JitPatchInfo> jit_class_patches_;
 
   // PC-relative loads on R2 clobber RA, which may need to be preserved explicitly in leaf methods.
   // This is a flag set by pc_relative_fixups_mips and dex_cache_array_fixups_mips optimizations.

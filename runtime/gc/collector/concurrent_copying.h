@@ -21,13 +21,8 @@
 #include "garbage_collector.h"
 #include "immune_spaces.h"
 #include "jni.h"
-#include "object_callbacks.h"
-#include "offsets.h"
-#include "gc/accounting/atomic_stack.h"
-#include "gc/accounting/read_barrier_table.h"
-#include "gc/accounting/space_bitmap.h"
-#include "mirror/object.h"
 #include "mirror/object_reference.h"
+#include "offsets.h"
 #include "safe_map.h"
 
 #include <unordered_map>
@@ -37,11 +32,19 @@ namespace art {
 class Closure;
 class RootInfo;
 
+namespace mirror {
+class Object;
+}  // namespace mirror
+
 namespace gc {
 
 namespace accounting {
+  template<typename T> class AtomicStack;
+  typedef AtomicStack<mirror::Object> ObjectStack;
+  template <size_t kAlignment> class SpaceBitmap;
   typedef SpaceBitmap<kObjectAlignment> ContinuousSpaceBitmap;
   class HeapBitmap;
+  class ReadBarrierTable;
 }  // namespace accounting
 
 namespace space {
@@ -106,7 +109,9 @@ class ConcurrentCopying : public GarbageCollector {
     return IsMarked(ref) == ref;
   }
   template<bool kGrayImmuneObject = true, bool kFromGCThread = false>
-  ALWAYS_INLINE mirror::Object* Mark(mirror::Object* from_ref)
+  ALWAYS_INLINE mirror::Object* Mark(mirror::Object* from_ref,
+                                     mirror::Object* holder = nullptr,
+                                     MemberOffset offset = MemberOffset(0))
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   ALWAYS_INLINE mirror::Object* MarkFromReadBarrier(mirror::Object* from_ref)
@@ -114,6 +119,11 @@ class ConcurrentCopying : public GarbageCollector {
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   bool IsMarking() const {
     return is_marking_;
+  }
+  // We may want to use read barrier entrypoints before is_marking_ is true since concurrent graying
+  // creates a small window where we might dispatch on these entrypoints.
+  bool IsUsingReadBarrierEntrypoints() const {
+    return is_using_read_barrier_entrypoints_;
   }
   bool IsActive() const {
     return is_active_;
@@ -127,10 +137,16 @@ class ConcurrentCopying : public GarbageCollector {
   void RevokeThreadLocalMarkStack(Thread* thread) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
 
+  virtual mirror::Object* IsMarked(mirror::Object* from_ref) OVERRIDE
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
  private:
   void PushOntoMarkStack(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
-  mirror::Object* Copy(mirror::Object* from_ref) REQUIRES_SHARED(Locks::mutator_lock_)
+  mirror::Object* Copy(mirror::Object* from_ref,
+                       mirror::Object* holder,
+                       MemberOffset offset)
+      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   void Scan(mirror::Object* to_ref) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
@@ -159,7 +175,13 @@ class ConcurrentCopying : public GarbageCollector {
   void GrayAllDirtyImmuneObjects()
       REQUIRES(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
+  void GrayAllNewlyDirtyImmuneObjects()
+      REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!mark_stack_lock_);
   void VerifyGrayImmuneObjects()
+      REQUIRES(Locks::mutator_lock_)
+      REQUIRES(!mark_stack_lock_);
+  void VerifyNoMissingCardMarks()
       REQUIRES(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_);
   size_t ProcessThreadLocalMarkStacks(bool disable_weak_ref_access, Closure* checkpoint_callback)
@@ -176,11 +198,10 @@ class ConcurrentCopying : public GarbageCollector {
   virtual mirror::Object* MarkObject(mirror::Object* from_ref) OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
-  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* from_ref) OVERRIDE
+  virtual void MarkHeapReference(mirror::HeapReference<mirror::Object>* from_ref,
+                                 bool do_atomic_update) OVERRIDE
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
-  virtual mirror::Object* IsMarked(mirror::Object* from_ref) OVERRIDE
-      REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsMarkedInUnevacFromSpace(mirror::Object* from_ref)
       REQUIRES_SHARED(Locks::mutator_lock_);
   virtual bool IsNullOrMarkedHeapReference(mirror::HeapReference<mirror::Object>* field,
@@ -217,7 +238,10 @@ class ConcurrentCopying : public GarbageCollector {
   void DisableMarking() REQUIRES_SHARED(Locks::mutator_lock_);
   void IssueDisableMarkingCheckpoint() REQUIRES_SHARED(Locks::mutator_lock_);
   void ExpandGcMarkStack() REQUIRES_SHARED(Locks::mutator_lock_);
-  mirror::Object* MarkNonMoving(mirror::Object* from_ref) REQUIRES_SHARED(Locks::mutator_lock_)
+  mirror::Object* MarkNonMoving(mirror::Object* from_ref,
+                                mirror::Object* holder = nullptr,
+                                MemberOffset offset = MemberOffset(0))
+      REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_);
   ALWAYS_INLINE mirror::Object* MarkUnevacFromSpaceRegion(mirror::Object* from_ref,
       accounting::SpaceBitmap<kObjectAlignment>* bitmap)
@@ -236,6 +260,8 @@ class ConcurrentCopying : public GarbageCollector {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!mark_stack_lock_, !skipped_blocks_lock_, !immune_gray_stack_lock_);
   void DumpPerformanceInfo(std::ostream& os) OVERRIDE REQUIRES(!rb_slow_path_histogram_lock_);
+  // Set the read barrier mark entrypoints to non-null.
+  void ActivateReadBarrierEntrypoints();
 
   space::RegionSpace* region_space_;      // The underlying region space.
   std::unique_ptr<Barrier> gc_barrier_;
@@ -252,10 +278,12 @@ class ConcurrentCopying : public GarbageCollector {
       GUARDED_BY(mark_stack_lock_);
   Thread* thread_running_gc_;
   bool is_marking_;                       // True while marking is ongoing.
+  // True while we might dispatch on the read barrier entrypoints.
+  bool is_using_read_barrier_entrypoints_;
   bool is_active_;                        // True while the collection is ongoing.
   bool is_asserting_to_space_invariant_;  // True while asserting the to-space invariant.
   ImmuneSpaces immune_spaces_;
-  accounting::SpaceBitmap<kObjectAlignment>* region_space_bitmap_;
+  accounting::ContinuousSpaceBitmap* region_space_bitmap_;
   // A cache of Heap::GetMarkBitmap().
   accounting::HeapBitmap* heap_mark_bitmap_;
   size_t live_stack_freeze_size_;
@@ -309,8 +337,14 @@ class ConcurrentCopying : public GarbageCollector {
   Mutex immune_gray_stack_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
   std::vector<mirror::Object*> immune_gray_stack_ GUARDED_BY(immune_gray_stack_lock_);
 
+  // Class of java.lang.Object. Filled in from WellKnownClasses in FlipCallback. Must
+  // be filled in before flipping thread roots so that FillDummyObject can run. Not
+  // ObjPtr since the GC may transition to suspended and runnable between phases.
+  mirror::Class* java_lang_Object_;
+
+  class ActivateReadBarrierEntrypointsCallback;
+  class ActivateReadBarrierEntrypointsCheckpoint;
   class AssertToSpaceInvariantFieldVisitor;
-  class AssertToSpaceInvariantObjectVisitor;
   class AssertToSpaceInvariantRefsVisitor;
   class ClearBlackPtrsVisitor;
   class ComputeUnevacFromSpaceLiveRatioVisitor;
@@ -318,7 +352,7 @@ class ConcurrentCopying : public GarbageCollector {
   class DisableMarkingCheckpoint;
   class DisableWeakRefAccessCallback;
   class FlipCallback;
-  class GrayImmuneObjectVisitor;
+  template <bool kConcurrent> class GrayImmuneObjectVisitor;
   class ImmuneSpaceScanObjVisitor;
   class LostCopyVisitor;
   class RefFieldsVisitor;
@@ -327,8 +361,8 @@ class ConcurrentCopying : public GarbageCollector {
   class ThreadFlipVisitor;
   class VerifyGrayImmuneObjectsVisitor;
   class VerifyNoFromSpaceRefsFieldVisitor;
-  class VerifyNoFromSpaceRefsObjectVisitor;
   class VerifyNoFromSpaceRefsVisitor;
+  class VerifyNoMissingCardMarkVisitor;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(ConcurrentCopying);
 };

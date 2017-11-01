@@ -17,12 +17,13 @@
 #ifndef ART_RUNTIME_THREAD_H_
 #define ART_RUNTIME_THREAD_H_
 
+#include <setjmp.h>
+
 #include <bitset>
 #include <deque>
 #include <iosfwd>
 #include <list>
 #include <memory>
-#include <setjmp.h>
 #include <string>
 
 #include "arch/context.h"
@@ -33,15 +34,15 @@
 #include "base/mutex.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "gc_root.h"
 #include "globals.h"
 #include "handle_scope.h"
 #include "instrumentation.h"
 #include "jvalue.h"
-#include "object_callbacks.h"
+#include "managed_stack.h"
 #include "offsets.h"
+#include "read_barrier_config.h"
 #include "runtime_stats.h"
-#include "stack.h"
+#include "suspend_reason.h"
 #include "thread_state.h"
 
 class BacktraceMap;
@@ -87,12 +88,14 @@ class FrameIdToShadowFrame;
 class JavaVMExt;
 struct JNIEnvExt;
 class Monitor;
+class RootVisitor;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
 class SingleStepControl;
 class StackedShadowFrameRecord;
 class Thread;
 class ThreadList;
+enum VisitRootFlags : uint8_t;
 
 // Thread priorities. These must match the Thread.MIN_PRIORITY,
 // Thread.NORM_PRIORITY, and Thread.MAX_PRIORITY constants.
@@ -113,6 +116,13 @@ enum ThreadFlag {
 enum class StackedShadowFrameType {
   kShadowFrameUnderConstruction,
   kDeoptimizationShadowFrame,
+};
+
+// The type of method that triggers deoptimization. It contains info on whether
+// the deoptimized method should advance dex_pc.
+enum class DeoptimizationMethodType {
+  kKeepDexPc,  // dex pc is required to be kept upon deoptimization.
+  kDefault     // dex pc may or may not advance depending on other conditions.
 };
 
 // This should match RosAlloc::kNumThreadLocalSizeBrackets.
@@ -149,6 +159,7 @@ static constexpr size_t kNumRosAllocThreadLocalSizeBracketsInThread = 16;
 class Thread {
  public:
   static const size_t kStackOverflowImplicitCheckSize;
+  static constexpr bool kVerifyStack = kIsDebugBuild;
 
   // Creates a new native thread corresponding to the given managed peer.
   // Used to implement Thread.start.
@@ -158,6 +169,8 @@ class Thread {
   // Used to implement JNI AttachCurrentThread and AttachCurrentThreadAsDaemon calls.
   static Thread* Attach(const char* thread_name, bool as_daemon, jobject thread_group,
                         bool create_peer);
+  // Attaches the calling native thread to the runtime, returning the new native peer.
+  static Thread* Attach(const char* thread_name, bool as_daemon, jobject thread_peer);
 
   // Reset internal state of child thread after fork.
   void InitAfterFork();
@@ -174,7 +187,8 @@ class Thread {
   void CheckSuspend() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Process a pending empty checkpoint if pending.
-  void CheckEmptyCheckpoint() REQUIRES_SHARED(Locks::mutator_lock_);
+  void CheckEmptyCheckpointFromWeakRefAccess(BaseMutex* cond_var_mutex);
+  void CheckEmptyCheckpointFromMutex();
 
   static Thread* FromManagedThread(const ScopedObjectAccessAlreadyRunnable& ts,
                                    ObjPtr<mirror::Object> thread_peer)
@@ -194,11 +208,14 @@ class Thread {
   // Dumps the detailed thread state and the thread stack (used for SIGQUIT).
   void Dump(std::ostream& os,
             bool dump_native_stack = true,
-            BacktraceMap* backtrace_map = nullptr) const
+            BacktraceMap* backtrace_map = nullptr,
+            bool force_dump_stack = false) const
       REQUIRES(!Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void DumpJavaStack(std::ostream& os) const
+  void DumpJavaStack(std::ostream& os,
+                     bool check_suspended = true,
+                     bool dump_locks = true) const
       REQUIRES(!Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -220,6 +237,11 @@ class Thread {
     return tls32_.suspend_count;
   }
 
+  int GetUserCodeSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_,
+                                               Locks::user_code_suspension_lock_) {
+    return tls32_.user_code_suspend_count;
+  }
+
   int GetDebugSuspendCount() const REQUIRES(Locks::thread_suspend_count_lock_) {
     return tls32_.debug_suspend_count;
   }
@@ -237,13 +259,20 @@ class Thread {
   bool ModifySuspendCount(Thread* self,
                           int delta,
                           AtomicInteger* suspend_barrier,
-                          bool for_debugger)
+                          SuspendReason reason)
+      WARN_UNUSED
       REQUIRES(Locks::thread_suspend_count_lock_);
 
   bool RequestCheckpoint(Closure* function)
       REQUIRES(Locks::thread_suspend_count_lock_);
-  void RequestSynchronousCheckpoint(Closure* function)
-      REQUIRES(!Locks::thread_suspend_count_lock_, !Locks::thread_list_lock_);
+
+  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution. This is
+  // due to the fact that Thread::Current() needs to go to sleep to allow the targeted thread to
+  // execute the checkpoint for us if it is Runnable.
+  bool RequestSynchronousCheckpoint(Closure* function)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      RELEASE(Locks::thread_list_lock_)
+      REQUIRES(!Locks::thread_suspend_count_lock_);
   bool RequestEmptyCheckpoint()
       REQUIRES(Locks::thread_suspend_count_lock_);
 
@@ -353,9 +382,14 @@ class Thread {
   uint64_t GetCpuMicroTime() const;
 
   mirror::Object* GetPeer() const REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(Thread::Current() == this) << "Use GetPeerFromOtherThread instead";
     CHECK(tlsPtr_.jpeer == nullptr);
     return tlsPtr_.opeer;
   }
+  // GetPeer is not safe if called on another thread in the middle of the CC thread flip and
+  // the thread's stack may have not been flipped yet and peer may be a from-space (stale) ref.
+  // This function will explicitly mark/forward it.
+  mirror::Object* GetPeerFromOtherThread() const REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool HasPeer() const {
     return tlsPtr_.jpeer != nullptr || tlsPtr_.opeer != nullptr;
@@ -371,6 +405,10 @@ class Thread {
     return tlsPtr_.exception != nullptr;
   }
 
+  bool IsAsyncExceptionPending() const {
+    return tlsPtr_.async_exception != nullptr;
+  }
+
   mirror::Throwable* GetException() const REQUIRES_SHARED(Locks::mutator_lock_) {
     return tlsPtr_.exception;
   }
@@ -382,9 +420,23 @@ class Thread {
 
   void SetException(ObjPtr<mirror::Throwable> new_exception) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Set an exception that is asynchronously thrown from a different thread. This will be checked
+  // periodically and might overwrite the current 'Exception'. This can only be called from a
+  // checkpoint.
+  //
+  // The caller should also make sure that the thread has been deoptimized so that the exception
+  // could be detected on back-edges.
+  void SetAsyncException(ObjPtr<mirror::Throwable> new_exception)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   void ClearException() REQUIRES_SHARED(Locks::mutator_lock_) {
     tlsPtr_.exception = nullptr;
   }
+
+  // Move the current async-exception to the main exception. This should be called when the current
+  // thread is ready to deal with any async exceptions. Returns true if there is an async exception
+  // that needs to be dealt with, false otherwise.
+  bool ObserveAsyncException() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Find catch block and perform long jump to appropriate exception handle
   NO_RETURN void QuickDeliverException() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -408,7 +460,9 @@ class Thread {
 
   // Get the current method and dex pc. If there are errors in retrieving the dex pc, this will
   // abort the runtime iff abort_on_error is true.
-  ArtMethod* GetCurrentMethod(uint32_t* dex_pc, bool abort_on_error = true) const
+  ArtMethod* GetCurrentMethod(uint32_t* dex_pc,
+                              bool check_suspended = true,
+                              bool abort_on_error = true) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns whether the given exception was thrown by the current Java method being executed
@@ -473,15 +527,12 @@ class Thread {
   }
 
   // Implements java.lang.Thread.interrupted.
-  bool Interrupted() REQUIRES(!*wait_mutex_);
+  bool Interrupted();
   // Implements java.lang.Thread.isInterrupted.
-  bool IsInterrupted() REQUIRES(!*wait_mutex_);
-  bool IsInterruptedLocked() REQUIRES(wait_mutex_) {
-    return interrupted_;
-  }
+  bool IsInterrupted();
   void Interrupt(Thread* self) REQUIRES(!*wait_mutex_);
-  void SetInterruptedLocked(bool i) REQUIRES(wait_mutex_) {
-    interrupted_ = i;
+  void SetInterrupted(bool i) {
+    tls32_.interrupted.StoreSequentiallyConsistent(i);
   }
   void Notify() REQUIRES(!*wait_mutex_);
 
@@ -549,10 +600,14 @@ class Thread {
     return tlsPtr_.frame_id_to_shadow_frame != nullptr;
   }
 
-  void VisitRoots(RootVisitor* visitor, VisitRootFlags flags = kVisitRootFlagAllRoots)
+  void VisitRoots(RootVisitor* visitor, VisitRootFlags flags)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void VerifyStack() REQUIRES_SHARED(Locks::mutator_lock_);
+  void VerifyStack() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kVerifyStack) {
+      VerifyStackImpl();
+    }
+  }
 
   //
   // Offsets of various members of native Thread class, used by compiled code.
@@ -563,6 +618,13 @@ class Thread {
     return ThreadOffset<pointer_size>(
         OFFSETOF_MEMBER(Thread, tls32_) +
         OFFSETOF_MEMBER(tls_32bit_sized_values, thin_lock_thread_id));
+  }
+
+  template<PointerSize pointer_size>
+  static ThreadOffset<pointer_size> InterruptedOffset() {
+    return ThreadOffset<pointer_size>(
+        OFFSETOF_MEMBER(Thread, tls32_) +
+        OFFSETOF_MEMBER(tls_32bit_sized_values, interrupted));
   }
 
   template<PointerSize pointer_size>
@@ -628,6 +690,17 @@ class Thread {
   static ThreadOffset<pointer_size> JniEntryPointOffset(size_t jni_entrypoint_offset) {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, jni_entrypoints) + jni_entrypoint_offset);
+  }
+
+  // Return the entry point offset integer value for ReadBarrierMarkRegX, where X is `reg`.
+  template <PointerSize pointer_size>
+  static int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
+    // The entry point list defines 30 ReadBarrierMarkRegX entry points.
+    DCHECK_LT(reg, 30u);
+    // The ReadBarrierMarkRegX entry points are ordered by increasing
+    // register number in Thread::tls_Ptr_.quick_entrypoints.
+    return QUICK_ENTRYPOINT_OFFSET(pointer_size, pReadBarrierMarkReg00).Int32Value()
+        + static_cast<size_t>(pointer_size) * reg;
   }
 
   template<PointerSize pointer_size>
@@ -775,13 +848,8 @@ class Thread {
     tlsPtr_.managed_stack.PopManagedStackFragment(fragment);
   }
 
-  ShadowFrame* PushShadowFrame(ShadowFrame* new_top_frame) {
-    return tlsPtr_.managed_stack.PushShadowFrame(new_top_frame);
-  }
-
-  ShadowFrame* PopShadowFrame() {
-    return tlsPtr_.managed_stack.PopShadowFrame();
-  }
+  ALWAYS_INLINE ShadowFrame* PushShadowFrame(ShadowFrame* new_top_frame);
+  ALWAYS_INLINE ShadowFrame* PopShadowFrame();
 
   template<PointerSize pointer_size>
   static ThreadOffset<pointer_size> TopShadowFrameOffset() {
@@ -793,7 +861,7 @@ class Thread {
   // Is the given obj in this thread's stack indirect reference table?
   bool HandleScopeContains(jobject obj) const;
 
-  void HandleScopeVisitRoots(RootVisitor* visitor, uint32_t thread_id)
+  void HandleScopeVisitRoots(RootVisitor* visitor, pid_t thread_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   BaseHandleScope* GetTopHandleScope() {
@@ -922,14 +990,18 @@ class Thread {
   // values on stacks.
   // 'from_code' denotes whether the deoptimization was explicitly made from
   // compiled code.
+  // 'method_type' contains info on whether deoptimization should advance
+  // dex_pc.
   void PushDeoptimizationContext(const JValue& return_value,
                                  bool is_reference,
+                                 ObjPtr<mirror::Throwable> exception,
                                  bool from_code,
-                                 ObjPtr<mirror::Throwable> exception)
+                                 DeoptimizationMethodType method_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void PopDeoptimizationContext(JValue* result,
                                 ObjPtr<mirror::Throwable>* exception,
-                                bool* from_code)
+                                bool* from_code,
+                                DeoptimizationMethodType* method_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void AssertHasDeoptimizationContext()
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1021,10 +1093,24 @@ class Thread {
   void ResetQuickAllocEntryPointsForThread(bool is_marking);
 
   // Returns the remaining space in the TLAB.
-  size_t TlabSize() const;
+  size_t TlabSize() const {
+    return tlsPtr_.thread_local_end - tlsPtr_.thread_local_pos;
+  }
+
+  // Returns the remaining space in the TLAB if we were to expand it to maximum capacity.
+  size_t TlabRemainingCapacity() const {
+    return tlsPtr_.thread_local_limit - tlsPtr_.thread_local_pos;
+  }
+
+  // Expand the TLAB by a fixed number of bytes. There must be enough capacity to do so.
+  void ExpandTlab(size_t bytes) {
+    tlsPtr_.thread_local_end += bytes;
+    DCHECK_LE(tlsPtr_.thread_local_end, tlsPtr_.thread_local_limit);
+  }
+
   // Doesn't check that there is room.
   mirror::Object* AllocTlab(size_t bytes);
-  void SetTlab(uint8_t* start, uint8_t* end);
+  void SetTlab(uint8_t* start, uint8_t* end, uint8_t* limit);
   bool HasTlab() const;
   uint8_t* GetTlabStart() {
     return tlsPtr_.thread_local_start;
@@ -1102,21 +1188,12 @@ class Thread {
     return tlsPtr_.mterp_alt_ibase;
   }
 
-  // Notify that a signal is being handled. This is to protect us from doing recursive
-  // NPE handling after a SIGSEGV.
-  void NoteSignalBeingHandled() {
-    if (tls32_.handling_signal_) {
-      LOG(FATAL) << "Detected signal while processing a signal";
-    }
-    tls32_.handling_signal_ = true;
+  bool HandlingSignal() const {
+    return tls32_.handling_signal_;
   }
 
-  void NoteSignalHandlerDone() {
-    tls32_.handling_signal_ = false;
-  }
-
-  jmp_buf* GetNestedSignalState() {
-    return tlsPtr_.nested_signal_state;
+  void SetHandlingSignal(bool handling_signal) {
+    tls32_.handling_signal_ = handling_signal;
   }
 
   bool IsTransitioningToRunnable() const {
@@ -1140,6 +1217,14 @@ class Thread {
     return debug_disallow_read_barrier_;
   }
 
+  void* GetCustomTLS() const REQUIRES(Locks::thread_list_lock_) {
+    return custom_tls_;
+  }
+
+  void SetCustomTLS(void* data) REQUIRES(Locks::thread_list_lock_) {
+    custom_tls_ = data;
+  }
+
   // Returns true if the current thread is the jit sensitive thread.
   bool IsJitSensitiveThread() const {
     return this == jit_sensitive_thread_;
@@ -1153,16 +1238,36 @@ class Thread {
     return false;
   }
 
+  // Set to the read barrier marking entrypoints to be non-null.
+  void SetReadBarrierEntrypoints();
+
+  static jobject CreateCompileTimePeer(JNIEnv* env,
+                                       const char* name,
+                                       bool as_daemon,
+                                       jobject thread_group)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
  private:
   explicit Thread(bool daemon);
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
   void Destroy();
 
+  // Attaches the calling native thread to the runtime, returning the new native peer.
+  // Used to implement JNI AttachCurrentThread and AttachCurrentThreadAsDaemon calls.
+  template <typename PeerAction>
+  static Thread* Attach(const char* thread_name,
+                        bool as_daemon,
+                        PeerAction p);
+
   void CreatePeer(const char* name, bool as_daemon, jobject thread_group);
 
   template<bool kTransactionActive>
-  void InitPeer(ScopedObjectAccess& soa, jboolean thread_is_daemon, jobject thread_group,
-                jobject thread_name, jint thread_priority)
+  static void InitPeer(ScopedObjectAccessAlreadyRunnable& soa,
+                       ObjPtr<mirror::Object> peer,
+                       jboolean thread_is_daemon,
+                       jobject thread_group,
+                       jobject thread_name,
+                       jint thread_priority)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit, ~Thread and
@@ -1187,7 +1292,8 @@ class Thread {
   void DumpState(std::ostream& os) const REQUIRES_SHARED(Locks::mutator_lock_);
   void DumpStack(std::ostream& os,
                  bool dump_native_stack = true,
-                 BacktraceMap* backtrace_map = nullptr) const
+                 BacktraceMap* backtrace_map = nullptr,
+                 bool force_dump_stack = false) const
       REQUIRES(!Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1198,9 +1304,10 @@ class Thread {
 
   static void* CreateCallback(void* arg);
 
-  void HandleUncaughtExceptions(ScopedObjectAccess& soa)
+  void HandleUncaughtExceptions(ScopedObjectAccessAlreadyRunnable& soa)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void RemoveFromThreadGroup(ScopedObjectAccess& soa) REQUIRES_SHARED(Locks::mutator_lock_);
+  void RemoveFromThreadGroup(ScopedObjectAccessAlreadyRunnable& soa)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Initialize a thread.
   //
@@ -1245,9 +1352,13 @@ class Thread {
   bool ModifySuspendCountInternal(Thread* self,
                                   int delta,
                                   AtomicInteger* suspend_barrier,
-                                  bool for_debugger)
+                                  SuspendReason reason)
+      WARN_UNUSED
       REQUIRES(Locks::thread_suspend_count_lock_);
 
+  // Runs a single checkpoint function. If there are no more pending checkpoint functions it will
+  // clear the kCheckpointRequest flag. The caller is responsible for calling this in a loop until
+  // the kCheckpointRequest flag is cleared.
   void RunCheckpointFunction();
   void RunEmptyCheckpoint();
 
@@ -1324,7 +1435,7 @@ class Thread {
       thread_exit_check_count(0), handling_signal_(false),
       is_transitioning_to_runnable(false), ready_for_debug_invoke(false),
       debug_method_entry_(false), is_gc_marking(false), weak_ref_access_enabled(true),
-      disable_thread_flip_count(0) {
+      disable_thread_flip_count(0), user_code_suspend_count(0) {
     }
 
     union StateAndFlags state_and_flags;
@@ -1383,6 +1494,9 @@ class Thread {
     // GC roots.
     bool32_t is_gc_marking;
 
+    // Thread "interrupted" status; stays raised until queried or thrown.
+    Atomic<bool32_t> interrupted;
+
     // True if the thread is allowed to access a weak ref (Reference::GetReferent() and system
     // weaks) and to potentially mark an object alive/gray. This is used for concurrent reference
     // processing of the CC collector only. This is thread local so that we can enable/disable weak
@@ -1396,6 +1510,12 @@ class Thread {
     // levels of (nested) JNI critical sections the thread is in and is used to detect a nested JNI
     // critical section enter.
     uint32_t disable_thread_flip_count;
+
+    // How much of 'suspend_count_' is by request of user code, used to distinguish threads
+    // suspended by the runtime from those suspended by user code.
+    // This should have GUARDED_BY(Locks::user_code_suspension_lock_) but auto analysis cannot be
+    // told that AssertHeld should be good enough.
+    int user_code_suspend_count GUARDED_BY(Locks::thread_suspend_count_lock_);
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1418,11 +1538,13 @@ class Thread {
       stacked_shadow_frame_record(nullptr), deoptimization_context_stack(nullptr),
       frame_id_to_shadow_frame(nullptr), name(nullptr), pthread_self(0),
       last_no_thread_suspension_cause(nullptr), checkpoint_function(nullptr),
-      thread_local_pos(nullptr), thread_local_end(nullptr), thread_local_start(nullptr),
+      thread_local_start(nullptr), thread_local_pos(nullptr), thread_local_end(nullptr),
+      thread_local_limit(nullptr),
       thread_local_objects(0), mterp_current_ibase(nullptr), mterp_default_ibase(nullptr),
       mterp_alt_ibase(nullptr), thread_local_alloc_stack_top(nullptr),
-      thread_local_alloc_stack_end(nullptr), nested_signal_state(nullptr),
-      flip_function(nullptr), method_verifier(nullptr), thread_local_mark_stack(nullptr) {
+      thread_local_alloc_stack_end(nullptr),
+      flip_function(nullptr), method_verifier(nullptr), thread_local_mark_stack(nullptr),
+      async_exception(nullptr) {
       std::fill(held_mutexes, held_mutexes + kLockLevelCount, nullptr);
     }
 
@@ -1537,19 +1659,24 @@ class Thread {
     // to avoid additional cost of a mutex and a condition variable, as used in art::Barrier.
     AtomicInteger* active_suspend_barriers[kMaxSuspendBarriers];
 
-    // Entrypoint function pointers.
-    // TODO: move this to more of a global offset table model to avoid per-thread duplication.
-    JniEntryPoints jni_entrypoints;
-    QuickEntryPoints quick_entrypoints;
+    // Thread-local allocation pointer. Moved here to force alignment for thread_local_pos on ARM.
+    uint8_t* thread_local_start;
 
     // thread_local_pos and thread_local_end must be consecutive for ldrd and are 8 byte aligned for
     // potentially better performance.
     uint8_t* thread_local_pos;
     uint8_t* thread_local_end;
-    // Thread-local allocation pointer.
-    uint8_t* thread_local_start;
+
+    // Thread local limit is how much we can expand the thread local buffer to, it is greater or
+    // equal to thread_local_end.
+    uint8_t* thread_local_limit;
 
     size_t thread_local_objects;
+
+    // Entrypoint function pointers.
+    // TODO: move this to more of a global offset table model to avoid per-thread duplication.
+    JniEntryPoints jni_entrypoints;
+    QuickEntryPoints quick_entrypoints;
 
     // Mterp jump table bases.
     void* mterp_current_ibase;
@@ -1566,9 +1693,6 @@ class Thread {
     // Support for Mutex lock hierarchy bug detection.
     BaseMutex* held_mutexes[kLockLevelCount];
 
-    // Recorded thread state for nested signals.
-    jmp_buf* nested_signal_state;
-
     // The function used for thread flip.
     Closure* flip_function;
 
@@ -1577,18 +1701,18 @@ class Thread {
 
     // Thread-local mark stack for the concurrent copying collector.
     gc::accounting::AtomicStack<mirror::Object>* thread_local_mark_stack;
+
+    // The pending async-exception or null.
+    mirror::Throwable* async_exception;
   } tlsPtr_;
 
-  // Guards the 'interrupted_' and 'wait_monitor_' members.
+  // Guards the 'wait_monitor_' members.
   Mutex* wait_mutex_ DEFAULT_MUTEX_ACQUIRED_AFTER;
 
   // Condition variable waited upon during a wait.
   ConditionVariable* wait_cond_ GUARDED_BY(wait_mutex_);
   // Pointer to the monitor lock we're currently waiting on or null if not waiting.
   Monitor* wait_monitor_ GUARDED_BY(wait_mutex_);
-
-  // Thread "interrupted" status; stays raised until queried or thrown.
-  bool interrupted_ GUARDED_BY(wait_mutex_);
 
   // Debug disable read barrier count, only is checked for debug builds and only in the runtime.
   uint8_t debug_disallow_read_barrier_ = 0;
@@ -1598,6 +1722,10 @@ class Thread {
 
   // Pending extra checkpoints if checkpoint_function_ is already used.
   std::list<Closure*> checkpoint_overflow_ GUARDED_BY(Locks::thread_suspend_count_lock_);
+
+  // Custom TLS field that can be used by plugins.
+  // TODO: Generalize once we have more plugins.
+  void* custom_tls_;
 
   // True if the thread is allowed to call back into java (for e.g. during class resolution).
   // By default this is true.
@@ -1618,8 +1746,13 @@ class Thread {
 
 class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
  public:
-  ALWAYS_INLINE explicit ScopedAssertNoThreadSuspension(const char* cause)
-      ACQUIRE(Roles::uninterruptible_) {
+  ALWAYS_INLINE ScopedAssertNoThreadSuspension(const char* cause,
+                                               bool enabled = true)
+      ACQUIRE(Roles::uninterruptible_)
+      : enabled_(enabled) {
+    if (!enabled_) {
+      return;
+    }
     if (kIsDebugBuild) {
       self_ = Thread::Current();
       old_cause_ = self_->StartAssertNoThreadSuspension(cause);
@@ -1628,6 +1761,9 @@ class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
     }
   }
   ALWAYS_INLINE ~ScopedAssertNoThreadSuspension() RELEASE(Roles::uninterruptible_) {
+    if (!enabled_) {
+      return;
+    }
     if (kIsDebugBuild) {
       self_->EndAssertNoThreadSuspension(old_cause_);
     } else {
@@ -1637,6 +1773,7 @@ class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
 
  private:
   Thread* self_;
+  const bool enabled_;
   const char* old_cause_;
 };
 
@@ -1689,6 +1826,14 @@ class ScopedTransitioningToRunnable : public ValueObject {
 
  private:
   Thread* const self_;
+};
+
+class ThreadLifecycleCallback {
+ public:
+  virtual ~ThreadLifecycleCallback() {}
+
+  virtual void ThreadStart(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+  virtual void ThreadDeath(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 };
 
 std::ostream& operator<<(std::ostream& os, const Thread& thread);

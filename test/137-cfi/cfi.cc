@@ -18,21 +18,23 @@
 #include <errno.h>
 #include <signal.h>
 #include <string.h>
-#include <unistd.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include "jni.h"
 
-#include "android-base/stringprintf.h"
 #include <backtrace/Backtrace.h>
+#include "android-base/stringprintf.h"
 
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
 #include "oat_file.h"
+#include "runtime.h"
 #include "utils.h"
 
 namespace art {

@@ -18,23 +18,32 @@
 
 #include <cstring>
 
+#include "art_field-inl.h"
+#include "art_method-inl.h"
 #include "base/stl_util.h"
 #include "compiler_callbacks.h"
+#include "dex_file-inl.h"
+#include "indenter.h"
 #include "leb128.h"
 #include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
 
 namespace art {
 namespace verifier {
 
-VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files) {
+VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files, bool output_only)
+    : output_only_(output_only) {
   for (const DexFile* dex_file : dex_files) {
     DCHECK(GetDexFileDeps(*dex_file) == nullptr);
     std::unique_ptr<DexFileDeps> deps(new DexFileDeps());
     dex_deps_.emplace(dex_file, std::move(deps));
   }
 }
+
+VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files)
+    : VerifierDeps(dex_files, /*output_only*/ true) {}
 
 void VerifierDeps::MergeWith(const VerifierDeps& other,
                              const std::vector<const DexFile*>& dex_files) {
@@ -49,12 +58,8 @@ void VerifierDeps::MergeWith(const VerifierDeps& other,
     MergeSets(my_deps->unassignable_types_, other_deps.unassignable_types_);
     MergeSets(my_deps->classes_, other_deps.classes_);
     MergeSets(my_deps->fields_, other_deps.fields_);
-    MergeSets(my_deps->direct_methods_, other_deps.direct_methods_);
-    MergeSets(my_deps->virtual_methods_, other_deps.virtual_methods_);
-    MergeSets(my_deps->interface_methods_, other_deps.interface_methods_);
-    for (dex::TypeIndex entry : other_deps.unverified_classes_) {
-      my_deps->unverified_classes_.push_back(entry);
-    }
+    MergeSets(my_deps->methods_, other_deps.methods_);
+    MergeSets(my_deps->unverified_classes_, other_deps.unverified_classes_);
   }
 }
 
@@ -68,13 +73,17 @@ const VerifierDeps::DexFileDeps* VerifierDeps::GetDexFileDeps(const DexFile& dex
   return (it == dex_deps_.end()) ? nullptr : it->second.get();
 }
 
+// Access flags that impact vdex verification.
+static constexpr uint32_t kAccVdexAccessFlags =
+    kAccPublic | kAccPrivate | kAccProtected | kAccStatic | kAccInterface;
+
 template <typename T>
 uint16_t VerifierDeps::GetAccessFlags(T* element) {
   static_assert(kAccJavaFlagsMask == 0xFFFF, "Unexpected value of a constant");
   if (element == nullptr) {
     return VerifierDeps::kUnresolvedMarker;
   } else {
-    uint16_t access_flags = Low16Bits(element->GetAccessFlags());
+    uint16_t access_flags = Low16Bits(element->GetAccessFlags()) & kAccVdexAccessFlags;
     CHECK_NE(access_flags, VerifierDeps::kUnresolvedMarker);
     return access_flags;
   }
@@ -308,7 +317,6 @@ void VerifierDeps::AddFieldResolution(const DexFile& dex_file,
 
 void VerifierDeps::AddMethodResolution(const DexFile& dex_file,
                                        uint32_t method_idx,
-                                       MethodResolutionKind resolution_kind,
                                        ArtMethod* method) {
   DexFileDeps* dex_deps = GetDexFileDeps(dex_file);
   if (dex_deps == nullptr) {
@@ -325,14 +333,7 @@ void VerifierDeps::AddMethodResolution(const DexFile& dex_file,
   MethodResolution method_tuple(method_idx,
                                 GetAccessFlags(method),
                                 GetMethodDeclaringClassStringId(dex_file, method_idx, method));
-  if (resolution_kind == kDirectMethodResolution) {
-    dex_deps->direct_methods_.emplace(method_tuple);
-  } else if (resolution_kind == kVirtualMethodResolution) {
-    dex_deps->virtual_methods_.emplace(method_tuple);
-  } else {
-    DCHECK_EQ(resolution_kind, kInterfaceMethodResolution);
-    dex_deps->interface_methods_.emplace(method_tuple);
-  }
+  dex_deps->methods_.insert(method_tuple);
 }
 
 mirror::Class* VerifierDeps::FindOneClassPathBoundaryForInterface(mirror::Class* destination,
@@ -424,8 +425,6 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
     return;
   }
 
-  DCHECK_EQ(is_assignable, destination->IsAssignableFrom(source));
-
   if (destination->IsArrayClass() && source->IsArrayClass()) {
     // Both types are arrays. Break down to component types and add recursively.
     // This helps filter out destinations from compiled DEX files (see below)
@@ -443,6 +442,10 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
                        is_assignable);
       return;
     }
+  } else {
+    // We only do this check for non-array types, as arrays might have erroneous
+    // component types which makes the IsAssignableFrom check unreliable.
+    DCHECK_EQ(is_assignable, destination->IsAssignableFrom(source));
   }
 
   DexFileDeps* dex_deps = GetDexFileDeps(dex_file);
@@ -458,8 +461,7 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
   }
 
   if (!IsInClassPath(source)) {
-    if (!destination->IsInterface()) {
-      DCHECK(!source->IsInterface());
+    if (!destination->IsInterface() && !source->IsInterface()) {
       // Find the super class at the classpath boundary. Only that class
       // can change the assignability.
       do {
@@ -494,8 +496,8 @@ void VerifierDeps::AddAssignability(const DexFile& dex_file,
 
 void VerifierDeps::MaybeRecordVerificationStatus(const DexFile& dex_file,
                                                  dex::TypeIndex type_idx,
-                                                 MethodVerifier::FailureKind failure_kind) {
-  if (failure_kind == MethodVerifier::kNoFailure) {
+                                                 FailureKind failure_kind) {
+  if (failure_kind == FailureKind::kNoFailure) {
     // We only record classes that did not fully verify at compile time.
     return;
   }
@@ -503,7 +505,7 @@ void VerifierDeps::MaybeRecordVerificationStatus(const DexFile& dex_file,
   VerifierDeps* thread_deps = GetThreadLocalVerifierDeps();
   if (thread_deps != nullptr) {
     DexFileDeps* dex_deps = thread_deps->GetDexFileDeps(dex_file);
-    dex_deps->unverified_classes_.push_back(type_idx);
+    dex_deps->unverified_classes_.insert(type_idx);
   }
 }
 
@@ -527,11 +529,10 @@ void VerifierDeps::MaybeRecordFieldResolution(const DexFile& dex_file,
 
 void VerifierDeps::MaybeRecordMethodResolution(const DexFile& dex_file,
                                                uint32_t method_idx,
-                                               MethodResolutionKind resolution_kind,
                                                ArtMethod* method) {
   VerifierDeps* thread_deps = GetThreadLocalVerifierDeps();
   if (thread_deps != nullptr) {
-    thread_deps->AddMethodResolution(dex_file, method_idx, resolution_kind, method);
+    thread_deps->AddMethodResolution(dex_file, method_idx, method);
   }
 }
 
@@ -581,6 +582,16 @@ template<> inline dex::TypeIndex Decode<dex::TypeIndex>(uint32_t in) {
 }
 template<> inline dex::StringIndex Decode<dex::StringIndex>(uint32_t in) {
   return dex::StringIndex(in);
+}
+
+// TODO: Clean this up, if we use a template arg here it confuses the compiler.
+static inline void EncodeTuple(std::vector<uint8_t>* out, const dex::TypeIndex& t) {
+  EncodeUnsignedLeb128(out, Encode(t));
+}
+
+// TODO: Clean this up, if we use a template arg here it confuses the compiler.
+static inline void DecodeTuple(const uint8_t** in, const uint8_t* end, dex::TypeIndex* t) {
+  *t = Decode<dex::TypeIndex>(DecodeUint32WithOverflowCheck(in, end));
 }
 
 template<typename T1, typename T2>
@@ -688,16 +699,14 @@ void VerifierDeps::Encode(const std::vector<const DexFile*>& dex_files,
     EncodeSet(buffer, deps.unassignable_types_);
     EncodeSet(buffer, deps.classes_);
     EncodeSet(buffer, deps.fields_);
-    EncodeSet(buffer, deps.direct_methods_);
-    EncodeSet(buffer, deps.virtual_methods_);
-    EncodeSet(buffer, deps.interface_methods_);
-    EncodeUint16Vector(buffer, deps.unverified_classes_);
+    EncodeSet(buffer, deps.methods_);
+    EncodeSet(buffer, deps.unverified_classes_);
   }
 }
 
 VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files,
                            ArrayRef<const uint8_t> data)
-    : VerifierDeps(dex_files) {
+    : VerifierDeps(dex_files, /*output_only*/ false) {
   if (data.empty()) {
     // Return eagerly, as the first thing we expect from VerifierDeps data is
     // the number of created strings, even if there is no dependency.
@@ -713,10 +722,8 @@ VerifierDeps::VerifierDeps(const std::vector<const DexFile*>& dex_files,
     DecodeSet(&data_start, data_end, &deps->unassignable_types_);
     DecodeSet(&data_start, data_end, &deps->classes_);
     DecodeSet(&data_start, data_end, &deps->fields_);
-    DecodeSet(&data_start, data_end, &deps->direct_methods_);
-    DecodeSet(&data_start, data_end, &deps->virtual_methods_);
-    DecodeSet(&data_start, data_end, &deps->interface_methods_);
-    DecodeUint16Vector(&data_start, data_end, &deps->unverified_classes_);
+    DecodeSet(&data_start, data_end, &deps->methods_);
+    DecodeSet(&data_start, data_end, &deps->unverified_classes_);
   }
   CHECK_LE(data_start, data_end);
 }
@@ -753,9 +760,7 @@ bool VerifierDeps::DexFileDeps::Equals(const VerifierDeps::DexFileDeps& rhs) con
          (unassignable_types_ == rhs.unassignable_types_) &&
          (classes_ == rhs.classes_) &&
          (fields_ == rhs.fields_) &&
-         (direct_methods_ == rhs.direct_methods_) &&
-         (virtual_methods_ == rhs.virtual_methods_) &&
-         (interface_methods_ == rhs.interface_methods_) &&
+         (methods_ == rhs.methods_) &&
          (unverified_classes_ == rhs.unverified_classes_);
 }
 
@@ -815,27 +820,21 @@ void VerifierDeps::Dump(VariableIndentationOutputStream* vios) const {
       }
     }
 
-    for (const auto& entry :
-            { std::make_pair(kDirectMethodResolution, dep.second->direct_methods_),
-              std::make_pair(kVirtualMethodResolution, dep.second->virtual_methods_),
-              std::make_pair(kInterfaceMethodResolution, dep.second->interface_methods_) }) {
-      for (const MethodResolution& method : entry.second) {
-        const DexFile::MethodId& method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
+    for (const MethodResolution& method : dep.second->methods_) {
+      const DexFile::MethodId& method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
+      vios->Stream()
+          << dex_file.GetMethodDeclaringClassDescriptor(method_id) << "->"
+          << dex_file.GetMethodName(method_id)
+          << dex_file.GetMethodSignature(method_id).ToString()
+          << " is expected to be ";
+      if (!method.IsResolved()) {
+        vios->Stream() << "unresolved\n";
+      } else {
         vios->Stream()
-            << dex_file.GetMethodDeclaringClassDescriptor(method_id) << "->"
-            << dex_file.GetMethodName(method_id)
-            << dex_file.GetMethodSignature(method_id).ToString()
-            << " is expected to be ";
-        if (!method.IsResolved()) {
-          vios->Stream() << "unresolved\n";
-        } else {
-          vios->Stream()
-            << "in class "
-            << GetStringFromId(dex_file, method.GetDeclaringClassIndex())
-            << ", have the access flags " << std::hex << method.GetAccessFlags() << std::dec
-            << ", and be of kind " << entry.first
-            << "\n";
-        }
+          << "in class "
+          << GetStringFromId(dex_file, method.GetDeclaringClassIndex())
+          << ", have the access flags " << std::hex << method.GetAccessFlags() << std::dec
+          << "\n";
       }
     }
 
@@ -890,12 +889,12 @@ bool VerifierDeps::VerifyAssignability(Handle<mirror::ClassLoader> class_loader,
     source.Assign(
         FindClassAndClearException(class_linker, self, source_desc.c_str(), class_loader));
 
-    if (destination.Get() == nullptr) {
+    if (destination == nullptr) {
       LOG(INFO) << "VerifiersDeps: Could not resolve class " << destination_desc;
       return false;
     }
 
-    if (source.Get() == nullptr) {
+    if (source == nullptr) {
       LOG(INFO) << "VerifierDeps: Could not resolve class " << source_desc;
       return false;
     }
@@ -925,7 +924,7 @@ bool VerifierDeps::VerifyClasses(Handle<mirror::ClassLoader> class_loader,
     cls.Assign(FindClassAndClearException(class_linker, self, descriptor, class_loader));
 
     if (entry.IsResolved()) {
-      if (cls.Get() == nullptr) {
+      if (cls == nullptr) {
         LOG(INFO) << "VerifierDeps: Could not resolve class " << descriptor;
         return false;
       } else if (entry.GetAccessFlags() != GetAccessFlags(cls.Get())) {
@@ -939,7 +938,7 @@ bool VerifierDeps::VerifyClasses(Handle<mirror::ClassLoader> class_loader,
                   << std::dec;
         return false;
       }
-    } else if (cls.Get() != nullptr) {
+    } else if (cls != nullptr) {
       LOG(INFO) << "VerifierDeps: Unexpected successful resolution of class " << descriptor;
       return false;
     }
@@ -963,20 +962,25 @@ bool VerifierDeps::VerifyFields(Handle<mirror::ClassLoader> class_loader,
   // Check recorded fields are resolved the same way, have the same recorded class,
   // and have the same recorded flags.
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  StackHandleScope<1> hs(self);
-  Handle<mirror::DexCache> dex_cache(
-      hs.NewHandle(class_linker->FindDexCache(self, dex_file, /* allow_failure */ false)));
   for (const auto& entry : fields) {
-    ArtField* field = class_linker->ResolveFieldJLS(
-        dex_file, entry.GetDexFieldIndex(), dex_cache, class_loader);
-
-    if (field == nullptr) {
-      DCHECK(self->IsExceptionPending());
-      self->ClearException();
+    const DexFile::FieldId& field_id = dex_file.GetFieldId(entry.GetDexFieldIndex());
+    StringPiece name(dex_file.StringDataByIdx(field_id.name_idx_));
+    StringPiece type(dex_file.StringDataByIdx(dex_file.GetTypeId(field_id.type_idx_).descriptor_idx_));
+    // Only use field_id.class_idx_ when the entry is unresolved, which is rare.
+    // Otherwise, we might end up resolving an application class, which is expensive.
+    std::string expected_decl_klass = entry.IsResolved()
+        ? GetStringFromId(dex_file, entry.GetDeclaringClassIndex())
+        : dex_file.StringByTypeIdx(field_id.class_idx_);
+    mirror::Class* cls = FindClassAndClearException(
+        class_linker, self, expected_decl_klass.c_str(), class_loader);
+    if (cls == nullptr) {
+      LOG(INFO) << "VerifierDeps: Could not resolve class " << expected_decl_klass;
+      return false;
     }
+    DCHECK(cls->IsResolved());
 
+    ArtField* field = mirror::Class::FindField(self, cls, name, type);
     if (entry.IsResolved()) {
-      std::string expected_decl_klass = GetStringFromId(dex_file, entry.GetDeclaringClassIndex());
       std::string temp;
       if (field == nullptr) {
         LOG(INFO) << "VerifierDeps: Could not resolve field "
@@ -1015,7 +1019,6 @@ static std::string GetMethodDescription(const DexFile& dex_file, uint32_t index)
 bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
                                  const DexFile& dex_file,
                                  const std::set<MethodResolution>& methods,
-                                 MethodResolutionKind kind,
                                  Thread* self) const {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   PointerSize pointer_size = class_linker->GetImagePointerSize();
@@ -1025,37 +1028,34 @@ bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
 
     const char* name = dex_file.GetMethodName(method_id);
     const Signature signature = dex_file.GetMethodSignature(method_id);
-    const char* descriptor = dex_file.GetMethodDeclaringClassDescriptor(method_id);
+    // Only use method_id.class_idx_ when the entry is unresolved, which is rare.
+    // Otherwise, we might end up resolving an application class, which is expensive.
+    std::string expected_decl_klass = entry.IsResolved()
+        ? GetStringFromId(dex_file, entry.GetDeclaringClassIndex())
+        : dex_file.StringByTypeIdx(method_id.class_idx_);
 
-    mirror::Class* cls = FindClassAndClearException(class_linker, self, descriptor, class_loader);
+    mirror::Class* cls = FindClassAndClearException(
+        class_linker, self, expected_decl_klass.c_str(), class_loader);
     if (cls == nullptr) {
-      LOG(INFO) << "VerifierDeps: Could not resolve class " << descriptor;
+      LOG(INFO) << "VerifierDeps: Could not resolve class " << expected_decl_klass;
       return false;
     }
     DCHECK(cls->IsResolved());
     ArtMethod* method = nullptr;
-    if (kind == kDirectMethodResolution) {
-      method = cls->FindDirectMethod(name, signature, pointer_size);
-    } else if (kind == kVirtualMethodResolution) {
-      method = cls->FindVirtualMethod(name, signature, pointer_size);
-    } else {
-      DCHECK_EQ(kind, kInterfaceMethodResolution);
+    if (cls->IsInterface()) {
       method = cls->FindInterfaceMethod(name, signature, pointer_size);
+    } else {
+      method = cls->FindClassMethod(name, signature, pointer_size);
     }
 
     if (entry.IsResolved()) {
       std::string temp;
-      std::string expected_decl_klass = GetStringFromId(dex_file, entry.GetDeclaringClassIndex());
       if (method == nullptr) {
-        LOG(INFO) << "VerifierDeps: Could not resolve "
-                  << kind
-                  << " method "
+        LOG(INFO) << "VerifierDeps: Could not resolve method "
                   << GetMethodDescription(dex_file, entry.GetDexMethodIndex());
         return false;
       } else if (expected_decl_klass != method->GetDeclaringClass()->GetDescriptor(&temp)) {
-        LOG(INFO) << "VerifierDeps: Unexpected declaring class for "
-                  << kind
-                  << " method resolution "
+        LOG(INFO) << "VerifierDeps: Unexpected declaring class for method resolution "
                   << GetMethodDescription(dex_file, entry.GetDexMethodIndex())
                   << " (expected="
                   << expected_decl_klass
@@ -1064,9 +1064,7 @@ bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
                   << ")";
         return false;
       } else if (entry.GetAccessFlags() != GetAccessFlags(method)) {
-        LOG(INFO) << "VerifierDeps: Unexpected access flags for resolved "
-                  << kind
-                  << " method resolution "
+        LOG(INFO) << "VerifierDeps: Unexpected access flags for resolved method resolution "
                   << GetMethodDescription(dex_file, entry.GetDexMethodIndex())
                   << std::hex
                   << " (expected="
@@ -1077,9 +1075,7 @@ bool VerifierDeps::VerifyMethods(Handle<mirror::ClassLoader> class_loader,
         return false;
       }
     } else if (method != nullptr) {
-      LOG(INFO) << "VerifierDeps: Unexpected successful resolution of "
-                << kind
-                << " method "
+      LOG(INFO) << "VerifierDeps: Unexpected successful resolution of method "
                 << GetMethodDescription(dex_file, entry.GetDexMethodIndex());
       return false;
     }
@@ -1099,12 +1095,7 @@ bool VerifierDeps::VerifyDexFile(Handle<mirror::ClassLoader> class_loader,
   result = result && VerifyClasses(class_loader, dex_file, deps.classes_, self);
   result = result && VerifyFields(class_loader, dex_file, deps.fields_, self);
 
-  result = result && VerifyMethods(
-      class_loader, dex_file, deps.direct_methods_, kDirectMethodResolution, self);
-  result = result && VerifyMethods(
-      class_loader, dex_file, deps.virtual_methods_, kVirtualMethodResolution, self);
-  result = result && VerifyMethods(
-      class_loader, dex_file, deps.interface_methods_, kInterfaceMethodResolution, self);
+  result = result && VerifyMethods(class_loader, dex_file, deps.methods_, self);
 
   return result;
 }

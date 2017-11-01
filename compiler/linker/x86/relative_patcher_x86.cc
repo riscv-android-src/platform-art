@@ -17,6 +17,7 @@
 #include "linker/x86/relative_patcher_x86.h"
 
 #include "compiled_method.h"
+#include "linker/linker_patch.h"
 
 namespace art {
 namespace linker {
@@ -54,6 +55,12 @@ void X86RelativePatcher::PatchPcRelativeReference(std::vector<uint8_t>* code,
   (*code)[literal_offset + 1u] = static_cast<uint8_t>(diff >> 8);
   (*code)[literal_offset + 2u] = static_cast<uint8_t>(diff >> 16);
   (*code)[literal_offset + 3u] = static_cast<uint8_t>(diff >> 24);
+}
+
+void X86RelativePatcher::PatchBakerReadBarrierBranch(std::vector<uint8_t>* code ATTRIBUTE_UNUSED,
+                                                     const LinkerPatch& patch ATTRIBUTE_UNUSED,
+                                                     uint32_t patch_offset ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "UNIMPLEMENTED";
 }
 
 }  // namespace linker

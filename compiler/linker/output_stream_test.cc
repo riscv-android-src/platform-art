@@ -17,13 +17,13 @@
 #include "file_output_stream.h"
 #include "vector_output_stream.h"
 
-#include "base/unix_file/fd_file.h"
 #include "base/logging.h"
-#include "base/stl_util.h"
+#include "base/unix_file/fd_file.h"
 #include "buffered_output_stream.h"
 #include "common_runtime_test.h"
 
 namespace art {
+namespace linker {
 
 class OutputStreamTest : public CommonRuntimeTest {
  protected:
@@ -79,7 +79,7 @@ TEST_F(OutputStreamTest, File) {
 TEST_F(OutputStreamTest, Buffered) {
   ScratchFile tmp;
   {
-    BufferedOutputStream buffered_output_stream(MakeUnique<FileOutputStream>(tmp.GetFile()));
+    BufferedOutputStream buffered_output_stream(std::make_unique<FileOutputStream>(tmp.GetFile()));
     SetOutputStream(buffered_output_stream);
     GenerateTestOutput();
   }
@@ -125,7 +125,7 @@ TEST_F(OutputStreamTest, BufferedFlush) {
     bool flush_called;
   };
 
-  std::unique_ptr<CheckingOutputStream> cos = MakeUnique<CheckingOutputStream>();
+  std::unique_ptr<CheckingOutputStream> cos = std::make_unique<CheckingOutputStream>();
   CheckingOutputStream* checking_output_stream = cos.get();
   BufferedOutputStream buffered(std::move(cos));
   ASSERT_FALSE(checking_output_stream->flush_called);
@@ -134,4 +134,5 @@ TEST_F(OutputStreamTest, BufferedFlush) {
   ASSERT_TRUE(checking_output_stream->flush_called);
 }
 
+}  // namespace linker
 }  // namespace art

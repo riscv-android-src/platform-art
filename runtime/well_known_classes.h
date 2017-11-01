@@ -33,21 +33,22 @@ class Class;
 // them up. Similar to libcore's JniConstants (except there's no overlap, so
 // we keep them separate).
 
-jmethodID CacheMethod(JNIEnv* env, jclass c, bool is_static, const char* name, const char* signature);
-
 struct WellKnownClasses {
  public:
   static void Init(JNIEnv* env);  // Run before native methods are registered.
   static void LateInit(JNIEnv* env);  // Run after native methods are registered.
+
+  static void Clear();
+
   static ArtMethod* StringInitToStringFactory(ArtMethod* method);
   static uint32_t StringInitToEntryPoint(ArtMethod* method);
 
   static ObjPtr<mirror::Class> ToClass(jclass global_jclass) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static jclass com_android_dex_Dex;
   static jclass dalvik_annotation_optimization_CriticalNative;
   static jclass dalvik_annotation_optimization_FastNative;
   static jclass dalvik_system_BaseDexClassLoader;
+  static jclass dalvik_system_DelegateLastClassLoader;
   static jclass dalvik_system_DexClassLoader;
   static jclass dalvik_system_DexFile;
   static jclass dalvik_system_DexPathList;
@@ -61,9 +62,9 @@ struct WellKnownClasses {
   static jclass java_lang_ClassNotFoundException;
   static jclass java_lang_Daemons;
   static jclass java_lang_Error;
-  static jclass java_lang_ExceptionInInitializerError;
   static jclass java_lang_IllegalAccessError;
   static jclass java_lang_invoke_MethodHandle;
+  static jclass java_lang_invoke_MethodHandle_PolymorphicSignature;
   static jclass java_lang_NoClassDefFoundError;
   static jclass java_lang_Object;
   static jclass java_lang_OutOfMemoryError;
@@ -91,7 +92,6 @@ struct WellKnownClasses {
   static jclass org_apache_harmony_dalvik_ddmc_Chunk;
   static jclass org_apache_harmony_dalvik_ddmc_DdmServer;
 
-  static jmethodID com_android_dex_Dex_create;
   static jmethodID dalvik_system_VMRuntime_runFinalization;
   static jmethodID java_lang_Boolean_valueOf;
   static jmethodID java_lang_Byte_valueOf;
@@ -106,6 +106,8 @@ struct WellKnownClasses {
   static jmethodID java_lang_Integer_valueOf;
   static jmethodID java_lang_invoke_MethodHandle_invoke;
   static jmethodID java_lang_invoke_MethodHandle_invokeExact;
+  static jmethodID java_lang_invoke_MethodHandles_lookup;
+  static jmethodID java_lang_invoke_MethodHandles_Lookup_findConstructor;
   static jmethodID java_lang_Long_valueOf;
   static jmethodID java_lang_ref_FinalizerReference_add;
   static jmethodID java_lang_ref_ReferenceQueue_add;
@@ -113,6 +115,7 @@ struct WellKnownClasses {
   static jmethodID java_lang_reflect_Proxy_invoke;
   static jmethodID java_lang_Runtime_nativeLoad;
   static jmethodID java_lang_Short_valueOf;
+  static jmethodID java_lang_String_charAt;
   static jmethodID java_lang_System_runFinalization;
   static jmethodID java_lang_Thread_dispatchUncaughtException;
   static jmethodID java_lang_Thread_init;

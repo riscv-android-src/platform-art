@@ -18,7 +18,6 @@
 #define ART_RUNTIME_COMMON_THROWS_H_
 
 #include "base/mutex.h"
-#include "invoke_type.h"
 #include "obj_ptr.h"
 
 namespace art {
@@ -30,6 +29,7 @@ namespace mirror {
 class ArtField;
 class ArtMethod;
 class DexFile;
+enum InvokeType : uint32_t;
 class Signature;
 class StringPiece;
 
@@ -54,6 +54,14 @@ void ThrowArrayIndexOutOfBoundsException(int index, int length)
 
 void ThrowArrayStoreException(ObjPtr<mirror::Class> element_class,
                               ObjPtr<mirror::Class> array_class)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
+// BootstrapMethodError
+
+void ThrowBootstrapMethodError(const char* fmt, ...)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
+void ThrowWrappedBootstrapMethodError(const char* fmt, ...)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 // ClassCircularityError
@@ -141,6 +149,12 @@ void ThrowIncompatibleClassChangeError(ObjPtr<mirror::Class> referrer, const cha
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 void ThrowIncompatibleClassChangeErrorForMethodConflict(ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
+
+// InternalError
+
+void ThrowInternalError(const char* fmt, ...)
+    __attribute__((__format__(__printf__, 1, 2)))
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
 // IOException
@@ -236,7 +250,7 @@ void ThrowVerifyError(ObjPtr<mirror::Class> referrer, const char* fmt, ...)
     __attribute__((__format__(__printf__, 2, 3)))
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;
 
-// WrontMethodTypeException
+// WrongMethodTypeException
 void ThrowWrongMethodTypeException(mirror::MethodType* callee_type,
                                    mirror::MethodType* callsite_type)
     REQUIRES_SHARED(Locks::mutator_lock_) COLD_ATTR;

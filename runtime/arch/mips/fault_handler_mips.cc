@@ -14,17 +14,18 @@
  * limitations under the License.
  */
 
-#include "arch/mips/quick_method_frame_info_mips.h"
-#include "fault_handler.h"
 #include <sys/ucontext.h>
-#include "art_method-inl.h"
+#include "fault_handler.h"
+
+#include "art_method.h"
+#include "base/callee_save_type.h"
+#include "base/hex_dump.h"
+#include "base/logging.h"
 #include "base/macros.h"
 #include "globals.h"
-#include "base/logging.h"
-#include "base/hex_dump.h"
+#include "quick_method_frame_info_mips.h"
 #include "registers_mips.h"
-#include "thread.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 extern "C" void art_quick_throw_stack_overflow();
 extern "C" void art_quick_throw_null_pointer_exception_from_signal();
@@ -34,10 +35,6 @@ extern "C" void art_quick_throw_null_pointer_exception_from_signal();
 //
 
 namespace art {
-
-void FaultManager::HandleNestedSignal(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBUTE_UNUSED,
-                                      void* context ATTRIBUTE_UNUSED) {
-}
 
 void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo, void* context,
                                              ArtMethod** out_method,
@@ -84,7 +81,7 @@ bool NullPointerHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, void*
 
   // Decrement $sp by the frame size of the kSaveEverything method and store
   // the fault address in the padding right after the ArtMethod*.
-  sc->sc_regs[mips::SP] -= mips::MipsCalleeSaveFrameSize(Runtime::kSaveEverything);
+  sc->sc_regs[mips::SP] -= mips::MipsCalleeSaveFrameSize(CalleeSaveType::kSaveEverything);
   uintptr_t* padding = reinterpret_cast<uintptr_t*>(sc->sc_regs[mips::SP]) + /* ArtMethod* */ 1;
   *padding = reinterpret_cast<uintptr_t>(info->si_addr);
 

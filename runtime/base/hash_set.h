@@ -17,10 +17,12 @@
 #ifndef ART_RUNTIME_BASE_HASH_SET_H_
 #define ART_RUNTIME_BASE_HASH_SET_H_
 
+#include <stdint.h>
+
 #include <functional>
 #include <iterator>
 #include <memory>
-#include <stdint.h>
+#include <type_traits>
 #include <utility>
 
 #include "bit_utils.h"
@@ -384,18 +386,20 @@ class HashSet {
   }
 
   // Insert an element, allows duplicates.
-  void Insert(const T& element) {
-    InsertWithHash(element, hashfn_(element));
+  template <typename U, typename = typename std::enable_if<std::is_convertible<U, T>::value>::type>
+  void Insert(U&& element) {
+    InsertWithHash(std::forward<U>(element), hashfn_(element));
   }
 
-  void InsertWithHash(const T& element, size_t hash) {
+  template <typename U, typename = typename std::enable_if<std::is_convertible<U, T>::value>::type>
+  void InsertWithHash(U&& element, size_t hash) {
     DCHECK_EQ(hash, hashfn_(element));
     if (num_elements_ >= elements_until_expand_) {
       Expand();
       DCHECK_LT(num_elements_, elements_until_expand_);
     }
     const size_t index = FirstAvailableSlot(IndexForHash(hash));
-    data_[index] = element;
+    data_[index] = std::forward<U>(element);
     ++num_elements_;
   }
 

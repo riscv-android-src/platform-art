@@ -19,11 +19,14 @@
 #ifndef ART_DEXLAYOUT_DEX_IR_H_
 #define ART_DEXLAYOUT_DEX_IR_H_
 
-#include <map>
-#include <vector>
 #include <stdint.h>
 
+#include <map>
+#include <vector>
+
+#include "base/stl_util.h"
 #include "dex_file-inl.h"
+#include "dex_file_types.h"
 #include "leb128.h"
 #include "utf.h"
 
@@ -35,6 +38,7 @@ class AnnotationItem;
 class AnnotationsDirectoryItem;
 class AnnotationSetItem;
 class AnnotationSetRefList;
+class CallSiteId;
 class ClassData;
 class ClassDef;
 class CodeItem;
@@ -47,6 +51,7 @@ class FieldItem;
 class Header;
 class MapList;
 class MapItem;
+class MethodHandleItem;
 class MethodId;
 class MethodItem;
 class ParameterAnnotation;
@@ -65,6 +70,8 @@ static constexpr size_t kProtoIdItemSize = 12;
 static constexpr size_t kFieldIdItemSize = 8;
 static constexpr size_t kMethodIdItemSize = 8;
 static constexpr size_t kClassDefItemSize = 32;
+static constexpr size_t kCallSiteIdItemSize = 4;
+static constexpr size_t kMethodHandleItemSize = 8;
 
 // Visitor support
 class AbstractDispatcher {
@@ -79,6 +86,8 @@ class AbstractDispatcher {
   virtual void Dispatch(const ProtoId* proto_id) = 0;
   virtual void Dispatch(const FieldId* field_id) = 0;
   virtual void Dispatch(const MethodId* method_id) = 0;
+  virtual void Dispatch(const CallSiteId* call_site_id) = 0;
+  virtual void Dispatch(const MethodHandleItem* method_handle_item) = 0;
   virtual void Dispatch(ClassData* class_data) = 0;
   virtual void Dispatch(ClassDef* class_def) = 0;
   virtual void Dispatch(FieldItem* field_item) = 0;
@@ -134,9 +143,17 @@ template<class T> class CollectionMap : public CollectionBase<T> {
  public:
   CollectionMap() = default;
 
+  // Returns the existing item if it is already inserted, null otherwise.
+  T* GetExistingObject(uint32_t offset) {
+    auto it = collection_.find(offset);
+    return it != collection_.end() ? it->second.get() : nullptr;
+  }
+
   void AddItem(T* object, uint32_t offset) {
     object->SetOffset(offset);
-    collection_.emplace(offset, std::unique_ptr<T>(object));
+    auto it = collection_.emplace(offset, std::unique_ptr<T>(object));
+    CHECK(it.second) << "CollectionMap already has an object with offset " << offset << " "
+                     << " and address " << it.first->second.get();
   }
   uint32_t Size() const { return collection_.size(); }
   std::map<uint32_t, std::unique_ptr<T>>& Collection() { return collection_; }
@@ -157,6 +174,9 @@ class Collections {
   std::vector<std::unique_ptr<FieldId>>& FieldIds() { return field_ids_.Collection(); }
   std::vector<std::unique_ptr<MethodId>>& MethodIds() { return method_ids_.Collection(); }
   std::vector<std::unique_ptr<ClassDef>>& ClassDefs() { return class_defs_.Collection(); }
+  std::vector<std::unique_ptr<CallSiteId>>& CallSiteIds() { return call_site_ids_.Collection(); }
+  std::vector<std::unique_ptr<MethodHandleItem>>& MethodHandleItems()
+      { return method_handle_items_.Collection(); }
   std::map<uint32_t, std::unique_ptr<StringData>>& StringDatas()
       { return string_datas_.Collection(); }
   std::map<uint32_t, std::unique_ptr<TypeList>>& TypeLists() { return type_lists_.Collection(); }
@@ -181,27 +201,61 @@ class Collections {
   void CreateFieldId(const DexFile& dex_file, uint32_t i);
   void CreateMethodId(const DexFile& dex_file, uint32_t i);
   void CreateClassDef(const DexFile& dex_file, uint32_t i);
+  void CreateCallSiteId(const DexFile& dex_file, uint32_t i);
+  void CreateMethodHandleItem(const DexFile& dex_file, uint32_t i);
+
+  void CreateCallSitesAndMethodHandles(const DexFile& dex_file);
 
   TypeList* CreateTypeList(const DexFile::TypeList* type_list, uint32_t offset);
   EncodedArrayItem* CreateEncodedArrayItem(const uint8_t* static_data, uint32_t offset);
-  AnnotationItem* CreateAnnotationItem(const DexFile::AnnotationItem* annotation, uint32_t offset);
+  AnnotationItem* CreateAnnotationItem(const DexFile& dex_file,
+                                       const DexFile::AnnotationItem* annotation);
   AnnotationSetItem* CreateAnnotationSetItem(const DexFile& dex_file,
-      const DexFile::AnnotationSetItem& disk_annotations_item, uint32_t offset);
+      const DexFile::AnnotationSetItem* disk_annotations_item, uint32_t offset);
   AnnotationsDirectoryItem* CreateAnnotationsDirectoryItem(const DexFile& dex_file,
       const DexFile::AnnotationsDirectoryItem* disk_annotations_item, uint32_t offset);
   CodeItem* CreateCodeItem(
       const DexFile& dex_file, const DexFile::CodeItem& disk_code_item, uint32_t offset);
   ClassData* CreateClassData(const DexFile& dex_file, const uint8_t* encoded_data, uint32_t offset);
+  void AddAnnotationsFromMapListSection(const DexFile& dex_file,
+                                        uint32_t start_offset,
+                                        uint32_t count);
 
-  StringId* GetStringId(uint32_t index) { return StringIds()[index].get(); }
-  TypeId* GetTypeId(uint32_t index) { return TypeIds()[index].get(); }
-  ProtoId* GetProtoId(uint32_t index) { return ProtoIds()[index].get(); }
-  FieldId* GetFieldId(uint32_t index) { return FieldIds()[index].get(); }
-  MethodId* GetMethodId(uint32_t index) { return MethodIds()[index].get(); }
-  ClassDef* GetClassDef(uint32_t index) { return ClassDefs()[index].get(); }
+  StringId* GetStringId(uint32_t index) {
+    CHECK_LT(index, StringIdsSize());
+    return StringIds()[index].get();
+  }
+  TypeId* GetTypeId(uint32_t index) {
+    CHECK_LT(index, TypeIdsSize());
+    return TypeIds()[index].get();
+  }
+  ProtoId* GetProtoId(uint32_t index) {
+    CHECK_LT(index, ProtoIdsSize());
+    return ProtoIds()[index].get();
+  }
+  FieldId* GetFieldId(uint32_t index) {
+    CHECK_LT(index, FieldIdsSize());
+    return FieldIds()[index].get();
+  }
+  MethodId* GetMethodId(uint32_t index) {
+    CHECK_LT(index, MethodIdsSize());
+    return MethodIds()[index].get();
+  }
+  ClassDef* GetClassDef(uint32_t index) {
+    CHECK_LT(index, ClassDefsSize());
+    return ClassDefs()[index].get();
+  }
+  CallSiteId* GetCallSiteId(uint32_t index) {
+    CHECK_LT(index, CallSiteIdsSize());
+    return CallSiteIds()[index].get();
+  }
+  MethodHandleItem* GetMethodHandle(uint32_t index) {
+    CHECK_LT(index, MethodHandleItemsSize());
+    return MethodHandleItems()[index].get();
+  }
 
   StringId* GetStringIdOrNullPtr(uint32_t index) {
-    return index == DexFile::kDexNoIndex ? nullptr : GetStringId(index);
+    return index == dex::kDexNoIndex ? nullptr : GetStringId(index);
   }
   TypeId* GetTypeIdOrNullPtr(uint16_t index) {
     return index == DexFile::kDexNoIndex16 ? nullptr : GetTypeId(index);
@@ -213,6 +267,8 @@ class Collections {
   uint32_t FieldIdsOffset() const { return field_ids_.GetOffset(); }
   uint32_t MethodIdsOffset() const { return method_ids_.GetOffset(); }
   uint32_t ClassDefsOffset() const { return class_defs_.GetOffset(); }
+  uint32_t CallSiteIdsOffset() const { return call_site_ids_.GetOffset(); }
+  uint32_t MethodHandleItemsOffset() const { return method_handle_items_.GetOffset(); }
   uint32_t StringDatasOffset() const { return string_datas_.GetOffset(); }
   uint32_t TypeListsOffset() const { return type_lists_.GetOffset(); }
   uint32_t EncodedArrayItemsOffset() const { return encoded_array_items_.GetOffset(); }
@@ -232,6 +288,9 @@ class Collections {
   void SetFieldIdsOffset(uint32_t new_offset) { field_ids_.SetOffset(new_offset); }
   void SetMethodIdsOffset(uint32_t new_offset) { method_ids_.SetOffset(new_offset); }
   void SetClassDefsOffset(uint32_t new_offset) { class_defs_.SetOffset(new_offset); }
+  void SetCallSiteIdsOffset(uint32_t new_offset) { call_site_ids_.SetOffset(new_offset); }
+  void SetMethodHandleItemsOffset(uint32_t new_offset)
+      { method_handle_items_.SetOffset(new_offset); }
   void SetStringDatasOffset(uint32_t new_offset) { string_datas_.SetOffset(new_offset); }
   void SetTypeListsOffset(uint32_t new_offset) { type_lists_.SetOffset(new_offset); }
   void SetEncodedArrayItemsOffset(uint32_t new_offset)
@@ -254,6 +313,8 @@ class Collections {
   uint32_t FieldIdsSize() const { return field_ids_.Size(); }
   uint32_t MethodIdsSize() const { return method_ids_.Size(); }
   uint32_t ClassDefsSize() const { return class_defs_.Size(); }
+  uint32_t CallSiteIdsSize() const { return call_site_ids_.Size(); }
+  uint32_t MethodHandleItemsSize() const { return method_handle_items_.Size(); }
   uint32_t StringDatasSize() const { return string_datas_.Size(); }
   uint32_t TypeListsSize() const { return type_lists_.Size(); }
   uint32_t EncodedArrayItemsSize() const { return encoded_array_items_.Size(); }
@@ -280,6 +341,8 @@ class Collections {
   CollectionVector<FieldId> field_ids_;
   CollectionVector<MethodId> method_ids_;
   CollectionVector<ClassDef> class_defs_;
+  CollectionVector<CallSiteId> call_site_ids_;
+  CollectionVector<MethodHandleItem> method_handle_items_;
 
   CollectionMap<StringData> string_datas_;
   CollectionMap<TypeList> type_lists_;
@@ -595,8 +658,10 @@ class EncodedValue {
   void SetDouble(double d) { u_.double_val_ = d; }
   void SetStringId(StringId* string_id) { u_.string_val_ = string_id; }
   void SetTypeId(TypeId* type_id) { u_.type_val_ = type_id; }
+  void SetProtoId(ProtoId* proto_id) { u_.proto_val_ = proto_id; }
   void SetFieldId(FieldId* field_id) { u_.field_val_ = field_id; }
   void SetMethodId(MethodId* method_id) { u_.method_val_ = method_id; }
+  void SetMethodHandle(MethodHandleItem* method_handle) { u_.method_handle_val_ = method_handle; }
   void SetEncodedArray(EncodedArrayItem* encoded_array) { encoded_array_.reset(encoded_array); }
   void SetEncodedAnnotation(EncodedAnnotation* encoded_annotation)
       { encoded_annotation_.reset(encoded_annotation); }
@@ -611,8 +676,10 @@ class EncodedValue {
   double GetDouble() const { return u_.double_val_; }
   StringId* GetStringId() const { return u_.string_val_; }
   TypeId* GetTypeId() const { return u_.type_val_; }
+  ProtoId* GetProtoId() const { return u_.proto_val_; }
   FieldId* GetFieldId() const { return u_.field_val_; }
   MethodId* GetMethodId() const { return u_.method_val_; }
+  MethodHandleItem* GetMethodHandle() const { return u_.method_handle_val_; }
   EncodedArrayItem* GetEncodedArray() const { return encoded_array_.get(); }
   EncodedAnnotation* GetEncodedAnnotation() const { return encoded_annotation_.get(); }
 
@@ -631,8 +698,10 @@ class EncodedValue {
     double double_val_;
     StringId* string_val_;
     TypeId* type_val_;
+    ProtoId* proto_val_;
     FieldId* field_val_;
     MethodId* method_val_;
+    MethodHandleItem* method_handle_val_;
   } u_;
   std::unique_ptr<EncodedArrayItem> encoded_array_;
   std::unique_ptr<EncodedAnnotation> encoded_annotation_;
@@ -740,8 +809,7 @@ class ClassDef : public IndexedItem {
   const TypeId* ClassType() const { return class_type_; }
   uint32_t GetAccessFlags() const { return access_flags_; }
   const TypeId* Superclass() const { return superclass_; }
-  const TypeIdVector* Interfaces()
-      { return interfaces_ == nullptr ? nullptr: interfaces_->GetTypeList(); }
+  const TypeList* Interfaces() { return interfaces_; }
   uint32_t InterfacesOffset() { return interfaces_ == nullptr ? 0 : interfaces_->GetOffset(); }
   const StringId* SourceFile() const { return source_file_; }
   AnnotationsDirectoryItem* Annotations() const { return annotations_; }
@@ -773,7 +841,7 @@ class TypeAddrPair {
   uint32_t GetAddress() const { return address_; }
 
  private:
-  const TypeId* type_id_;
+  const TypeId* type_id_;  // This can be nullptr.
   uint32_t address_;
 
   DISALLOW_COPY_AND_ASSIGN(TypeAddrPair);
@@ -883,6 +951,11 @@ class CodeItem : public Item {
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
 
+  IterationRange<DexInstructionIterator> Instructions() const {
+    return MakeIterationRange(DexInstructionIterator(Insns()),
+                              DexInstructionIterator(Insns() + InsnsSize()));
+  }
+
  private:
   uint16_t registers_size_;
   uint16_t ins_size_;
@@ -897,39 +970,6 @@ class CodeItem : public Item {
   DISALLOW_COPY_AND_ASSIGN(CodeItem);
 };
 
-struct PositionInfo {
-  PositionInfo(uint32_t address, uint32_t line) : address_(address), line_(line) { }
-
-  uint32_t address_;
-  uint32_t line_;
-};
-
-using PositionInfoVector = std::vector<std::unique_ptr<PositionInfo>>;
-
-struct LocalInfo {
-  LocalInfo(const char* name,
-            const char* descriptor,
-            const char* signature,
-            uint32_t start_address,
-            uint32_t end_address,
-            uint16_t reg)
-      : name_(name),
-        descriptor_(descriptor),
-        signature_(signature),
-        start_address_(start_address),
-        end_address_(end_address),
-        reg_(reg) { }
-
-  std::string name_;
-  std::string descriptor_;
-  std::string signature_;
-  uint32_t start_address_;
-  uint32_t end_address_;
-  uint16_t reg_;
-};
-
-using LocalInfoVector = std::vector<std::unique_ptr<LocalInfo>>;
-
 class DebugInfoItem : public Item {
  public:
   DebugInfoItem(uint32_t debug_info_size, uint8_t* debug_info)
@@ -938,15 +978,9 @@ class DebugInfoItem : public Item {
   uint32_t GetDebugInfoSize() const { return debug_info_size_; }
   uint8_t* GetDebugInfo() const { return debug_info_.get(); }
 
-  PositionInfoVector& GetPositionInfo() { return positions_; }
-  LocalInfoVector& GetLocalInfo() { return locals_; }
-
  private:
   uint32_t debug_info_size_;
   std::unique_ptr<uint8_t[]> debug_info_;
-
-  PositionInfoVector positions_;
-  LocalInfoVector locals_;
 
   DISALLOW_COPY_AND_ASSIGN(DebugInfoItem);
 };
@@ -1080,6 +1114,48 @@ class AnnotationsDirectoryItem : public Item {
   DISALLOW_COPY_AND_ASSIGN(AnnotationsDirectoryItem);
 };
 
+class CallSiteId : public IndexedItem {
+ public:
+  explicit CallSiteId(EncodedArrayItem* call_site_item) : call_site_item_(call_site_item) {
+    size_ = kCallSiteIdItemSize;
+  }
+  ~CallSiteId() OVERRIDE { }
+
+  static size_t ItemSize() { return kCallSiteIdItemSize; }
+
+  EncodedArrayItem* CallSiteItem() const { return call_site_item_; }
+
+  void Accept(AbstractDispatcher* dispatch) const { dispatch->Dispatch(this); }
+
+ private:
+  EncodedArrayItem* call_site_item_;
+
+  DISALLOW_COPY_AND_ASSIGN(CallSiteId);
+};
+
+class MethodHandleItem : public IndexedItem {
+ public:
+  MethodHandleItem(DexFile::MethodHandleType method_handle_type, IndexedItem* field_or_method_id)
+      : method_handle_type_(method_handle_type),
+        field_or_method_id_(field_or_method_id) {
+    size_ = kMethodHandleItemSize;
+  }
+  ~MethodHandleItem() OVERRIDE { }
+
+  static size_t ItemSize() { return kMethodHandleItemSize; }
+
+  DexFile::MethodHandleType GetMethodHandleType() const { return method_handle_type_; }
+  IndexedItem* GetFieldOrMethodId() const { return field_or_method_id_; }
+
+  void Accept(AbstractDispatcher* dispatch) const { dispatch->Dispatch(this); }
+
+ private:
+  DexFile::MethodHandleType method_handle_type_;
+  IndexedItem* field_or_method_id_;
+
+  DISALLOW_COPY_AND_ASSIGN(MethodHandleItem);
+};
+
 // TODO(sehr): implement MapList.
 class MapList : public Item {
  public:
@@ -1096,6 +1172,28 @@ class MapItem : public Item {
  private:
   DISALLOW_COPY_AND_ASSIGN(MapItem);
 };
+
+// Interface for building a vector of file sections for use by other clients.
+struct DexFileSection {
+ public:
+  DexFileSection(const std::string& name, uint16_t type, uint32_t size, uint32_t offset)
+      : name(name), type(type), size(size), offset(offset) { }
+  std::string name;
+  // The type (DexFile::MapItemType).
+  uint16_t type;
+  // The size (in elements, not bytes).
+  uint32_t size;
+  // The byte offset from the start of the file.
+  uint32_t offset;
+};
+
+enum class SortDirection {
+  kSortAscending,
+  kSortDescending
+};
+
+std::vector<DexFileSection> GetSortedDexFileSections(dex_ir::Header* header,
+                                                     SortDirection direction);
 
 }  // namespace dex_ir
 }  // namespace art

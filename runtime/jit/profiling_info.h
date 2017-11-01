@@ -29,17 +29,17 @@ class ProfilingInfo;
 
 namespace jit {
 class JitCodeCache;
-}
+}  // namespace jit
 
 namespace mirror {
 class Class;
-}
+}  // namespace mirror
 
 // Structure to store the classes seen at runtime for a specific instruction.
 // Once the classes_ array is full, we consider the INVOKE to be megamorphic.
 class InlineCache {
  public:
-  static constexpr uint16_t kIndividualCacheSize = 5;
+  static constexpr uint8_t kIndividualCacheSize = 5;
 
  private:
   uint32_t dex_pc_;
@@ -73,7 +73,9 @@ class ProfilingInfo {
     return method_;
   }
 
-  InlineCache* GetInlineCache(uint32_t dex_pc);
+  // Mutator lock only required for debugging output.
+  InlineCache* GetInlineCache(uint32_t dex_pc)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsMethodBeingCompiled(bool osr) const {
     return osr
@@ -106,9 +108,15 @@ class ProfilingInfo {
     }
   }
 
-  void IncrementInlineUse() {
-    DCHECK_NE(current_inline_uses_, std::numeric_limits<uint16_t>::max());
+  // Increments the number of times this method is currently being inlined.
+  // Returns whether it was successful, that is it could increment without
+  // overflowing.
+  bool IncrementInlineUse() {
+    if (current_inline_uses_ == std::numeric_limits<uint16_t>::max()) {
+      return false;
+    }
     current_inline_uses_++;
+    return true;
   }
 
   void DecrementInlineUse() {

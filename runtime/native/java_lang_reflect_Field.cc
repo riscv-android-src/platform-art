@@ -17,18 +17,22 @@
 #include "java_lang_reflect_Field.h"
 
 #include "android-base/stringprintf.h"
+#include "nativehelper/jni_macros.h"
 
-#include "class_linker.h"
+#include "art_field-inl.h"
 #include "class_linker-inl.h"
+#include "class_linker.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
 #include "dex_file_annotations.h"
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
-#include "mirror/field.h"
+#include "mirror/field-inl.h"
+#include "native_util.h"
 #include "reflection-inl.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "utils.h"
+#include "well_known_classes.h"
 
 namespace art {
 
@@ -456,6 +460,13 @@ static jlong Field_getArtField(JNIEnv* env, jobject javaField) {
   return reinterpret_cast<jlong>(field);
 }
 
+static jobject Field_getNameInternal(JNIEnv* env, jobject javaField) {
+  ScopedFastNativeObjectAccess soa(env);
+  ArtField* field = soa.Decode<mirror::Field>(javaField)->GetArtField();
+  return soa.AddLocalReference<jobject>(
+      field->GetStringName(soa.Self(), true /* resolve */));
+}
+
 static jobjectArray Field_getDeclaredAnnotations(JNIEnv* env, jobject javaField) {
   ScopedFastNativeObjectAccess soa(env);
   ArtField* field = soa.Decode<mirror::Field>(javaField)->GetArtField();
@@ -493,30 +504,31 @@ static jboolean Field_isAnnotationPresentNative(JNIEnv* env,
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Field, get,        "!(Ljava/lang/Object;)Ljava/lang/Object;"),
-  NATIVE_METHOD(Field, getBoolean, "!(Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(Field, getByte,    "!(Ljava/lang/Object;)B"),
-  NATIVE_METHOD(Field, getChar,    "!(Ljava/lang/Object;)C"),
-  NATIVE_METHOD(Field, getAnnotationNative,
-                "!(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"),
-  NATIVE_METHOD(Field, getArtField, "!()J"),
-  NATIVE_METHOD(Field, getDeclaredAnnotations, "!()[Ljava/lang/annotation/Annotation;"),
-  NATIVE_METHOD(Field, getSignatureAnnotation, "!()[Ljava/lang/String;"),
-  NATIVE_METHOD(Field, getDouble,  "!(Ljava/lang/Object;)D"),
-  NATIVE_METHOD(Field, getFloat,   "!(Ljava/lang/Object;)F"),
-  NATIVE_METHOD(Field, getInt,     "!(Ljava/lang/Object;)I"),
-  NATIVE_METHOD(Field, getLong,    "!(Ljava/lang/Object;)J"),
-  NATIVE_METHOD(Field, getShort,   "!(Ljava/lang/Object;)S"),
-  NATIVE_METHOD(Field, isAnnotationPresentNative, "!(Ljava/lang/Class;)Z"),
-  NATIVE_METHOD(Field, set,        "!(Ljava/lang/Object;Ljava/lang/Object;)V"),
-  NATIVE_METHOD(Field, setBoolean, "!(Ljava/lang/Object;Z)V"),
-  NATIVE_METHOD(Field, setByte,    "!(Ljava/lang/Object;B)V"),
-  NATIVE_METHOD(Field, setChar,    "!(Ljava/lang/Object;C)V"),
-  NATIVE_METHOD(Field, setDouble,  "!(Ljava/lang/Object;D)V"),
-  NATIVE_METHOD(Field, setFloat,   "!(Ljava/lang/Object;F)V"),
-  NATIVE_METHOD(Field, setInt,     "!(Ljava/lang/Object;I)V"),
-  NATIVE_METHOD(Field, setLong,    "!(Ljava/lang/Object;J)V"),
-  NATIVE_METHOD(Field, setShort,   "!(Ljava/lang/Object;S)V"),
+  FAST_NATIVE_METHOD(Field, get,        "(Ljava/lang/Object;)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Field, getBoolean, "(Ljava/lang/Object;)Z"),
+  FAST_NATIVE_METHOD(Field, getByte,    "(Ljava/lang/Object;)B"),
+  FAST_NATIVE_METHOD(Field, getChar,    "(Ljava/lang/Object;)C"),
+  FAST_NATIVE_METHOD(Field, getAnnotationNative,
+                "(Ljava/lang/Class;)Ljava/lang/annotation/Annotation;"),
+  FAST_NATIVE_METHOD(Field, getArtField, "()J"),
+  FAST_NATIVE_METHOD(Field, getDeclaredAnnotations, "()[Ljava/lang/annotation/Annotation;"),
+  FAST_NATIVE_METHOD(Field, getSignatureAnnotation, "()[Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(Field, getDouble,  "(Ljava/lang/Object;)D"),
+  FAST_NATIVE_METHOD(Field, getFloat,   "(Ljava/lang/Object;)F"),
+  FAST_NATIVE_METHOD(Field, getInt,     "(Ljava/lang/Object;)I"),
+  FAST_NATIVE_METHOD(Field, getLong,    "(Ljava/lang/Object;)J"),
+  FAST_NATIVE_METHOD(Field, getNameInternal, "()Ljava/lang/String;"),
+  FAST_NATIVE_METHOD(Field, getShort,   "(Ljava/lang/Object;)S"),
+  FAST_NATIVE_METHOD(Field, isAnnotationPresentNative, "(Ljava/lang/Class;)Z"),
+  FAST_NATIVE_METHOD(Field, set,        "(Ljava/lang/Object;Ljava/lang/Object;)V"),
+  FAST_NATIVE_METHOD(Field, setBoolean, "(Ljava/lang/Object;Z)V"),
+  FAST_NATIVE_METHOD(Field, setByte,    "(Ljava/lang/Object;B)V"),
+  FAST_NATIVE_METHOD(Field, setChar,    "(Ljava/lang/Object;C)V"),
+  FAST_NATIVE_METHOD(Field, setDouble,  "(Ljava/lang/Object;D)V"),
+  FAST_NATIVE_METHOD(Field, setFloat,   "(Ljava/lang/Object;F)V"),
+  FAST_NATIVE_METHOD(Field, setInt,     "(Ljava/lang/Object;I)V"),
+  FAST_NATIVE_METHOD(Field, setLong,    "(Ljava/lang/Object;J)V"),
+  FAST_NATIVE_METHOD(Field, setShort,   "(Ljava/lang/Object;S)V"),
 };
 
 void register_java_lang_reflect_Field(JNIEnv* env) {

@@ -21,14 +21,22 @@
 #include "android-base/stringprintf.h"
 
 #include "arch/instruction_set.h"
+#include "art_method-inl.h"
+#include "base/logging.h"
 #include "debugger.h"
 #include "java_vm_ext.h"
 #include "jit/jit.h"
 #include "jni_internal.h"
-#include "JNIHelp.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_utf_chars.h"
+#include "non_debuggable_classes.h"
+#include "oat_file.h"
+#include "oat_file_manager.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedUtfChars.h"
-#include "thread-inl.h"
+#include "stack.h"
+#include "thread-current-inl.h"
+#include "thread_list.h"
 #include "trace.h"
 
 #if defined(__linux__)
@@ -38,6 +46,11 @@
 #include <sys/resource.h>
 
 namespace art {
+
+// Set to true to always determine the non-debuggable classes even if we would not allow a debugger
+// to actually attach.
+static bool kAlwaysCollectNonDebuggableClasses =
+    RegisterRuntimeDebugFlag(&kAlwaysCollectNonDebuggableClasses);
 
 using android::base::StringPrintf;
 
@@ -68,21 +81,100 @@ static void EnableDebugger() {
   }
 }
 
-static void EnableDebugFeatures(uint32_t debug_flags) {
-  // Must match values in com.android.internal.os.Zygote.
-  enum {
-    DEBUG_ENABLE_DEBUGGER           = 1,
-    DEBUG_ENABLE_CHECKJNI           = 1 << 1,
-    DEBUG_ENABLE_ASSERT             = 1 << 2,
-    DEBUG_ENABLE_SAFEMODE           = 1 << 3,
-    DEBUG_ENABLE_JNI_LOGGING        = 1 << 4,
-    DEBUG_GENERATE_DEBUG_INFO       = 1 << 5,
-    DEBUG_ALWAYS_JIT                = 1 << 6,
-    DEBUG_NATIVE_DEBUGGABLE         = 1 << 7,
-  };
+class ClassSet {
+ public:
+  // The number of classes we reasonably expect to have to look at. Realistically the number is more
+  // ~10 but there is little harm in having some extra.
+  static constexpr int kClassSetCapacity = 100;
 
+  explicit ClassSet(Thread* const self) : self_(self) {
+    self_->GetJniEnv()->PushFrame(kClassSetCapacity);
+  }
+
+  ~ClassSet() {
+    self_->GetJniEnv()->PopFrame();
+  }
+
+  void AddClass(ObjPtr<mirror::Class> klass) REQUIRES(Locks::mutator_lock_) {
+    class_set_.insert(self_->GetJniEnv()->AddLocalReference<jclass>(klass.Ptr()));
+  }
+
+  const std::unordered_set<jclass>& GetClasses() const {
+    return class_set_;
+  }
+
+ private:
+  Thread* const self_;
+  std::unordered_set<jclass> class_set_;
+};
+
+static void DoCollectNonDebuggableCallback(Thread* thread, void* data)
+    REQUIRES(Locks::mutator_lock_) {
+  class NonDebuggableStacksVisitor : public StackVisitor {
+   public:
+    NonDebuggableStacksVisitor(Thread* t, ClassSet* class_set)
+        : StackVisitor(t, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
+          class_set_(class_set) {}
+
+    ~NonDebuggableStacksVisitor() OVERRIDE {}
+
+    bool VisitFrame() OVERRIDE REQUIRES(Locks::mutator_lock_) {
+      if (GetMethod()->IsRuntimeMethod()) {
+        return true;
+      }
+      class_set_->AddClass(GetMethod()->GetDeclaringClass());
+      if (kIsDebugBuild) {
+        LOG(INFO) << GetMethod()->GetDeclaringClass()->PrettyClass()
+                  << " might not be fully debuggable/deoptimizable due to "
+                  << GetMethod()->PrettyMethod() << " appearing on the stack during zygote fork.";
+      }
+      return true;
+    }
+
+   private:
+    ClassSet* class_set_;
+  };
+  NonDebuggableStacksVisitor visitor(thread, reinterpret_cast<ClassSet*>(data));
+  visitor.WalkStack();
+}
+
+static void CollectNonDebuggableClasses() REQUIRES(!Locks::mutator_lock_) {
   Runtime* const runtime = Runtime::Current();
-  if ((debug_flags & DEBUG_ENABLE_CHECKJNI) != 0) {
+  Thread* const self = Thread::Current();
+  // Get the mutator lock.
+  ScopedObjectAccess soa(self);
+  ClassSet classes(self);
+  {
+    // Drop the shared mutator lock.
+    ScopedThreadSuspension sts(self, art::ThreadState::kNative);
+    // Get exclusive mutator lock with suspend all.
+    ScopedSuspendAll suspend("Checking stacks for non-obsoletable methods!", /*long_suspend*/false);
+    MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
+    runtime->GetThreadList()->ForEach(DoCollectNonDebuggableCallback, &classes);
+  }
+  for (jclass klass : classes.GetClasses()) {
+    NonDebuggableClasses::AddNonDebuggableClass(klass);
+  }
+}
+
+// Must match values in com.android.internal.os.Zygote.
+enum {
+  DEBUG_ENABLE_JDWP               = 1,
+  DEBUG_ENABLE_CHECKJNI           = 1 << 1,
+  DEBUG_ENABLE_ASSERT             = 1 << 2,
+  DEBUG_ENABLE_SAFEMODE           = 1 << 3,
+  DEBUG_ENABLE_JNI_LOGGING        = 1 << 4,
+  DEBUG_GENERATE_DEBUG_INFO       = 1 << 5,
+  DEBUG_ALWAYS_JIT                = 1 << 6,
+  DEBUG_NATIVE_DEBUGGABLE         = 1 << 7,
+  DEBUG_JAVA_DEBUGGABLE           = 1 << 8,
+  DISABLE_VERIFIER                = 1 << 9,
+  ONLY_USE_SYSTEM_OAT_FILES       = 1 << 10,
+};
+
+static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
+  Runtime* const runtime = Runtime::Current();
+  if ((runtime_flags & DEBUG_ENABLE_CHECKJNI) != 0) {
     JavaVMExt* vm = runtime->GetJavaVM();
     if (!vm->IsCheckJniEnabled()) {
       LOG(INFO) << "Late-enabling -Xcheck:jni";
@@ -92,54 +184,65 @@ static void EnableDebugFeatures(uint32_t debug_flags) {
     } else {
       LOG(INFO) << "Not late-enabling -Xcheck:jni (already on)";
     }
-    debug_flags &= ~DEBUG_ENABLE_CHECKJNI;
+    runtime_flags &= ~DEBUG_ENABLE_CHECKJNI;
   }
 
-  if ((debug_flags & DEBUG_ENABLE_JNI_LOGGING) != 0) {
+  if ((runtime_flags & DEBUG_ENABLE_JNI_LOGGING) != 0) {
     gLogVerbosity.third_party_jni = true;
-    debug_flags &= ~DEBUG_ENABLE_JNI_LOGGING;
+    runtime_flags &= ~DEBUG_ENABLE_JNI_LOGGING;
   }
 
-  Dbg::SetJdwpAllowed((debug_flags & DEBUG_ENABLE_DEBUGGER) != 0);
-  if ((debug_flags & DEBUG_ENABLE_DEBUGGER) != 0) {
+  Dbg::SetJdwpAllowed((runtime_flags & DEBUG_ENABLE_JDWP) != 0);
+  if ((runtime_flags & DEBUG_ENABLE_JDWP) != 0) {
     EnableDebugger();
   }
-  debug_flags &= ~DEBUG_ENABLE_DEBUGGER;
+  runtime_flags &= ~DEBUG_ENABLE_JDWP;
 
-  const bool safe_mode = (debug_flags & DEBUG_ENABLE_SAFEMODE) != 0;
+  const bool safe_mode = (runtime_flags & DEBUG_ENABLE_SAFEMODE) != 0;
   if (safe_mode) {
-    // Ensure that any (secondary) oat files will be interpreted.
-    runtime->AddCompilerOption("--compiler-filter=interpret-only");
+    // Only quicken oat files.
+    runtime->AddCompilerOption("--compiler-filter=quicken");
     runtime->SetSafeMode(true);
-    debug_flags &= ~DEBUG_ENABLE_SAFEMODE;
+    runtime_flags &= ~DEBUG_ENABLE_SAFEMODE;
   }
 
-  const bool generate_debug_info = (debug_flags & DEBUG_GENERATE_DEBUG_INFO) != 0;
+  const bool generate_debug_info = (runtime_flags & DEBUG_GENERATE_DEBUG_INFO) != 0;
   if (generate_debug_info) {
     runtime->AddCompilerOption("--generate-debug-info");
-    debug_flags &= ~DEBUG_GENERATE_DEBUG_INFO;
+    runtime_flags &= ~DEBUG_GENERATE_DEBUG_INFO;
   }
 
   // This is for backwards compatibility with Dalvik.
-  debug_flags &= ~DEBUG_ENABLE_ASSERT;
+  runtime_flags &= ~DEBUG_ENABLE_ASSERT;
 
-  if ((debug_flags & DEBUG_ALWAYS_JIT) != 0) {
+  if ((runtime_flags & DEBUG_ALWAYS_JIT) != 0) {
     jit::JitOptions* jit_options = runtime->GetJITOptions();
     CHECK(jit_options != nullptr);
     jit_options->SetJitAtFirstUse();
-    debug_flags &= ~DEBUG_ALWAYS_JIT;
+    runtime_flags &= ~DEBUG_ALWAYS_JIT;
   }
 
-  if ((debug_flags & DEBUG_NATIVE_DEBUGGABLE) != 0) {
+  bool needs_non_debuggable_classes = false;
+  if ((runtime_flags & DEBUG_JAVA_DEBUGGABLE) != 0) {
+    runtime->AddCompilerOption("--debuggable");
+    runtime->SetJavaDebuggable(true);
+    // Deoptimize the boot image as it may be non-debuggable.
+    runtime->DeoptimizeBootImage();
+    runtime_flags &= ~DEBUG_JAVA_DEBUGGABLE;
+    needs_non_debuggable_classes = true;
+  }
+  if (needs_non_debuggable_classes || kAlwaysCollectNonDebuggableClasses) {
+    CollectNonDebuggableClasses();
+  }
+
+  if ((runtime_flags & DEBUG_NATIVE_DEBUGGABLE) != 0) {
     runtime->AddCompilerOption("--debuggable");
     runtime->AddCompilerOption("--generate-debug-info");
     runtime->SetNativeDebuggable(true);
-    debug_flags &= ~DEBUG_NATIVE_DEBUGGABLE;
+    runtime_flags &= ~DEBUG_NATIVE_DEBUGGABLE;
   }
 
-  if (debug_flags != 0) {
-    LOG(ERROR) << StringPrintf("Unknown bits set in debug_flags: %#x", debug_flags);
-  }
+  return runtime_flags;
 }
 
 static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
@@ -160,13 +263,27 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jclass,
                                             jlong token,
-                                            jint debug_flags,
+                                            jint runtime_flags,
                                             jboolean is_system_server,
                                             jstring instruction_set) {
   Thread* thread = reinterpret_cast<Thread*>(token);
   // Our system thread ID, etc, has changed so reset Thread state.
   thread->InitAfterFork();
-  EnableDebugFeatures(debug_flags);
+  runtime_flags = EnableDebugFeatures(runtime_flags);
+
+  if ((runtime_flags & DISABLE_VERIFIER) != 0) {
+    Runtime::Current()->DisableVerifier();
+    runtime_flags &= ~DISABLE_VERIFIER;
+  }
+
+  if ((runtime_flags & ONLY_USE_SYSTEM_OAT_FILES) != 0) {
+    Runtime::Current()->GetOatFileManager().SetOnlyUseSystemOatFiles();
+    runtime_flags &= ~ONLY_USE_SYSTEM_OAT_FILES;
+  }
+
+  if (runtime_flags != 0) {
+    LOG(ERROR) << StringPrintf("Unknown bits set in runtime_flags: %#x", runtime_flags);
+  }
 
   // Update tracing.
   if (Trace::GetMethodTracingMode() != TracingMode::kTracingInactive) {

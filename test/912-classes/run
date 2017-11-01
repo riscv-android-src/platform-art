@@ -14,6 +14,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-./default-run "$@" --experimental agents \
-                   --experimental runtime-plugins \
-                   --jvmti
+# This test checks which classes are initiated by a classloader. App images preload classes.
+# In certain configurations, the app images may be valid even in a new classloader. Turn off
+# app images to avoid the issue.
+
+./default-run "$@" --jvmti \
+                   --no-app-image

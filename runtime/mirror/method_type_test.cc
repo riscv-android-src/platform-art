@@ -19,12 +19,13 @@
 #include <string>
 #include <vector>
 
-#include "class_linker.h"
+#include "class-inl.h"
+#include "class_linker-inl.h"
+#include "class_loader.h"
 #include "common_runtime_test.h"
 #include "handle_scope-inl.h"
-#include "runtime/mirror/class.h"
-#include "runtime/mirror/class_loader.h"
-#include "scoped_thread_state_change.h"
+#include "object_array-inl.h"
+#include "scoped_thread_state_change-inl.h"
 
 namespace art {
 namespace mirror {
@@ -50,7 +51,7 @@ static mirror::MethodType* CreateMethodType(const std::string& return_type,
 
   Handle<mirror::Class> return_clazz = hs.NewHandle(class_linker->FindClass(
           soa.Self(), FullyQualifiedType(return_type).c_str(), boot_class_loader));
-  CHECK(return_clazz.Get() != nullptr);
+  CHECK(return_clazz != nullptr);
 
   ObjPtr<mirror::Class> class_type = mirror::Class::GetJavaLangClass();
   mirror::Class* class_array_type = class_linker->FindArrayClass(self, &class_type);

@@ -35,9 +35,9 @@ class ArmVIXLJNIMacroAssembler FINAL
  private:
   class ArmException;
  public:
-  explicit ArmVIXLJNIMacroAssembler(ArenaAllocator* arena)
-      : JNIMacroAssemblerFwd(arena),
-        exception_blocks_(arena->Adapter(kArenaAllocAssembler)) {}
+  explicit ArmVIXLJNIMacroAssembler(ArenaAllocator* allocator)
+      : JNIMacroAssemblerFwd(allocator),
+        exception_blocks_(allocator->Adapter(kArenaAllocAssembler)) {}
 
   virtual ~ArmVIXLJNIMacroAssembler() {}
   void FinalizeCode() OVERRIDE;
@@ -54,7 +54,8 @@ class ArmVIXLJNIMacroAssembler FINAL
 
   // Emit code that will remove an activation from the stack.
   void RemoveFrame(size_t frame_size,
-                   ArrayRef<const ManagedRegister> callee_save_regs) OVERRIDE;
+                   ArrayRef<const ManagedRegister> callee_save_regs,
+                   bool may_suspend) OVERRIDE;
 
   void IncreaseFrameSize(size_t adjust) OVERRIDE;
   void DecreaseFrameSize(size_t adjust) OVERRIDE;

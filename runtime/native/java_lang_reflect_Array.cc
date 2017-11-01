@@ -16,14 +16,17 @@
 
 #include "java_lang_reflect_Array.h"
 
+#include "nativehelper/jni_macros.h"
+
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex_file-inl.h"
+#include "handle_scope-inl.h"
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
+#include "native_util.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "handle_scope-inl.h"
 
 namespace art {
 
@@ -72,8 +75,8 @@ static jobject Array_createObjectArray(JNIEnv* env, jclass, jclass javaElementCl
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Array, createMultiArray, "!(Ljava/lang/Class;[I)Ljava/lang/Object;"),
-  NATIVE_METHOD(Array, createObjectArray, "!(Ljava/lang/Class;I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Array, createMultiArray, "(Ljava/lang/Class;[I)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Array, createObjectArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
 };
 
 void register_java_lang_reflect_Array(JNIEnv* env) {

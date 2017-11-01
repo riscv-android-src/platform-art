@@ -18,9 +18,11 @@
 
 #define CMDLINE_NDEBUG 1  // Do not output any debugging information for parsing.
 
-#include "memory_representation.h"
-#include "detail/cmdline_debug_detail.h"
+#include <list>
+
 #include "cmdline_type_parser.h"
+#include "detail/cmdline_debug_detail.h"
+#include "memory_representation.h"
 
 #include "android-base/strings.h"
 
@@ -34,6 +36,7 @@
 #include "jdwp/jdwp.h"
 #include "jit/profile_saver_options.h"
 #include "plugin.h"
+#include "read_barrier_config.h"
 #include "ti/agent.h"
 #include "unit.h"
 
@@ -287,26 +290,42 @@ struct CmdlineType<double> : CmdlineTypeParser<double> {
   static const char* Name() { return "double"; }
 };
 
+template <typename T>
+static inline CmdlineParseResult<T> ParseNumeric(const std::string& str) {
+  static_assert(sizeof(T) < sizeof(long long int),  // NOLINT [runtime/int] [4]
+                "Current support is restricted.");
+
+  const char* begin = str.c_str();
+  char* end;
+
+  // Parse into a larger type (long long) because we can't use strtoul
+  // since it silently converts negative values into unsigned long and doesn't set errno.
+  errno = 0;
+  long long int result = strtoll(begin, &end, 10);  // NOLINT [runtime/int] [4]
+  if (begin == end || *end != '\0' || errno == EINVAL) {
+    return CmdlineParseResult<T>::Failure("Failed to parse integer from " + str);
+  } else if ((errno == ERANGE) ||  // NOLINT [runtime/int] [4]
+      result < std::numeric_limits<T>::min() || result > std::numeric_limits<T>::max()) {
+    return CmdlineParseResult<T>::OutOfRange(
+        "Failed to parse integer from " + str + "; out of range");
+  }
+
+  return CmdlineParseResult<T>::Success(static_cast<T>(result));
+}
+
 template <>
 struct CmdlineType<unsigned int> : CmdlineTypeParser<unsigned int> {
   Result Parse(const std::string& str) {
-    const char* begin = str.c_str();
-    char* end;
+    return ParseNumeric<unsigned int>(str);
+  }
 
-    // Parse into a larger type (long long) because we can't use strtoul
-    // since it silently converts negative values into unsigned long and doesn't set errno.
-    errno = 0;
-    long long int result = strtoll(begin, &end, 10);  // NOLINT [runtime/int] [4]
-    if (begin == end || *end != '\0' || errno == EINVAL) {
-      return Result::Failure("Failed to parse integer from " + str);
-    } else if ((errno == ERANGE) ||  // NOLINT [runtime/int] [4]
-        result < std::numeric_limits<int>::min()
-        || result > std::numeric_limits<unsigned int>::max() || result < 0) {
-      return Result::OutOfRange(
-          "Failed to parse integer from " + str + "; out of unsigned int range");
-    }
+  static const char* Name() { return "unsigned integer"; }
+};
 
-    return Result::Success(static_cast<unsigned int>(result));
+template <>
+struct CmdlineType<int> : CmdlineTypeParser<int> {
+  Result Parse(const std::string& str) {
+    return ParseNumeric<int>(str);
   }
 
   static const char* Name() { return "unsigned integer"; }
@@ -401,19 +420,19 @@ struct CmdlineType<std::vector<Plugin>> : CmdlineTypeParser<std::vector<Plugin>>
 };
 
 template <>
-struct CmdlineType<std::vector<ti::Agent>> : CmdlineTypeParser<std::vector<ti::Agent>> {
+struct CmdlineType<std::list<ti::Agent>> : CmdlineTypeParser<std::list<ti::Agent>> {
   Result Parse(const std::string& args) {
-    assert(false && "Use AppendValues() for an Agent vector type");
-    return Result::Failure("Unconditional failure: Agent vector must be appended: " + args);
+    assert(false && "Use AppendValues() for an Agent list type");
+    return Result::Failure("Unconditional failure: Agent list must be appended: " + args);
   }
 
   Result ParseAndAppend(const std::string& args,
-                        std::vector<ti::Agent>& existing_value) {
+                        std::list<ti::Agent>& existing_value) {
     existing_value.emplace_back(args);
     return Result::SuccessNoValue();
   }
 
-  static const char* Name() { return "std::vector<ti::Agent>"; }
+  static const char* Name() { return "std::list<ti::Agent>"; }
 };
 
 template <>
@@ -656,6 +675,8 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.systrace_lock_logging = true;
       } else if (verbose_options[j] == "agents") {
         log_verbosity.agents = true;
+      } else if (verbose_options[j] == "dex") {
+        log_verbosity.dex = true;
       } else {
         return Result::Usage(std::string("Unknown -verbose option ") + verbose_options[j]);
       }
@@ -708,6 +729,11 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
       return Result::SuccessNoValue();
     }
 
+    if (option == "profile-boot-class-path") {
+      existing.profile_boot_class_path_ = true;
+      return Result::SuccessNoValue();
+    }
+
     // The rest of these options are always the wildcard from '-Xps-*'
     std::string suffix = RemovePrefix(option);
 
@@ -723,10 +749,10 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
              &ProfileSaverOptions::save_resolved_classes_delay_ms_,
              type_parser.Parse(suffix));
     }
-    if (android::base::StartsWith(option, "startup-method-samples:")) {
+    if (android::base::StartsWith(option, "hot-startup-method-samples:")) {
       CmdlineType<unsigned int> type_parser;
       return ParseInto(existing,
-             &ProfileSaverOptions::startup_method_samples_,
+             &ProfileSaverOptions::hot_startup_method_samples_,
              type_parser.Parse(suffix));
     }
     if (android::base::StartsWith(option, "min-methods-to-save:")) {
@@ -752,9 +778,13 @@ struct CmdlineType<ProfileSaverOptions> : CmdlineTypeParser<ProfileSaverOptions>
       return ParseInto(existing,
              &ProfileSaverOptions::max_notification_before_wake_,
              type_parser.Parse(suffix));
-    } else {
-      return Result::Failure(std::string("Invalid suboption '") + option + "'");
     }
+    if (android::base::StartsWith(option, "profile-path:")) {
+      existing.profile_path_ = suffix;
+      return Result::SuccessNoValue();
+    }
+
+    return Result::Failure(std::string("Invalid suboption '") + option + "'");
   }
 
   static const char* Name() { return "ProfileSaverOptions"; }
@@ -766,12 +796,6 @@ struct CmdlineType<ExperimentalFlags> : CmdlineTypeParser<ExperimentalFlags> {
   Result ParseAndAppend(const std::string& option, ExperimentalFlags& existing) {
     if (option == "none") {
       existing = ExperimentalFlags::kNone;
-    } else if (option == "agents") {
-      existing = existing | ExperimentalFlags::kAgents;
-    } else if (option == "runtime-plugins") {
-      existing = existing | ExperimentalFlags::kRuntimePlugins;
-    } else if (option == "method-handles") {
-      existing = existing | ExperimentalFlags::kMethodHandles;
     } else {
       return Result::Failure(std::string("Unknown option '") + option + "'");
     }
@@ -780,6 +804,5 @@ struct CmdlineType<ExperimentalFlags> : CmdlineTypeParser<ExperimentalFlags> {
 
   static const char* Name() { return "ExperimentalFlags"; }
 };
-
 }  // namespace art
 #endif  // ART_CMDLINE_CMDLINE_TYPES_H_

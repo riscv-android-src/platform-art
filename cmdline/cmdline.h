@@ -26,6 +26,7 @@
 
 #include "android-base/stringprintf.h"
 
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/stringpiece.h"
 #include "noop_compiler_callbacks.h"
@@ -78,6 +79,7 @@ static bool LocationToFilename(const std::string& location, InstructionSet isa,
     *filename = cache_filename;
     return true;
   } else {
+    *filename = system_filename;
     return false;
   }
 }
@@ -217,7 +219,7 @@ struct CmdlineArgs {
   // Specified by --boot-image.
   const char* boot_image_location_ = nullptr;
   // Specified by --instruction-set.
-  InstructionSet instruction_set_ = kRuntimeISA;
+  InstructionSet instruction_set_ = InstructionSet::kNone;
   // Specified by --output.
   std::ostream* os_ = &std::cout;
   std::unique_ptr<std::ofstream> out_;  // If something besides cout is used
@@ -229,6 +231,10 @@ struct CmdlineArgs {
     if (boot_image_location_ == nullptr) {
       *error_msg = "--boot-image must be specified";
       return false;
+    }
+    if (instruction_set_ == InstructionSet::kNone) {
+      LOG(WARNING) << "No instruction set given, assuming " << GetInstructionSetString(kRuntimeISA);
+      instruction_set_ = kRuntimeISA;
     }
 
     DBG_LOG << "boot image location: " << boot_image_location_;
@@ -266,8 +272,10 @@ struct CmdlineArgs {
       // Check that the boot image location points to a valid file name.
       std::string file_name;
       if (!LocationToFilename(boot_image_location, instruction_set_, &file_name)) {
-        *error_msg = android::base::StringPrintf("No corresponding file for location '%s' exists",
-                                                 file_name.c_str());
+        *error_msg = android::base::StringPrintf(
+            "No corresponding file for location '%s' (filename '%s') exists",
+            boot_image_location.c_str(),
+            file_name.c_str());
         return false;
       }
 
@@ -295,7 +303,7 @@ struct CmdlineArgs {
 template <typename Args = CmdlineArgs>
 struct CmdlineMain {
   int Main(int argc, char** argv) {
-    InitLogging(argv, Runtime::Aborter);
+    InitLogging(argv, Runtime::Abort);
     std::unique_ptr<Args> args = std::unique_ptr<Args>(CreateArguments());
     args_ = args.get();
 

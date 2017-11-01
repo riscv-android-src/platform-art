@@ -17,8 +17,8 @@
 #ifndef ART_COMPILER_LINKER_MIPS_RELATIVE_PATCHER_MIPS_H_
 #define ART_COMPILER_LINKER_MIPS_RELATIVE_PATCHER_MIPS_H_
 
-#include "linker/relative_patcher.h"
 #include "arch/mips/instruction_set_features_mips.h"
+#include "linker/relative_patcher.h"
 
 namespace art {
 namespace linker {
@@ -41,11 +41,12 @@ class MipsRelativePatcher FINAL : public RelativePatcher {
                                 const LinkerPatch& patch,
                                 uint32_t patch_offset,
                                 uint32_t target_offset) OVERRIDE;
+  void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code,
+                                   const LinkerPatch& patch,
+                                   uint32_t patch_offset) OVERRIDE;
+  std::vector<debug::MethodDebugInfo> GenerateThunkDebugInfo(uint32_t executable_offset) OVERRIDE;
 
  private:
-  // We'll maximize the range of a single load instruction for dex cache array accesses
-  // by aligning offset -32768 with the offset of the first used element.
-  static constexpr uint32_t kDexCacheArrayLwOffset = 0x8000;
   bool is_r6;
 
   DISALLOW_COPY_AND_ASSIGN(MipsRelativePatcher);

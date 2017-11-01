@@ -47,7 +47,8 @@ MipsAssembler::DelaySlot::DelaySlot()
       fpr_outs_mask_(0),
       fpr_ins_mask_(0),
       cc_outs_mask_(0),
-      cc_ins_mask_(0) {}
+      cc_ins_mask_(0),
+      patcher_label_(nullptr) {}
 
 void MipsAssembler::DsFsmInstr(uint32_t instruction,
                                uint32_t gpr_outs_mask,
@@ -55,7 +56,8 @@ void MipsAssembler::DsFsmInstr(uint32_t instruction,
                                uint32_t fpr_outs_mask,
                                uint32_t fpr_ins_mask,
                                uint32_t cc_outs_mask,
-                               uint32_t cc_ins_mask) {
+                               uint32_t cc_ins_mask,
+                               MipsLabel* patcher_label) {
   if (!reordering_) {
     CHECK_EQ(ds_fsm_state_, kExpectingLabel);
     CHECK_EQ(delay_slot_.instruction_, 0u);
@@ -96,6 +98,7 @@ void MipsAssembler::DsFsmInstr(uint32_t instruction,
   delay_slot_.fpr_ins_mask_ = fpr_ins_mask;
   delay_slot_.cc_outs_mask_ = cc_outs_mask;
   delay_slot_.cc_ins_mask_ = cc_ins_mask;
+  delay_slot_.patcher_label_ = patcher_label;
 }
 
 void MipsAssembler::DsFsmLabel() {
@@ -167,8 +170,12 @@ void MipsAssembler::DsFsmInstrNop(uint32_t instruction ATTRIBUTE_UNUSED) {
   DsFsmInstr(0, 0, 0, 0, 0, 0, 0);
 }
 
-void MipsAssembler::DsFsmInstrRrr(uint32_t instruction, Register out, Register in1, Register in2) {
-  DsFsmInstr(instruction, (1u << out), (1u << in1) | (1u << in2), 0, 0, 0, 0);
+void MipsAssembler::DsFsmInstrRrr(uint32_t instruction,
+                                  Register out,
+                                  Register in1,
+                                  Register in2,
+                                  MipsLabel* patcher_label) {
+  DsFsmInstr(instruction, (1u << out), (1u << in1) | (1u << in2), 0, 0, 0, 0, patcher_label);
 }
 
 void MipsAssembler::DsFsmInstrRrrr(uint32_t instruction,
@@ -310,8 +317,8 @@ void MipsAssembler::EmitBranches() {
   // Switch from appending instructions at the end of the buffer to overwriting
   // existing instructions (branch placeholders) in the buffer.
   overwriting_ = true;
-  for (auto& branch : branches_) {
-    EmitBranch(&branch);
+  for (size_t id = 0; id < branches_.size(); id++) {
+    EmitBranch(id);
   }
   overwriting_ = false;
 }
@@ -404,12 +411,142 @@ uint32_t MipsAssembler::EmitFI(int opcode, int fmt, FRegister ft, uint16_t imm) 
   return encoding;
 }
 
+uint32_t MipsAssembler::EmitMsa3R(int operation,
+                                  int df,
+                                  VectorRegister wt,
+                                  VectorRegister ws,
+                                  VectorRegister wd,
+                                  int minor_opcode) {
+  CHECK_NE(wt, kNoVectorRegister);
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df << kDfShift |
+                      static_cast<uint32_t>(wt) << kWtShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsaBIT(int operation,
+                                   int df_m,
+                                   VectorRegister ws,
+                                   VectorRegister wd,
+                                   int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df_m << kDfMShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsaELM(int operation,
+                                   int df_n,
+                                   VectorRegister ws,
+                                   VectorRegister wd,
+                                   int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaELMOperationShift |
+                      df_n << kDfNShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsaMI10(int s10,
+                                    Register rs,
+                                    VectorRegister wd,
+                                    int minor_opcode,
+                                    int df) {
+  CHECK_NE(rs, kNoRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  CHECK(IsUint<10>(s10)) << s10;
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      s10 << kS10Shift |
+                      static_cast<uint32_t>(rs) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode << kS10MinorShift |
+                      df;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsaI10(int operation,
+                                   int df,
+                                   int i10,
+                                   VectorRegister wd,
+                                   int minor_opcode) {
+  CHECK_NE(wd, kNoVectorRegister);
+  CHECK(IsUint<10>(i10)) << i10;
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsaOperationShift |
+                      df << kDfShift |
+                      i10 << kI10Shift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsa2R(int operation,
+                                  int df,
+                                  VectorRegister ws,
+                                  VectorRegister wd,
+                                  int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsa2ROperationShift |
+                      df << kDf2RShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
+uint32_t MipsAssembler::EmitMsa2RF(int operation,
+                                   int df,
+                                   VectorRegister ws,
+                                   VectorRegister wd,
+                                   int minor_opcode) {
+  CHECK_NE(ws, kNoVectorRegister);
+  CHECK_NE(wd, kNoVectorRegister);
+  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
+                      operation << kMsa2RFOperationShift |
+                      df << kDf2RShift |
+                      static_cast<uint32_t>(ws) << kWsShift |
+                      static_cast<uint32_t>(wd) << kWdShift |
+                      minor_opcode;
+  Emit(encoding);
+  return encoding;
+}
+
 void MipsAssembler::Addu(Register rd, Register rs, Register rt) {
   DsFsmInstrRrr(EmitR(0, rs, rt, rd, 0, 0x21), rd, rs, rt);
 }
 
+void MipsAssembler::Addiu(Register rt, Register rs, uint16_t imm16, MipsLabel* patcher_label) {
+  if (patcher_label != nullptr) {
+    Bind(patcher_label);
+  }
+  DsFsmInstrRrr(EmitI(0x9, rs, rt, imm16), rt, rs, rs, patcher_label);
+}
+
 void MipsAssembler::Addiu(Register rt, Register rs, uint16_t imm16) {
-  DsFsmInstrRrr(EmitI(0x9, rs, rt, imm16), rt, rs, rs);
+  Addiu(rt, rs, imm16, /* patcher_label */ nullptr);
 }
 
 void MipsAssembler::Subu(Register rd, Register rs, Register rt) {
@@ -636,10 +773,28 @@ void MipsAssembler::Ins(Register rd, Register rt, int pos, int size) {
 }
 
 void MipsAssembler::Lsa(Register rd, Register rs, Register rt, int saPlusOne) {
-  CHECK(IsR6());
+  CHECK(IsR6() || HasMsa());
   CHECK(1 <= saPlusOne && saPlusOne <= 4) << saPlusOne;
   int sa = saPlusOne - 1;
   DsFsmInstrRrr(EmitR(0x0, rs, rt, rd, sa, 0x05), rd, rs, rt);
+}
+
+void MipsAssembler::ShiftAndAdd(Register dst,
+                                Register src_idx,
+                                Register src_base,
+                                int shamt,
+                                Register tmp) {
+  CHECK(0 <= shamt && shamt <= 4) << shamt;
+  CHECK_NE(src_base, tmp);
+  if (shamt == TIMES_1) {
+    // Catch the special case where the shift amount is zero (0).
+    Addu(dst, src_base, src_idx);
+  } else if (IsR6() || HasMsa()) {
+    Lsa(dst, src_idx, src_base, shamt);
+  } else {
+    Sll(tmp, src_idx, shamt);
+    Addu(dst, src_base, tmp);
+  }
 }
 
 void MipsAssembler::Lb(Register rt, Register rs, uint16_t imm16) {
@@ -650,8 +805,15 @@ void MipsAssembler::Lh(Register rt, Register rs, uint16_t imm16) {
   DsFsmInstrRrr(EmitI(0x21, rs, rt, imm16), rt, rs, rs);
 }
 
+void MipsAssembler::Lw(Register rt, Register rs, uint16_t imm16, MipsLabel* patcher_label) {
+  if (patcher_label != nullptr) {
+    Bind(patcher_label);
+  }
+  DsFsmInstrRrr(EmitI(0x23, rs, rt, imm16), rt, rs, rs, patcher_label);
+}
+
 void MipsAssembler::Lw(Register rt, Register rs, uint16_t imm16) {
-  DsFsmInstrRrr(EmitI(0x23, rs, rt, imm16), rt, rs, rs);
+  Lw(rt, rs, imm16, /* patcher_label */ nullptr);
 }
 
 void MipsAssembler::Lwl(Register rt, Register rs, uint16_t imm16) {
@@ -687,6 +849,22 @@ void MipsAssembler::Aui(Register rt, Register rs, uint16_t imm16) {
   DsFsmInstrRrr(EmitI(0xf, rs, rt, imm16), rt, rt, rs);
 }
 
+void MipsAssembler::AddUpper(Register rt, Register rs, uint16_t imm16, Register tmp) {
+  bool increment = (rs == rt);
+  if (increment) {
+    CHECK_NE(rs, tmp);
+  }
+  if (IsR6()) {
+    Aui(rt, rs, imm16);
+  } else if (increment) {
+    Lui(tmp, imm16);
+    Addu(rt, rs, tmp);
+  } else {
+    Lui(rt, imm16);
+    Addu(rt, rs, rt);
+  }
+}
+
 void MipsAssembler::Sync(uint32_t stype) {
   DsFsmInstrNop(EmitR(0, ZERO, ZERO, ZERO, stype & 0x1f, 0xf));
 }
@@ -709,8 +887,15 @@ void MipsAssembler::Sh(Register rt, Register rs, uint16_t imm16) {
   DsFsmInstrRrr(EmitI(0x29, rs, rt, imm16), ZERO, rt, rs);
 }
 
+void MipsAssembler::Sw(Register rt, Register rs, uint16_t imm16, MipsLabel* patcher_label) {
+  if (patcher_label != nullptr) {
+    Bind(patcher_label);
+  }
+  DsFsmInstrRrr(EmitI(0x2b, rs, rt, imm16), ZERO, rt, rs, patcher_label);
+}
+
 void MipsAssembler::Sw(Register rt, Register rs, uint16_t imm16) {
-  DsFsmInstrRrr(EmitI(0x2b, rs, rt, imm16), ZERO, rt, rs);
+  Sw(rt, rs, imm16, /* patcher_label */ nullptr);
 }
 
 void MipsAssembler::Swl(Register rt, Register rs, uint16_t imm16) {
@@ -778,11 +963,11 @@ void MipsAssembler::Bne(Register rs, Register rt, uint16_t imm16) {
 }
 
 void MipsAssembler::Beqz(Register rt, uint16_t imm16) {
-  Beq(ZERO, rt, imm16);
+  Beq(rt, ZERO, imm16);
 }
 
 void MipsAssembler::Bnez(Register rt, uint16_t imm16) {
-  Bne(ZERO, rt, imm16);
+  Bne(rt, ZERO, imm16);
 }
 
 void MipsAssembler::Bltz(Register rt, uint16_t imm16) {
@@ -834,6 +1019,7 @@ void MipsAssembler::Jal(uint32_t addr26) {
 
 void MipsAssembler::Jalr(Register rd, Register rs) {
   uint32_t last_instruction = delay_slot_.instruction_;
+  MipsLabel* patcher_label = delay_slot_.patcher_label_;
   bool exchange = (last_instruction != 0 &&
       (delay_slot_.gpr_outs_mask_ & (1u << rs)) == 0 &&
       ((delay_slot_.gpr_ins_mask_ | delay_slot_.gpr_outs_mask_) & (1u << rd)) == 0);
@@ -854,6 +1040,10 @@ void MipsAssembler::Jalr(Register rd, Register rs) {
     CHECK_EQ(instr1, last_instruction);
     buffer_.Store<uint32_t>(pos1, instr2);
     buffer_.Store<uint32_t>(pos2, instr1);
+    // Move the patcher label along with the patched instruction.
+    if (patcher_label != nullptr) {
+      patcher_label->AdjustBoundPosition(sizeof(uint32_t));
+    }
   } else if (reordering_) {
     Nop();
   }
@@ -1673,21 +1863,1413 @@ void MipsAssembler::Not(Register rd, Register rs) {
 }
 
 void MipsAssembler::Push(Register rs) {
-  IncreaseFrameSize(kMipsWordSize);
+  IncreaseFrameSize(kStackAlignment);
   Sw(rs, SP, 0);
 }
 
 void MipsAssembler::Pop(Register rd) {
   Lw(rd, SP, 0);
-  DecreaseFrameSize(kMipsWordSize);
+  DecreaseFrameSize(kStackAlignment);
 }
 
 void MipsAssembler::PopAndReturn(Register rd, Register rt) {
   bool reordering = SetReorder(false);
   Lw(rd, SP, 0);
   Jr(rt);
-  DecreaseFrameSize(kMipsWordSize);  // Single instruction in delay slot.
+  DecreaseFrameSize(kStackAlignment);  // Single instruction in delay slot.
   SetReorder(reordering);
+}
+
+void MipsAssembler::AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x10),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x3, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x3, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x3, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x3, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x0, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x1, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x2, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0xe),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Ffint_sW(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa2RF(0x19e, 0x0, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Ffint_sD(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa2RF(0x19e, 0x1, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Ftint_sW(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa2RF(0x19c, 0x0, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Ftint_sD(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa2RF(0x19c, 0x1, ws, wd, 0x1e),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xd),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::SlliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  DsFsmInstrFff(EmitMsaBIT(0x0, shamt3 | kMsaDfMByteMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SlliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  DsFsmInstrFff(EmitMsaBIT(0x0, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SlliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  DsFsmInstrFff(EmitMsaBIT(0x0, shamt5 | kMsaDfMWordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SlliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  DsFsmInstrFff(EmitMsaBIT(0x0, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SraiB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  DsFsmInstrFff(EmitMsaBIT(0x1, shamt3 | kMsaDfMByteMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SraiH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  DsFsmInstrFff(EmitMsaBIT(0x1, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SraiW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  DsFsmInstrFff(EmitMsaBIT(0x1, shamt5 | kMsaDfMWordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SraiD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  DsFsmInstrFff(EmitMsaBIT(0x1, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SrliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(shamt3)) << shamt3;
+  DsFsmInstrFff(EmitMsaBIT(0x2, shamt3 | kMsaDfMByteMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SrliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(shamt4)) << shamt4;
+  DsFsmInstrFff(EmitMsaBIT(0x2, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SrliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  CHECK(HasMsa());
+  CHECK(IsUint<5>(shamt5)) << shamt5;
+  DsFsmInstrFff(EmitMsaBIT(0x2, shamt5 | kMsaDfMWordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SrliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  CHECK(HasMsa());
+  CHECK(IsUint<6>(shamt6)) << shamt6;
+  DsFsmInstrFff(EmitMsaBIT(0x2, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::MoveV(VectorRegister wd, VectorRegister ws) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsaBIT(0x1, 0x3e, ws, wd, 0x19),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SplatiB(VectorRegister wd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  DsFsmInstrFff(EmitMsaELM(0x1, n4 | kMsaDfNByteMask, ws, wd, 0x19),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SplatiH(VectorRegister wd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  DsFsmInstrFff(EmitMsaELM(0x1, n3 | kMsaDfNHalfwordMask, ws, wd, 0x19),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SplatiW(VectorRegister wd, VectorRegister ws, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  DsFsmInstrFff(EmitMsaELM(0x1, n2 | kMsaDfNWordMask, ws, wd, 0x19),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::SplatiD(VectorRegister wd, VectorRegister ws, int n1) {
+  CHECK(HasMsa());
+  CHECK(IsUint<1>(n1)) << n1;
+  DsFsmInstrFff(EmitMsaELM(0x1, n1 | kMsaDfNDoublewordMask, ws, wd, 0x19),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Copy_sB(Register rd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  DsFsmInstrRf(EmitMsaELM(0x2, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19),
+               rd,
+               static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Copy_sH(Register rd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  DsFsmInstrRf(EmitMsaELM(0x2, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19),
+               rd,
+               static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Copy_sW(Register rd, VectorRegister ws, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  DsFsmInstrRf(EmitMsaELM(0x2, n2 | kMsaDfNWordMask, ws, static_cast<VectorRegister>(rd), 0x19),
+               rd,
+               static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Copy_uB(Register rd, VectorRegister ws, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  DsFsmInstrRf(EmitMsaELM(0x3, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19),
+               rd,
+               static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::Copy_uH(Register rd, VectorRegister ws, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  DsFsmInstrRf(EmitMsaELM(0x3, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19),
+               rd,
+               static_cast<FRegister>(ws));
+}
+
+void MipsAssembler::InsertB(VectorRegister wd, Register rs, int n4) {
+  CHECK(HasMsa());
+  CHECK(IsUint<4>(n4)) << n4;
+  DsFsmInstrFffr(EmitMsaELM(0x4, n4 | kMsaDfNByteMask, static_cast<VectorRegister>(rs), wd, 0x19),
+                 static_cast<FRegister>(wd),
+                 static_cast<FRegister>(wd),
+                 rs);
+}
+
+void MipsAssembler::InsertH(VectorRegister wd, Register rs, int n3) {
+  CHECK(HasMsa());
+  CHECK(IsUint<3>(n3)) << n3;
+  DsFsmInstrFffr(
+      EmitMsaELM(0x4, n3 | kMsaDfNHalfwordMask, static_cast<VectorRegister>(rs), wd, 0x19),
+      static_cast<FRegister>(wd),
+      static_cast<FRegister>(wd),
+      rs);
+}
+
+void MipsAssembler::InsertW(VectorRegister wd, Register rs, int n2) {
+  CHECK(HasMsa());
+  CHECK(IsUint<2>(n2)) << n2;
+  DsFsmInstrFffr(EmitMsaELM(0x4, n2 | kMsaDfNWordMask, static_cast<VectorRegister>(rs), wd, 0x19),
+                 static_cast<FRegister>(wd),
+                 static_cast<FRegister>(wd),
+                 rs);
+}
+
+void MipsAssembler::FillB(VectorRegister wd, Register rs) {
+  CHECK(HasMsa());
+  DsFsmInstrFr(EmitMsa2R(0xc0, 0x0, static_cast<VectorRegister>(rs), wd, 0x1e),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::FillH(VectorRegister wd, Register rs) {
+  CHECK(HasMsa());
+  DsFsmInstrFr(EmitMsa2R(0xc0, 0x1, static_cast<VectorRegister>(rs), wd, 0x1e),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::FillW(VectorRegister wd, Register rs) {
+  CHECK(HasMsa());
+  DsFsmInstrFr(EmitMsa2R(0xc0, 0x2, static_cast<VectorRegister>(rs), wd, 0x1e),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::LdiB(VectorRegister wd, int imm8) {
+  CHECK(HasMsa());
+  CHECK(IsInt<8>(imm8)) << imm8;
+  DsFsmInstrFr(EmitMsaI10(0x6, 0x0, imm8 & kMsaS10Mask, wd, 0x7),
+               static_cast<FRegister>(wd),
+               ZERO);
+}
+
+void MipsAssembler::LdiH(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  DsFsmInstrFr(EmitMsaI10(0x6, 0x1, imm10 & kMsaS10Mask, wd, 0x7),
+               static_cast<FRegister>(wd),
+               ZERO);
+}
+
+void MipsAssembler::LdiW(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  DsFsmInstrFr(EmitMsaI10(0x6, 0x2, imm10 & kMsaS10Mask, wd, 0x7),
+               static_cast<FRegister>(wd),
+               ZERO);
+}
+
+void MipsAssembler::LdiD(VectorRegister wd, int imm10) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(imm10)) << imm10;
+  DsFsmInstrFr(EmitMsaI10(0x6, 0x3, imm10 & kMsaS10Mask, wd, 0x7),
+               static_cast<FRegister>(wd),
+               ZERO);
+}
+
+void MipsAssembler::LdB(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(offset)) << offset;
+  DsFsmInstrFr(EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x8, 0x0),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::LdH(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<11>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsHalfwordSize);
+  DsFsmInstrFr(EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x8, 0x1),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::LdW(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<12>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsWordSize);
+  DsFsmInstrFr(EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x8, 0x2),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::LdD(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<13>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsDoublewordSize);
+  DsFsmInstrFr(EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x8, 0x3),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::StB(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<10>(offset)) << offset;
+  DsFsmInstrFR(EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x9, 0x0), static_cast<FRegister>(wd), rs);
+}
+
+void MipsAssembler::StH(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<11>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsHalfwordSize);
+  DsFsmInstrFR(EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x9, 0x1),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::StW(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<12>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsWordSize);
+  DsFsmInstrFR(EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x9, 0x2),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::StD(VectorRegister wd, Register rs, int offset) {
+  CHECK(HasMsa());
+  CHECK(IsInt<13>(offset)) << offset;
+  CHECK_ALIGNED(offset, kMipsDoublewordSize);
+  DsFsmInstrFR(EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x9, 0x3),
+               static_cast<FRegister>(wd),
+               rs);
+}
+
+void MipsAssembler::IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x14),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x12),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x1b),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  CHECK(HasMsa());
+  DsFsmInstrFff(EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x15),
+                static_cast<FRegister>(wd),
+                static_cast<FRegister>(ws),
+                static_cast<FRegister>(wt));
+}
+
+void MipsAssembler::ReplicateFPToVectorRegister(VectorRegister dst,
+                                                FRegister src,
+                                                bool is_double) {
+  // Float or double in FPU register Fx can be considered as 0th element in vector register Wx.
+  if (is_double) {
+    SplatiD(dst, static_cast<VectorRegister>(src), 0);
+  } else {
+    SplatiW(dst, static_cast<VectorRegister>(src), 0);
+  }
 }
 
 void MipsAssembler::LoadConst32(Register rd, int32_t value) {
@@ -1781,7 +3363,7 @@ void MipsAssembler::Branch::InitShortOrLong(MipsAssembler::Branch::OffsetBits of
 }
 
 void MipsAssembler::Branch::InitializeType(Type initial_type, bool is_r6) {
-  OffsetBits offset_size = GetOffsetSizeNeeded(location_, target_);
+  OffsetBits offset_size_needed = GetOffsetSizeNeeded(location_, target_);
   if (is_r6) {
     // R6
     switch (initial_type) {
@@ -1794,22 +3376,30 @@ void MipsAssembler::Branch::InitializeType(Type initial_type, bool is_r6) {
         type_ = kR6Literal;
         break;
       case kCall:
-        InitShortOrLong(offset_size, kR6Call, kR6LongCall);
+        InitShortOrLong(offset_size_needed, kR6Call, kR6LongCall);
         break;
       case kCondBranch:
         switch (condition_) {
           case kUncond:
-            InitShortOrLong(offset_size, kR6UncondBranch, kR6LongUncondBranch);
+            InitShortOrLong(offset_size_needed, kR6UncondBranch, kR6LongUncondBranch);
             break;
           case kCondEQZ:
           case kCondNEZ:
             // Special case for beqzc/bnezc with longer offset than in other b<cond>c instructions.
-            type_ = (offset_size <= kOffset23) ? kR6CondBranch : kR6LongCondBranch;
+            type_ = (offset_size_needed <= kOffset23) ? kR6CondBranch : kR6LongCondBranch;
             break;
           default:
-            InitShortOrLong(offset_size, kR6CondBranch, kR6LongCondBranch);
+            InitShortOrLong(offset_size_needed, kR6CondBranch, kR6LongCondBranch);
             break;
         }
+        break;
+      case kBareCall:
+        type_ = kR6BareCall;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
+        break;
+      case kBareCondBranch:
+        type_ = (condition_ == kUncond) ? kR6BareUncondBranch : kR6BareCondBranch;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
         break;
       default:
         LOG(FATAL) << "Unexpected branch type " << initial_type;
@@ -1827,17 +3417,25 @@ void MipsAssembler::Branch::InitializeType(Type initial_type, bool is_r6) {
         type_ = kLiteral;
         break;
       case kCall:
-        InitShortOrLong(offset_size, kCall, kLongCall);
+        InitShortOrLong(offset_size_needed, kCall, kLongCall);
         break;
       case kCondBranch:
         switch (condition_) {
           case kUncond:
-            InitShortOrLong(offset_size, kUncondBranch, kLongUncondBranch);
+            InitShortOrLong(offset_size_needed, kUncondBranch, kLongUncondBranch);
             break;
           default:
-            InitShortOrLong(offset_size, kCondBranch, kLongCondBranch);
+            InitShortOrLong(offset_size_needed, kCondBranch, kLongCondBranch);
             break;
         }
+        break;
+      case kBareCall:
+        type_ = kBareCall;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
+        break;
+      case kBareCondBranch:
+        type_ = (condition_ == kUncond) ? kBareUncondBranch : kBareCondBranch;
+        CHECK_LE(offset_size_needed, GetOffsetSize());
         break;
       default:
         LOG(FATAL) << "Unexpected branch type " << initial_type;
@@ -1873,15 +3471,22 @@ bool MipsAssembler::Branch::IsUncond(BranchCondition condition, Register lhs, Re
   }
 }
 
-MipsAssembler::Branch::Branch(bool is_r6, uint32_t location, uint32_t target, bool is_call)
+MipsAssembler::Branch::Branch(bool is_r6,
+                              uint32_t location,
+                              uint32_t target,
+                              bool is_call,
+                              bool is_bare)
     : old_location_(location),
       location_(location),
       target_(target),
       lhs_reg_(0),
       rhs_reg_(0),
       condition_(kUncond),
-      delayed_instruction_(kUnfilledDelaySlot) {
-  InitializeType((is_call ? kCall : kCondBranch), is_r6);
+      delayed_instruction_(kUnfilledDelaySlot),
+      patcher_label_(nullptr) {
+  InitializeType(
+      (is_call ? (is_bare ? kBareCall : kCall) : (is_bare ? kBareCondBranch : kCondBranch)),
+      is_r6);
 }
 
 MipsAssembler::Branch::Branch(bool is_r6,
@@ -1889,14 +3494,16 @@ MipsAssembler::Branch::Branch(bool is_r6,
                               uint32_t target,
                               MipsAssembler::BranchCondition condition,
                               Register lhs_reg,
-                              Register rhs_reg)
+                              Register rhs_reg,
+                              bool is_bare)
     : old_location_(location),
       location_(location),
       target_(target),
       lhs_reg_(lhs_reg),
       rhs_reg_(rhs_reg),
       condition_(condition),
-      delayed_instruction_(kUnfilledDelaySlot) {
+      delayed_instruction_(kUnfilledDelaySlot),
+      patcher_label_(nullptr) {
   CHECK_NE(condition, kUncond);
   switch (condition) {
     case kCondLT:
@@ -1939,7 +3546,7 @@ MipsAssembler::Branch::Branch(bool is_r6,
     // Branch condition is always true, make the branch unconditional.
     condition_ = kUncond;
   }
-  InitializeType(kCondBranch, is_r6);
+  InitializeType((is_bare ? kBareCondBranch : kCondBranch), is_r6);
 }
 
 MipsAssembler::Branch::Branch(bool is_r6,
@@ -1953,12 +3560,11 @@ MipsAssembler::Branch::Branch(bool is_r6,
       lhs_reg_(dest_reg),
       rhs_reg_(base_reg),
       condition_(kUncond),
-      delayed_instruction_(kUnfilledDelaySlot) {
+      delayed_instruction_(kUnfilledDelaySlot),
+      patcher_label_(nullptr) {
   CHECK_NE(dest_reg, ZERO);
   if (is_r6) {
     CHECK_EQ(base_reg, ZERO);
-  } else {
-    CHECK_NE(base_reg, ZERO);
   }
   InitializeType(label_or_literal_type, is_r6);
 }
@@ -2082,20 +3688,44 @@ uint32_t MipsAssembler::Branch::GetOldEndLocation() const {
   return GetOldLocation() + GetOldSize();
 }
 
+bool MipsAssembler::Branch::IsBare() const {
+  switch (type_) {
+    // R2 short branches (can't be promoted to long), delay slots filled manually.
+    case kBareUncondBranch:
+    case kBareCondBranch:
+    case kBareCall:
+    // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+    case kR6BareUncondBranch:
+    case kR6BareCondBranch:
+    case kR6BareCall:
+      return true;
+    default:
+      return false;
+  }
+}
+
 bool MipsAssembler::Branch::IsLong() const {
   switch (type_) {
-    // R2 short branches.
+    // R2 short branches (can be promoted to long).
     case kUncondBranch:
     case kCondBranch:
     case kCall:
+    // R2 short branches (can't be promoted to long), delay slots filled manually.
+    case kBareUncondBranch:
+    case kBareCondBranch:
+    case kBareCall:
     // R2 near label.
     case kLabel:
     // R2 near literal.
     case kLiteral:
-    // R6 short branches.
+    // R6 short branches (can be promoted to long).
     case kR6UncondBranch:
     case kR6CondBranch:
     case kR6Call:
+    // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+    case kR6BareUncondBranch:
+    case kR6BareCondBranch:
+    case kR6BareCall:
     // R6 near label.
     case kR6Label:
     // R6 near literal.
@@ -2127,8 +3757,9 @@ bool MipsAssembler::Branch::IsResolved() const {
 }
 
 MipsAssembler::Branch::OffsetBits MipsAssembler::Branch::GetOffsetSize() const {
+  bool r6_cond_branch = (type_ == kR6CondBranch || type_ == kR6BareCondBranch);
   OffsetBits offset_size =
-      (type_ == kR6CondBranch && (condition_ == kCondEQZ || condition_ == kCondNEZ))
+      (r6_cond_branch && (condition_ == kCondEQZ || condition_ == kCondNEZ))
           ? kOffset23
           : branch_info_[type_].offset_size;
   return offset_size;
@@ -2174,8 +3805,9 @@ void MipsAssembler::Branch::Relocate(uint32_t expand_location, uint32_t delta) {
 }
 
 void MipsAssembler::Branch::PromoteToLong() {
+  CHECK(!IsBare());  // Bare branches do not promote.
   switch (type_) {
-    // R2 short branches.
+    // R2 short branches (can be promoted to long).
     case kUncondBranch:
       type_ = kLongUncondBranch;
       break;
@@ -2193,7 +3825,7 @@ void MipsAssembler::Branch::PromoteToLong() {
     case kLiteral:
       type_ = kFarLiteral;
       break;
-    // R6 short branches.
+    // R6 short branches (can be promoted to long).
     case kR6UncondBranch:
       type_ = kR6LongUncondBranch;
       break;
@@ -2224,15 +3856,29 @@ uint32_t MipsAssembler::GetBranchLocationOrPcRelBase(const MipsAssembler::Branch
     case Branch::kFarLabel:
     case Branch::kLiteral:
     case Branch::kFarLiteral:
-      return GetLabelLocation(&pc_rel_base_label_);
+      if (branch->GetRightRegister() != ZERO) {
+        return GetLabelLocation(&pc_rel_base_label_);
+      }
+      // For those label/literal loads which come with their own NAL instruction
+      // and don't depend on `pc_rel_base_label_` we can simply use the location
+      // of the "branch" (the NAL precedes the "branch" immediately). The location
+      // is close enough for the user of the returned location, PromoteIfNeeded(),
+      // to not miss needed promotion to a far load.
+      // (GetOffsetSizeNeeded() provides a little leeway by means of kMaxBranchSize,
+      // which is larger than all composite branches and label/literal loads: it's
+      // OK to promote a bit earlier than strictly necessary, it makes things
+      // simpler.)
+      FALLTHROUGH_INTENDED;
     default:
       return branch->GetLocation();
   }
 }
 
 uint32_t MipsAssembler::Branch::PromoteIfNeeded(uint32_t location, uint32_t max_short_distance) {
-  // `location` is either `GetLabelLocation(&pc_rel_base_label_)` for R2 labels/literals or
-  // `this->GetLocation()` for everything else.
+  // `location` comes from GetBranchLocationOrPcRelBase() and is either the location
+  // of the PC-relative branch or (for some R2 label and literal loads) the location
+  // of `pc_rel_base_label_`. The PC-relative offset of the branch/load is relative
+  // to this location.
   // If the branch is still unresolved or already long, nothing to do.
   if (IsLong() || !IsResolved()) {
     return 0;
@@ -2248,7 +3894,7 @@ uint32_t MipsAssembler::Branch::PromoteIfNeeded(uint32_t location, uint32_t max_
   }
   // The following logic is for debugging/testing purposes.
   // Promote some short branches to long when it's not really required.
-  if (UNLIKELY(max_short_distance != std::numeric_limits<uint32_t>::max())) {
+  if (UNLIKELY(max_short_distance != std::numeric_limits<uint32_t>::max() && !IsBare())) {
     int64_t distance = static_cast<int64_t>(target_) - location;
     distance = (distance >= 0) ? distance : -distance;
     if (distance >= max_short_distance) {
@@ -2273,7 +3919,15 @@ uint32_t MipsAssembler::GetBranchOrPcRelBaseForEncoding(const MipsAssembler::Bra
     case Branch::kFarLabel:
     case Branch::kLiteral:
     case Branch::kFarLiteral:
-      return GetLabelLocation(&pc_rel_base_label_);
+      if (branch->GetRightRegister() == ZERO) {
+        // These loads don't use `pc_rel_base_label_` and instead rely on their own
+        // NAL instruction (it immediately precedes the "branch"). Therefore the
+        // effective PC-relative base register is RA and it corresponds to the 2nd
+        // instruction after the NAL.
+        return branch->GetLocation() + sizeof(uint32_t);
+      } else {
+        return GetLabelLocation(&pc_rel_base_label_);
+      }
     default:
       return branch->GetOffsetLocation() +
           Branch::branch_info_[branch->GetType()].pc_org * sizeof(uint32_t);
@@ -2281,9 +3935,10 @@ uint32_t MipsAssembler::GetBranchOrPcRelBaseForEncoding(const MipsAssembler::Bra
 }
 
 uint32_t MipsAssembler::Branch::GetOffset(uint32_t location) const {
-  // `location` is either `GetLabelLocation(&pc_rel_base_label_)` for R2 labels/literals or
-  // `this->GetOffsetLocation() + branch_info_[this->GetType()].pc_org * sizeof(uint32_t)`
-  // for everything else.
+  // `location` comes from GetBranchOrPcRelBaseForEncoding() and is either a location
+  // within/near the PC-relative branch or (for some R2 label and literal loads) the
+  // location of `pc_rel_base_label_`. The PC-relative offset of the branch/load is
+  // relative to this location.
   CHECK(IsResolved());
   uint32_t ofs_mask = 0xFFFFFFFF >> (32 - GetOffsetSize());
   // Calculate the byte distance between instructions and also account for
@@ -2302,6 +3957,17 @@ MipsAssembler::Branch* MipsAssembler::GetBranch(uint32_t branch_id) {
 const MipsAssembler::Branch* MipsAssembler::GetBranch(uint32_t branch_id) const {
   CHECK_LT(branch_id, branches_.size());
   return &branches_[branch_id];
+}
+
+void MipsAssembler::BindRelativeToPrecedingBranch(MipsLabel* label,
+                                                  uint32_t prev_branch_id_plus_one,
+                                                  uint32_t position) {
+  if (prev_branch_id_plus_one != 0) {
+    const Branch* branch = GetBranch(prev_branch_id_plus_one - 1);
+    position -= branch->GetEndLocation();
+  }
+  label->prev_branch_id_plus_one_ = prev_branch_id_plus_one;
+  label->BindTo(position);
 }
 
 void MipsAssembler::Bind(MipsLabel* label) {
@@ -2329,22 +3995,15 @@ void MipsAssembler::Bind(MipsLabel* label) {
 
   // Now make the label object contain its own location (relative to the end of the preceding
   // branch, if any; it will be used by the branches referring to and following this label).
-  label->prev_branch_id_plus_one_ = branches_.size();
-  if (label->prev_branch_id_plus_one_) {
-    uint32_t branch_id = label->prev_branch_id_plus_one_ - 1;
-    const Branch* branch = GetBranch(branch_id);
-    bound_pc -= branch->GetEndLocation();
-  }
-  label->BindTo(bound_pc);
+  BindRelativeToPrecedingBranch(label, branches_.size(), bound_pc);
 }
 
 uint32_t MipsAssembler::GetLabelLocation(const MipsLabel* label) const {
   CHECK(label->IsBound());
   uint32_t target = label->Position();
-  if (label->prev_branch_id_plus_one_) {
+  if (label->prev_branch_id_plus_one_ != 0) {
     // Get label location based on the branch preceding it.
-    uint32_t branch_id = label->prev_branch_id_plus_one_ - 1;
-    const Branch* branch = GetBranch(branch_id);
+    const Branch* branch = GetBranch(label->prev_branch_id_plus_one_ - 1);
     target += branch->GetEndLocation();
   }
   return target;
@@ -2486,10 +4145,15 @@ uint32_t MipsAssembler::Branch::GetDelayedInstruction() const {
   return delayed_instruction_;
 }
 
-void MipsAssembler::Branch::SetDelayedInstruction(uint32_t instruction) {
+MipsLabel* MipsAssembler::Branch::GetPatcherLabel() const {
+  return patcher_label_;
+}
+
+void MipsAssembler::Branch::SetDelayedInstruction(uint32_t instruction, MipsLabel* patcher_label) {
   CHECK_NE(instruction, kUnfilledDelaySlot);
   CHECK_EQ(delayed_instruction_, kUnfilledDelaySlot);
   delayed_instruction_ = instruction;
+  patcher_label_ = patcher_label;
 }
 
 void MipsAssembler::Branch::DecrementLocations() {
@@ -2514,6 +4178,10 @@ void MipsAssembler::Branch::DecrementLocations() {
 }
 
 void MipsAssembler::MoveInstructionToDelaySlot(Branch& branch) {
+  if (branch.IsBare()) {
+    // Delay slots are filled manually in bare branches.
+    return;
+  }
   if (branch.CanHaveDelayedInstruction(delay_slot_)) {
     // The last instruction cannot be used in a different delay slot,
     // do not commit the label before it (if any).
@@ -2526,34 +4194,39 @@ void MipsAssembler::MoveInstructionToDelaySlot(Branch& branch) {
     buffer_.Resize(size);
     // Attach it to the branch and adjust the branch locations.
     branch.DecrementLocations();
-    branch.SetDelayedInstruction(delay_slot_.instruction_);
+    branch.SetDelayedInstruction(delay_slot_.instruction_, delay_slot_.patcher_label_);
   } else if (!reordering_ && branch.GetType() == Branch::kUncondBranch) {
     // If reordefing is disabled, prevent absorption of the target instruction.
     branch.SetDelayedInstruction(Branch::kUnfillableDelaySlot);
   }
 }
 
-void MipsAssembler::Buncond(MipsLabel* label) {
+void MipsAssembler::Buncond(MipsLabel* label, bool is_r6, bool is_bare) {
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(IsR6(), buffer_.Size(), target, /* is_call */ false);
+  branches_.emplace_back(is_r6, buffer_.Size(), target, /* is_call */ false, is_bare);
   MoveInstructionToDelaySlot(branches_.back());
   FinalizeLabeledBranch(label);
 }
 
-void MipsAssembler::Bcond(MipsLabel* label, BranchCondition condition, Register lhs, Register rhs) {
+void MipsAssembler::Bcond(MipsLabel* label,
+                          bool is_r6,
+                          bool is_bare,
+                          BranchCondition condition,
+                          Register lhs,
+                          Register rhs) {
   // If lhs = rhs, this can be a NOP.
   if (Branch::IsNop(condition, lhs, rhs)) {
     return;
   }
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(IsR6(), buffer_.Size(), target, condition, lhs, rhs);
+  branches_.emplace_back(is_r6, buffer_.Size(), target, condition, lhs, rhs, is_bare);
   MoveInstructionToDelaySlot(branches_.back());
   FinalizeLabeledBranch(label);
 }
 
-void MipsAssembler::Call(MipsLabel* label) {
+void MipsAssembler::Call(MipsLabel* label, bool is_r6, bool is_bare) {
   uint32_t target = label->IsBound() ? GetLabelLocation(label) : Branch::kUnresolved;
-  branches_.emplace_back(IsR6(), buffer_.Size(), target, /* is_call */ true);
+  branches_.emplace_back(is_r6, buffer_.Size(), target, /* is_call */ true, is_bare);
   MoveInstructionToDelaySlot(branches_.back());
   FinalizeLabeledBranch(label);
 }
@@ -2561,6 +4234,12 @@ void MipsAssembler::Call(MipsLabel* label) {
 void MipsAssembler::LoadLabelAddress(Register dest_reg, Register base_reg, MipsLabel* label) {
   // Label address loads are treated as pseudo branches since they require very similar handling.
   DCHECK(!label->IsBound());
+  // If `pc_rel_base_label_` isn't bound or none of registers contains its address, we
+  // may generate an individual NAL instruction to simulate PC-relative addressing on R2
+  // by specifying `base_reg` of `ZERO`. Check for it.
+  if (base_reg == ZERO && !IsR6()) {
+    Nal();
+  }
   branches_.emplace_back(IsR6(), buffer_.Size(), dest_reg, base_reg, Branch::kLabel);
   FinalizeLabeledBranch(label);
 }
@@ -2576,6 +4255,12 @@ void MipsAssembler::LoadLiteral(Register dest_reg, Register base_reg, Literal* l
   DCHECK_EQ(literal->GetSize(), 4u);
   MipsLabel* label = literal->GetLabel();
   DCHECK(!label->IsBound());
+  // If `pc_rel_base_label_` isn't bound or none of registers contains its address, we
+  // may generate an individual NAL instruction to simulate PC-relative addressing on R2
+  // by specifying `base_reg` of `ZERO`. Check for it.
+  if (base_reg == ZERO && !IsR6()) {
+    Nal();
+  }
   branches_.emplace_back(IsR6(), buffer_.Size(), dest_reg, base_reg, Branch::kLiteral);
   FinalizeLabeledBranch(label);
 }
@@ -2701,10 +4386,14 @@ void MipsAssembler::PromoteBranches() {
 
 // Note: make sure branch_info_[] and EmitBranch() are kept synchronized.
 const MipsAssembler::Branch::BranchInfo MipsAssembler::Branch::branch_info_[] = {
-  // R2 short branches.
+  // R2 short branches (can be promoted to long).
   {  2, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kUncondBranch
   {  2, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kCondBranch
   {  2, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kCall
+  // R2 short branches (can't be promoted to long), delay slots filled manually.
+  {  1, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kBareUncondBranch
+  {  1, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kBareCondBranch
+  {  1, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kBareCall
   // R2 near label.
   {  1, 0, 0, MipsAssembler::Branch::kOffset16, 0 },  // kLabel
   // R2 near literal.
@@ -2717,11 +4406,16 @@ const MipsAssembler::Branch::BranchInfo MipsAssembler::Branch::branch_info_[] = 
   {  3, 0, 0, MipsAssembler::Branch::kOffset32, 0 },  // kFarLabel
   // R2 far literal.
   {  3, 0, 0, MipsAssembler::Branch::kOffset32, 0 },  // kFarLiteral
-  // R6 short branches.
+  // R6 short branches (can be promoted to long).
   {  1, 0, 1, MipsAssembler::Branch::kOffset28, 2 },  // kR6UncondBranch
   {  2, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kR6CondBranch
                                                       // Exception: kOffset23 for beqzc/bnezc.
   {  1, 0, 1, MipsAssembler::Branch::kOffset28, 2 },  // kR6Call
+  // R6 short branches (can't be promoted to long), forbidden/delay slots filled manually.
+  {  1, 0, 1, MipsAssembler::Branch::kOffset28, 2 },  // kR6BareUncondBranch
+  {  1, 0, 1, MipsAssembler::Branch::kOffset18, 2 },  // kR6BareCondBranch
+                                                      // Exception: kOffset23 for beqzc/bnezc.
+  {  1, 0, 1, MipsAssembler::Branch::kOffset28, 2 },  // kR6BareCall
   // R6 near label.
   {  1, 0, 0, MipsAssembler::Branch::kOffset21, 2 },  // kR6Label
   // R6 near literal.
@@ -2736,15 +4430,56 @@ const MipsAssembler::Branch::BranchInfo MipsAssembler::Branch::branch_info_[] = 
   {  2, 0, 0, MipsAssembler::Branch::kOffset32, 0 },  // kR6FarLiteral
 };
 
+static inline bool IsAbsorbableInstruction(uint32_t instruction) {
+  // The relative patcher patches addiu, lw and sw with an immediate operand of 0x5678.
+  // We want to make sure that these instructions do not get absorbed into delay slots
+  // of unconditional branches on R2. Absorption would otherwise make copies of
+  // unpatched instructions.
+  if ((instruction & 0xFFFF) != 0x5678) {
+    return true;
+  }
+  switch (instruction >> kOpcodeShift) {
+    case 0x09:  // Addiu.
+    case 0x23:  // Lw.
+    case 0x2B:  // Sw.
+      return false;
+    default:
+      return true;
+  }
+}
+
+static inline Register GetR2PcRelBaseRegister(Register reg) {
+  // LoadLabelAddress() and LoadLiteral() generate individual NAL
+  // instructions on R2 when the specified base register is ZERO
+  // and so the effective PC-relative base register is RA, not ZERO.
+  return (reg == ZERO) ? RA : reg;
+}
+
 // Note: make sure branch_info_[] and EmitBranch() are kept synchronized.
-void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
+void MipsAssembler::EmitBranch(uint32_t branch_id) {
   CHECK_EQ(overwriting_, true);
+  Branch* branch = GetBranch(branch_id);
   overwrite_location_ = branch->GetLocation();
   uint32_t offset = branch->GetOffset(GetBranchOrPcRelBaseForEncoding(branch));
   BranchCondition condition = branch->GetCondition();
   Register lhs = branch->GetLeftRegister();
   Register rhs = branch->GetRightRegister();
   uint32_t delayed_instruction = branch->GetDelayedInstruction();
+  MipsLabel* patcher_label = branch->GetPatcherLabel();
+  if (patcher_label != nullptr) {
+    // Update the patcher label location to account for branch promotion and
+    // delay slot filling.
+    CHECK(patcher_label->IsBound());
+    uint32_t bound_pc = branch->GetLocation();
+    if (!branch->IsLong()) {
+      // Short branches precede delay slots.
+      // Long branches follow "delay slots".
+      bound_pc += sizeof(uint32_t);
+    }
+    // Rebind the label.
+    patcher_label->Reinitialize();
+    BindRelativeToPrecedingBranch(patcher_label, branch_id, bound_pc);
+  }
   switch (branch->GetType()) {
     // R2 short branches.
     case Branch::kUncondBranch:
@@ -2760,8 +4495,11 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
         if (offset != 0x7FFF) {
           uint32_t target = branch->GetTarget();
           if (std::binary_search(ds_fsm_target_pcs_.begin(), ds_fsm_target_pcs_.end(), target)) {
-            delayed_instruction = buffer_.Load<uint32_t>(target);
-            offset++;
+            uint32_t target_instruction = buffer_.Load<uint32_t>(target);
+            if (IsAbsorbableInstruction(target_instruction)) {
+              delayed_instruction = target_instruction;
+              offset++;
+            }
           }
         }
       }
@@ -2787,18 +4525,33 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       Bal(offset);
       Emit(delayed_instruction);
       break;
+    case Branch::kBareUncondBranch:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      B(offset);
+      break;
+    case Branch::kBareCondBranch:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      EmitBcondR2(condition, lhs, rhs, offset);
+      break;
+    case Branch::kBareCall:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      Bal(offset);
+      break;
 
     // R2 near label.
     case Branch::kLabel:
       DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
-      Addiu(lhs, rhs, offset);
+      Addiu(lhs, GetR2PcRelBaseRegister(rhs), offset);
       break;
     // R2 near literal.
     case Branch::kLiteral:
       DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
-      Lw(lhs, rhs, offset);
+      Lw(lhs, GetR2PcRelBaseRegister(rhs), offset);
       break;
 
     // R2 long branches.
@@ -2835,7 +4588,7 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       Addu(AT, AT, RA);
       Lw(RA, SP, 0);
       Jr(AT);
-      DecreaseFrameSize(kMipsWordSize);
+      DecreaseFrameSize(kStackAlignment);
       break;
     case Branch::kLongCondBranch:
       // The comment on case 'Branch::kLongUncondBranch' applies here as well.
@@ -2855,7 +4608,7 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       Addu(AT, AT, RA);
       Lw(RA, SP, 0);
       Jr(AT);
-      DecreaseFrameSize(kMipsWordSize);
+      DecreaseFrameSize(kStackAlignment);
       break;
     case Branch::kLongCall:
       DCHECK_NE(delayed_instruction, Branch::kUnfillableDelaySlot);
@@ -2877,7 +4630,7 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
       Lui(AT, High16Bits(offset));
       Ori(AT, AT, Low16Bits(offset));
-      Addu(lhs, AT, rhs);
+      Addu(lhs, AT, GetR2PcRelBaseRegister(rhs));
       break;
     // R2 far literal.
     case Branch::kFarLiteral:
@@ -2885,7 +4638,7 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       offset += (offset & 0x8000) << 1;  // Account for sign extension in lw.
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
       Lui(AT, High16Bits(offset));
-      Addu(AT, AT, rhs);
+      Addu(AT, AT, GetR2PcRelBaseRegister(rhs));
       Lw(lhs, AT, Low16Bits(offset));
       break;
 
@@ -2908,6 +4661,21 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
       }
       break;
     case Branch::kR6Call:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      Balc(offset);
+      break;
+    case Branch::kR6BareUncondBranch:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      Bc(offset);
+      break;
+    case Branch::kR6BareCondBranch:
+      DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
+      CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
+      EmitBcondR6(condition, lhs, rhs, offset);
+      break;
+    case Branch::kR6BareCall:
       DCHECK_EQ(delayed_instruction, Branch::kUnfilledDelaySlot);
       CHECK_EQ(overwrite_location_, branch->GetOffsetLocation());
       Balc(offset);
@@ -2972,46 +4740,51 @@ void MipsAssembler::EmitBranch(MipsAssembler::Branch* branch) {
   }
   CHECK_EQ(overwrite_location_, branch->GetEndLocation());
   CHECK_LT(branch->GetSize(), static_cast<uint32_t>(Branch::kMaxBranchSize));
+  if (patcher_label != nullptr) {
+    // The patched instruction should look like one.
+    uint32_t patched_instruction = buffer_.Load<uint32_t>(GetLabelLocation(patcher_label));
+    CHECK(!IsAbsorbableInstruction(patched_instruction));
+  }
 }
 
-void MipsAssembler::B(MipsLabel* label) {
-  Buncond(label);
+void MipsAssembler::B(MipsLabel* label, bool is_bare) {
+  Buncond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare);
 }
 
-void MipsAssembler::Bal(MipsLabel* label) {
-  Call(label);
+void MipsAssembler::Bal(MipsLabel* label, bool is_bare) {
+  Call(label, /* is_r6 */ (IsR6() && !is_bare), is_bare);
 }
 
-void MipsAssembler::Beq(Register rs, Register rt, MipsLabel* label) {
-  Bcond(label, kCondEQ, rs, rt);
+void MipsAssembler::Beq(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondEQ, rs, rt);
 }
 
-void MipsAssembler::Bne(Register rs, Register rt, MipsLabel* label) {
-  Bcond(label, kCondNE, rs, rt);
+void MipsAssembler::Bne(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondNE, rs, rt);
 }
 
-void MipsAssembler::Beqz(Register rt, MipsLabel* label) {
-  Bcond(label, kCondEQZ, rt);
+void MipsAssembler::Beqz(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondEQZ, rt);
 }
 
-void MipsAssembler::Bnez(Register rt, MipsLabel* label) {
-  Bcond(label, kCondNEZ, rt);
+void MipsAssembler::Bnez(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondNEZ, rt);
 }
 
-void MipsAssembler::Bltz(Register rt, MipsLabel* label) {
-  Bcond(label, kCondLTZ, rt);
+void MipsAssembler::Bltz(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondLTZ, rt);
 }
 
-void MipsAssembler::Bgez(Register rt, MipsLabel* label) {
-  Bcond(label, kCondGEZ, rt);
+void MipsAssembler::Bgez(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondGEZ, rt);
 }
 
-void MipsAssembler::Blez(Register rt, MipsLabel* label) {
-  Bcond(label, kCondLEZ, rt);
+void MipsAssembler::Blez(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondLEZ, rt);
 }
 
-void MipsAssembler::Bgtz(Register rt, MipsLabel* label) {
-  Bcond(label, kCondGTZ, rt);
+void MipsAssembler::Bgtz(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ (IsR6() && !is_bare), is_bare, kCondGTZ, rt);
 }
 
 bool MipsAssembler::CanExchangeWithSlt(Register rs, Register rt) const {
@@ -3062,74 +4835,130 @@ void MipsAssembler::GenerateSltForCondBranch(bool unsigned_slt, Register rs, Reg
   }
 }
 
-void MipsAssembler::Blt(Register rs, Register rt, MipsLabel* label) {
-  if (IsR6()) {
-    Bcond(label, kCondLT, rs, rt);
+void MipsAssembler::Blt(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  if (IsR6() && !is_bare) {
+    Bcond(label, IsR6(), is_bare, kCondLT, rs, rt);
   } else if (!Branch::IsNop(kCondLT, rs, rt)) {
     // Synthesize the instruction (not available on R2).
     GenerateSltForCondBranch(/* unsigned_slt */ false, rs, rt);
-    Bnez(AT, label);
+    Bnez(AT, label, is_bare);
   }
 }
 
-void MipsAssembler::Bge(Register rs, Register rt, MipsLabel* label) {
-  if (IsR6()) {
-    Bcond(label, kCondGE, rs, rt);
+void MipsAssembler::Bge(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  if (IsR6() && !is_bare) {
+    Bcond(label, IsR6(), is_bare, kCondGE, rs, rt);
   } else if (Branch::IsUncond(kCondGE, rs, rt)) {
-    B(label);
+    B(label, is_bare);
   } else {
     // Synthesize the instruction (not available on R2).
     GenerateSltForCondBranch(/* unsigned_slt */ false, rs, rt);
-    Beqz(AT, label);
+    Beqz(AT, label, is_bare);
   }
 }
 
-void MipsAssembler::Bltu(Register rs, Register rt, MipsLabel* label) {
-  if (IsR6()) {
-    Bcond(label, kCondLTU, rs, rt);
+void MipsAssembler::Bltu(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  if (IsR6() && !is_bare) {
+    Bcond(label, IsR6(), is_bare, kCondLTU, rs, rt);
   } else if (!Branch::IsNop(kCondLTU, rs, rt)) {
     // Synthesize the instruction (not available on R2).
     GenerateSltForCondBranch(/* unsigned_slt */ true, rs, rt);
-    Bnez(AT, label);
+    Bnez(AT, label, is_bare);
   }
 }
 
-void MipsAssembler::Bgeu(Register rs, Register rt, MipsLabel* label) {
-  if (IsR6()) {
-    Bcond(label, kCondGEU, rs, rt);
+void MipsAssembler::Bgeu(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  if (IsR6() && !is_bare) {
+    Bcond(label, IsR6(), is_bare, kCondGEU, rs, rt);
   } else if (Branch::IsUncond(kCondGEU, rs, rt)) {
-    B(label);
+    B(label, is_bare);
   } else {
     // Synthesize the instruction (not available on R2).
     GenerateSltForCondBranch(/* unsigned_slt */ true, rs, rt);
-    Beqz(AT, label);
+    Beqz(AT, label, is_bare);
   }
 }
 
-void MipsAssembler::Bc1f(MipsLabel* label) {
-  Bc1f(0, label);
+void MipsAssembler::Bc1f(MipsLabel* label, bool is_bare) {
+  Bc1f(0, label, is_bare);
 }
 
-void MipsAssembler::Bc1f(int cc, MipsLabel* label) {
+void MipsAssembler::Bc1f(int cc, MipsLabel* label, bool is_bare) {
   CHECK(IsUint<3>(cc)) << cc;
-  Bcond(label, kCondF, static_cast<Register>(cc), ZERO);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondF, static_cast<Register>(cc), ZERO);
 }
 
-void MipsAssembler::Bc1t(MipsLabel* label) {
-  Bc1t(0, label);
+void MipsAssembler::Bc1t(MipsLabel* label, bool is_bare) {
+  Bc1t(0, label, is_bare);
 }
 
-void MipsAssembler::Bc1t(int cc, MipsLabel* label) {
+void MipsAssembler::Bc1t(int cc, MipsLabel* label, bool is_bare) {
   CHECK(IsUint<3>(cc)) << cc;
-  Bcond(label, kCondT, static_cast<Register>(cc), ZERO);
+  Bcond(label, /* is_r6 */ false, is_bare, kCondT, static_cast<Register>(cc), ZERO);
 }
 
-void MipsAssembler::Bc1eqz(FRegister ft, MipsLabel* label) {
-  Bcond(label, kCondF, static_cast<Register>(ft), ZERO);
+void MipsAssembler::Bc(MipsLabel* label, bool is_bare) {
+  Buncond(label, /* is_r6 */ true, is_bare);
 }
 
-void MipsAssembler::Bc1nez(FRegister ft, MipsLabel* label) {
-  Bcond(label, kCondT, static_cast<Register>(ft), ZERO);
+void MipsAssembler::Balc(MipsLabel* label, bool is_bare) {
+  Call(label, /* is_r6 */ true, is_bare);
+}
+
+void MipsAssembler::Beqc(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondEQ, rs, rt);
+}
+
+void MipsAssembler::Bnec(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondNE, rs, rt);
+}
+
+void MipsAssembler::Beqzc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondEQZ, rt);
+}
+
+void MipsAssembler::Bnezc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondNEZ, rt);
+}
+
+void MipsAssembler::Bltzc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLTZ, rt);
+}
+
+void MipsAssembler::Bgezc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGEZ, rt);
+}
+
+void MipsAssembler::Blezc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLEZ, rt);
+}
+
+void MipsAssembler::Bgtzc(Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGTZ, rt);
+}
+
+void MipsAssembler::Bltc(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLT, rs, rt);
+}
+
+void MipsAssembler::Bgec(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGE, rs, rt);
+}
+
+void MipsAssembler::Bltuc(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondLTU, rs, rt);
+}
+
+void MipsAssembler::Bgeuc(Register rs, Register rt, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondGEU, rs, rt);
+}
+
+void MipsAssembler::Bc1eqz(FRegister ft, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondF, static_cast<Register>(ft), ZERO);
+}
+
+void MipsAssembler::Bc1nez(FRegister ft, MipsLabel* label, bool is_bare) {
+  Bcond(label, /* is_r6 */ true, is_bare, kCondT, static_cast<Register>(ft), ZERO);
 }
 
 void MipsAssembler::AdjustBaseAndOffset(Register& base,
@@ -3226,6 +5055,106 @@ void MipsAssembler::AdjustBaseAndOffset(Register& base,
   CHECK_EQ(misalignment, offset & (kMipsDoublewordSize - 1));
 }
 
+void MipsAssembler::AdjustBaseOffsetAndElementSizeShift(Register& base,
+                                                        int32_t& offset,
+                                                        int& element_size_shift) {
+  // This method is used to adjust the base register, offset and element_size_shift
+  // for a vector load/store when the offset doesn't fit into allowed number of bits.
+  // MSA ld.df and st.df instructions take signed offsets as arguments, but maximum
+  // offset is dependant on the size of the data format df (10-bit offsets for ld.b,
+  // 11-bit for ld.h, 12-bit for ld.w and 13-bit for ld.d).
+  // If element_size_shift is non-negative at entry, it won't be changed, but offset
+  // will be checked for appropriate alignment. If negative at entry, it will be
+  // adjusted based on offset for maximum fit.
+  // It's assumed that `base` is a multiple of 8.
+  CHECK_NE(base, AT);  // Must not overwrite the register `base` while loading `offset`.
+
+  if (element_size_shift >= 0) {
+    CHECK_LE(element_size_shift, TIMES_8);
+    CHECK_GE(JAVASTYLE_CTZ(offset), element_size_shift);
+  } else if (IsAligned<kMipsDoublewordSize>(offset)) {
+    element_size_shift = TIMES_8;
+  } else if (IsAligned<kMipsWordSize>(offset)) {
+    element_size_shift = TIMES_4;
+  } else if (IsAligned<kMipsHalfwordSize>(offset)) {
+    element_size_shift = TIMES_2;
+  } else {
+    element_size_shift = TIMES_1;
+  }
+
+  const int low_len = 10 + element_size_shift;  // How many low bits of `offset` ld.df/st.df
+                                                // will take.
+  int16_t low = offset & ((1 << low_len) - 1);  // Isolate these bits.
+  low -= (low & (1 << (low_len - 1))) << 1;     // Sign-extend these bits.
+  if (low == offset) {
+    return;  // `offset` fits into ld.df/st.df.
+  }
+
+  // First, see if `offset` can be represented as a sum of two or three signed offsets.
+  // This can save an instruction or two.
+
+  // Max int16_t that's a multiple of element size.
+  const int32_t kMaxDeltaForSimpleAdjustment = 0x8000 - (1 << element_size_shift);
+  // Max ld.df/st.df offset that's a multiple of element size.
+  const int32_t kMaxLoadStoreOffset = 0x1ff << element_size_shift;
+  const int32_t kMaxOffsetForSimpleAdjustment = kMaxDeltaForSimpleAdjustment + kMaxLoadStoreOffset;
+  const int32_t kMinOffsetForMediumAdjustment = 2 * kMaxDeltaForSimpleAdjustment;
+  const int32_t kMaxOffsetForMediumAdjustment = kMinOffsetForMediumAdjustment + kMaxLoadStoreOffset;
+
+  if (IsInt<16>(offset)) {
+    Addiu(AT, base, offset);
+    offset = 0;
+  } else if (0 <= offset && offset <= kMaxOffsetForSimpleAdjustment) {
+    Addiu(AT, base, kMaxDeltaForSimpleAdjustment);
+    offset -= kMaxDeltaForSimpleAdjustment;
+  } else if (-kMaxOffsetForSimpleAdjustment <= offset && offset < 0) {
+    Addiu(AT, base, -kMaxDeltaForSimpleAdjustment);
+    offset += kMaxDeltaForSimpleAdjustment;
+  } else if (!IsR6() && 0 <= offset && offset <= kMaxOffsetForMediumAdjustment) {
+    Addiu(AT, base, kMaxDeltaForSimpleAdjustment);
+    if (offset <= kMinOffsetForMediumAdjustment) {
+      Addiu(AT, AT, offset - kMaxDeltaForSimpleAdjustment);
+      offset = 0;
+    } else {
+      Addiu(AT, AT, kMaxDeltaForSimpleAdjustment);
+      offset -= kMinOffsetForMediumAdjustment;
+    }
+  } else if (!IsR6() && -kMaxOffsetForMediumAdjustment <= offset && offset < 0) {
+    Addiu(AT, base, -kMaxDeltaForSimpleAdjustment);
+    if (-kMinOffsetForMediumAdjustment <= offset) {
+      Addiu(AT, AT, offset + kMaxDeltaForSimpleAdjustment);
+      offset = 0;
+    } else {
+      Addiu(AT, AT, -kMaxDeltaForSimpleAdjustment);
+      offset += kMinOffsetForMediumAdjustment;
+    }
+  } else {
+    // 16-bit or smaller parts of `offset`:
+    // |31  hi  16|15  mid  13-10|12-9  low  0|
+    //
+    // Instructions that supply each part as a signed integer addend:
+    // |aui       |addiu         |ld.df/st.df |
+    uint32_t tmp = static_cast<uint32_t>(offset) - low;  // Exclude `low` from the rest of `offset`
+                                                         // (accounts for sign of `low`).
+    tmp += (tmp & (UINT32_C(1) << 15)) << 1;  // Account for sign extension in addiu.
+    int16_t mid = Low16Bits(tmp);
+    int16_t hi = High16Bits(tmp);
+    if (IsR6()) {
+      Aui(AT, base, hi);
+    } else {
+      Lui(AT, hi);
+      Addu(AT, AT, base);
+    }
+    if (mid != 0) {
+      Addiu(AT, AT, mid);
+    }
+    offset = low;
+  }
+  base = AT;
+  CHECK_GE(JAVASTYLE_CTZ(offset), element_size_shift);
+  CHECK(IsInt<10>(offset >> element_size_shift));
+}
+
 void MipsAssembler::LoadFromOffset(LoadOperandType type,
                                    Register reg,
                                    Register base,
@@ -3239,6 +5168,10 @@ void MipsAssembler::LoadSFromOffset(FRegister reg, Register base, int32_t offset
 
 void MipsAssembler::LoadDFromOffset(FRegister reg, Register base, int32_t offset) {
   LoadDFromOffset<>(reg, base, offset);
+}
+
+void MipsAssembler::LoadQFromOffset(FRegister reg, Register base, int32_t offset) {
+  LoadQFromOffset<>(reg, base, offset);
 }
 
 void MipsAssembler::EmitLoad(ManagedRegister m_dst, Register src_register, int32_t src_offset,
@@ -3278,6 +5211,10 @@ void MipsAssembler::StoreSToOffset(FRegister reg, Register base, int32_t offset)
 
 void MipsAssembler::StoreDToOffset(FRegister reg, Register base, int32_t offset) {
   StoreDToOffset<>(reg, base, offset);
+}
+
+void MipsAssembler::StoreQToOffset(FRegister reg, Register base, int32_t offset) {
+  StoreQToOffset<>(reg, base, offset);
 }
 
 static dwarf::Reg DWARFReg(Register reg) {
@@ -3331,7 +5268,8 @@ void MipsAssembler::BuildFrame(size_t frame_size,
 }
 
 void MipsAssembler::RemoveFrame(size_t frame_size,
-                                ArrayRef<const ManagedRegister> callee_save_regs) {
+                                ArrayRef<const ManagedRegister> callee_save_regs,
+                                bool may_suspend ATTRIBUTE_UNUSED) {
   CHECK_ALIGNED(frame_size, kStackAlignment);
   DCHECK(!overwriting_);
   cfi_.RememberState();
@@ -3475,8 +5413,8 @@ void MipsAssembler::LoadRef(ManagedRegister mdest, ManagedRegister base, MemberO
   CHECK(dest.IsCoreRegister() && base.AsMips().IsCoreRegister());
   LoadFromOffset(kLoadWord, dest.AsCoreRegister(),
                  base.AsMips().AsCoreRegister(), offs.Int32Value());
-  if (kPoisonHeapReferences && unpoison_reference) {
-    Subu(dest.AsCoreRegister(), ZERO, dest.AsCoreRegister());
+  if (unpoison_reference) {
+    MaybeUnpoisonHeapReference(dest.AsCoreRegister());
   }
 }
 

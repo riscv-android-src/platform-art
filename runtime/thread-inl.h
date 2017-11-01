@@ -19,17 +19,13 @@
 
 #include "thread.h"
 
-#ifdef ART_TARGET_ANDROID
-#include <bionic_tls.h>  // Access to our own TLS slot.
-#endif
-
-#include <pthread.h>
-
 #include "base/casts.h"
 #include "base/mutex-inl.h"
-#include "gc/heap.h"
+#include "base/time_utils.h"
 #include "jni_env_ext.h"
-#include "runtime.h"
+#include "managed_stack-inl.h"
+#include "obj_ptr.h"
+#include "thread-current-inl.h"
 #include "thread_pool.h"
 
 namespace art {
@@ -38,21 +34,6 @@ namespace art {
 static inline Thread* ThreadForEnv(JNIEnv* env) {
   JNIEnvExt* full_env(down_cast<JNIEnvExt*>(env));
   return full_env->self;
-}
-
-inline Thread* Thread::Current() {
-  // We rely on Thread::Current returning null for a detached thread, so it's not obvious
-  // that we can replace this with a direct %fs access on x86.
-  if (!is_started_) {
-    return nullptr;
-  } else {
-#ifdef ART_TARGET_ANDROID
-    void* thread = __get_tls()[TLS_SLOT_ART_THREAD_SELF];
-#else
-    void* thread = pthread_getspecific(Thread::pthread_key_self_);
-#endif
-    return reinterpret_cast<Thread*>(thread);
-  }
 }
 
 inline void Thread::AllowThreadSuspension() {
@@ -80,7 +61,32 @@ inline void Thread::CheckSuspend() {
   }
 }
 
-inline void Thread::CheckEmptyCheckpoint() {
+inline void Thread::CheckEmptyCheckpointFromWeakRefAccess(BaseMutex* cond_var_mutex) {
+  Thread* self = Thread::Current();
+  DCHECK_EQ(self, this);
+  for (;;) {
+    if (ReadFlag(kEmptyCheckpointRequest)) {
+      RunEmptyCheckpoint();
+      // Check we hold only an expected mutex when accessing weak ref.
+      if (kIsDebugBuild) {
+        for (int i = kLockLevelCount - 1; i >= 0; --i) {
+          BaseMutex* held_mutex = self->GetHeldMutex(static_cast<LockLevel>(i));
+          if (held_mutex != nullptr &&
+              held_mutex != Locks::mutator_lock_ &&
+              held_mutex != cond_var_mutex) {
+            CHECK(Locks::IsExpectedOnWeakRefAccess(held_mutex))
+                << "Holding unexpected mutex " << held_mutex->GetName()
+                << " when accessing weak ref";
+          }
+        }
+      }
+    } else {
+      break;
+    }
+  }
+}
+
+inline void Thread::CheckEmptyCheckpointFromMutex() {
   DCHECK_EQ(Thread::Current(), this);
   for (;;) {
     if (ReadFlag(kEmptyCheckpointRequest)) {
@@ -115,9 +121,19 @@ inline bool Thread::IsThreadSuspensionAllowable() const {
     return false;
   }
   for (int i = kLockLevelCount - 1; i >= 0; --i) {
-    if (i != kMutatorLock && GetHeldMutex(static_cast<LockLevel>(i)) != nullptr) {
+    if (i != kMutatorLock &&
+        i != kUserCodeSuspensionLock &&
+        GetHeldMutex(static_cast<LockLevel>(i)) != nullptr) {
       return false;
     }
+  }
+  // Thread autoanalysis isn't able to understand that the GetHeldMutex(...) or AssertHeld means we
+  // have the mutex meaning we need to do this hack.
+  auto is_suspending_for_user_code = [this]() NO_THREAD_SAFETY_ANALYSIS {
+    return tls32_.user_code_suspend_count != 0;
+  };
+  if (GetHeldMutex(kUserCodeSuspensionLock) != nullptr && is_suspending_for_user_code()) {
+    return false;
   }
   return true;
 }
@@ -130,8 +146,9 @@ inline void Thread::AssertThreadSuspensionIsAllowable(bool check_locks) const {
     if (check_locks) {
       bool bad_mutexes_held = false;
       for (int i = kLockLevelCount - 1; i >= 0; --i) {
-        // We expect no locks except the mutator_lock_ or thread list suspend thread lock.
-        if (i != kMutatorLock) {
+        // We expect no locks except the mutator_lock_. User code suspension lock is OK as long as
+        // we aren't going to be held suspended due to SuspendReason::kForUserCode.
+        if (i != kMutatorLock && i != kUserCodeSuspensionLock) {
           BaseMutex* held_mutex = GetHeldMutex(static_cast<LockLevel>(i));
           if (held_mutex != nullptr) {
             LOG(ERROR) << "holding \"" << held_mutex->GetName()
@@ -139,6 +156,19 @@ inline void Thread::AssertThreadSuspensionIsAllowable(bool check_locks) const {
             bad_mutexes_held = true;
           }
         }
+      }
+      // Make sure that if we hold the user_code_suspension_lock_ we aren't suspending due to
+      // user_code_suspend_count which would prevent the thread from ever waking up.  Thread
+      // autoanalysis isn't able to understand that the GetHeldMutex(...) or AssertHeld means we
+      // have the mutex meaning we need to do this hack.
+      auto is_suspending_for_user_code = [this]() NO_THREAD_SAFETY_ANALYSIS {
+        return tls32_.user_code_suspend_count != 0;
+      };
+      if (GetHeldMutex(kUserCodeSuspensionLock) != nullptr && is_suspending_for_user_code()) {
+        LOG(ERROR) << "suspending due to user-code while holding \""
+                   << Locks::user_code_suspension_lock_->GetName() << "\"! Thread would never "
+                   << "wake up.";
+        bad_mutexes_held = true;
       }
       if (gAborting == 0) {
         CHECK(!bad_mutexes_held);
@@ -269,18 +299,6 @@ inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
   return static_cast<ThreadState>(old_state);
 }
 
-inline void Thread::VerifyStack() {
-  if (kVerifyStack) {
-    if (Runtime::Current()->GetHeap()->IsObjectValidationEnabled()) {
-      VerifyStackImpl();
-    }
-  }
-}
-
-inline size_t Thread::TlabSize() const {
-  return tlsPtr_.thread_local_end - tlsPtr_.thread_local_pos;
-}
-
 inline mirror::Object* Thread::AllocTlab(size_t bytes) {
   DCHECK_GE(TlabSize(), bytes);
   ++tlsPtr_.thread_local_objects;
@@ -328,7 +346,7 @@ inline void Thread::RevokeThreadLocalAllocationStack() {
 }
 
 inline void Thread::PoisonObjectPointersIfDebug() {
-  if (kIsDebugBuild) {
+  if (kObjPtrPoisoning) {
     Thread::Current()->PoisonObjectPointers();
   }
 }
@@ -336,12 +354,12 @@ inline void Thread::PoisonObjectPointersIfDebug() {
 inline bool Thread::ModifySuspendCount(Thread* self,
                                        int delta,
                                        AtomicInteger* suspend_barrier,
-                                       bool for_debugger) {
+                                       SuspendReason reason) {
   if (delta > 0 && ((kUseReadBarrier && this != self) || suspend_barrier != nullptr)) {
     // When delta > 0 (requesting a suspend), ModifySuspendCountInternal() may fail either if
     // active_suspend_barriers is full or we are in the middle of a thread flip. Retry in a loop.
     while (true) {
-      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger))) {
+      if (LIKELY(ModifySuspendCountInternal(self, delta, suspend_barrier, reason))) {
         return true;
       } else {
         // Failure means the list of active_suspend_barriers is full or we are in the middle of a
@@ -360,8 +378,16 @@ inline bool Thread::ModifySuspendCount(Thread* self,
       }
     }
   } else {
-    return ModifySuspendCountInternal(self, delta, suspend_barrier, for_debugger);
+    return ModifySuspendCountInternal(self, delta, suspend_barrier, reason);
   }
+}
+
+inline ShadowFrame* Thread::PushShadowFrame(ShadowFrame* new_top_frame) {
+  return tlsPtr_.managed_stack.PushShadowFrame(new_top_frame);
+}
+
+inline ShadowFrame* Thread::PopShadowFrame() {
+  return tlsPtr_.managed_stack.PopShadowFrame();
 }
 
 }  // namespace art

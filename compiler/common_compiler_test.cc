@@ -18,22 +18,23 @@
 
 #include "arch/instruction_set_features.h"
 #include "art_field-inl.h"
-#include "art_method.h"
+#include "art_method-inl.h"
+#include "base/callee_save_type.h"
 #include "base/enums.h"
 #include "class_linker.h"
-#include "compiled_method.h"
+#include "compiled_method-inl.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "interpreter/interpreter.h"
-#include "mirror/class_loader.h"
 #include "mirror/class-inl.h"
+#include "mirror/class_loader.h"
 #include "mirror/dex_cache.h"
 #include "mirror/object-inl.h"
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 namespace art {
@@ -52,14 +53,20 @@ void CommonCompilerTest::MakeExecutable(ArtMethod* method) {
         compiler_driver_->GetCompiledMethod(MethodReference(&dex_file,
                                                             method->GetDexMethodIndex()));
   }
-  if (compiled_method != nullptr) {
+  // If the code size is 0 it means the method was skipped due to profile guided compilation.
+  if (compiled_method != nullptr && compiled_method->GetQuickCode().size() != 0u) {
     ArrayRef<const uint8_t> code = compiled_method->GetQuickCode();
-    uint32_t code_size = code.size();
-    CHECK_NE(0u, code_size);
+    const uint32_t code_size = code.size();
     ArrayRef<const uint8_t> vmap_table = compiled_method->GetVmapTable();
-    uint32_t vmap_table_offset = vmap_table.empty() ? 0u
+    const uint32_t vmap_table_offset = vmap_table.empty() ? 0u
         : sizeof(OatQuickMethodHeader) + vmap_table.size();
+    // The method info is directly before the vmap table.
+    ArrayRef<const uint8_t> method_info = compiled_method->GetMethodInfo();
+    const uint32_t method_info_offset = method_info.empty() ? 0u
+        : vmap_table_offset + method_info.size();
+
     OatQuickMethodHeader method_header(vmap_table_offset,
+                                       method_info_offset,
                                        compiled_method->GetFrameSizeInBytes(),
                                        compiled_method->GetCoreSpillMask(),
                                        compiled_method->GetFpSpillMask(),
@@ -68,11 +75,12 @@ void CommonCompilerTest::MakeExecutable(ArtMethod* method) {
     header_code_and_maps_chunks_.push_back(std::vector<uint8_t>());
     std::vector<uint8_t>* chunk = &header_code_and_maps_chunks_.back();
     const size_t max_padding = GetInstructionSetAlignment(compiled_method->GetInstructionSet());
-    const size_t size = vmap_table.size() + sizeof(method_header) + code_size;
+    const size_t size = method_info.size() + vmap_table.size() + sizeof(method_header) + code_size;
     chunk->reserve(size + max_padding);
     chunk->resize(sizeof(method_header));
     memcpy(&(*chunk)[0], &method_header, sizeof(method_header));
     chunk->insert(chunk->begin(), vmap_table.begin(), vmap_table.end());
+    chunk->insert(chunk->begin(), method_info.begin(), method_info.end());
     chunk->insert(chunk->end(), code.begin(), code.end());
     CHECK_EQ(chunk->size(), size);
     const void* unaligned_code_ptr = chunk->data() + (size - code_size);
@@ -87,7 +95,7 @@ void CommonCompilerTest::MakeExecutable(ArtMethod* method) {
     const void* method_code = CompiledMethod::CodePointer(code_ptr,
                                                           compiled_method->GetInstructionSet());
     LOG(INFO) << "MakeExecutable " << method->PrettyMethod() << " code=" << method_code;
-    class_linker_->SetEntryPointsToCompiledCode(method, method_code);
+    method->SetEntryPointFromQuickCompiledCode(method_code);
   } else {
     // No code? You must mean to go into the interpreter.
     // Or the generic JNI...
@@ -159,8 +167,8 @@ void CommonCompilerTest::SetUp() {
     instruction_set_features_ = InstructionSetFeatures::FromCppDefines();
 
     runtime_->SetInstructionSet(instruction_set);
-    for (int i = 0; i < Runtime::kLastCalleeSaveType; i++) {
-      Runtime::CalleeSaveType type = Runtime::CalleeSaveType(i);
+    for (uint32_t i = 0; i < static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {
+      CalleeSaveType type = CalleeSaveType(i);
       if (!runtime_->HasCalleeSaveMethod(type)) {
         runtime_->SetCalleeSaveMethod(runtime_->CreateCalleeSaveMethod(), type);
       }
@@ -175,6 +183,7 @@ void CommonCompilerTest::CreateCompilerDriver(Compiler::Kind kind,
                                               InstructionSet isa,
                                               size_t number_of_threads) {
   compiler_options_->boot_image_ = true;
+  compiler_options_->SetCompilerFilter(GetCompilerFilter());
   compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
                                             verification_results_.get(),
                                             kind,
@@ -198,8 +207,10 @@ void CommonCompilerTest::SetUpRuntimeOptions(RuntimeOptions* options) {
 
   compiler_options_.reset(new CompilerOptions);
   verification_results_.reset(new VerificationResults(compiler_options_.get()));
-  callbacks_.reset(new QuickCompilerCallbacks(verification_results_.get(),
-                                              CompilerCallbacks::CallbackMode::kCompileApp));
+  QuickCompilerCallbacks* callbacks =
+      new QuickCompilerCallbacks(CompilerCallbacks::CallbackMode::kCompileApp);
+  callbacks->SetVerificationResults(verification_results_.get());
+  callbacks_.reset(callbacks);
 }
 
 Compiler::Kind CommonCompilerTest::GetCompilerKind() const {
@@ -256,8 +267,8 @@ void CommonCompilerTest::CompileDirectMethod(Handle<mirror::ClassLoader> class_l
   mirror::Class* klass = class_linker_->FindClass(self, class_descriptor.c_str(), class_loader);
   CHECK(klass != nullptr) << "Class not found " << class_name;
   auto pointer_size = class_linker_->GetImagePointerSize();
-  ArtMethod* method = klass->FindDirectMethod(method_name, signature, pointer_size);
-  CHECK(method != nullptr) << "Direct method not found: "
+  ArtMethod* method = klass->FindClassMethod(method_name, signature, pointer_size);
+  CHECK(method != nullptr && method->IsDirect()) << "Direct method not found: "
       << class_name << "." << method_name << signature;
   CompileMethod(method);
 }
@@ -270,8 +281,8 @@ void CommonCompilerTest::CompileVirtualMethod(Handle<mirror::ClassLoader> class_
   mirror::Class* klass = class_linker_->FindClass(self, class_descriptor.c_str(), class_loader);
   CHECK(klass != nullptr) << "Class not found " << class_name;
   auto pointer_size = class_linker_->GetImagePointerSize();
-  ArtMethod* method = klass->FindVirtualMethod(method_name, signature, pointer_size);
-  CHECK(method != nullptr) << "Virtual method not found: "
+  ArtMethod* method = klass->FindClassMethod(method_name, signature, pointer_size);
+  CHECK(method != nullptr && !method->IsDirect()) << "Virtual method not found: "
       << class_name << "." << method_name << signature;
   CompileMethod(method);
 }

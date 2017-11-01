@@ -15,8 +15,8 @@
  */
 
 #include "gc_cause.h"
-#include "globals.h"
 #include "base/logging.h"
+#include "globals.h"
 
 #include <ostream>
 
@@ -25,10 +25,12 @@ namespace gc {
 
 const char* PrettyCause(GcCause cause) {
   switch (cause) {
+    case kGcCauseNone: return "None";
     case kGcCauseForAlloc: return "Alloc";
     case kGcCauseBackground: return "Background";
     case kGcCauseExplicit: return "Explicit";
     case kGcCauseForNativeAlloc: return "NativeAlloc";
+    case kGcCauseForNativeAllocBlocking: return "NativeAllocBlocking";
     case kGcCauseCollectorTransition: return "CollectorTransition";
     case kGcCauseDisableMovingGc: return "DisableMovingGc";
     case kGcCauseHomogeneousSpaceCompact: return "HomogeneousSpaceCompact";
@@ -39,6 +41,9 @@ const char* PrettyCause(GcCause cause) {
     case kGcCauseClassLinker: return "ClassLinker";
     case kGcCauseJitCodeCache: return "JitCodeCache";
     case kGcCauseAddRemoveSystemWeakHolder: return "SystemWeakHolder";
+    case kGcCauseHprof: return "Hprof";
+    case kGcCauseGetObjectsAllocated: return "ObjectsAllocated";
+    case kGcCauseProfileSaver: return "ProfileSaver";
   }
   LOG(FATAL) << "Unreachable";
   UNREACHABLE();

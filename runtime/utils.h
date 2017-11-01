@@ -20,12 +20,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 
-#include <limits>
-#include <memory>
 #include <random>
 #include <string>
-#include <type_traits>
-#include <vector>
 
 #include "arch/instruction_set.h"
 #include "base/casts.h"
@@ -70,8 +66,6 @@ static inline uint32_t PointerToLowMemUInt32(const void* p) {
   return intp & 0xFFFFFFFFU;
 }
 
-uint8_t* DecodeBase64(const char* src, size_t* dst_size);
-
 std::string PrintableChar(uint16_t ch);
 
 // Returns an ASCII string corresponding to the given UTF-8 string.
@@ -83,12 +77,9 @@ std::string PrintableString(const char* utf8);
 // Returns a human-readable equivalent of 'descriptor'. So "I" would be "int",
 // "[[I" would be "int[][]", "[Ljava/lang/String;" would be
 // "java.lang.String[]", and so forth.
+void AppendPrettyDescriptor(const char* descriptor, std::string* result);
 std::string PrettyDescriptor(const char* descriptor);
 std::string PrettyDescriptor(Primitive::Type type);
-
-// Utilities for printing the types for method signatures.
-std::string PrettyArguments(const char* signature);
-std::string PrettyReturnType(const char* signature);
 
 // Returns a human-readable version of the Java part of the access flags, e.g., "private static "
 // (note the trailing whitespace).
@@ -100,6 +91,8 @@ std::string PrettySize(int64_t size_in_bytes);
 // Performs JNI name mangling as described in section 11.3 "Linking Native Methods"
 // of the JNI spec.
 std::string MangleForJni(const std::string& s);
+
+std::string GetJniShortName(const std::string& class_name, const std::string& method_name);
 
 // Turn "java.lang.String" into "Ljava/lang/String;".
 std::string DotToDescriptor(const char* class_name);
@@ -121,9 +114,6 @@ bool IsValidDescriptor(const char* s);       // "Ljava/lang/String;"
 // additionally allowing names that begin with '<' and end with '>'.
 bool IsValidMemberName(const char* s);
 
-bool ReadFileToString(const std::string& file_name, std::string* result);
-bool PrintFileToLog(const std::string& file_name, LogSeverity level);
-
 // Splits a string using the given separator character into a vector of
 // strings. Empty strings will be omitted.
 void Split(const std::string& s, char separator, std::vector<std::string>* result);
@@ -134,56 +124,12 @@ pid_t GetTid();
 // Returns the given thread's name.
 std::string GetThreadName(pid_t tid);
 
-// Reads data from "/proc/self/task/${tid}/stat".
-void GetTaskStats(pid_t tid, char* state, int* utime, int* stime, int* task_cpu);
-
 // Sets the name of the current thread. The name may be truncated to an
 // implementation-defined limit.
 void SetThreadName(const char* thread_name);
 
-// Find $ANDROID_ROOT, /system, or abort.
-const char* GetAndroidRoot();
-
-// Find $ANDROID_DATA, /data, or abort.
-const char* GetAndroidData();
-// Find $ANDROID_DATA, /data, or return null.
-const char* GetAndroidDataSafe(std::string* error_msg);
-
-// Returns the dalvik-cache location, with subdir appended. Returns the empty string if the cache
-// could not be found.
-std::string GetDalvikCache(const char* subdir);
-// Return true if we found the dalvik cache and stored it in the dalvik_cache argument.
-// have_android_data will be set to true if we have an ANDROID_DATA that exists,
-// dalvik_cache_exists will be true if there is a dalvik-cache directory that is present.
-// The flag is_global_cache tells whether this cache is /data/dalvik-cache.
-void GetDalvikCache(const char* subdir, bool create_if_absent, std::string* dalvik_cache,
-                    bool* have_android_data, bool* dalvik_cache_exists, bool* is_global_cache);
-
-// Returns the absolute dalvik-cache path for a DexFile or OatFile. The path returned will be
-// rooted at cache_location.
-bool GetDalvikCacheFilename(const char* file_location, const char* cache_location,
-                            std::string* filename, std::string* error_msg);
-
-// Returns the system location for an image
-std::string GetSystemImageFilename(const char* location, InstructionSet isa);
-
-// Wrapper on fork/execv to run a command in a subprocess.
-// Both of these spawn child processes using the environment as it was set when the single instance
-// of the runtime (Runtime::Current()) was started.  If no instance of the runtime was started, it
-// will use the current environment settings.
-bool Exec(std::vector<std::string>& arg_vector, std::string* error_msg);
-int ExecAndReturnCode(std::vector<std::string>& arg_vector, std::string* error_msg);
-
-// Returns true if the file exists.
-bool FileExists(const std::string& filename);
-bool FileExistsAndNotEmpty(const std::string& filename);
-
-// Returns `filename` with the text after the last occurrence of '.' replaced with
-// `extension`. If `filename` does not contain a period, returns a string containing `filename`,
-// a period, and `new_extension`.
-// Example: ReplaceFileExtension("foo.bar", "abc") == "foo.abc"
-//          ReplaceFileExtension("foo", "abc") == "foo.abc"
-std::string ReplaceFileExtension(const std::string& filename, const std::string& new_extension);
+// Reads data from "/proc/self/task/${tid}/stat".
+void GetTaskStats(pid_t tid, char* state, int* utime, int* stime, int* task_cpu);
 
 class VoidFunctor {
  public:
@@ -274,9 +220,6 @@ static T GetRandomNumber(T min, T max) {
   return dist(rng);
 }
 
-// Return the file size in bytes or -1 if the file does not exists.
-int64_t GetFileSizeBytes(const std::string& filename);
-
 // Sleep forever and never come back.
 NO_RETURN void SleepForever();
 
@@ -297,6 +240,51 @@ constexpr PointerSize ConvertToPointerSize(T any) {
   } else {
     LOG(FATAL);
     UNREACHABLE();
+  }
+}
+
+// Returns a type cast pointer if object pointed to is within the provided bounds.
+// Otherwise returns nullptr.
+template <typename T>
+inline static T BoundsCheckedCast(const void* pointer,
+                                  const void* lower,
+                                  const void* upper) {
+  const uint8_t* bound_begin = static_cast<const uint8_t*>(lower);
+  const uint8_t* bound_end = static_cast<const uint8_t*>(upper);
+  DCHECK(bound_begin <= bound_end);
+
+  T result = reinterpret_cast<T>(pointer);
+  const uint8_t* begin = static_cast<const uint8_t*>(pointer);
+  const uint8_t* end = begin + sizeof(*result);
+  if (begin < bound_begin || end > bound_end || begin > end) {
+    return nullptr;
+  }
+  return result;
+}
+
+template <typename T, size_t size>
+constexpr size_t ArrayCount(const T (&)[size]) {
+  return size;
+}
+
+// Return -1 if <, 0 if ==, 1 if >.
+template <typename T>
+inline static int32_t Compare(T lhs, T rhs) {
+  return (lhs < rhs) ? -1 : ((lhs == rhs) ? 0 : 1);
+}
+
+// Return -1 if < 0, 0 if == 0, 1 if > 0.
+template <typename T>
+inline static int32_t Signum(T opnd) {
+  return (opnd < 0) ? -1 : ((opnd == 0) ? 0 : 1);
+}
+
+template <typename Func, typename... Args>
+static inline void CheckedCall(const Func& function, const char* what, Args... args) {
+  int rc = function(args...);
+  if (UNLIKELY(rc != 0)) {
+    errno = rc;
+    PLOG(FATAL) << "Checked call failed for " << what;
   }
 }
 

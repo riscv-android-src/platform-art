@@ -32,19 +32,20 @@
 #include "common_throws.h"
 #include "debugger.h"
 #include "dex_file-inl.h"
+#include "entrypoints/quick/quick_entrypoints.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "instrumentation.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
-#include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-inl.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "os.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
+#include "stack.h"
 #include "thread.h"
 #include "thread_list.h"
 #include "utils.h"
-#include "entrypoints/quick/quick_entrypoints.h"
 
 namespace art {
 
@@ -54,6 +55,7 @@ static constexpr size_t TraceActionBits = MinimumBitsToStore(
     static_cast<size_t>(kTraceMethodActionMask));
 static constexpr uint8_t kOpNewMethod = 1U;
 static constexpr uint8_t kOpNewThread = 2U;
+static constexpr uint8_t kOpTraceSummary = 3U;
 
 class BuildStackTraceVisitor : public StackVisitor {
  public:
@@ -700,20 +702,19 @@ void Trace::FinishTracing() {
   std::string header(os.str());
 
   if (trace_output_mode_ == TraceOutputMode::kStreaming) {
-    File file(streaming_file_name_ + ".sec", O_CREAT | O_WRONLY, true);
-    if (!file.IsOpened()) {
-      LOG(WARNING) << "Could not open secondary trace file!";
-      return;
-    }
-    if (!file.WriteFully(header.c_str(), header.length())) {
-      file.Erase();
-      std::string detail(StringPrintf("Trace data write failed: %s", strerror(errno)));
-      PLOG(ERROR) << detail;
-      ThrowRuntimeException("%s", detail.c_str());
-    }
-    if (file.FlushCloseOrErase() != 0) {
-      PLOG(ERROR) << "Could not write secondary file";
-    }
+    MutexLock mu(Thread::Current(), *streaming_lock_);  // To serialize writing.
+    // Write a special token to mark the end of trace records and the start of
+    // trace summary.
+    uint8_t buf[7];
+    Append2LE(buf, 0);
+    buf[2] = kOpTraceSummary;
+    Append4LE(buf + 3, static_cast<uint32_t>(header.length()));
+    WriteToBuf(buf, sizeof(buf));
+    // Write the trace summary. The summary is identical to the file header when
+    // the output mode is not streaming (except for methods).
+    WriteToBuf(reinterpret_cast<const uint8_t*>(header.c_str()), header.length());
+    // Flush the buffer, which may include some trace records before the summary.
+    FlushBuf();
   } else {
     if (trace_file_.get() == nullptr) {
       iovec iov[2];
@@ -739,7 +740,7 @@ void Trace::FinishTracing() {
 }
 
 void Trace::DexPcMoved(Thread* thread ATTRIBUTE_UNUSED,
-                       mirror::Object* this_object ATTRIBUTE_UNUSED,
+                       Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
                        ArtMethod* method,
                        uint32_t new_dex_pc) {
   // We're not recorded to listen to this kind of event, so complain.
@@ -748,7 +749,7 @@ void Trace::DexPcMoved(Thread* thread ATTRIBUTE_UNUSED,
 }
 
 void Trace::FieldRead(Thread* thread ATTRIBUTE_UNUSED,
-                      mirror::Object* this_object ATTRIBUTE_UNUSED,
+                      Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
                       ArtMethod* method,
                       uint32_t dex_pc,
                       ArtField* field ATTRIBUTE_UNUSED)
@@ -759,7 +760,7 @@ void Trace::FieldRead(Thread* thread ATTRIBUTE_UNUSED,
 }
 
 void Trace::FieldWritten(Thread* thread ATTRIBUTE_UNUSED,
-                         mirror::Object* this_object ATTRIBUTE_UNUSED,
+                         Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
                          ArtMethod* method,
                          uint32_t dex_pc,
                          ArtField* field ATTRIBUTE_UNUSED,
@@ -770,8 +771,10 @@ void Trace::FieldWritten(Thread* thread ATTRIBUTE_UNUSED,
              << " " << dex_pc;
 }
 
-void Trace::MethodEntered(Thread* thread, mirror::Object* this_object ATTRIBUTE_UNUSED,
-                          ArtMethod* method, uint32_t dex_pc ATTRIBUTE_UNUSED) {
+void Trace::MethodEntered(Thread* thread,
+                          Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
+                          ArtMethod* method,
+                          uint32_t dex_pc ATTRIBUTE_UNUSED) {
   uint32_t thread_clock_diff = 0;
   uint32_t wall_clock_diff = 0;
   ReadClocks(thread, &thread_clock_diff, &wall_clock_diff);
@@ -779,8 +782,10 @@ void Trace::MethodEntered(Thread* thread, mirror::Object* this_object ATTRIBUTE_
                       thread_clock_diff, wall_clock_diff);
 }
 
-void Trace::MethodExited(Thread* thread, mirror::Object* this_object ATTRIBUTE_UNUSED,
-                         ArtMethod* method, uint32_t dex_pc ATTRIBUTE_UNUSED,
+void Trace::MethodExited(Thread* thread,
+                         Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
+                         ArtMethod* method,
+                         uint32_t dex_pc ATTRIBUTE_UNUSED,
                          const JValue& return_value ATTRIBUTE_UNUSED) {
   uint32_t thread_clock_diff = 0;
   uint32_t wall_clock_diff = 0;
@@ -789,8 +794,10 @@ void Trace::MethodExited(Thread* thread, mirror::Object* this_object ATTRIBUTE_U
                       thread_clock_diff, wall_clock_diff);
 }
 
-void Trace::MethodUnwind(Thread* thread, mirror::Object* this_object ATTRIBUTE_UNUSED,
-                         ArtMethod* method, uint32_t dex_pc ATTRIBUTE_UNUSED) {
+void Trace::MethodUnwind(Thread* thread,
+                         Handle<mirror::Object> this_object ATTRIBUTE_UNUSED,
+                         ArtMethod* method,
+                         uint32_t dex_pc ATTRIBUTE_UNUSED) {
   uint32_t thread_clock_diff = 0;
   uint32_t wall_clock_diff = 0;
   ReadClocks(thread, &thread_clock_diff, &wall_clock_diff);
@@ -798,10 +805,16 @@ void Trace::MethodUnwind(Thread* thread, mirror::Object* this_object ATTRIBUTE_U
                       thread_clock_diff, wall_clock_diff);
 }
 
-void Trace::ExceptionCaught(Thread* thread ATTRIBUTE_UNUSED,
-                            mirror::Throwable* exception_object ATTRIBUTE_UNUSED)
+void Trace::ExceptionThrown(Thread* thread ATTRIBUTE_UNUSED,
+                            Handle<mirror::Throwable> exception_object ATTRIBUTE_UNUSED)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  LOG(ERROR) << "Unexpected exception caught event in tracing";
+  LOG(ERROR) << "Unexpected exception thrown event in tracing";
+}
+
+void Trace::ExceptionHandled(Thread* thread ATTRIBUTE_UNUSED,
+                             Handle<mirror::Throwable> exception_object ATTRIBUTE_UNUSED)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  LOG(ERROR) << "Unexpected exception thrown event in tracing";
 }
 
 void Trace::Branch(Thread* /*thread*/, ArtMethod* method,
@@ -811,12 +824,17 @@ void Trace::Branch(Thread* /*thread*/, ArtMethod* method,
 }
 
 void Trace::InvokeVirtualOrInterface(Thread*,
-                                     mirror::Object*,
+                                     Handle<mirror::Object>,
                                      ArtMethod* method,
                                      uint32_t dex_pc,
                                      ArtMethod*) {
   LOG(ERROR) << "Unexpected invoke event in tracing" << ArtMethod::PrettyMethod(method)
              << " " << dex_pc;
+}
+
+void Trace::WatchedFramePop(Thread* self ATTRIBUTE_UNUSED,
+                            const ShadowFrame& frame ATTRIBUTE_UNUSED) {
+  LOG(ERROR) << "Unexpected WatchedFramePop event in tracing";
 }
 
 void Trace::ReadClocks(Thread* thread, uint32_t* thread_clock_diff, uint32_t* wall_clock_diff) {
@@ -894,9 +912,20 @@ void Trace::WriteToBuf(const uint8_t* src, size_t src_size) {
   memcpy(buf_.get() + old_offset, src, src_size);
 }
 
+void Trace::FlushBuf() {
+  int32_t offset = cur_offset_.LoadRelaxed();
+  if (!trace_file_->WriteFully(buf_.get(), offset)) {
+    PLOG(WARNING) << "Failed flush the remaining data in streaming.";
+  }
+  cur_offset_.StoreRelease(0);
+}
+
 void Trace::LogMethodTraceEvent(Thread* thread, ArtMethod* method,
                                 instrumentation::Instrumentation::InstrumentationEvent event,
                                 uint32_t thread_clock_diff, uint32_t wall_clock_diff) {
+  // Ensure we always use the non-obsolete version of the method so that entry/exit events have the
+  // same pointer value.
+  method = method->GetNonObsoleteMethod();
   // Advance cur_offset_ atomically.
   int32_t new_offset;
   int32_t old_offset = 0;

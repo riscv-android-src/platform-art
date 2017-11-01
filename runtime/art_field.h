@@ -47,7 +47,16 @@ class ArtField FINAL {
   void SetDeclaringClass(ObjPtr<mirror::Class> new_declaring_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_);
+  mirror::CompressedReference<mirror::Object>* GetDeclaringClassAddressWithoutBarrier() {
+    return declaring_class_.AddressWithoutBarrier();
+  }
+
+  uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kIsDebugBuild) {
+      GetAccessFlagsDCheck();
+    }
+    return access_flags_;
+  }
 
   void SetAccessFlags(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_) {
     // Not called within a transaction.
@@ -76,7 +85,12 @@ class ArtField FINAL {
   }
 
   // Offset to field within an Object.
-  MemberOffset GetOffset() REQUIRES_SHARED(Locks::mutator_lock_);
+  MemberOffset GetOffset() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kIsDebugBuild) {
+      GetOffsetDCheck();
+    }
+    return MemberOffset(offset_);
+  }
 
   static MemberOffset OffsetOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtField, offset_));
@@ -157,7 +171,9 @@ class ArtField FINAL {
 
   // NO_THREAD_SAFETY_ANALYSIS since we don't know what the callback requires.
   template<typename RootVisitorType>
-  void VisitRoots(RootVisitorType& visitor) NO_THREAD_SAFETY_ANALYSIS;
+  ALWAYS_INLINE inline void VisitRoots(RootVisitorType& visitor) NO_THREAD_SAFETY_ANALYSIS {
+    visitor.VisitRoot(declaring_class_.AddressWithoutBarrier());
+  }
 
   bool IsVolatile() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccVolatile) != 0;
@@ -217,13 +233,14 @@ class ArtField FINAL {
  private:
   ObjPtr<mirror::Class> ProxyFindSystemClass(const char* descriptor)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<mirror::Class> ResolveGetType(dex::TypeIndex type_idx)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   ObjPtr<mirror::String> ResolveGetStringName(Thread* self,
                                               const DexFile& dex_file,
                                               dex::StringIndex string_idx,
                                               ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
+  void GetOffsetDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
 
   GcRoot<mirror::Class> declaring_class_;
 

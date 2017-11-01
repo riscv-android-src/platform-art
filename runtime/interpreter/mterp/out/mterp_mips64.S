@@ -21,17 +21,50 @@
  * limitations under the License.
  */
 
-#include <machine/regdef.h>
+#define zero $0  /* always zero */
+#define AT   $at /* assembler temp */
+#define v0   $2  /* return value */
+#define v1   $3
+#define a0   $4  /* argument registers */
+#define a1   $5
+#define a2   $6
+#define a3   $7
+#define a4   $8  /* expanded register arguments */
+#define a5   $9
+#define a6   $10
+#define a7   $11
+#define ta0  $8  /* alias */
+#define ta1  $9
+#define ta2  $10
+#define ta3  $11
+#define t0   $12 /* temp registers (not saved across subroutine calls) */
+#define t1   $13
+#define t2   $14
+#define t3   $15
 
-/* TODO: add the missing file and use its FP register definitions. */
-/* #include <machine/fpregdef.h> */
-/* FP register definitions */
-#define f0  $f0
-#define f1  $f1
-#define f2  $f2
-#define f3  $f3
-#define f12 $f12
-#define f13 $f13
+#define s0   $16 /* saved across subroutine calls (callee saved) */
+#define s1   $17
+#define s2   $18
+#define s3   $19
+#define s4   $20
+#define s5   $21
+#define s6   $22
+#define s7   $23
+#define t8   $24 /* two more temp registers */
+#define t9   $25
+#define k0   $26 /* kernel temporary */
+#define k1   $27
+#define gp   $28 /* global pointer */
+#define sp   $29 /* stack pointer */
+#define s8   $30 /* one more callee saved */
+#define ra   $31 /* return address */
+
+#define f0   $f0
+#define f1   $f1
+#define f2   $f2
+#define f3   $f3
+#define f12  $f12
+#define f13  $f13
 
 /*
  * It looks like the GNU assembler currently does not support the blec and bgtc
@@ -383,6 +416,7 @@ ExecuteMterpImpl:
     /* Set up for backwards branches & osr profiling */
     ld      a0, OFF_FP_METHOD(rFP)
     daddu   a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rSELF
     jal     MterpSetUpHotnessCountdown
     move    rPROFILE, v0                # Starting hotness countdown to rPROFILE
 
@@ -395,7 +429,6 @@ ExecuteMterpImpl:
 
 
     .global artMterpAsmInstructionStart
-    .type   artMterpAsmInstructionStart, %function
 artMterpAsmInstructionStart = .L_op_nop
     .text
 
@@ -827,19 +860,24 @@ artMterpAsmInstructionStart = .L_op_nop
     .balign 128
 .L_op_const_string: /* 0x1a */
 /* File: mips64/op_const_string.S */
-    /* const/string vAA, String//BBBB */
+/* File: mips64/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
     .extern MterpConstString
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- BBBB
     srl     a1, rINST, 8                # a1 <- AA
     daddu   a2, rFP, OFF_FP_SHADOWFRAME
     move    a3, rSELF
-    jal     MterpConstString            # (index, tgt_reg, shadow_frame, self)
+    jal     MterpConstString                     # (index, tgt_reg, shadow_frame, self)
     PREFETCH_INST 2                     # load rINST
     bnez    v0, MterpPossibleException  # let reference interpreter deal with it.
     ADVANCE 2                           # advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
     GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -865,19 +903,24 @@ artMterpAsmInstructionStart = .L_op_nop
     .balign 128
 .L_op_const_class: /* 0x1c */
 /* File: mips64/op_const_class.S */
-    /* const/class vAA, Class//BBBB */
+/* File: mips64/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
     .extern MterpConstClass
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- BBBB
     srl     a1, rINST, 8                # a1 <- AA
     daddu   a2, rFP, OFF_FP_SHADOWFRAME
     move    a3, rSELF
-    jal     MterpConstClass             # (index, tgt_reg, shadow_frame, self)
+    jal     MterpConstClass                     # (index, tgt_reg, shadow_frame, self)
     PREFETCH_INST 2                     # load rINST
     bnez    v0, MterpPossibleException  # let reference interpreter deal with it.
     ADVANCE 2                           # advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
     GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -1174,7 +1217,6 @@ artMterpAsmInstructionStart = .L_op_nop
      */
     /* op vAA, +BBBBBBBB */
     .extern MterpDoPackedSwitch
-    .extern MterpProfileBranch
     lh      a0, 2(rPC)                  # a0 <- bbbb (lo)
     lh      a1, 4(rPC)                  # a1 <- BBBB (hi)
     srl     a3, rINST, 8                # a3 <- AA
@@ -1201,7 +1243,6 @@ artMterpAsmInstructionStart = .L_op_nop
      */
     /* op vAA, +BBBBBBBB */
     .extern MterpDoSparseSwitch
-    .extern MterpProfileBranch
     lh      a0, 2(rPC)                  # a0 <- bbbb (lo)
     lh      a1, 4(rPC)                  # a1 <- BBBB (hi)
     srl     a3, rINST, 8                # a3 <- AA
@@ -1396,7 +1437,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -1423,7 +1463,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -1450,7 +1489,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -1477,7 +1515,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -1504,7 +1541,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -1531,7 +1567,6 @@ artMterpAsmInstructionStart = .L_op_nop
      * For: if-eq, if-ne, if-lt, if-ge, if-gt, if-le
      */
     /* if-cmp vA, vB, +CCCC */
-    .extern MterpProfileBranch
     ext     a2, rINST, 8, 4             # a2 <- A
     ext     a3, rINST, 12, 4            # a3 <- B
     lh      rINST, 2(rPC)               # rINST <- offset (sign-extended CCCC)
@@ -2593,12 +2628,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGet32StaticFromCode
+    .extern MterpGet32Static
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGet32StaticFromCode
+    jal     MterpGet32Static
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     
@@ -2622,12 +2657,12 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      */
     /* sget-wide vAA, field//BBBB */
-    .extern artGet64StaticFromCode
+    .extern MterpGet64Static
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGet64StaticFromCode
+    jal     MterpGet64Static
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a4, rINST, 8                # a4 <- AA
     bnez    a3, MterpException          # bail out
@@ -2647,12 +2682,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGetObjStaticFromCode
+    .extern MterpGetObjStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGetObjStaticFromCode
+    jal     MterpGetObjStatic
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     
@@ -2679,12 +2714,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGetBooleanStaticFromCode
+    .extern MterpGetBooleanStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGetBooleanStaticFromCode
+    jal     MterpGetBooleanStatic
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     and v0, v0, 0xff
@@ -2711,12 +2746,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGetByteStaticFromCode
+    .extern MterpGetByteStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGetByteStaticFromCode
+    jal     MterpGetByteStatic
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     seb v0, v0
@@ -2743,12 +2778,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGetCharStaticFromCode
+    .extern MterpGetCharStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGetCharStaticFromCode
+    jal     MterpGetCharStatic
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     and v0, v0, 0xffff
@@ -2775,12 +2810,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field//BBBB */
-    .extern artGetShortStaticFromCode
+    .extern MterpGetShortStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     ld      a1, OFF_FP_METHOD(rFP)
     move    a2, rSELF
-    jal     artGetShortStaticFromCode
+    jal     MterpGetShortStatic
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF)
     srl     a2, rINST, 8                # a2 <- AA
     seh v0, v0
@@ -2806,7 +2841,7 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sput, sput-boolean, sput-byte, sput-char, sput-short
      */
     /* op vAA, field//BBBB */
-    .extern artSet32StaticFromCode
+    .extern MterpSet32Static
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     srl     a3, rINST, 8                # a3 <- AA
@@ -2814,7 +2849,7 @@ artMterpAsmInstructionStart = .L_op_nop
     ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet32StaticFromCode
+    jal     MterpSet32Static
     bnezc   v0, MterpException          # 0 on success
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -2829,15 +2864,15 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      */
     /* sput-wide vAA, field//BBBB */
-    .extern artSet64IndirectStaticFromMterp
+    .extern MterpSet64Static
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
-    ld      a1, OFF_FP_METHOD(rFP)
-    srl     a2, rINST, 8                # a2 <- AA
-    dlsa    a2, a2, rFP, 2
+    srl     a1, rINST, 8                # a2 <- AA
+    dlsa    a1, a1, rFP, 2
+    ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet64IndirectStaticFromMterp
+    jal     MterpSet64Static
     bnezc   v0, MterpException          # 0 on success, -1 on failure
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -2870,7 +2905,7 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sput, sput-boolean, sput-byte, sput-char, sput-short
      */
     /* op vAA, field//BBBB */
-    .extern artSet8StaticFromCode
+    .extern MterpSetBooleanStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     srl     a3, rINST, 8                # a3 <- AA
@@ -2878,7 +2913,7 @@ artMterpAsmInstructionStart = .L_op_nop
     ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet8StaticFromCode
+    jal     MterpSetBooleanStatic
     bnezc   v0, MterpException          # 0 on success
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -2896,7 +2931,7 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sput, sput-boolean, sput-byte, sput-char, sput-short
      */
     /* op vAA, field//BBBB */
-    .extern artSet8StaticFromCode
+    .extern MterpSetByteStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     srl     a3, rINST, 8                # a3 <- AA
@@ -2904,7 +2939,7 @@ artMterpAsmInstructionStart = .L_op_nop
     ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet8StaticFromCode
+    jal     MterpSetByteStatic
     bnezc   v0, MterpException          # 0 on success
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -2922,7 +2957,7 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sput, sput-boolean, sput-byte, sput-char, sput-short
      */
     /* op vAA, field//BBBB */
-    .extern artSet16StaticFromCode
+    .extern MterpSetCharStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     srl     a3, rINST, 8                # a3 <- AA
@@ -2930,7 +2965,7 @@ artMterpAsmInstructionStart = .L_op_nop
     ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet16StaticFromCode
+    jal     MterpSetCharStatic
     bnezc   v0, MterpException          # 0 on success
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -2948,7 +2983,7 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sput, sput-boolean, sput-byte, sput-char, sput-short
      */
     /* op vAA, field//BBBB */
-    .extern artSet16StaticFromCode
+    .extern MterpSetShortStatic
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- field ref BBBB
     srl     a3, rINST, 8                # a3 <- AA
@@ -2956,7 +2991,7 @@ artMterpAsmInstructionStart = .L_op_nop
     ld      a2, OFF_FP_METHOD(rFP)
     move    a3, rSELF
     PREFETCH_INST 2                     # Get next inst, but don't advance rPC
-    jal     artSet16StaticFromCode
+    jal     MterpSetShortStatic
     bnezc   v0, MterpException          # 0 on success
     ADVANCE 2                           # Past exception point - now advance rPC
     GET_INST_OPCODE v0                  # extract opcode from rINST
@@ -3707,19 +3742,27 @@ artMterpAsmInstructionStart = .L_op_nop
     GET_VREG_FLOAT f0, a2
     FETCH_ADVANCE_INST 1                # advance rPC, load rINST
 
+    trunc.w.s f0, f0
+/* File: mips64/fcvtFooter.S */
     /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
+     * Stores a specified register containing the result of conversion
+     * from or to a floating-point type and jumps to the next instruction.
+     *
+     * Expects a1 to contain the destination Dalvik register number.
+     * a1 is set up by fcvtHeader.S.
+     *
+     * For: int-to-float, int-to-double, long-to-float, long-to-double,
+     *      float-to-int, float-to-long, float-to-double, double-to-int,
+     *      double-to-long, double-to-float, neg-float, neg-double.
+     *
+     * Note that this file can't be included after a break in other files
+     * and in those files its contents appear as a copy.
+     * See: float-to-int, float-to-long, double-to-int, double-to-long.
      */
-    li      t0, INT_MIN_AS_FLOAT
-    mtc1    t0, f1
-    cmp.le.s f1, f1, f0
-    bc1nez  f1, .Lop_float_to_int_trunc
-    cmp.eq.s f1, f0, f0
-    li      t0, INT_MIN
-    mfc1    t1, f1
-    and     t0, t0, t1
-    b       .Lop_float_to_int_done
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    SET_VREG_FLOAT f0, a1
+    GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -3742,19 +3785,27 @@ artMterpAsmInstructionStart = .L_op_nop
     GET_VREG_FLOAT f0, a2
     FETCH_ADVANCE_INST 1                # advance rPC, load rINST
 
+    trunc.l.s f0, f0
+/* File: mips64/fcvtFooter.S */
     /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
+     * Stores a specified register containing the result of conversion
+     * from or to a floating-point type and jumps to the next instruction.
+     *
+     * Expects a1 to contain the destination Dalvik register number.
+     * a1 is set up by fcvtHeader.S.
+     *
+     * For: int-to-float, int-to-double, long-to-float, long-to-double,
+     *      float-to-int, float-to-long, float-to-double, double-to-int,
+     *      double-to-long, double-to-float, neg-float, neg-double.
+     *
+     * Note that this file can't be included after a break in other files
+     * and in those files its contents appear as a copy.
+     * See: float-to-int, float-to-long, double-to-int, double-to-long.
      */
-    li      t0, LONG_MIN_AS_FLOAT
-    mtc1    t0, f1
-    cmp.le.s f1, f1, f0
-    bc1nez  f1, .Lop_float_to_long_trunc
-    cmp.eq.s f1, f0, f0
-    dli     t0, LONG_MIN
-    mfc1    t1, f1
-    and     t0, t0, t1
-    b       .Lop_float_to_long_done
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    SET_VREG_DOUBLE f0, a1
+    GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -3825,19 +3876,27 @@ artMterpAsmInstructionStart = .L_op_nop
     GET_VREG_DOUBLE f0, a2
     FETCH_ADVANCE_INST 1                # advance rPC, load rINST
 
+    trunc.w.d f0, f0
+/* File: mips64/fcvtFooter.S */
     /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
+     * Stores a specified register containing the result of conversion
+     * from or to a floating-point type and jumps to the next instruction.
+     *
+     * Expects a1 to contain the destination Dalvik register number.
+     * a1 is set up by fcvtHeader.S.
+     *
+     * For: int-to-float, int-to-double, long-to-float, long-to-double,
+     *      float-to-int, float-to-long, float-to-double, double-to-int,
+     *      double-to-long, double-to-float, neg-float, neg-double.
+     *
+     * Note that this file can't be included after a break in other files
+     * and in those files its contents appear as a copy.
+     * See: float-to-int, float-to-long, double-to-int, double-to-long.
      */
-    dli     t0, INT_MIN_AS_DOUBLE
-    dmtc1   t0, f1
-    cmp.le.d f1, f1, f0
-    bc1nez  f1, .Lop_double_to_int_trunc
-    cmp.eq.d f1, f0, f0
-    li      t0, INT_MIN
-    mfc1    t1, f1
-    and     t0, t0, t1
-    b       .Lop_double_to_int_done
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    SET_VREG_FLOAT f0, a1
+    GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -3860,19 +3919,27 @@ artMterpAsmInstructionStart = .L_op_nop
     GET_VREG_DOUBLE f0, a2
     FETCH_ADVANCE_INST 1                # advance rPC, load rINST
 
+    trunc.l.d f0, f0
+/* File: mips64/fcvtFooter.S */
     /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
+     * Stores a specified register containing the result of conversion
+     * from or to a floating-point type and jumps to the next instruction.
+     *
+     * Expects a1 to contain the destination Dalvik register number.
+     * a1 is set up by fcvtHeader.S.
+     *
+     * For: int-to-float, int-to-double, long-to-float, long-to-double,
+     *      float-to-int, float-to-long, float-to-double, double-to-int,
+     *      double-to-long, double-to-float, neg-float, neg-double.
+     *
+     * Note that this file can't be included after a break in other files
+     * and in those files its contents appear as a copy.
+     * See: float-to-int, float-to-long, double-to-int, double-to-long.
      */
-    dli     t0, LONG_MIN_AS_DOUBLE
-    dmtc1   t0, f1
-    cmp.le.d f1, f1, f0
-    bc1nez  f1, .Lop_double_to_long_trunc
-    cmp.eq.d f1, f0, f0
-    dli     t0, LONG_MIN
-    mfc1    t1, f1
-    and     t0, t0, t1
-    b       .Lop_double_to_long_done
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    SET_VREG_DOUBLE f0, a1
+    GOTO_OPCODE v0                      # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -7081,61 +7148,154 @@ artMterpAsmInstructionStart = .L_op_nop
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic: /* 0xfa */
-/* Transfer stub to alternate interpreter */
-    b       MterpFallback
+/* File: mips64/op_invoke_polymorphic.S */
+/* File: mips64/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphic
+    .extern MterpShouldSwitchInterpreters
+    EXPORT_PC
+    move    a0, rSELF
+    daddu   a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    jal     MterpInvokePolymorphic
+    beqzc   v0, MterpException
+    FETCH_ADVANCE_INST 4
+    jal     MterpShouldSwitchInterpreters
+    bnezc   v0, MterpFallback
+    GET_INST_OPCODE v0
+    GOTO_OPCODE v0
+
 
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic_range: /* 0xfb */
-/* Transfer stub to alternate interpreter */
-    b       MterpFallback
-
-/* ------------------------------ */
-    .balign 128
-.L_op_unused_fc: /* 0xfc */
-/* File: mips64/op_unused_fc.S */
-/* File: mips64/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    b       MterpFallback
-
-
-/* ------------------------------ */
-    .balign 128
-.L_op_unused_fd: /* 0xfd */
-/* File: mips64/op_unused_fd.S */
-/* File: mips64/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    b       MterpFallback
+/* File: mips64/op_invoke_polymorphic_range.S */
+/* File: mips64/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphicRange
+    .extern MterpShouldSwitchInterpreters
+    EXPORT_PC
+    move    a0, rSELF
+    daddu   a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    jal     MterpInvokePolymorphicRange
+    beqzc   v0, MterpException
+    FETCH_ADVANCE_INST 4
+    jal     MterpShouldSwitchInterpreters
+    bnezc   v0, MterpFallback
+    GET_INST_OPCODE v0
+    GOTO_OPCODE v0
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_fe: /* 0xfe */
-/* File: mips64/op_unused_fe.S */
-/* File: mips64/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    b       MterpFallback
+.L_op_invoke_custom: /* 0xfc */
+/* File: mips64/op_invoke_custom.S */
+/* File: mips64/invoke.S */
+    /*
+     * Generic invoke handler wrapper.
+     */
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustom
+    .extern MterpShouldSwitchInterpreters
+    EXPORT_PC
+    move    a0, rSELF
+    daddu   a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    jal     MterpInvokeCustom
+    beqzc   v0, MterpException
+    FETCH_ADVANCE_INST 3
+    jal     MterpShouldSwitchInterpreters
+    bnezc   v0, MterpFallback
+    GET_INST_OPCODE v0
+    GOTO_OPCODE v0
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_ff: /* 0xff */
-/* File: mips64/op_unused_ff.S */
-/* File: mips64/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    b       MterpFallback
+.L_op_invoke_custom_range: /* 0xfd */
+/* File: mips64/op_invoke_custom_range.S */
+/* File: mips64/invoke.S */
+    /*
+     * Generic invoke handler wrapper.
+     */
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustomRange
+    .extern MterpShouldSwitchInterpreters
+    EXPORT_PC
+    move    a0, rSELF
+    daddu   a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    jal     MterpInvokeCustomRange
+    beqzc   v0, MterpException
+    FETCH_ADVANCE_INST 3
+    jal     MterpShouldSwitchInterpreters
+    bnezc   v0, MterpFallback
+    GET_INST_OPCODE v0
+    GOTO_OPCODE v0
+
+
+/* ------------------------------ */
+    .balign 128
+.L_op_const_method_handle: /* 0xfe */
+/* File: mips64/op_const_method_handle.S */
+/* File: mips64/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodHandle
+    EXPORT_PC
+    lhu     a0, 2(rPC)                  # a0 <- BBBB
+    srl     a1, rINST, 8                # a1 <- AA
+    daddu   a2, rFP, OFF_FP_SHADOWFRAME
+    move    a3, rSELF
+    jal     MterpConstMethodHandle                     # (index, tgt_reg, shadow_frame, self)
+    PREFETCH_INST 2                     # load rINST
+    bnez    v0, MterpPossibleException  # let reference interpreter deal with it.
+    ADVANCE 2                           # advance rPC
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    GOTO_OPCODE v0                      # jump to next instruction
+
+
+/* ------------------------------ */
+    .balign 128
+.L_op_const_method_type: /* 0xff */
+/* File: mips64/op_const_method_type.S */
+/* File: mips64/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodType
+    EXPORT_PC
+    lhu     a0, 2(rPC)                  # a0 <- BBBB
+    srl     a1, rINST, 8                # a1 <- AA
+    daddu   a2, rFP, OFF_FP_SHADOWFRAME
+    move    a3, rSELF
+    jal     MterpConstMethodType                     # (index, tgt_reg, shadow_frame, self)
+    PREFETCH_INST 2                     # load rINST
+    bnez    v0, MterpPossibleException  # let reference interpreter deal with it.
+    ADVANCE 2                           # advance rPC
+    GET_INST_OPCODE v0                  # extract opcode from rINST
+    GOTO_OPCODE v0                      # jump to next instruction
 
 
     .balign 128
-    .size   artMterpAsmInstructionStart, .-artMterpAsmInstructionStart
     .global artMterpAsmInstructionEnd
 artMterpAsmInstructionEnd:
 
@@ -7145,58 +7305,14 @@ artMterpAsmInstructionEnd:
  * ===========================================================================
  */
     .global artMterpAsmSisterStart
-    .type   artMterpAsmSisterStart, %function
     .text
     .balign 4
 artMterpAsmSisterStart:
-
-/* continuation for op_float_to_int */
-.Lop_float_to_int_trunc:
-    trunc.w.s f0, f0
-    mfc1    t0, f0
-.Lop_float_to_int_done:
-    /* Can't include fcvtFooter.S after break */
-    GET_INST_OPCODE v0                  # extract opcode from rINST
-    SET_VREG t0, a1
-    GOTO_OPCODE v0                      # jump to next instruction
-
-/* continuation for op_float_to_long */
-.Lop_float_to_long_trunc:
-    trunc.l.s f0, f0
-    dmfc1   t0, f0
-.Lop_float_to_long_done:
-    /* Can't include fcvtFooter.S after break */
-    GET_INST_OPCODE v0                  # extract opcode from rINST
-    SET_VREG_WIDE t0, a1
-    GOTO_OPCODE v0                      # jump to next instruction
-
-/* continuation for op_double_to_int */
-.Lop_double_to_int_trunc:
-    trunc.w.d f0, f0
-    mfc1    t0, f0
-.Lop_double_to_int_done:
-    /* Can't include fcvtFooter.S after break */
-    GET_INST_OPCODE v0                  # extract opcode from rINST
-    SET_VREG t0, a1
-    GOTO_OPCODE v0                      # jump to next instruction
-
-/* continuation for op_double_to_long */
-.Lop_double_to_long_trunc:
-    trunc.l.d f0, f0
-    dmfc1   t0, f0
-.Lop_double_to_long_done:
-    /* Can't include fcvtFooter.S after break */
-    GET_INST_OPCODE v0                  # extract opcode from rINST
-    SET_VREG_WIDE t0, a1
-    GOTO_OPCODE v0                      # jump to next instruction
-
-    .size   artMterpAsmSisterStart, .-artMterpAsmSisterStart
     .global artMterpAsmSisterEnd
 artMterpAsmSisterEnd:
 
 
     .global artMterpAsmAltInstructionStart
-    .type   artMterpAsmAltInstructionStart, %function
     .text
 
 artMterpAsmAltInstructionStart = .L_ALT_op_nop
@@ -11990,7 +12106,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fc: /* 0xfc */
+.L_ALT_op_invoke_custom: /* 0xfc */
 /* File: mips64/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12009,7 +12125,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fd: /* 0xfd */
+.L_ALT_op_invoke_custom_range: /* 0xfd */
 /* File: mips64/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12028,7 +12144,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fe: /* 0xfe */
+.L_ALT_op_const_method_handle: /* 0xfe */
 /* File: mips64/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12047,7 +12163,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_ff: /* 0xff */
+.L_ALT_op_const_method_type: /* 0xff */
 /* File: mips64/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12065,7 +12181,6 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
     jalr    zero, t9                            # (self, shadow_frame, dex_pc_ptr) Note: tail call.
 
     .balign 128
-    .size   artMterpAsmAltInstructionStart, .-artMterpAsmAltInstructionStart
     .global artMterpAsmAltInstructionEnd
 artMterpAsmAltInstructionEnd:
 /* File: mips64/footer.S */

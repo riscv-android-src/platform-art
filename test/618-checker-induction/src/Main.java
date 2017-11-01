@@ -21,6 +21,8 @@ public class Main {
 
   static int[] a = new int[10];
 
+  static int[] novec = new int[20];  // to prevent vectorization
+
   /// CHECK-START: void Main.deadSingleLoop() loop_optimization (before)
   /// CHECK-DAG: Phi loop:{{B\d+}} outer_loop:none
   //
@@ -132,16 +134,18 @@ public class Main {
   /// CHECK-START: void Main.deadInduction() loop_optimization (before)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
   /// CHECK-START: void Main.deadInduction() loop_optimization (after)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-NOT: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   static void deadInduction() {
     int dead = 0;
     for (int i = 0; i < a.length; i++) {
-      a[i] = 1;
+      a[i] = novec[2 * i] + 1;
       dead += 5;
     }
   }
@@ -151,17 +155,19 @@ public class Main {
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
   /// CHECK-START: void Main.deadManyInduction() loop_optimization (after)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-NOT: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   static void deadManyInduction() {
     int dead1 = 0, dead2 = 1, dead3 = 3;
     for (int i = 0; i < a.length; i++) {
       dead1 += 5;
-      a[i] = 2;
+      a[i] = novec[2 * i] + 2;
       dead2 += 10;
       dead3 += 100;
     }
@@ -170,16 +176,18 @@ public class Main {
   /// CHECK-START: void Main.deadSequence() loop_optimization (before)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   //
   /// CHECK-START: void Main.deadSequence() loop_optimization (after)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-NOT: Phi      loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   static void deadSequence() {
     int dead = 0;
     for (int i = 0; i < a.length; i++) {
-      a[i] = 3;
+      a[i] = novec[2 * i] + 3;
       // Increment value defined inside loop,
       // but sequence itself not used anywhere.
       dead += i;
@@ -191,17 +199,19 @@ public class Main {
   /// CHECK-DAG: Phi      loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-NOT: BoundsCheck
   //
   /// CHECK-START: void Main.deadCycleWithException(int) loop_optimization (after)
   /// CHECK-DAG: Phi      loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-NOT: Phi      loop:<<Loop>>      outer_loop:none
   /// CHECK-DAG: ArraySet loop:<<Loop>>      outer_loop:none
+  /// CHECK-DAG: ArrayGet loop:<<Loop>>      outer_loop:none
   /// CHECK-NOT: ArrayGet loop:<<Loop>>      outer_loop:none
   static void deadCycleWithException(int k) {
     int dead = 0;
     for (int i = 0; i < a.length; i++) {
-      a[i] = 4;
+      a[i] = novec[2 * i] + 4;
       // Increment value of dead cycle may throw exception. Dynamic
       // BCE takes care of the bounds check though, which enables
       // removing the ArrayGet after removing the dead cycle.
@@ -454,6 +464,19 @@ public class Main {
     for (int i = 0; i < 6; i++) {
       k++;
       sum += k;
+    }
+    return sum;
+  }
+
+  // Ensure double induction does not "overshoot" the subscript range.
+  private static int getIncr2(int[] arr) {
+    for (int i = 0; i < 12; ) {
+      arr[i++] = 30;
+      arr[i++] = 29;
+    }
+    int sum = 0;
+    for (int i = 0; i < 12; i++) {
+      sum += arr[i];
     }
     return sum;
   }
@@ -859,6 +882,7 @@ public class Main {
     expectEquals(1, periodicReturned9());
     expectEquals(0, periodicReturned10());
     expectEquals(21, getSum21());
+    expectEquals(354, getIncr2(new int[12]));
     for (int n = -4; n < 4; n++) {
       int tc = (n <= 0) ? 0 : n;
       expectEquals(tc, mainIndexReturnedN(n));

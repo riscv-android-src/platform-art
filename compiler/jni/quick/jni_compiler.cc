@@ -17,36 +17,36 @@
 #include "jni_compiler.h"
 
 #include <algorithm>
+#include <fstream>
 #include <ios>
 #include <memory>
 #include <vector>
-#include <fstream>
 
 #include "art_method.h"
 #include "base/arena_allocator.h"
 #include "base/enums.h"
 #include "base/logging.h"
 #include "base/macros.h"
-#include "memory_region.h"
 #include "calling_convention.h"
 #include "class_linker.h"
 #include "compiled_method.h"
+#include "debug/dwarf/debug_frame_opcode_writer.h"
 #include "dex_file-inl.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "jni_env_ext.h"
-#include "debug/dwarf/debug_frame_opcode_writer.h"
+#include "memory_region.h"
+#include "thread.h"
+#include "utils.h"
+#include "utils/arm/managed_register_arm.h"
+#include "utils/arm64/managed_register_arm64.h"
 #include "utils/assembler.h"
 #include "utils/jni_macro_assembler.h"
 #include "utils/managed_register.h"
-#include "utils/arm/managed_register_arm.h"
-#include "utils/arm64/managed_register_arm64.h"
 #include "utils/mips/managed_register_mips.h"
 #include "utils/mips64/managed_register_mips64.h"
 #include "utils/x86/managed_register_x86.h"
-#include "utils.h"
-#include "thread.h"
 
 #define __ jni_asm->
 
@@ -66,8 +66,8 @@ static void SetNativeParameter(JNIMacroAssembler<kPointerSize>* jni_asm,
 
 template <PointerSize kPointerSize>
 static std::unique_ptr<JNIMacroAssembler<kPointerSize>> GetMacroAssembler(
-    ArenaAllocator* arena, InstructionSet isa, const InstructionSetFeatures* features) {
-  return JNIMacroAssembler<kPointerSize>::Create(arena, isa, features);
+    ArenaAllocator* allocator, InstructionSet isa, const InstructionSetFeatures* features) {
+  return JNIMacroAssembler<kPointerSize>::Create(allocator, isa, features);
 }
 
 enum class JniEntrypoint {
@@ -179,11 +179,11 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   }
 
   ArenaPool pool;
-  ArenaAllocator arena(&pool);
+  ArenaAllocator allocator(&pool);
 
   // Calling conventions used to iterate over parameters to method
   std::unique_ptr<JniCallingConvention> main_jni_conv =
-      JniCallingConvention::Create(&arena,
+      JniCallingConvention::Create(&allocator,
                                    is_static,
                                    is_synchronized,
                                    is_critical_native,
@@ -193,7 +193,7 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
 
   std::unique_ptr<ManagedRuntimeCallingConvention> mr_conv(
       ManagedRuntimeCallingConvention::Create(
-          &arena, is_static, is_synchronized, shorty, instruction_set));
+          &allocator, is_static, is_synchronized, shorty, instruction_set));
 
   // Calling conventions to call into JNI method "end" possibly passing a returned reference, the
   //     method and the current thread.
@@ -209,7 +209,7 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   }
 
   std::unique_ptr<JniCallingConvention> end_jni_conv(
-      JniCallingConvention::Create(&arena,
+      JniCallingConvention::Create(&allocator,
                                    is_static,
                                    is_synchronized,
                                    is_critical_native,
@@ -218,8 +218,10 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
 
   // Assembler that holds generated instructions
   std::unique_ptr<JNIMacroAssembler<kPointerSize>> jni_asm =
-      GetMacroAssembler<kPointerSize>(&arena, instruction_set, instruction_set_features);
-  jni_asm->cfi().SetEnabled(driver->GetCompilerOptions().GenerateAnyDebugInfo());
+      GetMacroAssembler<kPointerSize>(&allocator, instruction_set, instruction_set_features);
+  const CompilerOptions& compiler_options = driver->GetCompilerOptions();
+  jni_asm->cfi().SetEnabled(compiler_options.GenerateAnyDebugInfo());
+  jni_asm->SetEmitRunTimeChecksInDebugMode(compiler_options.EmitRunTimeChecksInDebugMode());
 
   // Offsets into data structures
   // TODO: if cross compiling these offsets are for the host not the target
@@ -644,7 +646,10 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   // 16. Remove activation - need to restore callee save registers since the GC may have changed
   //     them.
   DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
-  __ RemoveFrame(frame_size, callee_save_regs);
+  // We expect the compiled method to possibly be suspended during its
+  // execution, except in the case of a CriticalNative method.
+  bool may_suspend = !is_critical_native;
+  __ RemoveFrame(frame_size, callee_save_regs, may_suspend);
   DCHECK_EQ(jni_asm->cfi().GetCurrentCFAOffset(), static_cast<int>(frame_size));
 
   // 17. Finalize code generation
@@ -660,10 +665,10 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
                                                  frame_size,
                                                  main_jni_conv->CoreSpillMask(),
                                                  main_jni_conv->FpSpillMask(),
-                                                 ArrayRef<const SrcMapElem>(),
-                                                 ArrayRef<const uint8_t>(),  // vmap_table.
+                                                 /* method_info */ ArrayRef<const uint8_t>(),
+                                                 /* vmap_table */ ArrayRef<const uint8_t>(),
                                                  ArrayRef<const uint8_t>(*jni_asm->cfi().data()),
-                                                 ArrayRef<const LinkerPatch>());
+                                                 ArrayRef<const linker::LinkerPatch>());
 }
 
 // Copy a single parameter from the managed to the JNI calling convention.

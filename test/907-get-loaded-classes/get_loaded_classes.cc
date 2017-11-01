@@ -14,19 +14,22 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
 #include <vector>
 
-#include "base/macros.h"
-#include "jni.h"
-#include "openjdkjvmti/jvmti.h"
-#include "ScopedLocalRef.h"
-#include "ScopedUtfChars.h"
+#include "android-base/macros.h"
 
-#include "ti-agent/common_helper.h"
-#include "ti-agent/common_load.h"
+#include "jni.h"
+#include "jvmti.h"
+#include "scoped_local_ref.h"
+#include "scoped_utf_chars.h"
+
+// Test infrastructure
+#include "jni_helper.h"
+#include "test_env.h"
 
 namespace art {
 namespace Test907GetLoadedClasses {
@@ -37,7 +40,7 @@ static jstring GetClassName(JNIEnv* jni_env, jclass cls) {
   return reinterpret_cast<jstring>(jni_env->CallObjectMethod(cls, mid));
 }
 
-extern "C" JNIEXPORT jobjectArray JNICALL Java_Main_getLoadedClasses(
+extern "C" JNIEXPORT jobjectArray JNICALL Java_art_Test907_getLoadedClasses(
     JNIEnv* env, jclass klass ATTRIBUTE_UNUSED) {
   jint count = -1;
   jclass* classes = nullptr;

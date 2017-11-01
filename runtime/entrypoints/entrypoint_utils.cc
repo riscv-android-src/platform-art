@@ -26,6 +26,7 @@
 #include "entrypoints/quick/callee_save_frame.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
+#include "java_vm_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
@@ -38,98 +39,13 @@
 
 namespace art {
 
-static inline mirror::Class* CheckFilledNewArrayAlloc(dex::TypeIndex type_idx,
-                                                      int32_t component_count,
-                                                      ArtMethod* referrer,
-                                                      Thread* self,
-                                                      bool access_check)
-    REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_) {
-  if (UNLIKELY(component_count < 0)) {
-    ThrowNegativeArraySizeException(component_count);
-    return nullptr;  // Failure
-  }
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  PointerSize pointer_size = class_linker->GetImagePointerSize();
-  mirror::Class* klass = referrer->GetDexCacheResolvedType<false>(type_idx, pointer_size);
-  if (UNLIKELY(klass == nullptr)) {  // Not in dex cache so try to resolve
-    klass = class_linker->ResolveType(type_idx, referrer);
-    if (klass == nullptr) {  // Error
-      DCHECK(self->IsExceptionPending());
-      return nullptr;  // Failure
-    }
-  }
-  if (UNLIKELY(klass->IsPrimitive() && !klass->IsPrimitiveInt())) {
-    if (klass->IsPrimitiveLong() || klass->IsPrimitiveDouble()) {
-      ThrowRuntimeException("Bad filled array request for type %s",
-                            klass->PrettyDescriptor().c_str());
-    } else {
-      self->ThrowNewExceptionF(
-          "Ljava/lang/InternalError;",
-          "Found type %s; filled-new-array not implemented for anything but 'int'",
-          klass->PrettyDescriptor().c_str());
-    }
-    return nullptr;  // Failure
-  }
-  if (access_check) {
-    mirror::Class* referrer_klass = referrer->GetDeclaringClass();
-    if (UNLIKELY(!referrer_klass->CanAccess(klass))) {
-      ThrowIllegalAccessErrorClass(referrer_klass, klass);
-      return nullptr;  // Failure
-    }
-  }
-  DCHECK(klass->IsArrayClass()) << klass->PrettyClass();
-  return klass;
-}
-
-// Helper function to allocate array for FILLED_NEW_ARRAY.
-mirror::Array* CheckAndAllocArrayFromCode(dex::TypeIndex type_idx,
-                                          int32_t component_count,
-                                          ArtMethod* referrer,
-                                          Thread* self,
-                                          bool access_check,
-                                          gc::AllocatorType allocator_type ATTRIBUTE_UNUSED) {
-  mirror::Class* klass = CheckFilledNewArrayAlloc(type_idx, component_count, referrer, self,
-                                                  access_check);
-  if (UNLIKELY(klass == nullptr)) {
-    return nullptr;
-  }
-  // Always go slow path for now, filled new array is not common.
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  // Use the current allocator type in case CheckFilledNewArrayAlloc caused us to suspend and then
-  // the heap switched the allocator type while we were suspended.
-  return mirror::Array::Alloc<false>(self, klass, component_count,
-                                     klass->GetComponentSizeShift(),
-                                     heap->GetCurrentAllocator());
-}
-
-// Helper function to allocate array for FILLED_NEW_ARRAY.
-mirror::Array* CheckAndAllocArrayFromCodeInstrumented(
-    dex::TypeIndex type_idx,
-    int32_t component_count,
-    ArtMethod* referrer,
-    Thread* self,
-    bool access_check,
-    gc::AllocatorType allocator_type ATTRIBUTE_UNUSED) {
-  mirror::Class* klass = CheckFilledNewArrayAlloc(type_idx, component_count, referrer, self,
-                                                  access_check);
-  if (UNLIKELY(klass == nullptr)) {
-    return nullptr;
-  }
-  gc::Heap* heap = Runtime::Current()->GetHeap();
-  // Use the current allocator type in case CheckFilledNewArrayAlloc caused us to suspend and then
-  // the heap switched the allocator type while we were suspended.
-  return mirror::Array::Alloc<true>(self, klass, component_count,
-                                    klass->GetComponentSizeShift(),
-                                    heap->GetCurrentAllocator());
-}
-
 void CheckReferenceResult(Handle<mirror::Object> o, Thread* self) {
-  if (o.Get() == nullptr) {
+  if (o == nullptr) {
     return;
   }
   // Make sure that the result is an instance of the type this method was expected to return.
   ArtMethod* method = self->GetCurrentMethod(nullptr);
-  mirror::Class* return_type = method->GetReturnType(true /* resolve */, kRuntimePointerSize);
+  ObjPtr<mirror::Class> return_type = method->ResolveReturnType();
 
   if (!o->InstanceOf(return_type)) {
     Runtime::Current()->GetJavaVM()->JniAbortF(nullptr,
@@ -192,8 +108,7 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
       ArtMethod* interface_method =
           soa.Decode<mirror::Method>(interface_method_jobj)->GetArtMethod();
       // This can cause thread suspension.
-      PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-      mirror::Class* result_type = interface_method->GetReturnType(true /* resolve */, pointer_size);
+      ObjPtr<mirror::Class> result_type = interface_method->ResolveReturnType();
       ObjPtr<mirror::Object> result_ref = soa.Decode<mirror::Object>(result);
       JValue result_unboxed;
       if (!UnboxPrimitiveForResult(result_ref.Ptr(), result_type, &result_unboxed)) {
@@ -221,10 +136,10 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
         // Rely on the fact that the methods are contiguous to determine the index of the method in
         // the slice.
         int throws_index = (reinterpret_cast<uintptr_t>(proxy_method) -
-            reinterpret_cast<uintptr_t>(&virtual_methods.At(0))) / method_size;
+            reinterpret_cast<uintptr_t>(&virtual_methods[0])) / method_size;
         CHECK_LT(throws_index, static_cast<int>(num_virtuals));
         mirror::ObjectArray<mirror::Class>* declared_exceptions =
-            proxy_class->GetThrows()->Get(throws_index);
+            proxy_class->GetProxyThrows()->Get(throws_index);
         mirror::Class* exception_class = exception->GetClass();
         for (int32_t i = 0; i < declared_exceptions->GetLength() && !declares_exception; i++) {
           mirror::Class* declared_exception = declared_exceptions->Get(i);
@@ -261,11 +176,8 @@ bool FillArrayData(ObjPtr<mirror::Object> obj, const Instruction::ArrayDataPaylo
   return true;
 }
 
-ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
-                                     Runtime::CalleeSaveType type,
-                                     bool do_caller_check)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  ScopedAssertNoThreadSuspension ants(__FUNCTION__);
+static inline std::pair<ArtMethod*, uintptr_t> DoGetCalleeSaveMethodOuterCallerAndPc(
+    ArtMethod** sp, CalleeSaveType type) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK_EQ(*sp, Runtime::Current()->GetCalleeSaveMethod(type));
 
   const size_t callee_frame_size = GetCalleeSaveFrameSize(kRuntimeISA, type);
@@ -275,6 +187,13 @@ ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
   uintptr_t caller_pc = *reinterpret_cast<uintptr_t*>(
       (reinterpret_cast<uint8_t*>(sp) + callee_return_pc_offset));
   ArtMethod* outer_method = *caller_sp;
+  return std::make_pair(outer_method, caller_pc);
+}
+
+static inline ArtMethod* DoGetCalleeSaveMethodCaller(ArtMethod* outer_method,
+                                                     uintptr_t caller_pc,
+                                                     bool do_caller_check)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   ArtMethod* caller = outer_method;
   if (LIKELY(caller_pc != reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()))) {
     if (outer_method != nullptr) {
@@ -283,15 +202,17 @@ ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
       DCHECK(current_code->IsOptimized());
       uintptr_t native_pc_offset = current_code->NativeQuickPcOffset(caller_pc);
       CodeInfo code_info = current_code->GetOptimizedCodeInfo();
+      MethodInfo method_info = current_code->GetOptimizedMethodInfo();
       CodeInfoEncoding encoding = code_info.ExtractEncoding();
       StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
       DCHECK(stack_map.IsValid());
-      if (stack_map.HasInlineInfo(encoding.stack_map_encoding)) {
+      if (stack_map.HasInlineInfo(encoding.stack_map.encoding)) {
         InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
         caller = GetResolvedMethod(outer_method,
+                                   method_info,
                                    inline_info,
-                                   encoding.inline_info_encoding,
-                                   inline_info.GetDepth(encoding.inline_info_encoding) - 1);
+                                   encoding.inline_info.encoding,
+                                   inline_info.GetDepth(encoding.inline_info.encoding) - 1);
       }
     }
     if (kIsDebugBuild && do_caller_check) {
@@ -308,8 +229,35 @@ ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
     visitor.WalkStack();
     caller = visitor.caller;
   }
-
   return caller;
+}
+
+ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp, CalleeSaveType type, bool do_caller_check)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedAssertNoThreadSuspension ants(__FUNCTION__);
+  auto outer_caller_and_pc = DoGetCalleeSaveMethodOuterCallerAndPc(sp, type);
+  ArtMethod* outer_method = outer_caller_and_pc.first;
+  uintptr_t caller_pc = outer_caller_and_pc.second;
+  ArtMethod* caller = DoGetCalleeSaveMethodCaller(outer_method, caller_pc, do_caller_check);
+  return caller;
+}
+
+CallerAndOuterMethod GetCalleeSaveMethodCallerAndOuterMethod(Thread* self, CalleeSaveType type) {
+  CallerAndOuterMethod result;
+  ScopedAssertNoThreadSuspension ants(__FUNCTION__);
+  ArtMethod** sp = self->GetManagedStack()->GetTopQuickFrame();
+  auto outer_caller_and_pc = DoGetCalleeSaveMethodOuterCallerAndPc(sp, type);
+  result.outer_method = outer_caller_and_pc.first;
+  uintptr_t caller_pc = outer_caller_and_pc.second;
+  result.caller =
+      DoGetCalleeSaveMethodCaller(result.outer_method, caller_pc, /* do_caller_check */ true);
+  return result;
+}
+
+ArtMethod* GetCalleeSaveOuterMethod(Thread* self, CalleeSaveType type) {
+  ScopedAssertNoThreadSuspension ants(__FUNCTION__);
+  ArtMethod** sp = self->GetManagedStack()->GetTopQuickFrame();
+  return DoGetCalleeSaveMethodOuterCallerAndPc(sp, type).first;
 }
 
 }  // namespace art

@@ -17,13 +17,14 @@
 #include "mark_sweep.h"
 
 #include <atomic>
+#include <climits>
 #include <functional>
 #include <numeric>
-#include <climits>
 #include <vector>
 
 #include "base/bounded_fifo.h"
 #include "base/enums.h"
+#include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex-inl.h"
@@ -42,7 +43,7 @@
 #include "mirror/object-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "thread_list.h"
 
 namespace art {
@@ -532,7 +533,8 @@ inline bool MarkSweep::MarkObjectParallel(mirror::Object* obj) {
   return !mark_bitmap_->AtomicTestAndSet(obj, visitor);
 }
 
-void MarkSweep::MarkHeapReference(mirror::HeapReference<mirror::Object>* ref) {
+void MarkSweep::MarkHeapReference(mirror::HeapReference<mirror::Object>* ref,
+                                  bool do_atomic_update ATTRIBUTE_UNUSED) {
   MarkObject(ref->AsMirrorPtr(), nullptr, MemberOffset(0));
 }
 
@@ -1140,7 +1142,7 @@ class MarkSweep::CheckpointMarkThreadRoots : public Closure, public RootVisitor 
     Thread* const self = Thread::Current();
     CHECK(thread == self || thread->IsSuspended() || thread->GetState() == kWaitingPerformingGc)
         << thread->GetState() << " thread " << thread << " self " << self;
-    thread->VisitRoots(this);
+    thread->VisitRoots(this, kVisitRootFlagAllRoots);
     if (revoke_ros_alloc_thread_local_buffers_at_checkpoint_) {
       ScopedTrace trace2("RevokeRosAllocThreadLocalBuffers");
       mark_sweep_->GetHeap()->RevokeRosAllocThreadLocalBuffers(thread);
@@ -1204,7 +1206,7 @@ void MarkSweep::SweepArray(accounting::ObjectStack* allocations, bool swap_bitma
       }
     }
   }
-  // Unlikely to sweep a significant amount of non_movable objects, so we do these after the after
+  // Unlikely to sweep a significant amount of non_movable objects, so we do these after
   // the other alloc spaces as an optimization.
   if (non_moving_space != nullptr) {
     sweep_spaces.push_back(non_moving_space);

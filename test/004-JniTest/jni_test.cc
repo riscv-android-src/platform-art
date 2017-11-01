@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-#include <iostream>
 #include <pthread.h>
-#include <stdio.h>
+
+#include <cstdio>
+#include <iostream>
 #include <vector>
 
 #include "art_method-inl.h"
@@ -773,6 +774,31 @@ static jint Java_Main_intFastNativeMethod(JNIEnv*, jclass, jint a, jint b, jint 
 static jint Java_Main_intCriticalNativeMethod(jint a, jint b, jint c) {
   // Note that unlike a "Fast Native" method this excludes JNIEnv and the jclass parameters.
   return a + b + c;
+}
+
+extern "C" JNIEXPORT jobject JNICALL Java_Main_lookupClinit(JNIEnv* env, jclass, jclass kls) {
+  jmethodID clinit_id = env->GetStaticMethodID(kls, "<clinit>", "()V");
+
+  if (clinit_id != nullptr) {
+    jobject obj = env->ToReflectedMethod(kls, clinit_id, /*isStatic*/ true);
+    CHECK(obj != nullptr);
+    return obj;
+  } else {
+    return nullptr;
+  }
+}
+
+extern "C" JNIEXPORT jboolean JNICALL Java_Main_isSlowDebug(JNIEnv*, jclass) {
+  // Return whether slow-debug is on. Only relevant for debug builds.
+  if (kIsDebugBuild) {
+    // Register a dummy flag and get the default value it should be initialized with.
+    static bool dummy_flag = false;
+    dummy_flag = RegisterRuntimeDebugFlag(&dummy_flag);
+
+    return dummy_flag ? JNI_TRUE : JNI_FALSE;
+  }
+  // To pass the Java-side test, just so "on" for release builds.
+  return JNI_TRUE;
 }
 
 }  // namespace art

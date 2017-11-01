@@ -18,14 +18,16 @@
 
 #include "common_throws.h"
 #include "jni_internal.h"
-#include "monitor.h"
 #include "mirror/object.h"
+#include "monitor.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_utf_chars.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedUtfChars.h"
 #include "thread.h"
 #include "thread_list.h"
-#include "verify_object-inl.h"
+#include "verify_object.h"
 
 namespace art {
 
@@ -84,6 +86,8 @@ static jint Thread_nativeGetStatus(JNIEnv* env, jobject java_thread, jboolean ha
     case kWaiting:                        return kJavaWaiting;
     case kStarting:                       return kJavaNew;
     case kNative:                         return kJavaRunnable;
+    case kWaitingForTaskProcessor:        return kJavaWaiting;
+    case kWaitingForLockInflation:        return kJavaWaiting;
     case kWaitingForGcToComplete:         return kJavaWaiting;
     case kWaitingPerformingGc:            return kJavaWaiting;
     case kWaitingForCheckPointsToRun:     return kJavaWaiting;
@@ -143,13 +147,17 @@ static void Thread_nativeSetName(JNIEnv* env, jobject peer, jstring java_name) {
   ThreadList* thread_list = Runtime::Current()->GetThreadList();
   bool timed_out;
   // Take suspend thread lock to avoid races with threads trying to suspend this one.
-  Thread* thread = thread_list->SuspendThreadByPeer(peer, true, false, &timed_out);
+  Thread* thread = thread_list->SuspendThreadByPeer(peer,
+                                                    /* request_suspension */ true,
+                                                    SuspendReason::kInternal,
+                                                    &timed_out);
   if (thread != nullptr) {
     {
       ScopedObjectAccess soa(env);
       thread->SetThreadName(name.c_str());
     }
-    thread_list->Resume(thread, false);
+    bool resumed = thread_list->Resume(thread, SuspendReason::kInternal);
+    DCHECK(resumed);
   } else if (timed_out) {
     LOG(ERROR) << "Trying to set thread name to '" << name.c_str() << "' failed as the thread "
         "failed to suspend within a generous timeout.";
@@ -187,16 +195,16 @@ static void Thread_yield(JNIEnv*, jobject) {
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Thread, currentThread, "!()Ljava/lang/Thread;"),
-  NATIVE_METHOD(Thread, interrupted, "!()Z"),
-  NATIVE_METHOD(Thread, isInterrupted, "!()Z"),
+  FAST_NATIVE_METHOD(Thread, currentThread, "()Ljava/lang/Thread;"),
+  FAST_NATIVE_METHOD(Thread, interrupted, "()Z"),
+  FAST_NATIVE_METHOD(Thread, isInterrupted, "()Z"),
   NATIVE_METHOD(Thread, nativeCreate, "(Ljava/lang/Thread;JZ)V"),
   NATIVE_METHOD(Thread, nativeGetStatus, "(Z)I"),
   NATIVE_METHOD(Thread, nativeHoldsLock, "(Ljava/lang/Object;)Z"),
-  NATIVE_METHOD(Thread, nativeInterrupt, "!()V"),
+  FAST_NATIVE_METHOD(Thread, nativeInterrupt, "()V"),
   NATIVE_METHOD(Thread, nativeSetName, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(Thread, nativeSetPriority, "(I)V"),
-  NATIVE_METHOD(Thread, sleep, "!(Ljava/lang/Object;JI)V"),
+  FAST_NATIVE_METHOD(Thread, sleep, "(Ljava/lang/Object;JI)V"),
   NATIVE_METHOD(Thread, yield, "()V"),
 };
 

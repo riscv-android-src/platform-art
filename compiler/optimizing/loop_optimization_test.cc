@@ -24,14 +24,12 @@ namespace art {
  * constructing the loop hierarchy. Actual optimizations are tested
  * through the checker tests.
  */
-class LoopOptimizationTest : public CommonCompilerTest {
+class LoopOptimizationTest : public OptimizingUnitTest {
  public:
   LoopOptimizationTest()
-      : pool_(),
-        allocator_(&pool_),
-        graph_(CreateGraph(&allocator_)),
-        iva_(new (&allocator_) HInductionVarAnalysis(graph_)),
-        loop_opt_(new (&allocator_) HLoopOptimization(graph_, iva_)) {
+      : graph_(CreateGraph()),
+        iva_(new (GetAllocator()) HInductionVarAnalysis(graph_)),
+        loop_opt_(new (GetAllocator()) HLoopOptimization(graph_, nullptr, iva_, nullptr)) {
     BuildGraph();
   }
 
@@ -40,38 +38,38 @@ class LoopOptimizationTest : public CommonCompilerTest {
   /** Constructs bare minimum graph. */
   void BuildGraph() {
     graph_->SetNumberOfVRegs(1);
-    entry_block_ = new (&allocator_) HBasicBlock(graph_);
-    return_block_ = new (&allocator_) HBasicBlock(graph_);
-    exit_block_ = new (&allocator_) HBasicBlock(graph_);
+    entry_block_ = new (GetAllocator()) HBasicBlock(graph_);
+    return_block_ = new (GetAllocator()) HBasicBlock(graph_);
+    exit_block_ = new (GetAllocator()) HBasicBlock(graph_);
     graph_->AddBlock(entry_block_);
     graph_->AddBlock(return_block_);
     graph_->AddBlock(exit_block_);
     graph_->SetEntryBlock(entry_block_);
     graph_->SetExitBlock(exit_block_);
-    parameter_ = new (&allocator_) HParameterValue(graph_->GetDexFile(),
-                                                   dex::TypeIndex(0),
-                                                   0,
-                                                   Primitive::kPrimInt);
+    parameter_ = new (GetAllocator()) HParameterValue(graph_->GetDexFile(),
+                                                      dex::TypeIndex(0),
+                                                      0,
+                                                      DataType::Type::kInt32);
     entry_block_->AddInstruction(parameter_);
-    return_block_->AddInstruction(new (&allocator_) HReturnVoid());
-    exit_block_->AddInstruction(new (&allocator_) HExit());
+    return_block_->AddInstruction(new (GetAllocator()) HReturnVoid());
+    exit_block_->AddInstruction(new (GetAllocator()) HExit());
     entry_block_->AddSuccessor(return_block_);
     return_block_->AddSuccessor(exit_block_);
   }
 
   /** Adds a loop nest at given position before successor. */
   HBasicBlock* AddLoop(HBasicBlock* position, HBasicBlock* successor) {
-    HBasicBlock* header = new (&allocator_) HBasicBlock(graph_);
-    HBasicBlock* body = new (&allocator_) HBasicBlock(graph_);
+    HBasicBlock* header = new (GetAllocator()) HBasicBlock(graph_);
+    HBasicBlock* body = new (GetAllocator()) HBasicBlock(graph_);
     graph_->AddBlock(header);
     graph_->AddBlock(body);
     // Control flow.
     position->ReplaceSuccessor(successor, header);
     header->AddSuccessor(body);
     header->AddSuccessor(successor);
-    header->AddInstruction(new (&allocator_) HIf(parameter_));
+    header->AddInstruction(new (GetAllocator()) HIf(parameter_));
     body->AddSuccessor(header);
-    body->AddInstruction(new (&allocator_) HGoto());
+    body->AddInstruction(new (GetAllocator()) HGoto());
     return header;
   }
 
@@ -80,7 +78,8 @@ class LoopOptimizationTest : public CommonCompilerTest {
     graph_->BuildDominatorTree();
     iva_->Run();
     // Do not release the loop hierarchy.
-    loop_opt_->loop_allocator_ = &allocator_;
+    ScopedArenaAllocator loop_allocator(GetArenaStack());
+    loop_opt_->loop_allocator_ = &loop_allocator;
     loop_opt_->LocalRun();
   }
 
@@ -101,8 +100,6 @@ class LoopOptimizationTest : public CommonCompilerTest {
   }
 
   // General building fields.
-  ArenaPool pool_;
-  ArenaAllocator allocator_;
   HGraph* graph_;
   HInductionVarAnalysis* iva_;
   HLoopOptimization* loop_opt_;
@@ -195,4 +192,44 @@ TEST_F(LoopOptimizationTest, LoopNestWithSequence) {
   EXPECT_EQ("[[[[[[[[[[][][][][][][][][][]]]]]]]]]]", LoopStructure());
 }
 
+// Check that SimplifyLoop() doesn't invalidate data flow when ordering loop headers'
+// predecessors.
+TEST_F(LoopOptimizationTest, SimplifyLoop) {
+  // Can't use AddLoop as we want special order for blocks predecessors.
+  HBasicBlock* header = new (GetAllocator()) HBasicBlock(graph_);
+  HBasicBlock* body = new (GetAllocator()) HBasicBlock(graph_);
+  graph_->AddBlock(header);
+  graph_->AddBlock(body);
+
+  // Control flow: make a loop back edge first in the list of predecessors.
+  entry_block_->RemoveSuccessor(return_block_);
+  body->AddSuccessor(header);
+  entry_block_->AddSuccessor(header);
+  header->AddSuccessor(body);
+  header->AddSuccessor(return_block_);
+  DCHECK(header->GetSuccessors()[1] == return_block_);
+
+  // Data flow.
+  header->AddInstruction(new (GetAllocator()) HIf(parameter_));
+  body->AddInstruction(new (GetAllocator()) HGoto());
+
+  HPhi* phi = new (GetAllocator()) HPhi(GetAllocator(), 0, 0, DataType::Type::kInt32);
+  HInstruction* add = new (GetAllocator()) HAdd(DataType::Type::kInt32, phi, parameter_);
+  header->AddPhi(phi);
+  body->AddInstruction(add);
+
+  phi->AddInput(add);
+  phi->AddInput(parameter_);
+
+  graph_->ClearLoopInformation();
+  graph_->ClearDominanceInformation();
+  graph_->BuildDominatorTree();
+
+  // Check that after optimizations in BuildDominatorTree()/SimplifyCFG() phi inputs
+  // are still mapped correctly to the block predecessors.
+  for (size_t i = 0, e = phi->InputCount(); i < e; i++) {
+    HInstruction* input = phi->InputAt(i);
+    ASSERT_TRUE(input->GetBlock()->Dominates(header->GetPredecessors()[i]));
+  }
+}
 }  // namespace art

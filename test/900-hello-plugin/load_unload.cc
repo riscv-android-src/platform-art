@@ -20,6 +20,8 @@
 #include "art_method-inl.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "java_vm_ext.h"
+#include "runtime.h"
 
 namespace art {
 
@@ -52,6 +54,9 @@ extern "C" JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* vm,
                                                char* options,
                                                void* reserved ATTRIBUTE_UNUSED) {
   printf("Agent_OnLoad called with options \"%s\"\n", options);
+  if (strcmp("test_900_round_2", options) == 0) {
+    return 0;
+  }
   uintptr_t env = 0;
   jint res = vm->GetEnv(reinterpret_cast<void**>(&env), TEST_900_ENV_VERSION_NUMBER);
   if (res != JNI_OK) {

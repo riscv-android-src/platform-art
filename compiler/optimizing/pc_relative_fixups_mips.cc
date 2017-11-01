@@ -52,18 +52,31 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
     // Insert the base at the start of the entry block, move it to a better
     // position later in MoveBaseIfNeeded().
-    base_ = new (GetGraph()->GetArena()) HMipsComputeBaseMethodAddress();
+    base_ = new (GetGraph()->GetAllocator()) HMipsComputeBaseMethodAddress();
     HBasicBlock* entry_block = GetGraph()->GetEntryBlock();
     entry_block->InsertInstructionBefore(base_, entry_block->GetFirstInstruction());
     DCHECK(base_ != nullptr);
   }
 
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE {
+    // If this is an invoke with PC-relative load kind,
+    // we need to add the base as the special input.
+    if (invoke->HasPcRelativeMethodLoadKind() &&
+        !IsCallFreeIntrinsic<IntrinsicLocationsBuilderMIPS>(invoke, codegen_)) {
+      InitializePCRelativeBasePointer();
+      // Add the special argument base to the method.
+      DCHECK(!invoke->HasCurrentMethodInput());
+      invoke->AddSpecialInput(base_);
+    }
+  }
+
   void VisitLoadClass(HLoadClass* load_class) OVERRIDE {
     HLoadClass::LoadKind load_kind = load_class->GetLoadKind();
     switch (load_kind) {
-      case HLoadClass::LoadKind::kBootImageLinkTimeAddress:
-      case HLoadClass::LoadKind::kBootImageAddress:
       case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
+      case HLoadClass::LoadKind::kBootImageAddress:
+      case HLoadClass::LoadKind::kBootImageClassTable:
+      case HLoadClass::LoadKind::kBssEntry:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
         load_class->AddSpecialInput(base_);
@@ -76,9 +89,9 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
   void VisitLoadString(HLoadString* load_string) OVERRIDE {
     HLoadString::LoadKind load_kind = load_string->GetLoadKind();
     switch (load_kind) {
-      case HLoadString::LoadKind::kBootImageLinkTimeAddress:
-      case HLoadString::LoadKind::kBootImageAddress:
       case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
+      case HLoadString::LoadKind::kBootImageAddress:
+      case HLoadString::LoadKind::kBootImageInternTable:
       case HLoadString::LoadKind::kBssEntry:
         // Add a base register for PC-relative literals on R2.
         InitializePCRelativeBasePointer();
@@ -99,7 +112,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     InitializePCRelativeBasePointer();
     HGraph* graph = GetGraph();
     HBasicBlock* block = switch_insn->GetBlock();
-    HMipsPackedSwitch* mips_switch = new (graph->GetArena()) HMipsPackedSwitch(
+    HMipsPackedSwitch* mips_switch = new (graph->GetAllocator()) HMipsPackedSwitch(
         switch_insn->GetStartValue(),
         switch_insn->GetNumEntries(),
         switch_insn->InputAt(0),

@@ -39,6 +39,10 @@ class Mips64RelativePatcher FINAL : public RelativePatcher {
                                 const LinkerPatch& patch,
                                 uint32_t patch_offset,
                                 uint32_t target_offset) OVERRIDE;
+  void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code,
+                                   const LinkerPatch& patch,
+                                   uint32_t patch_offset) OVERRIDE;
+  std::vector<debug::MethodDebugInfo> GenerateThunkDebugInfo(uint32_t executable_offset) OVERRIDE;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(Mips64RelativePatcher);

@@ -17,6 +17,7 @@
 #include "elf_debug_writer.h"
 
 #include <vector>
+#include <unordered_map>
 
 #include "base/array_ref.h"
 #include "debug/dwarf/dwarf_constants.h"
@@ -28,14 +29,15 @@
 #include "debug/elf_gnu_debugdata_writer.h"
 #include "debug/elf_symtab_writer.h"
 #include "debug/method_debug_info.h"
-#include "elf_builder.h"
+#include "linker/elf_builder.h"
 #include "linker/vector_output_stream.h"
+#include "oat.h"
 
 namespace art {
 namespace debug {
 
 template <typename ElfTypes>
-void WriteDebugInfo(ElfBuilder<ElfTypes>* builder,
+void WriteDebugInfo(linker::ElfBuilder<ElfTypes>* builder,
                     const ArrayRef<const MethodDebugInfo>& method_infos,
                     dwarf::CFIFormat cfi_format,
                     bool write_oat_patches) {
@@ -45,26 +47,41 @@ void WriteDebugInfo(ElfBuilder<ElfTypes>* builder,
   // Write .debug_frame.
   WriteCFISection(builder, method_infos, cfi_format, write_oat_patches);
 
-  // Group the methods into compilation units based on source file.
-  std::vector<ElfCompilationUnit> compilation_units;
-  const char* last_source_file = nullptr;
+  // Group the methods into compilation units based on class.
+  std::unordered_map<const DexFile::ClassDef*, ElfCompilationUnit> class_to_compilation_unit;
   for (const MethodDebugInfo& mi : method_infos) {
     if (mi.dex_file != nullptr) {
       auto& dex_class_def = mi.dex_file->GetClassDef(mi.class_def_index);
-      const char* source_file = mi.dex_file->GetSourceFile(dex_class_def);
-      if (compilation_units.empty() || source_file != last_source_file) {
-        compilation_units.push_back(ElfCompilationUnit());
-      }
-      ElfCompilationUnit& cu = compilation_units.back();
+      ElfCompilationUnit& cu = class_to_compilation_unit[&dex_class_def];
       cu.methods.push_back(&mi);
       // All methods must have the same addressing mode otherwise the min/max below does not work.
       DCHECK_EQ(cu.methods.front()->is_code_address_text_relative, mi.is_code_address_text_relative);
       cu.is_code_address_text_relative = mi.is_code_address_text_relative;
       cu.code_address = std::min(cu.code_address, mi.code_address);
       cu.code_end = std::max(cu.code_end, mi.code_address + mi.code_size);
-      last_source_file = source_file;
     }
   }
+
+  // Sort compilation units to make the compiler output deterministic.
+  std::vector<ElfCompilationUnit> compilation_units;
+  compilation_units.reserve(class_to_compilation_unit.size());
+  for (auto& it : class_to_compilation_unit) {
+    // The .debug_line section requires the methods to be sorted by code address.
+    std::stable_sort(it.second.methods.begin(),
+                     it.second.methods.end(),
+                     [](const MethodDebugInfo* a, const MethodDebugInfo* b) {
+                         return a->code_address < b->code_address;
+                     });
+    compilation_units.push_back(std::move(it.second));
+  }
+  std::sort(compilation_units.begin(),
+            compilation_units.end(),
+            [](ElfCompilationUnit& a, ElfCompilationUnit& b) {
+                // Sort by index of the first method within the method_infos array.
+                // This assumes that the order of method_infos is deterministic.
+                // Code address is not good for sorting due to possible duplicates.
+                return a.methods.front() < b.methods.front();
+            });
 
   // Write .debug_line section.
   if (!compilation_units.empty()) {
@@ -116,8 +133,9 @@ static std::vector<uint8_t> WriteDebugElfFileForMethodsInternal(
     const ArrayRef<const MethodDebugInfo>& method_infos) {
   std::vector<uint8_t> buffer;
   buffer.reserve(KB);
-  VectorOutputStream out("Debug ELF file", &buffer);
-  std::unique_ptr<ElfBuilder<ElfTypes>> builder(new ElfBuilder<ElfTypes>(isa, features, &out));
+  linker::VectorOutputStream out("Debug ELF file", &buffer);
+  std::unique_ptr<linker::ElfBuilder<ElfTypes>> builder(
+      new linker::ElfBuilder<ElfTypes>(isa, features, &out));
   // No program headers since the ELF file is not linked and has no allocated sections.
   builder->Start(false /* write_program_headers */);
   WriteDebugInfo(builder.get(),
@@ -148,8 +166,9 @@ static std::vector<uint8_t> WriteDebugElfFileForClassesInternal(
     REQUIRES_SHARED(Locks::mutator_lock_) {
   std::vector<uint8_t> buffer;
   buffer.reserve(KB);
-  VectorOutputStream out("Debug ELF file", &buffer);
-  std::unique_ptr<ElfBuilder<ElfTypes>> builder(new ElfBuilder<ElfTypes>(isa, features, &out));
+  linker::VectorOutputStream out("Debug ELF file", &buffer);
+  std::unique_ptr<linker::ElfBuilder<ElfTypes>> builder(
+      new linker::ElfBuilder<ElfTypes>(isa, features, &out));
   // No program headers since the ELF file is not linked and has no allocated sections.
   builder->Start(false /* write_program_headers */);
   ElfDebugInfoWriter<ElfTypes> info_writer(builder.get());
@@ -173,39 +192,14 @@ std::vector<uint8_t> WriteDebugElfFileForClasses(InstructionSet isa,
   }
 }
 
-std::vector<MethodDebugInfo> MakeTrampolineInfos(const OatHeader& header) {
-  std::map<const char*, uint32_t> trampolines = {
-    { "interpreterToInterpreterBridge", header.GetInterpreterToInterpreterBridgeOffset() },
-    { "interpreterToCompiledCodeBridge", header.GetInterpreterToCompiledCodeBridgeOffset() },
-    { "jniDlsymLookup", header.GetJniDlsymLookupOffset() },
-    { "quickGenericJniTrampoline", header.GetQuickGenericJniTrampolineOffset() },
-    { "quickImtConflictTrampoline", header.GetQuickImtConflictTrampolineOffset() },
-    { "quickResolutionTrampoline", header.GetQuickResolutionTrampolineOffset() },
-    { "quickToInterpreterBridge", header.GetQuickToInterpreterBridgeOffset() },
-  };
-  std::vector<MethodDebugInfo> result;
-  for (const auto& it : trampolines) {
-    if (it.second != 0) {
-      MethodDebugInfo info = MethodDebugInfo();
-      info.trampoline_name = it.first;
-      info.isa = header.GetInstructionSet();
-      info.is_code_address_text_relative = true;
-      info.code_address = it.second - header.GetExecutableOffset();
-      info.code_size = 0;  // The symbol lasts until the next symbol.
-      result.push_back(std::move(info));
-    }
-  }
-  return result;
-}
-
 // Explicit instantiations
 template void WriteDebugInfo<ElfTypes32>(
-    ElfBuilder<ElfTypes32>* builder,
+    linker::ElfBuilder<ElfTypes32>* builder,
     const ArrayRef<const MethodDebugInfo>& method_infos,
     dwarf::CFIFormat cfi_format,
     bool write_oat_patches);
 template void WriteDebugInfo<ElfTypes64>(
-    ElfBuilder<ElfTypes64>* builder,
+    linker::ElfBuilder<ElfTypes64>* builder,
     const ArrayRef<const MethodDebugInfo>& method_infos,
     dwarf::CFIFormat cfi_format,
     bool write_oat_patches);

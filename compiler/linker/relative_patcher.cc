@@ -16,6 +16,7 @@
 
 #include "linker/relative_patcher.h"
 
+#include "debug/method_debug_info.h"
 #ifdef ART_ENABLE_CODEGEN_arm
 #include "linker/arm/relative_patcher_thumb2.h"
 #endif
@@ -75,6 +76,17 @@ std::unique_ptr<RelativePatcher> RelativePatcher::Create(
       LOG(FATAL) << "Unexpected relative dex cache array patch.";
     }
 
+    void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code ATTRIBUTE_UNUSED,
+                                     const LinkerPatch& patch ATTRIBUTE_UNUSED,
+                                     uint32_t patch_offset ATTRIBUTE_UNUSED) {
+      LOG(FATAL) << "Unexpected baker read barrier branch patch.";
+    }
+
+    std::vector<debug::MethodDebugInfo> GenerateThunkDebugInfo(
+        uint32_t executable_offset ATTRIBUTE_UNUSED) OVERRIDE {
+      return std::vector<debug::MethodDebugInfo>();  // No thunks added.
+    }
+
    private:
     DISALLOW_COPY_AND_ASSIGN(RelativePatcherNone);
   };
@@ -127,7 +139,7 @@ bool RelativePatcher::WriteCodeAlignment(OutputStream* out, uint32_t aligned_cod
   return true;
 }
 
-bool RelativePatcher::WriteRelCallThunk(OutputStream* out, const ArrayRef<const uint8_t>& thunk) {
+bool RelativePatcher::WriteThunk(OutputStream* out, const ArrayRef<const uint8_t>& thunk) {
   if (UNLIKELY(!out->WriteFully(thunk.data(), thunk.size()))) {
     return false;
   }

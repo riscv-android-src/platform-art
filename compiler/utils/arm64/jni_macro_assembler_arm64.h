@@ -25,9 +25,9 @@
 #include "base/arena_containers.h"
 #include "base/enums.h"
 #include "base/logging.h"
+#include "offsets.h"
 #include "utils/assembler.h"
 #include "utils/jni_macro_assembler.h"
-#include "offsets.h"
 
 // TODO(VIXL): Make VIXL compile with -Wshadow.
 #pragma GCC diagnostic push
@@ -40,9 +40,9 @@ namespace arm64 {
 
 class Arm64JNIMacroAssembler FINAL : public JNIMacroAssemblerFwd<Arm64Assembler, PointerSize::k64> {
  public:
-  explicit Arm64JNIMacroAssembler(ArenaAllocator* arena)
-      : JNIMacroAssemblerFwd(arena),
-        exception_blocks_(arena->Adapter(kArenaAllocAssembler)) {}
+  explicit Arm64JNIMacroAssembler(ArenaAllocator* allocator)
+      : JNIMacroAssemblerFwd(allocator),
+        exception_blocks_(allocator->Adapter(kArenaAllocAssembler)) {}
 
   ~Arm64JNIMacroAssembler();
 
@@ -56,8 +56,9 @@ class Arm64JNIMacroAssembler FINAL : public JNIMacroAssemblerFwd<Arm64Assembler,
                   const ManagedRegisterEntrySpills& entry_spills) OVERRIDE;
 
   // Emit code that will remove an activation from the stack.
-  void RemoveFrame(size_t frame_size, ArrayRef<const ManagedRegister> callee_save_regs)
-      OVERRIDE;
+  void RemoveFrame(size_t frame_size,
+                   ArrayRef<const ManagedRegister> callee_save_regs,
+                   bool may_suspend) OVERRIDE;
 
   void IncreaseFrameSize(size_t adjust) OVERRIDE;
   void DecreaseFrameSize(size_t adjust) OVERRIDE;

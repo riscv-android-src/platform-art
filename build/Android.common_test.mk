@@ -54,11 +54,11 @@ ART_TEST_FULL ?= false
 ART_TEST_QUIET ?= true
 
 # Do you want interpreter tests run?
-ART_TEST_INTERPRETER ?= $(ART_TEST_FULL)
-ART_TEST_INTERPRETER_ACCESS_CHECKS ?= $(ART_TEST_FULL)
+ART_TEST_INTERPRETER ?= true
+ART_TEST_INTERPRETER_ACCESS_CHECKS ?= true
 
 # Do you want JIT tests run?
-ART_TEST_JIT ?= $(ART_TEST_FULL)
+ART_TEST_JIT ?= true
 
 # Do you want optimizing compiler tests run?
 ART_TEST_OPTIMIZING ?= true
@@ -66,8 +66,8 @@ ART_TEST_OPTIMIZING ?= true
 # Do you want to test the optimizing compiler with graph coloring register allocation?
 ART_TEST_OPTIMIZING_GRAPH_COLOR ?= $(ART_TEST_FULL)
 
-# Do we want to test a non-PIC-compiled core image?
-ART_TEST_NPIC_IMAGE ?= $(ART_TEST_FULL)
+# Do you want to do run-tests with profiles?
+ART_TEST_SPEED_PROFILE ?= $(ART_TEST_FULL)
 
 # Do we want to test PIC-compiled tests ("apps")?
 ART_TEST_PIC_TEST ?= $(ART_TEST_FULL)
@@ -87,14 +87,17 @@ ART_TEST_GC_STRESS ?= $(ART_TEST_FULL)
 # Do you want tests with the JNI forcecopy mode enabled run?
 ART_TEST_JNI_FORCECOPY ?= $(ART_TEST_FULL)
 
-# Do you want run-tests with relocation disabled run?
-ART_TEST_RUN_TEST_NO_RELOCATE ?= $(ART_TEST_FULL)
+# Do you want run-tests with relocation enabled run?
+ART_TEST_RUN_TEST_RELOCATE ?= $(ART_TEST_FULL)
 
 # Do you want run-tests with prebuilding?
 ART_TEST_RUN_TEST_PREBUILD ?= true
 
 # Do you want run-tests with no prebuilding enabled run?
 ART_TEST_RUN_TEST_NO_PREBUILD ?= $(ART_TEST_FULL)
+
+# Do you want run-tests with a pregenerated core.art?
+ART_TEST_RUN_TEST_IMAGE ?= true
 
 # Do you want run-tests without a pregenerated core.art?
 ART_TEST_RUN_TEST_NO_IMAGE ?= $(ART_TEST_FULL)
@@ -199,9 +202,9 @@ endef
 # $(5): a make variable used to collate target dependencies, e.g ART_TEST_TARGET_OAT_HelloWorld_DEX
 # $(6): a make variable used to collate host dependencies, e.g ART_TEST_HOST_OAT_HelloWorld_DEX
 #
-# If the input test directory contains a file called main.list and main.jpp,
+# If the input test directory contains a file called main.list,
 # then a multi-dex file is created passing main.list as the --main-dex-list
-# argument to dx and main.jpp for Jack.
+# argument to dx.
 define build-art-test-dex
   ifeq ($(ART_BUILD_TARGET),true)
     include $(CLEAR_VARS)
@@ -215,7 +218,7 @@ define build-art-test-dex
     LOCAL_MODULE_PATH := $(3)
     LOCAL_DEX_PREOPT_IMAGE_LOCATION := $(TARGET_CORE_IMG_OUT)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
-      LOCAL_JACK_FLAGS := -D jack.dex.output.policy=minimal-multidex -D jack.preprocessor=true -D jack.preprocessor.file=$(LOCAL_PATH)/$(2)/main.jpp
+      LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_JAVA_LIBRARY)
     $(5) := $$(LOCAL_INSTALLED_MODULE)
@@ -230,7 +233,7 @@ define build-art-test-dex
     LOCAL_JAVA_LIBRARIES := $(HOST_CORE_JARS)
     LOCAL_DEX_PREOPT_IMAGE := $(HOST_CORE_IMG_LOCATION)
     ifneq ($(wildcard $(LOCAL_PATH)/$(2)/main.list),)
-      LOCAL_JACK_FLAGS := -D jack.dex.output.policy=minimal-multidex -D jack.preprocessor=true -D jack.preprocessor.file=$(LOCAL_PATH)/$(2)/main.jpp
+      LOCAL_DX_FLAGS := --multi-dex --main-dex-list=$(LOCAL_PATH)/$(2)/main.list --minimal-main-dex
     endif
     include $(BUILD_HOST_DALVIK_JAVA_LIBRARY)
     $(6) := $$(LOCAL_INSTALLED_MODULE)

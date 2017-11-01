@@ -20,12 +20,12 @@
 #include <unordered_set>
 #include <vector>
 
-#include "compiled_method.h"
 #include "debug/dwarf/debug_line_opcode_writer.h"
 #include "debug/dwarf/headers.h"
 #include "debug/elf_compilation_unit.h"
+#include "debug/src_map_elem.h"
 #include "dex_file-inl.h"
-#include "elf_builder.h"
+#include "linker/elf_builder.h"
 #include "stack_map.h"
 
 namespace art {
@@ -43,7 +43,7 @@ class ElfDebugLineWriter {
   using Elf_Addr = typename ElfTypes::Addr;
 
  public:
-  explicit ElfDebugLineWriter(ElfBuilder<ElfTypes>* builder) : builder_(builder) {
+  explicit ElfDebugLineWriter(linker::ElfBuilder<ElfTypes>* builder) : builder_(builder) {
   }
 
   void Start() {
@@ -53,7 +53,8 @@ class ElfDebugLineWriter {
   // Write line table for given set of methods.
   // Returns the number of bytes written.
   size_t WriteCompilationUnit(ElfCompilationUnit& compilation_unit) {
-    const bool is64bit = Is64BitInstructionSet(builder_->GetIsa());
+    const InstructionSet isa = builder_->GetIsa();
+    const bool is64bit = Is64BitInstructionSet(isa);
     const Elf_Addr base_address = compilation_unit.is_code_address_text_relative
         ? builder_->GetText()->GetAddress()
         : 0;
@@ -66,7 +67,7 @@ class ElfDebugLineWriter {
     std::unordered_map<std::string, size_t> directories_map;
     int code_factor_bits_ = 0;
     int dwarf_isa = -1;
-    switch (builder_->GetIsa()) {
+    switch (isa) {
       case kArm:  // arm actually means thumb2.
       case kThumb2:
         code_factor_bits_ = 1;  // 16-bit instuctions
@@ -103,10 +104,10 @@ class ElfDebugLineWriter {
         for (uint32_t s = 0; s < code_info.GetNumberOfStackMaps(encoding); s++) {
           StackMap stack_map = code_info.GetStackMapAt(s, encoding);
           DCHECK(stack_map.IsValid());
-          const uint32_t pc = stack_map.GetNativePcOffset(encoding.stack_map_encoding);
-          const int32_t dex = stack_map.GetDexPc(encoding.stack_map_encoding);
+          const uint32_t pc = stack_map.GetNativePcOffset(encoding.stack_map.encoding, isa);
+          const int32_t dex = stack_map.GetDexPc(encoding.stack_map.encoding);
           pc2dex_map.push_back({pc, dex});
-          if (stack_map.HasDexRegisterMap(encoding.stack_map_encoding)) {
+          if (stack_map.HasDexRegisterMap(encoding.stack_map.encoding)) {
             // Guess that the first map with local variables is the end of prologue.
             prologue_end = std::min(prologue_end, pc);
           }
@@ -279,7 +280,7 @@ class ElfDebugLineWriter {
   }
 
  private:
-  ElfBuilder<ElfTypes>* builder_;
+  linker::ElfBuilder<ElfTypes>* builder_;
   std::vector<uintptr_t> debug_line_patches_;
 };
 

@@ -18,7 +18,10 @@
 #include <type_traits>
 
 #include "assembler_arm_vixl.h"
+#include "base/bit_utils.h"
+#include "base/bit_utils_iterator.h"
 #include "entrypoints/quick/quick_entrypoints.h"
+#include "heap_poisoning.h"
 #include "thread.h"
 
 using namespace vixl::aarch32;  // NOLINT(build/namespaces)
@@ -35,7 +38,10 @@ namespace arm {
 #define ___   vixl_masm_.
 #endif
 
+// Thread register definition.
 extern const vixl32::Register tr(TR);
+// Marking register definition.
+extern const vixl32::Register mr(MR);
 
 void ArmVIXLAssembler::FinalizeCode() {
   vixl_masm_.FinalizeCode();
@@ -75,6 +81,22 @@ void ArmVIXLAssembler::MaybeUnpoisonHeapReference(vixl32::Register reg) {
   if (kPoisonHeapReferences) {
     UnpoisonHeapReference(reg);
   }
+}
+
+void ArmVIXLAssembler::GenerateMarkingRegisterCheck(vixl32::Register temp, int code) {
+  // The Marking Register is only used in the Baker read barrier configuration.
+  DCHECK(kEmitCompilerReadBarrier);
+  DCHECK(kUseBakerReadBarrier);
+
+  vixl32::Label mr_is_ok;
+
+  // temp = self.tls32_.is.gc_marking
+  ___ Ldr(temp, MemOperand(tr, Thread::IsGcMarkingOffset<kArmPointerSize>().Int32Value()));
+  // Check that mr == self.tls32_.is.gc_marking.
+  ___ Cmp(mr, temp);
+  ___ B(eq, &mr_is_ok, /* far_target */ false);
+  ___ Bkpt(code);
+  ___ Bind(&mr_is_ok);
 }
 
 void ArmVIXLAssembler::LoadImmediate(vixl32::Register rd, int32_t value) {
@@ -230,6 +252,7 @@ void ArmVIXLAssembler::StoreToOffset(StoreOperandType type,
   if (!CanHoldStoreOffsetThumb(type, offset)) {
     CHECK_NE(base.GetCode(), kIpCode);
     if ((reg.GetCode() != kIpCode) &&
+        (!vixl_masm_.GetScratchRegisterList()->IsEmpty()) &&
         ((type != kStoreWordPair) || (reg.GetCode() + 1 != kIpCode))) {
       tmp_reg = temps.Acquire();
     } else {

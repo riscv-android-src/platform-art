@@ -20,15 +20,14 @@
 // All quick entrypoints. Format is name, return type, argument types.
 
 #define QUICK_ENTRYPOINT_LIST(V) \
-  V(AllocArray, void*, uint32_t, int32_t, ArtMethod*) \
-  V(AllocArrayResolved, void*, mirror::Class*, int32_t, ArtMethod*) \
-  V(AllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*) \
-  V(AllocObject, void*, uint32_t, ArtMethod*) \
-  V(AllocObjectResolved, void*, mirror::Class*, ArtMethod*) \
-  V(AllocObjectInitialized, void*, mirror::Class*, ArtMethod*) \
-  V(AllocObjectWithAccessCheck, void*, uint32_t, ArtMethod*) \
-  V(CheckAndAllocArray, void*, uint32_t, int32_t, ArtMethod*) \
-  V(CheckAndAllocArrayWithAccessCheck, void*, uint32_t, int32_t, ArtMethod*) \
+  V(AllocArrayResolved, void*, mirror::Class*, int32_t) \
+  V(AllocArrayResolved8, void*, mirror::Class*, int32_t) \
+  V(AllocArrayResolved16, void*, mirror::Class*, int32_t) \
+  V(AllocArrayResolved32, void*, mirror::Class*, int32_t) \
+  V(AllocArrayResolved64, void*, mirror::Class*, int32_t) \
+  V(AllocObjectResolved, void*, mirror::Class*) \
+  V(AllocObjectInitialized, void*, mirror::Class*) \
+  V(AllocObjectWithChecks, void*, mirror::Class*) \
   V(AllocStringFromBytes, void*, void*, int32_t, int32_t, int32_t) \
   V(AllocStringFromChars, void*, int32_t, int32_t, void*) \
   V(AllocStringFromString, void*, void*) \
@@ -66,10 +65,7 @@
   V(GetObjInstance, void*, uint32_t, void*) \
   V(GetObjStatic, void*, uint32_t) \
 \
-  V(AputObjectWithNullAndBoundCheck, void, mirror::Array*, int32_t, mirror::Object*) \
-  V(AputObjectWithBoundCheck, void, mirror::Array*, int32_t, mirror::Object*) \
   V(AputObject, void, mirror::Array*, int32_t, mirror::Object*) \
-  V(HandleFillArrayData, void, void*, void*) \
 \
   V(JniMethodStart, uint32_t, Thread*) \
   V(JniMethodFastStart, uint32_t, Thread*) \
@@ -134,6 +130,7 @@
   V(InvokeStaticTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeSuperTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeVirtualTrampolineWithAccessCheck, void, uint32_t, void*) \
+  V(InvokePolymorphic, void, uint32_t, void*) \
 \
   V(TestSuspend, void, void) \
 \
@@ -143,27 +140,27 @@
   V(ThrowNullPointer, void, void) \
   V(ThrowStackOverflow, void, void*) \
   V(ThrowStringBounds, void, int32_t, int32_t) \
-  V(Deoptimize, void, void) \
+  V(Deoptimize, void, DeoptimizationKind) \
 \
   V(A64Load, int64_t, volatile const int64_t *) \
   V(A64Store, void, volatile int64_t *, int64_t) \
 \
-  V(NewEmptyString, void) \
-  V(NewStringFromBytes_B, void) \
-  V(NewStringFromBytes_BI, void) \
-  V(NewStringFromBytes_BII, void) \
-  V(NewStringFromBytes_BIII, void) \
-  V(NewStringFromBytes_BIIString, void) \
-  V(NewStringFromBytes_BString, void) \
-  V(NewStringFromBytes_BIICharset, void) \
-  V(NewStringFromBytes_BCharset, void) \
-  V(NewStringFromChars_C, void) \
-  V(NewStringFromChars_CII, void) \
-  V(NewStringFromChars_IIC, void) \
-  V(NewStringFromCodePoints, void) \
-  V(NewStringFromString, void) \
-  V(NewStringFromStringBuffer, void) \
-  V(NewStringFromStringBuilder, void) \
+  V(NewEmptyString, void, void) \
+  V(NewStringFromBytes_B, void, void) \
+  V(NewStringFromBytes_BI, void, void) \
+  V(NewStringFromBytes_BII, void, void) \
+  V(NewStringFromBytes_BIII, void, void) \
+  V(NewStringFromBytes_BIIString, void, void) \
+  V(NewStringFromBytes_BString, void, void) \
+  V(NewStringFromBytes_BIICharset, void, void) \
+  V(NewStringFromBytes_BCharset, void, void) \
+  V(NewStringFromChars_C, void, void) \
+  V(NewStringFromChars_CII, void, void) \
+  V(NewStringFromChars_IIC, void, void) \
+  V(NewStringFromCodePoints, void, void) \
+  V(NewStringFromString, void, void) \
+  V(NewStringFromStringBuffer, void, void) \
+  V(NewStringFromStringBuilder, void, void) \
 \
   V(ReadBarrierJni, void, mirror::CompressedReference<mirror::Object>*, Thread*) \
   V(ReadBarrierMarkReg00, mirror::Object*, mirror::Object*) \

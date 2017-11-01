@@ -17,22 +17,23 @@
 #include <memory>
 
 #include "base/arena_allocator.h"
+#include "base/callee_save_type.h"
 #include "base/enums.h"
 #include "class_linker.h"
 #include "common_runtime_test.h"
-#include "dex_file.h"
 #include "dex_file-inl.h"
+#include "dex_file.h"
 #include "gtest/gtest.h"
+#include "handle_scope-inl.h"
 #include "leb128.h"
 #include "mirror/class-inl.h"
-#include "mirror/object_array-inl.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "oat_quick_method_header.h"
 #include "optimizing/stack_map_stream.h"
-#include "runtime.h"
+#include "runtime-inl.h"
 #include "scoped_thread_state_change-inl.h"
-#include "handle_scope-inl.h"
 #include "thread.h"
 
 namespace art {
@@ -60,8 +61,9 @@ class ExceptionTest : public CommonRuntimeTest {
     }
 
     ArenaPool pool;
-    ArenaAllocator allocator(&pool);
-    StackMapStream stack_maps(&allocator);
+    ArenaStack arena_stack(&pool);
+    ScopedArenaAllocator allocator(&arena_stack);
+    StackMapStream stack_maps(&allocator, kRuntimeISA);
     stack_maps.BeginStackMapEntry(/* dex_pc */ 3u,
                                   /* native_pc_offset */ 3u,
                                   /* register_mask */ 0u,
@@ -74,8 +76,8 @@ class ExceptionTest : public CommonRuntimeTest {
 
     fake_header_code_and_maps_.resize(stack_maps_offset + fake_code_.size());
     MemoryRegion stack_maps_region(&fake_header_code_and_maps_[0], stack_maps_size);
-    stack_maps.FillIn(stack_maps_region);
-    OatQuickMethodHeader method_header(stack_maps_offset, 4 * sizeof(void*), 0u, 0u, code_size);
+    stack_maps.FillInCodeInfo(stack_maps_region);
+    OatQuickMethodHeader method_header(stack_maps_offset, 0u, 4 * sizeof(void*), 0u, 0u, code_size);
     memcpy(&fake_header_code_and_maps_[stack_maps_size], &method_header, sizeof(method_header));
     std::copy(fake_code_.begin(),
               fake_code_.end(),
@@ -101,12 +103,14 @@ class ExceptionTest : public CommonRuntimeTest {
       CHECK_ALIGNED(stack_maps_offset, 2);
     }
 
-    method_f_ = my_klass_->FindVirtualMethod("f", "()I", kRuntimePointerSize);
+    method_f_ = my_klass_->FindClassMethod("f", "()I", kRuntimePointerSize);
     ASSERT_TRUE(method_f_ != nullptr);
+    ASSERT_FALSE(method_f_->IsDirect());
     method_f_->SetEntryPointFromQuickCompiledCode(code_ptr);
 
-    method_g_ = my_klass_->FindVirtualMethod("g", "(I)V", kRuntimePointerSize);
+    method_g_ = my_klass_->FindClassMethod("g", "(I)V", kRuntimePointerSize);
     ASSERT_TRUE(method_g_ != nullptr);
+    ASSERT_FALSE(method_g_->IsDirect());
     method_g_->SetEntryPointFromQuickCompiledCode(code_ptr);
   }
 
@@ -170,7 +174,7 @@ TEST_F(ExceptionTest, StackTraceElement) {
   Runtime* r = Runtime::Current();
   r->SetInstructionSet(kRuntimeISA);
   ArtMethod* save_method = r->CreateCalleeSaveMethod();
-  r->SetCalleeSaveMethod(save_method, Runtime::kSaveAllCalleeSaves);
+  r->SetCalleeSaveMethod(save_method, CalleeSaveType::kSaveAllCalleeSaves);
   QuickMethodFrameInfo frame_info = r->GetRuntimeMethodFrameInfo(save_method);
 
   ASSERT_EQ(kStackAlignment, 16U);

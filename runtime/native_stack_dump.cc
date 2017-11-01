@@ -40,12 +40,13 @@
 #include "android-base/stringprintf.h"
 
 #include "arch/instruction_set.h"
+#include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
 #include "base/unix_file/fd_file.h"
 #include "oat_quick_method_header.h"
 #include "os.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 #include "utils.h"
 
 #endif
@@ -105,7 +106,7 @@ static std::unique_ptr<Addr2linePipe> Connect(const std::string& name, const cha
   if (pid == -1) {
     close(caller_to_addr2line[0]);
     close(caller_to_addr2line[1]);
-    close(addr2line_to_caller[1]);
+    close(addr2line_to_caller[0]);
     close(addr2line_to_caller[1]);
     return nullptr;
   }
@@ -337,7 +338,7 @@ void DumpNativeStack(std::ostream& os,
     } else {
       os << StringPrintf(Is64BitInstructionSet(kRuntimeISA) ? "%016" PRIxPTR "  "
                                                             : "%08" PRIxPTR "  ",
-                         BacktraceMap::GetRelativePc(it->map, it->pc));
+                         it->rel_pc);
       os << it->map.name;
       os << " (";
       if (!it->func_name.empty()) {

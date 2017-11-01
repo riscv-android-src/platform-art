@@ -797,7 +797,8 @@ ExecuteMterpImpl:
     /* Set up for backwards branches & osr profiling */
     lw      a0, OFF_FP_METHOD(rFP)
     addu    a1, rFP, OFF_FP_SHADOWFRAME
-    JAL(MterpSetUpHotnessCountdown)        # (method, shadow_frame)
+    move    a2, rSELF
+    JAL(MterpSetUpHotnessCountdown)        # (method, shadow_frame, self)
     move    rPROFILE, v0                   # Starting hotness countdown to rPROFILE
 
     /* start executing the instruction at rPC */
@@ -808,7 +809,6 @@ ExecuteMterpImpl:
 
 
     .global artMterpAsmInstructionStart
-    .type   artMterpAsmInstructionStart, %function
 artMterpAsmInstructionStart = .L_op_nop
     .text
 
@@ -1225,18 +1225,24 @@ artMterpAsmInstructionStart = .L_op_nop
     .balign 128
 .L_op_const_string: /* 0x1a */
 /* File: mips/op_const_string.S */
-    /* const/string vAA, string@BBBB */
+/* File: mips/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstString
     EXPORT_PC()
     FETCH(a0, 1)                        # a0 <- BBBB
     GET_OPA(a1)                         # a1 <- AA
     addu   a2, rFP, OFF_FP_SHADOWFRAME  # a2 <- shadow frame
     move   a3, rSELF
-    JAL(MterpConstString)               # v0 <- Mterp(index, tgt_reg, shadow_frame, self)
+    JAL(MterpConstString)                        # v0 <- Mterp(index, tgt_reg, shadow_frame, self)
     PREFETCH_INST(2)                    # load rINST
     bnez   v0, MterpPossibleException
     ADVANCE(2)                          # advance rPC
     GET_INST_OPCODE(t0)                 # extract opcode from rINST
     GOTO_OPCODE(t0)                     # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -1261,18 +1267,24 @@ artMterpAsmInstructionStart = .L_op_nop
     .balign 128
 .L_op_const_class: /* 0x1c */
 /* File: mips/op_const_class.S */
-    /* const/class vAA, class@BBBB */
+/* File: mips/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstClass
     EXPORT_PC()
     FETCH(a0, 1)                        # a0 <- BBBB
     GET_OPA(a1)                         # a1 <- AA
     addu   a2, rFP, OFF_FP_SHADOWFRAME  # a2 <- shadow frame
     move   a3, rSELF
-    JAL(MterpConstClass)
+    JAL(MterpConstClass)                        # v0 <- Mterp(index, tgt_reg, shadow_frame, self)
     PREFETCH_INST(2)                    # load rINST
     bnez   v0, MterpPossibleException
     ADVANCE(2)                          # advance rPC
     GET_INST_OPCODE(t0)                 # extract opcode from rINST
     GOTO_OPCODE(t0)                     # jump to next instruction
+
 
 /* ------------------------------ */
     .balign 128
@@ -3038,12 +3050,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGet32StaticFromCode
+    .extern MterpGet32Static
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGet32StaticFromCode)
+    JAL(MterpGet32Static)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3064,12 +3076,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * 64-bit SGET handler.
      */
     /* sget-wide vAA, field@BBBB */
-    .extern artGet64StaticFromCode
+    .extern MterpGet64Static
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGet64StaticFromCode)
+    JAL(MterpGet64Static)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     bnez  a3, MterpException
     GET_OPA(a1)                            # a1 <- AA
@@ -3088,12 +3100,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGetObjStaticFromCode
+    .extern MterpGetObjStatic
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGetObjStaticFromCode)
+    JAL(MterpGetObjStatic)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3118,12 +3130,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGetBooleanStaticFromCode
+    .extern MterpGetBooleanStatic
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGetBooleanStaticFromCode)
+    JAL(MterpGetBooleanStatic)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3148,12 +3160,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGetByteStaticFromCode
+    .extern MterpGetByteStatic
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGetByteStaticFromCode)
+    JAL(MterpGetByteStatic)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3178,12 +3190,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGetCharStaticFromCode
+    .extern MterpGetCharStatic
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGetCharStaticFromCode)
+    JAL(MterpGetCharStatic)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3208,12 +3220,12 @@ artMterpAsmInstructionStart = .L_op_nop
      * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
      */
     /* op vAA, field@BBBB */
-    .extern artGetShortStaticFromCode
+    .extern MterpGetShortStatic
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref BBBB
     lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
     move  a2, rSELF                        # a2 <- self
-    JAL(artGetShortStaticFromCode)
+    JAL(MterpGetShortStatic)
     lw    a3, THREAD_EXCEPTION_OFFSET(rSELF)
     GET_OPA(a2)                            # a2 <- AA
     PREFETCH_INST(2)
@@ -3244,7 +3256,7 @@ artMterpAsmInstructionStart = .L_op_nop
     lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet32StaticFromCode)
+    JAL(MterpSet32Static)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3258,15 +3270,15 @@ artMterpAsmInstructionStart = .L_op_nop
      * 64-bit SPUT handler.
      */
     /* sput-wide vAA, field@BBBB */
-    .extern artSet64IndirectStaticFromMterp
+    .extern MterpSet64Static
     EXPORT_PC()
     FETCH(a0, 1)                           # a0 <- field ref CCCC
-    lw    a1, OFF_FP_METHOD(rFP)           # a1 <- method
-    GET_OPA(a2)                            # a2 <- AA
-    EAS2(a2, rFP, a2)                      # a2 <- &fp[AA]
+    GET_OPA(a1)                            # a1 <- AA
+    EAS2(a1, rFP, a1)                      # a1 <- &fp[AA]
+    lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet64IndirectStaticFromMterp)
+    JAL(MterpSet64Static)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3311,7 +3323,7 @@ artMterpAsmInstructionStart = .L_op_nop
     lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet8StaticFromCode)
+    JAL(MterpSetBooleanStatic)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3336,7 +3348,7 @@ artMterpAsmInstructionStart = .L_op_nop
     lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet8StaticFromCode)
+    JAL(MterpSetByteStatic)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3361,7 +3373,7 @@ artMterpAsmInstructionStart = .L_op_nop
     lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet16StaticFromCode)
+    JAL(MterpSetCharStatic)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3386,7 +3398,7 @@ artMterpAsmInstructionStart = .L_op_nop
     lw    a2, OFF_FP_METHOD(rFP)           # a2 <- method
     move  a3, rSELF                        # a3 <- self
     PREFETCH_INST(2)                       # load rINST
-    JAL(artSet16StaticFromCode)
+    JAL(MterpSetShortStatic)
     bnez  v0, MterpException               # bail out
     ADVANCE(2)                             # advance rPC
     GET_INST_OPCODE(t0)                    # extract opcode from rINST
@@ -3967,7 +3979,8 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      * We have to clip values to int min/max per the specification.  The
      * expected common case is a "reasonable" value that converts directly
-     * to modest integer.  The EABI convert function isn't doing this for us.
+     * to modest integer.  The EABI convert function isn't doing this for us
+     * for pre-R6.
      */
     /* unop vA, vB */
     GET_OPB(a3)                            #  a3 <- B
@@ -3975,27 +3988,19 @@ artMterpAsmInstructionStart = .L_op_nop
     GET_VREG_F(fa0, a3)
     FETCH_ADVANCE_INST(1)                  #  advance rPC, load rINST
 
+#ifndef MIPS32REVGE6
     li        t0, INT_MIN_AS_FLOAT
     mtc1      t0, fa1
-#ifdef MIPS32REVGE6
-    /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
-     */
-    cmp.le.s  ft0, fa1, fa0
-    GET_INST_OPCODE(t1)                    #  extract opcode from rINST
-    bc1nez    ft0, 1f                      #  if INT_MIN <= vB, proceed to truncation
-    cmp.eq.s  ft0, fa0, fa0
-    selnez.s  fa0, fa1, ft0                #  fa0 = ordered(vB) ? INT_MIN_AS_FLOAT : 0
-#else
     c.ole.s   fcc0, fa1, fa0
+#endif
     GET_INST_OPCODE(t1)                    #  extract opcode from rINST
+#ifndef MIPS32REVGE6
     bc1t      fcc0, 1f                     #  if INT_MIN <= vB, proceed to truncation
     c.eq.s    fcc0, fa0, fa0
     mtc1      zero, fa0
     movt.s    fa0, fa1, fcc0               #  fa0 = ordered(vB) ? INT_MIN_AS_FLOAT : 0
-#endif
 1:
+#endif
     trunc.w.s fa0, fa0
     SET_VREG_F_GOTO(fa0, rOBJ, t1)         #  vA <- result
 
@@ -4008,7 +4013,8 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      * We have to clip values to long min/max per the specification.  The
      * expected common case is a "reasonable" value that converts directly
-     * to modest integer.  The EABI convert function isn't doing this for us.
+     * to modest integer.  The EABI convert function isn't doing this for us
+     * for pre-R6.
      */
     /* unop vA, vB */
     GET_OPA4(rOBJ)                         #  rOBJ <- A+
@@ -4017,18 +4023,7 @@ artMterpAsmInstructionStart = .L_op_nop
     FETCH_ADVANCE_INST(1)                  #  advance rPC, load rINST
 
 #ifdef MIPS32REVGE6
-    /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
-     */
-    li        t0, LONG_MIN_AS_FLOAT
-    mtc1      t0, fa1
-    cmp.le.s  ft0, fa1, fa0
     GET_INST_OPCODE(t1)                    #  extract opcode from rINST
-    bc1nez    ft0, 1f                      #  if LONG_MIN <= vB, proceed to truncation
-    cmp.eq.s  ft0, fa0, fa0
-    selnez.s  fa0, fa1, ft0                #  fa0 = ordered(vB) ? LONG_MIN_AS_FLOAT : 0
-1:
     trunc.l.s fa0, fa0
     SET_VREG64_F_GOTO(fa0, fa0f, rOBJ, t1) #  vA <- result
 #else
@@ -4084,7 +4079,8 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      * We have to clip values to int min/max per the specification.  The
      * expected common case is a "reasonable" value that converts directly
-     * to modest integer.  The EABI convert function isn't doing this for us.
+     * to modest integer.  The EABI convert function isn't doing this for us
+     * for pre-R6.
      */
     /* unop vA, vB */
     GET_OPB(a3)                            #  a3 <- B
@@ -4092,30 +4088,21 @@ artMterpAsmInstructionStart = .L_op_nop
     EAS2(a3, rFP, a3)                      #  a3 <- &fp[B]
     LOAD64_F(fa0, fa0f, a3)
     FETCH_ADVANCE_INST(1)                  #  advance rPC, load rINST
-
+#ifndef MIPS32REVGE6
     li        t0, INT_MIN_AS_DOUBLE_HIGH
     mtc1      zero, fa1
     MOVE_TO_FPU_HIGH(t0, fa1, fa1f)
-#ifdef MIPS32REVGE6
-    /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
-     */
-    cmp.le.d  ft0, fa1, fa0
-    GET_INST_OPCODE(t1)                    #  extract opcode from rINST
-    bc1nez    ft0, 1f                      #  if INT_MIN <= vB, proceed to truncation
-    cmp.eq.d  ft0, fa0, fa0
-    selnez.d  fa0, fa1, ft0                #  fa0 = ordered(vB) ? INT_MIN_AS_DOUBLE : 0
-#else
     c.ole.d   fcc0, fa1, fa0
+#endif
     GET_INST_OPCODE(t1)                    #  extract opcode from rINST
+#ifndef MIPS32REVGE6
     bc1t      fcc0, 1f                     #  if INT_MIN <= vB, proceed to truncation
     c.eq.d    fcc0, fa0, fa0
     mtc1      zero, fa0
     MOVE_TO_FPU_HIGH(zero, fa0, fa0f)
     movt.d    fa0, fa1, fcc0               #  fa0 = ordered(vB) ? INT_MIN_AS_DOUBLE : 0
-#endif
 1:
+#endif
     trunc.w.d fa0, fa0
     SET_VREG_F_GOTO(fa0, rOBJ, t1)         #  vA <- result
 
@@ -4128,7 +4115,8 @@ artMterpAsmInstructionStart = .L_op_nop
      *
      * We have to clip values to long min/max per the specification.  The
      * expected common case is a "reasonable" value that converts directly
-     * to modest integer.  The EABI convert function isn't doing this for us.
+     * to modest integer.  The EABI convert function isn't doing this for us
+     * for pre-R6.
      */
     /* unop vA, vB */
     GET_OPA4(rOBJ)                         #  rOBJ <- A+
@@ -4138,19 +4126,7 @@ artMterpAsmInstructionStart = .L_op_nop
     FETCH_ADVANCE_INST(1)                  #  advance rPC, load rINST
 
 #ifdef MIPS32REVGE6
-    /*
-     * TODO: simplify this when the MIPS64R6 emulator
-     * supports NAN2008=1.
-     */
-    li        t0, LONG_MIN_AS_DOUBLE_HIGH
-    mtc1      zero, fa1
-    mthc1     t0, fa1
-    cmp.le.d  ft0, fa1, fa0
     GET_INST_OPCODE(t1)                    #  extract opcode from rINST
-    bc1nez    ft0, 1f                      #  if LONG_MIN <= vB, proceed to truncation
-    cmp.eq.d  ft0, fa0, fa0
-    selnez.d  fa0, fa1, ft0                #  fa0 = ordered(vB) ? LONG_MIN_AS_DOUBLE : 0
-1:
     trunc.l.d fa0, fa0
     SET_VREG64_F_GOTO(fa0, fa0f, rOBJ, t1) #  vA <- result
 #else
@@ -7750,61 +7726,150 @@ artMterpAsmInstructionStart = .L_op_nop
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic: /* 0xfa */
-/* Transfer stub to alternate interpreter */
-    b    MterpFallback
+/* File: mips/op_invoke_polymorphic.S */
+/* File: mips/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphic
+    EXPORT_PC()
+    move    a0, rSELF
+    addu    a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    JAL(MterpInvokePolymorphic)
+    beqz    v0, MterpException
+    FETCH_ADVANCE_INST(4)
+    JAL(MterpShouldSwitchInterpreters)
+    bnez    v0, MterpFallback
+    GET_INST_OPCODE(t0)
+    GOTO_OPCODE(t0)
+
 
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic_range: /* 0xfb */
-/* Transfer stub to alternate interpreter */
-    b    MterpFallback
-
-/* ------------------------------ */
-    .balign 128
-.L_op_unused_fc: /* 0xfc */
-/* File: mips/op_unused_fc.S */
-/* File: mips/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-  b MterpFallback
-
-
-/* ------------------------------ */
-    .balign 128
-.L_op_unused_fd: /* 0xfd */
-/* File: mips/op_unused_fd.S */
-/* File: mips/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-  b MterpFallback
+/* File: mips/op_invoke_polymorphic_range.S */
+/* File: mips/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphicRange
+    EXPORT_PC()
+    move    a0, rSELF
+    addu    a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    JAL(MterpInvokePolymorphicRange)
+    beqz    v0, MterpException
+    FETCH_ADVANCE_INST(4)
+    JAL(MterpShouldSwitchInterpreters)
+    bnez    v0, MterpFallback
+    GET_INST_OPCODE(t0)
+    GOTO_OPCODE(t0)
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_fe: /* 0xfe */
-/* File: mips/op_unused_fe.S */
-/* File: mips/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-  b MterpFallback
+.L_op_invoke_custom: /* 0xfc */
+/* File: mips/op_invoke_custom.S */
+/* File: mips/invoke.S */
+    /*
+     * Generic invoke handler wrapper.
+     */
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustom
+    EXPORT_PC()
+    move    a0, rSELF
+    addu    a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    JAL(MterpInvokeCustom)
+    beqz    v0, MterpException
+    FETCH_ADVANCE_INST(3)
+    JAL(MterpShouldSwitchInterpreters)
+    bnez    v0, MterpFallback
+    GET_INST_OPCODE(t0)
+    GOTO_OPCODE(t0)
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_ff: /* 0xff */
-/* File: mips/op_unused_ff.S */
-/* File: mips/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-  b MterpFallback
+.L_op_invoke_custom_range: /* 0xfd */
+/* File: mips/op_invoke_custom_range.S */
+/* File: mips/invoke.S */
+    /*
+     * Generic invoke handler wrapper.
+     */
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustomRange
+    EXPORT_PC()
+    move    a0, rSELF
+    addu    a1, rFP, OFF_FP_SHADOWFRAME
+    move    a2, rPC
+    move    a3, rINST
+    JAL(MterpInvokeCustomRange)
+    beqz    v0, MterpException
+    FETCH_ADVANCE_INST(3)
+    JAL(MterpShouldSwitchInterpreters)
+    bnez    v0, MterpFallback
+    GET_INST_OPCODE(t0)
+    GOTO_OPCODE(t0)
+
+
+/* ------------------------------ */
+    .balign 128
+.L_op_const_method_handle: /* 0xfe */
+/* File: mips/op_const_method_handle.S */
+/* File: mips/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodHandle
+    EXPORT_PC()
+    FETCH(a0, 1)                        # a0 <- BBBB
+    GET_OPA(a1)                         # a1 <- AA
+    addu   a2, rFP, OFF_FP_SHADOWFRAME  # a2 <- shadow frame
+    move   a3, rSELF
+    JAL(MterpConstMethodHandle)                        # v0 <- Mterp(index, tgt_reg, shadow_frame, self)
+    PREFETCH_INST(2)                    # load rINST
+    bnez   v0, MterpPossibleException
+    ADVANCE(2)                          # advance rPC
+    GET_INST_OPCODE(t0)                 # extract opcode from rINST
+    GOTO_OPCODE(t0)                     # jump to next instruction
+
+
+/* ------------------------------ */
+    .balign 128
+.L_op_const_method_type: /* 0xff */
+/* File: mips/op_const_method_type.S */
+/* File: mips/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodType
+    EXPORT_PC()
+    FETCH(a0, 1)                        # a0 <- BBBB
+    GET_OPA(a1)                         # a1 <- AA
+    addu   a2, rFP, OFF_FP_SHADOWFRAME  # a2 <- shadow frame
+    move   a3, rSELF
+    JAL(MterpConstMethodType)                        # v0 <- Mterp(index, tgt_reg, shadow_frame, self)
+    PREFETCH_INST(2)                    # load rINST
+    bnez   v0, MterpPossibleException
+    ADVANCE(2)                          # advance rPC
+    GET_INST_OPCODE(t0)                 # extract opcode from rINST
+    GOTO_OPCODE(t0)                     # jump to next instruction
 
 
     .balign 128
-    .size   artMterpAsmInstructionStart, .-artMterpAsmInstructionStart
     .global artMterpAsmInstructionEnd
 artMterpAsmInstructionEnd:
 
@@ -7814,7 +7879,6 @@ artMterpAsmInstructionEnd:
  * ===========================================================================
  */
     .global artMterpAsmSisterStart
-    .type   artMterpAsmSisterStart, %function
     .text
     .balign 4
 artMterpAsmSisterStart:
@@ -7874,14 +7938,11 @@ artMterpAsmSisterStart:
 
 .Lop_ushr_long_2addr_finish:
     SET_VREG64_GOTO(v1, zero, t3, t0)      #  vA/vA+1 <- rlo/rhi
-
-    .size   artMterpAsmSisterStart, .-artMterpAsmSisterStart
     .global artMterpAsmSisterEnd
 artMterpAsmSisterEnd:
 
 
     .global artMterpAsmAltInstructionStart
-    .type   artMterpAsmAltInstructionStart, %function
     .text
 
 artMterpAsmAltInstructionStart = .L_ALT_op_nop
@@ -12423,7 +12484,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fc: /* 0xfc */
+.L_ALT_op_invoke_custom: /* 0xfc */
 /* File: mips/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12441,7 +12502,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fd: /* 0xfd */
+.L_ALT_op_invoke_custom_range: /* 0xfd */
 /* File: mips/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12459,7 +12520,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fe: /* 0xfe */
+.L_ALT_op_const_method_handle: /* 0xfe */
 /* File: mips/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12477,7 +12538,7 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_ff: /* 0xff */
+.L_ALT_op_const_method_type: /* 0xff */
 /* File: mips/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12494,7 +12555,6 @@ artMterpAsmAltInstructionStart = .L_ALT_op_nop
     jalr   zero, t9                     # Tail call to Mterp(self, shadow_frame, dex_pc_ptr)
 
     .balign 128
-    .size   artMterpAsmAltInstructionStart, .-artMterpAsmAltInstructionStart
     .global artMterpAsmAltInstructionEnd
 artMterpAsmAltInstructionEnd:
 /* File: mips/footer.S */

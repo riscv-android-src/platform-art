@@ -21,6 +21,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "art_field-inl.h"
 #include "debug/dwarf/debug_abbrev_writer.h"
 #include "debug/dwarf/debug_info_entry_writer.h"
 #include "debug/elf_compilation_unit.h"
@@ -28,8 +29,9 @@
 #include "debug/method_debug_info.h"
 #include "dex_file-inl.h"
 #include "dex_file.h"
-#include "elf_builder.h"
+#include "heap_poisoning.h"
 #include "linear_alloc.h"
+#include "linker/elf_builder.h"
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
@@ -66,7 +68,7 @@ class ElfDebugInfoWriter {
   using Elf_Addr = typename ElfTypes::Addr;
 
  public:
-  explicit ElfDebugInfoWriter(ElfBuilder<ElfTypes>* builder)
+  explicit ElfDebugInfoWriter(linker::ElfBuilder<ElfTypes>* builder)
       : builder_(builder),
         debug_abbrev_(&debug_abbrev_buffer_) {
   }
@@ -91,7 +93,7 @@ class ElfDebugInfoWriter {
   }
 
  private:
-  ElfBuilder<ElfTypes>* builder_;
+  linker::ElfBuilder<ElfTypes>* builder_;
   std::vector<uintptr_t> debug_info_patches_;
   std::vector<uint8_t> debug_abbrev_buffer_;
   dwarf::DebugAbbrevWriter<> debug_abbrev_;
@@ -121,16 +123,38 @@ class ElfCompilationUnitWriter {
     const Elf_Addr base_address = compilation_unit.is_code_address_text_relative
         ? owner_->builder_->GetText()->GetAddress()
         : 0;
-    const uint64_t cu_size = compilation_unit.code_end - compilation_unit.code_address;
+    const bool is64bit = Is64BitInstructionSet(owner_->builder_->GetIsa());
     using namespace dwarf;  // NOLINT. For easy access to DWARF constants.
 
     info_.StartTag(DW_TAG_compile_unit);
     info_.WriteString(DW_AT_producer, "Android dex2oat");
     info_.WriteData1(DW_AT_language, DW_LANG_Java);
     info_.WriteString(DW_AT_comp_dir, "$JAVA_SRC_ROOT");
+    // The low_pc acts as base address for several other addresses/ranges.
     info_.WriteAddr(DW_AT_low_pc, base_address + compilation_unit.code_address);
-    info_.WriteUdata(DW_AT_high_pc, dchecked_integral_cast<uint32_t>(cu_size));
     info_.WriteSecOffset(DW_AT_stmt_list, compilation_unit.debug_line_offset);
+
+    // Write .debug_ranges entries covering code ranges of the whole compilation unit.
+    dwarf::Writer<> debug_ranges(&owner_->debug_ranges_);
+    info_.WriteSecOffset(DW_AT_ranges, owner_->debug_ranges_.size());
+    for (auto mi : compilation_unit.methods) {
+      uint64_t low_pc = mi->code_address - compilation_unit.code_address;
+      uint64_t high_pc = low_pc + mi->code_size;
+      if (is64bit) {
+        debug_ranges.PushUint64(low_pc);
+        debug_ranges.PushUint64(high_pc);
+      } else {
+        debug_ranges.PushUint32(low_pc);
+        debug_ranges.PushUint32(high_pc);
+      }
+    }
+    if (is64bit) {
+      debug_ranges.PushUint64(0);  // End of list.
+      debug_ranges.PushUint64(0);
+    } else {
+      debug_ranges.PushUint32(0);  // End of list.
+      debug_ranges.PushUint32(0);
+    }
 
     const char* last_dex_class_desc = nullptr;
     for (auto mi : compilation_unit.methods) {
@@ -410,7 +434,7 @@ class ElfCompilationUnitWriter {
     for (const auto& base_class_reference : base_class_references) {
       size_t reference_offset = base_class_reference.first;
       mirror::Class* base_class = base_class_reference.second;
-      const auto& it = class_declarations.find(base_class);
+      const auto it = class_declarations.find(base_class);
       if (it != class_declarations.end()) {
         info_.UpdateUint32(reference_offset, it->second);
       } else {
@@ -511,7 +535,7 @@ class ElfCompilationUnitWriter {
     using namespace dwarf;  // NOLINT. For easy access to DWARF constants.
 
     DCHECK(!desc.empty());
-    const auto& it = type_cache_.find(desc);
+    const auto it = type_cache_.find(desc);
     if (it != type_cache_.end()) {
       return it->second;
     }

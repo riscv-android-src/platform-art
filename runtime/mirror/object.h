@@ -17,12 +17,15 @@
 #ifndef ART_RUNTIME_MIRROR_OBJECT_H_
 #define ART_RUNTIME_MIRROR_OBJECT_H_
 
+#include "atomic.h"
 #include "base/casts.h"
 #include "base/enums.h"
 #include "globals.h"
 #include "obj_ptr.h"
 #include "object_reference.h"
 #include "offsets.h"
+#include "read_barrier_config.h"
+#include "read_barrier_option.h"
 #include "verify_object.h"
 
 namespace art {
@@ -127,8 +130,7 @@ class MANAGED LOCKABLE Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool InstanceOf(ObjPtr<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t SizeOf() REQUIRES_SHARED(Locks::mutator_lock_);
 
   Object* Clone(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_)
@@ -312,6 +314,11 @@ class MANAGED LOCKABLE Object {
                                             ObjPtr<Object> new_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<bool kCheckTransaction = true, VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           bool kIsVolatile = false>
+  ALWAYS_INLINE void SetFieldObjectTransaction(MemberOffset field_offset, ObjPtr<Object> new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   template<bool kTransactionActive,
            bool kCheckTransaction = true,
            VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -350,7 +357,22 @@ class MANAGED LOCKABLE Object {
   template<bool kTransactionActive,
            bool kCheckTransaction = true,
            VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool CasFieldWeakReleaseObjectWithoutWriteBarrier(MemberOffset field_offset,
+                                                    ObjPtr<Object> old_value,
+                                                    ObjPtr<Object> new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<bool kTransactionActive,
+           bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool CasFieldStrongRelaxedObjectWithoutWriteBarrier(MemberOffset field_offset,
+                                                      ObjPtr<Object> old_value,
+                                                      ObjPtr<Object> new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive,
+           bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool CasFieldStrongReleaseObjectWithoutWriteBarrier(MemberOffset field_offset,
                                                       ObjPtr<Object> old_value,
                                                       ObjPtr<Object> new_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -360,7 +382,12 @@ class MANAGED LOCKABLE Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
   ALWAYS_INLINE uint8_t GetFieldBoolean(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kVerifyFlags & kVerifyThis) {
+      VerifyObject(this);
+    }
+    return GetField<uint8_t, kIsVolatile>(field_offset);
+  }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
   ALWAYS_INLINE int8_t GetFieldByte(MemberOffset field_offset)
@@ -432,11 +459,18 @@ class MANAGED LOCKABLE Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
   ALWAYS_INLINE int32_t GetField32(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kVerifyFlags & kVerifyThis) {
+      VerifyObject(this);
+    }
+    return GetField<int32_t, kIsVolatile>(field_offset);
+  }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE int32_t GetField32Volatile(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetField32<kVerifyFlags, true>(field_offset);
+  }
 
   template<bool kTransactionActive, bool kCheckTransaction = true,
       VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
@@ -446,6 +480,12 @@ class MANAGED LOCKABLE Object {
   template<bool kTransactionActive, bool kCheckTransaction = true,
       VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE void SetField32Volatile(MemberOffset field_offset, int32_t new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           bool kIsVolatile = false>
+  ALWAYS_INLINE void SetField32Transaction(MemberOffset field_offset, int32_t new_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<bool kTransactionActive, bool kCheckTransaction = true,
@@ -480,11 +520,18 @@ class MANAGED LOCKABLE Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
   ALWAYS_INLINE int64_t GetField64(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kVerifyFlags & kVerifyThis) {
+      VerifyObject(this);
+    }
+    return GetField<int64_t, kIsVolatile>(field_offset);
+  }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE int64_t GetField64Volatile(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetField64<kVerifyFlags, true>(field_offset);
+  }
 
   template<bool kTransactionActive, bool kCheckTransaction = true,
       VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
@@ -494,6 +541,12 @@ class MANAGED LOCKABLE Object {
   template<bool kTransactionActive, bool kCheckTransaction = true,
       VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE void SetField64Volatile(MemberOffset field_offset, int64_t new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           bool kIsVolatile = false>
+  ALWAYS_INLINE void SetField64Transaction(MemberOffset field_offset, int32_t new_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<bool kTransactionActive, bool kCheckTransaction = true,
@@ -530,10 +583,10 @@ class MANAGED LOCKABLE Object {
                                          PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (pointer_size == PointerSize::k32) {
-      intptr_t ptr  = reinterpret_cast<intptr_t>(new_value);
-      DCHECK_EQ(static_cast<int32_t>(ptr), ptr);  // Check that we dont lose any non 0 bits.
+      uintptr_t ptr  = reinterpret_cast<uintptr_t>(new_value);
+      DCHECK_EQ(static_cast<uint32_t>(ptr), ptr);  // Check that we dont lose any non 0 bits.
       SetField32<kTransactionActive, kCheckTransaction, kVerifyFlags>(
-          field_offset, static_cast<int32_t>(ptr));
+          field_offset, static_cast<int32_t>(static_cast<uint32_t>(ptr)));
     } else {
       SetField64<kTransactionActive, kCheckTransaction, kVerifyFlags>(
           field_offset, reinterpret_cast64<int64_t>(new_value));
@@ -583,7 +636,8 @@ class MANAGED LOCKABLE Object {
   ALWAYS_INLINE T GetFieldPtrWithSize(MemberOffset field_offset, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (pointer_size == PointerSize::k32) {
-      return reinterpret_cast<T>(GetField32<kVerifyFlags, kIsVolatile>(field_offset));
+      uint64_t address = static_cast<uint32_t>(GetField32<kVerifyFlags, kIsVolatile>(field_offset));
+      return reinterpret_cast<T>(static_cast<uintptr_t>(address));
     } else {
       int64_t v = GetField64<kVerifyFlags, kIsVolatile>(field_offset);
       return reinterpret_cast64<T>(v);
@@ -611,10 +665,28 @@ class MANAGED LOCKABLE Object {
  private:
   template<typename kSize, bool kIsVolatile>
   ALWAYS_INLINE void SetField(MemberOffset field_offset, kSize new_value)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
+    kSize* addr = reinterpret_cast<kSize*>(raw_addr);
+    if (kIsVolatile) {
+      reinterpret_cast<Atomic<kSize>*>(addr)->StoreSequentiallyConsistent(new_value);
+    } else {
+      reinterpret_cast<Atomic<kSize>*>(addr)->StoreJavaData(new_value);
+    }
+  }
+
   template<typename kSize, bool kIsVolatile>
   ALWAYS_INLINE kSize GetField(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    const uint8_t* raw_addr = reinterpret_cast<const uint8_t*>(this) + field_offset.Int32Value();
+    const kSize* addr = reinterpret_cast<const kSize*>(raw_addr);
+    if (kIsVolatile) {
+      return reinterpret_cast<const Atomic<kSize>*>(addr)->LoadSequentiallyConsistent();
+    } else {
+      return reinterpret_cast<const Atomic<kSize>*>(addr)->LoadJavaData();
+    }
+  }
+
   // Get a field with acquire semantics.
   template<typename kSize>
   ALWAYS_INLINE kSize GetFieldAcquire(MemberOffset field_offset)

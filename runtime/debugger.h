@@ -27,11 +27,14 @@
 #include <string>
 #include <vector>
 
+#include "class_linker.h"
 #include "gc_root.h"
+#include "handle.h"
 #include "jdwp/jdwp.h"
 #include "jni.h"
 #include "jvalue.h"
 #include "obj_ptr.h"
+#include "runtime_callbacks.h"
 #include "thread.h"
 #include "thread_state.h"
 
@@ -48,6 +51,13 @@ class ScopedObjectAccess;
 class ScopedObjectAccessUnchecked;
 class StackVisitor;
 class Thread;
+
+struct DebuggerActiveMethodInspectionCallback : public MethodInspectionCallback {
+  bool IsMethodBeingInspected(ArtMethod* m ATTRIBUTE_UNUSED)
+      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+  bool IsMethodSafeToJit(ArtMethod* m) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+};
+
 
 /*
  * Invoke-during-breakpoint support.
@@ -286,6 +296,9 @@ class Dbg {
       REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError GetSignature(JDWP::RefTypeId ref_type_id, std::string* signature)
       REQUIRES_SHARED(Locks::mutator_lock_);
+  static JDWP::JdwpError GetSourceDebugExtension(JDWP::RefTypeId ref_type_id,
+                                                 std::string* extension_data)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError GetSourceFile(JDWP::RefTypeId ref_type_id, std::string* source_file)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError GetObjectTag(JDWP::ObjectId object_id, uint8_t* tag)
@@ -367,6 +380,8 @@ class Dbg {
   // Methods and fields.
   //
   static std::string GetMethodName(JDWP::MethodId method_id)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  static bool IsMethodObsolete(JDWP::MethodId method_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static JDWP::JdwpError OutputDeclaredFields(JDWP::RefTypeId ref_type_id, bool with_generic,
                                               JDWP::ExpandBuf* pReply)
@@ -501,12 +516,6 @@ class Dbg {
                                          const JValue* field_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static void PostException(mirror::Throwable* exception)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void PostThreadStart(Thread* t)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void PostThreadDeath(Thread* t)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static void PostClassPrepare(mirror::Class* c)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static void UpdateDebugger(Thread* thread, mirror::Object* this_object,
@@ -707,6 +716,13 @@ class Dbg {
     return instrumentation_events_;
   }
 
+  static ThreadLifecycleCallback* GetThreadLifecycleCallback() {
+    return &thread_lifecycle_callback_;
+  }
+  static ClassLoadCallback* GetClassLoadCallback() {
+    return &class_load_callback_;
+  }
+
  private:
   static void ExecuteMethodWithoutPendingException(ScopedObjectAccess& soa, DebugInvokeReq* pReq)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -725,7 +741,15 @@ class Dbg {
       REQUIRES(!Locks::thread_list_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static void DdmBroadcast(bool connect) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  static void PostThreadStart(Thread* t)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  static void PostThreadDeath(Thread* t)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   static void PostThreadStartOrStop(Thread*, uint32_t)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  static void PostClassPrepare(mirror::Class* c)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static void PostLocationEvent(ArtMethod* method, int pcOffset,
@@ -756,6 +780,8 @@ class Dbg {
 
   // Indicates whether the debugger is making requests.
   static bool gDebuggerActive;
+
+  static DebuggerActiveMethodInspectionCallback gDebugActiveCallback;
 
   // Indicates whether we should drop the JDWP connection because the runtime stops or the
   // debugger called VirtualMachine.Dispose.
@@ -788,6 +814,22 @@ class Dbg {
   static size_t field_write_event_ref_count_ GUARDED_BY(Locks::deoptimization_lock_);
   static size_t exception_catch_event_ref_count_ GUARDED_BY(Locks::deoptimization_lock_);
   static uint32_t instrumentation_events_ GUARDED_BY(Locks::mutator_lock_);
+
+  class DbgThreadLifecycleCallback : public ThreadLifecycleCallback {
+   public:
+    void ThreadStart(Thread* self) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+    void ThreadDeath(Thread* self) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+  };
+
+  class DbgClassLoadCallback : public ClassLoadCallback {
+   public:
+    void ClassLoad(Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+    void ClassPrepare(Handle<mirror::Class> temp_klass,
+                      Handle<mirror::Class> klass) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_);
+  };
+
+  static DbgThreadLifecycleCallback thread_lifecycle_callback_;
+  static DbgClassLoadCallback class_load_callback_;
 
   DISALLOW_COPY_AND_ASSIGN(Dbg);
 };

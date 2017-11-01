@@ -19,8 +19,10 @@
 #include "base/logging.h"
 #include "debugger.h"
 #include "jni_internal.h"
+#include "native_util.h"
+#include "nativehelper/jni_macros.h"
+#include "nativehelper/scoped_primitive_array.h"
 #include "scoped_fast_native_object_access-inl.h"
-#include "ScopedPrimitiveArray.h"
 
 namespace art {
 
@@ -33,7 +35,7 @@ static void DdmServer_nativeSendChunk(JNIEnv* env, jclass, jint type,
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(DdmServer, nativeSendChunk, "!(I[BII)V"),
+  FAST_NATIVE_METHOD(DdmServer, nativeSendChunk, "(I[BII)V"),
 };
 
 void register_org_apache_harmony_dalvik_ddmc_DdmServer(JNIEnv* env) {

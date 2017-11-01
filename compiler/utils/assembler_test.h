@@ -19,14 +19,15 @@
 
 #include "assembler.h"
 
-#include "assembler_test_base.h"
-#include "common_runtime_test.h"  // For ScratchFile
+#include <sys/stat.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
-#include <sys/stat.h>
+
+#include "assembler_test_base.h"
+#include "common_runtime_test.h"  // For ScratchFile
 
 namespace art {
 
@@ -42,7 +43,15 @@ enum class RegisterView {  // private
   kUseQuaternaryName,
 };
 
-template<typename Ass, typename Reg, typename FPReg, typename Imm>
+// For use in the template as the default type to get a nonvector registers version.
+struct NoVectorRegs {};
+
+template<typename Ass,
+         typename Addr,
+         typename Reg,
+         typename FPReg,
+         typename Imm,
+         typename VecReg = NoVectorRegs>
 class AssemblerTest : public testing::Test {
  public:
   Ass* GetAssembler() {
@@ -59,6 +68,10 @@ class AssemblerTest : public testing::Test {
   void DriverStr(const std::string& assembly_string, const std::string& test_name) {
     DriverWrapper(assembly_string, test_name);
   }
+
+  //
+  // Register repeats.
+  //
 
   std::string RepeatR(void (Ass::*f)(Reg), const std::string& fmt) {
     return RepeatTemplatedRegister<Reg>(f,
@@ -101,6 +114,24 @@ class AssemblerTest : public testing::Test {
         fmt);
   }
 
+  std::string Repeatww(void (Ass::*f)(Reg, Reg), const std::string& fmt) {
+    return RepeatTemplatedRegisters<Reg, Reg>(f,
+        GetRegisters(),
+        GetRegisters(),
+        &AssemblerTest::GetRegName<RegisterView::kUseTertiaryName>,
+        &AssemblerTest::GetRegName<RegisterView::kUseTertiaryName>,
+        fmt);
+  }
+
+  std::string Repeatbb(void (Ass::*f)(Reg, Reg), const std::string& fmt) {
+    return RepeatTemplatedRegisters<Reg, Reg>(f,
+        GetRegisters(),
+        GetRegisters(),
+        &AssemblerTest::GetRegName<RegisterView::kUseQuaternaryName>,
+        &AssemblerTest::GetRegName<RegisterView::kUseQuaternaryName>,
+        fmt);
+  }
+
   std::string RepeatRRR(void (Ass::*f)(Reg, Reg, Reg), const std::string& fmt) {
     return RepeatTemplatedRegisters<Reg, Reg, Reg>(f,
         GetRegisters(),
@@ -134,8 +165,16 @@ class AssemblerTest : public testing::Test {
     return RepeatRegisterImm<RegisterView::kUsePrimaryName>(f, imm_bytes, fmt);
   }
 
-  std::string Repeatri(void (Ass::*f)(Reg, const Imm&), size_t imm_bytes, const std::string& fmt) {
+  std::string RepeatrI(void (Ass::*f)(Reg, const Imm&), size_t imm_bytes, const std::string& fmt) {
     return RepeatRegisterImm<RegisterView::kUseSecondaryName>(f, imm_bytes, fmt);
+  }
+
+  std::string RepeatwI(void (Ass::*f)(Reg, const Imm&), size_t imm_bytes, const std::string& fmt) {
+    return RepeatRegisterImm<RegisterView::kUseTertiaryName>(f, imm_bytes, fmt);
+  }
+
+  std::string RepeatbI(void (Ass::*f)(Reg, const Imm&), size_t imm_bytes, const std::string& fmt) {
+    return RepeatRegisterImm<RegisterView::kUseQuaternaryName>(f, imm_bytes, fmt);
   }
 
   template <typename Reg1, typename Reg2, typename ImmType>
@@ -146,7 +185,8 @@ class AssemblerTest : public testing::Test {
                                               std::string (AssemblerTest::*GetName1)(const Reg1&),
                                               std::string (AssemblerTest::*GetName2)(const Reg2&),
                                               const std::string& fmt,
-                                              int bias = 0) {
+                                              int bias = 0,
+                                              int multiplier = 1) {
     std::string str;
     std::vector<int64_t> imms = CreateImmediateValuesBits(abs(imm_bits), (imm_bits > 0));
 
@@ -154,7 +194,9 @@ class AssemblerTest : public testing::Test {
       for (auto reg2 : reg2_registers) {
         for (int64_t imm : imms) {
           ImmType new_imm = CreateImmediate(imm);
-          (assembler_.get()->*f)(*reg1, *reg2, new_imm + bias);
+          if (f != nullptr) {
+            (assembler_.get()->*f)(*reg1, *reg2, new_imm * multiplier + bias);
+          }
           std::string base = fmt;
 
           std::string reg1_string = (this->*GetName1)(*reg1);
@@ -172,7 +214,7 @@ class AssemblerTest : public testing::Test {
           size_t imm_index = base.find(IMM_TOKEN);
           if (imm_index != std::string::npos) {
             std::ostringstream sreg;
-            sreg << imm + bias;
+            sreg << imm * multiplier + bias;
             std::string imm_string = sreg.str();
             base.replace(imm_index, ConstexprStrLen(IMM_TOKEN), imm_string);
           }
@@ -208,7 +250,9 @@ class AssemblerTest : public testing::Test {
         for (auto reg3 : reg3_registers) {
           for (int64_t imm : imms) {
             ImmType new_imm = CreateImmediate(imm);
-            (assembler_.get()->*f)(*reg1, *reg2, *reg3, new_imm + bias);
+            if (f != nullptr) {
+              (assembler_.get()->*f)(*reg1, *reg2, *reg3, new_imm + bias);
+            }
             std::string base = fmt;
 
             std::string reg1_string = (this->*GetName1)(*reg1);
@@ -267,7 +311,9 @@ class AssemblerTest : public testing::Test {
       for (auto reg2 : reg2_registers) {
         for (int64_t imm : imms) {
           ImmType new_imm = CreateImmediate(imm);
-          (assembler_.get()->*f)(new_imm, *reg1, *reg2);
+          if (f != nullptr) {
+            (assembler_.get()->*f)(new_imm, *reg1, *reg2);
+          }
           std::string base = fmt;
 
           std::string reg1_string = (this->*GetName1)(*reg1);
@@ -305,7 +351,7 @@ class AssemblerTest : public testing::Test {
   template <typename RegType, typename ImmType>
   std::string RepeatTemplatedRegisterImmBits(void (Ass::*f)(RegType, ImmType),
                                              int imm_bits,
-                                             const std::vector<Reg*> registers,
+                                             const std::vector<RegType*> registers,
                                              std::string (AssemblerTest::*GetName)(const RegType&),
                                              const std::string& fmt,
                                              int bias) {
@@ -315,7 +361,9 @@ class AssemblerTest : public testing::Test {
     for (auto reg : registers) {
       for (int64_t imm : imms) {
         ImmType new_imm = CreateImmediate(imm);
-        (assembler_.get()->*f)(*reg, new_imm + bias);
+        if (f != nullptr) {
+          (assembler_.get()->*f)(*reg, new_imm + bias);
+        }
         std::string base = fmt;
 
         std::string reg_string = (this->*GetName)(*reg);
@@ -517,7 +565,9 @@ class AssemblerTest : public testing::Test {
 
     for (int64_t imm : imms) {
       Imm new_imm = CreateImmediate(imm);
-      (assembler_.get()->*f)(new_imm);
+      if (f != nullptr) {
+        (assembler_.get()->*f)(new_imm);
+      }
       std::string base = fmt;
 
       size_t imm_index = base.find(IMM_TOKEN);
@@ -538,6 +588,100 @@ class AssemblerTest : public testing::Test {
     return str;
   }
 
+  std::string RepeatVV(void (Ass::*f)(VecReg, VecReg), const std::string& fmt) {
+    return RepeatTemplatedRegisters<VecReg, VecReg>(f,
+                                                    GetVectorRegisters(),
+                                                    GetVectorRegisters(),
+                                                    &AssemblerTest::GetVecRegName,
+                                                    &AssemblerTest::GetVecRegName,
+                                                    fmt);
+  }
+
+  std::string RepeatVVV(void (Ass::*f)(VecReg, VecReg, VecReg), const std::string& fmt) {
+    return RepeatTemplatedRegisters<VecReg, VecReg, VecReg>(f,
+                                                            GetVectorRegisters(),
+                                                            GetVectorRegisters(),
+                                                            GetVectorRegisters(),
+                                                            &AssemblerTest::GetVecRegName,
+                                                            &AssemblerTest::GetVecRegName,
+                                                            &AssemblerTest::GetVecRegName,
+                                                            fmt);
+  }
+
+  std::string RepeatVR(void (Ass::*f)(VecReg, Reg), const std::string& fmt) {
+    return RepeatTemplatedRegisters<VecReg, Reg>(
+        f,
+        GetVectorRegisters(),
+        GetRegisters(),
+        &AssemblerTest::GetVecRegName,
+        &AssemblerTest::GetRegName<RegisterView::kUsePrimaryName>,
+        fmt);
+  }
+
+  template <typename ImmType>
+  std::string RepeatVIb(void (Ass::*f)(VecReg, ImmType),
+                        int imm_bits,
+                        std::string fmt,
+                        int bias = 0) {
+    return RepeatTemplatedRegisterImmBits<VecReg, ImmType>(f,
+                                                           imm_bits,
+                                                           GetVectorRegisters(),
+                                                           &AssemblerTest::GetVecRegName,
+                                                           fmt,
+                                                           bias);
+  }
+
+  template <typename ImmType>
+  std::string RepeatVRIb(void (Ass::*f)(VecReg, Reg, ImmType),
+                         int imm_bits,
+                         const std::string& fmt,
+                         int bias = 0,
+                         int multiplier = 1) {
+    return RepeatTemplatedRegistersImmBits<VecReg, Reg, ImmType>(
+        f,
+        imm_bits,
+        GetVectorRegisters(),
+        GetRegisters(),
+        &AssemblerTest::GetVecRegName,
+        &AssemblerTest::GetRegName<RegisterView::kUsePrimaryName>,
+        fmt,
+        bias,
+        multiplier);
+  }
+
+  template <typename ImmType>
+  std::string RepeatRVIb(void (Ass::*f)(Reg, VecReg, ImmType),
+                         int imm_bits,
+                         const std::string& fmt,
+                         int bias = 0,
+                         int multiplier = 1) {
+    return RepeatTemplatedRegistersImmBits<Reg, VecReg, ImmType>(
+        f,
+        imm_bits,
+        GetRegisters(),
+        GetVectorRegisters(),
+        &AssemblerTest::GetRegName<RegisterView::kUsePrimaryName>,
+        &AssemblerTest::GetVecRegName,
+        fmt,
+        bias,
+        multiplier);
+  }
+
+  template <typename ImmType>
+  std::string RepeatVVIb(void (Ass::*f)(VecReg, VecReg, ImmType),
+                         int imm_bits,
+                         const std::string& fmt,
+                         int bias = 0) {
+    return RepeatTemplatedRegistersImmBits<VecReg, VecReg, ImmType>(f,
+                                                                    imm_bits,
+                                                                    GetVectorRegisters(),
+                                                                    GetVectorRegisters(),
+                                                                    &AssemblerTest::GetVecRegName,
+                                                                    &AssemblerTest::GetVecRegName,
+                                                                    fmt,
+                                                                    bias);
+  }
+
   // This is intended to be run as a test.
   bool CheckTools() {
     return test_helper_->CheckTools();
@@ -545,10 +689,25 @@ class AssemblerTest : public testing::Test {
 
   // The following functions are public so that TestFn can use them...
 
+  // Returns a vector of address used by any of the repeat methods
+  // involving an "A" (e.g. RepeatA).
+  virtual std::vector<Addr> GetAddresses() = 0;
+
+  // Returns a vector of registers used by any of the repeat methods
+  // involving an "R" (e.g. RepeatR).
   virtual std::vector<Reg*> GetRegisters() = 0;
 
+  // Returns a vector of fp-registers used by any of the repeat methods
+  // involving an "F" (e.g. RepeatFF).
   virtual std::vector<FPReg*> GetFPRegisters() {
     UNIMPLEMENTED(FATAL) << "Architecture does not support floating-point registers";
+    UNREACHABLE();
+  }
+
+  // Returns a vector of dedicated simd-registers used by any of the repeat
+  // methods involving an "V" (e.g. RepeatVV).
+  virtual std::vector<VecReg*> GetVectorRegisters() {
+    UNIMPLEMENTED(FATAL) << "Architecture does not support vector registers";
     UNREACHABLE();
   }
 
@@ -578,8 +737,8 @@ class AssemblerTest : public testing::Test {
   explicit AssemblerTest() {}
 
   void SetUp() OVERRIDE {
-    arena_.reset(new ArenaAllocator(&pool_));
-    assembler_.reset(CreateAssembler(arena_.get()));
+    allocator_.reset(new ArenaAllocator(&pool_));
+    assembler_.reset(CreateAssembler(allocator_.get()));
     test_helper_.reset(
         new AssemblerTestInfrastructure(GetArchitectureString(),
                                         GetAssemblerCmdName(),
@@ -596,12 +755,12 @@ class AssemblerTest : public testing::Test {
   void TearDown() OVERRIDE {
     test_helper_.reset();  // Clean up the helper.
     assembler_.reset();
-    arena_.reset();
+    allocator_.reset();
   }
 
   // Override this to set up any architecture-specific things, e.g., CPU revision.
-  virtual Ass* CreateAssembler(ArenaAllocator* arena) {
-    return new (arena) Ass(arena);
+  virtual Ass* CreateAssembler(ArenaAllocator* allocator) {
+    return new (allocator) Ass(allocator);
   }
 
   // Override this to set up any architecture-specific things, e.g., register vectors.
@@ -742,6 +901,382 @@ class AssemblerTest : public testing::Test {
   // Create an immediate from the specific value.
   virtual Imm CreateImmediate(int64_t imm_value) = 0;
 
+  //
+  // Addresses repeats.
+  //
+
+  // Repeats over addresses provided by fixture.
+  std::string RepeatA(void (Ass::*f)(const Addr&), const std::string& fmt) {
+    return RepeatA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatA(void (Ass::*f)(const Addr&),
+                      const std::vector<Addr>& a,
+                      const std::string& fmt) {
+    return RepeatTemplatedMem<Addr>(f, a, &AssemblerTest::GetAddrName, fmt);
+  }
+
+  // Repeats over addresses and immediates provided by fixture.
+  std::string RepeatAI(void (Ass::*f)(const Addr&, const Imm&),
+                       size_t imm_bytes,
+                       const std::string& fmt) {
+    return RepeatAI(f, imm_bytes, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAI(void (Ass::*f)(const Addr&, const Imm&),
+                       size_t imm_bytes,
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemImm<Addr>(f, imm_bytes, a, &AssemblerTest::GetAddrName, fmt);
+  }
+
+  // Repeats over registers and addresses provided by fixture.
+  std::string RepeatRA(void (Ass::*f)(Reg, const Addr&), const std::string& fmt) {
+    return RepeatRA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatRA(void (Ass::*f)(Reg, const Addr&),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedRegMem<Reg, Addr>(
+        f,
+        GetRegisters(),
+        a,
+        &AssemblerTest::GetRegName<RegisterView::kUsePrimaryName>,
+        &AssemblerTest::GetAddrName,
+        fmt);
+  }
+
+  // Repeats over secondary registers and addresses provided by fixture.
+  std::string RepeatrA(void (Ass::*f)(Reg, const Addr&), const std::string& fmt) {
+    return RepeatrA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatrA(void (Ass::*f)(Reg, const Addr&),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedRegMem<Reg, Addr>(
+        f,
+        GetRegisters(),
+        a,
+        &AssemblerTest::GetRegName<RegisterView::kUseSecondaryName>,
+        &AssemblerTest::GetAddrName,
+        fmt);
+  }
+
+  // Repeats over tertiary registers and addresses provided by fixture.
+  std::string RepeatwA(void (Ass::*f)(Reg, const Addr&), const std::string& fmt) {
+    return RepeatwA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatwA(void (Ass::*f)(Reg, const Addr&),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedRegMem<Reg, Addr>(
+        f,
+        GetRegisters(),
+        a,
+        &AssemblerTest::GetRegName<RegisterView::kUseTertiaryName>,
+        &AssemblerTest::GetAddrName,
+        fmt);
+  }
+
+  // Repeats over quaternary registers and addresses provided by fixture.
+  std::string RepeatbA(void (Ass::*f)(Reg, const Addr&), const std::string& fmt) {
+    return RepeatbA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatbA(void (Ass::*f)(Reg, const Addr&),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedRegMem<Reg, Addr>(
+        f,
+        GetRegisters(),
+        a,
+        &AssemblerTest::GetRegName<RegisterView::kUseQuaternaryName>,
+        &AssemblerTest::GetAddrName,
+        fmt);
+  }
+
+  // Repeats over fp-registers and addresses provided by fixture.
+  std::string RepeatFA(void (Ass::*f)(FPReg, const Addr&), const std::string& fmt) {
+    return RepeatFA(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatFA(void (Ass::*f)(FPReg, const Addr&),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedRegMem<FPReg, Addr>(
+        f,
+        GetFPRegisters(),
+        a,
+        &AssemblerTest::GetFPRegName,
+        &AssemblerTest::GetAddrName,
+        fmt);
+  }
+
+  // Repeats over addresses and registers provided by fixture.
+  std::string RepeatAR(void (Ass::*f)(const Addr&, Reg), const std::string& fmt) {
+    return RepeatAR(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAR(void (Ass::*f)(const Addr&, Reg),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemReg<Addr, Reg>(
+        f,
+        a,
+        GetRegisters(),
+        &AssemblerTest::GetAddrName,
+        &AssemblerTest::GetRegName<RegisterView::kUsePrimaryName>,
+        fmt);
+  }
+
+  // Repeats over addresses and secondary registers provided by fixture.
+  std::string RepeatAr(void (Ass::*f)(const Addr&, Reg), const std::string& fmt) {
+    return RepeatAr(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAr(void (Ass::*f)(const Addr&, Reg),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemReg<Addr, Reg>(
+        f,
+        a,
+        GetRegisters(),
+        &AssemblerTest::GetAddrName,
+        &AssemblerTest::GetRegName<RegisterView::kUseSecondaryName>,
+        fmt);
+  }
+
+  // Repeats over addresses and tertiary registers provided by fixture.
+  std::string RepeatAw(void (Ass::*f)(const Addr&, Reg), const std::string& fmt) {
+    return RepeatAw(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAw(void (Ass::*f)(const Addr&, Reg),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemReg<Addr, Reg>(
+        f,
+        a,
+        GetRegisters(),
+        &AssemblerTest::GetAddrName,
+        &AssemblerTest::GetRegName<RegisterView::kUseTertiaryName>,
+        fmt);
+  }
+
+  // Repeats over addresses and quaternary registers provided by fixture.
+  std::string RepeatAb(void (Ass::*f)(const Addr&, Reg), const std::string& fmt) {
+    return RepeatAb(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAb(void (Ass::*f)(const Addr&, Reg),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemReg<Addr, Reg>(
+        f,
+        a,
+        GetRegisters(),
+        &AssemblerTest::GetAddrName,
+        &AssemblerTest::GetRegName<RegisterView::kUseQuaternaryName>,
+        fmt);
+  }
+
+  // Repeats over addresses and fp-registers provided by fixture.
+  std::string RepeatAF(void (Ass::*f)(const Addr&, FPReg), const std::string& fmt) {
+    return RepeatAF(f, GetAddresses(), fmt);
+  }
+
+  // Variant that takes explicit vector of addresss
+  // (to test restricted addressing modes set).
+  std::string RepeatAF(void (Ass::*f)(const Addr&, FPReg),
+                       const std::vector<Addr>& a,
+                       const std::string& fmt) {
+    return RepeatTemplatedMemReg<Addr, FPReg>(
+        f,
+        a,
+        GetFPRegisters(),
+        &AssemblerTest::GetAddrName,
+        &AssemblerTest::GetFPRegName,
+        fmt);
+  }
+
+  template <typename AddrType>
+  std::string RepeatTemplatedMem(void (Ass::*f)(const AddrType&),
+                                 const std::vector<AddrType> addresses,
+                                 std::string (AssemblerTest::*GetAName)(const AddrType&),
+                                 const std::string& fmt) {
+    WarnOnCombinations(addresses.size());
+    std::string str;
+    for (auto addr : addresses) {
+      if (f != nullptr) {
+        (assembler_.get()->*f)(addr);
+      }
+      std::string base = fmt;
+
+      std::string addr_string = (this->*GetAName)(addr);
+      size_t addr_index;
+      if ((addr_index = base.find(ADDRESS_TOKEN)) != std::string::npos) {
+        base.replace(addr_index, ConstexprStrLen(ADDRESS_TOKEN), addr_string);
+      }
+
+      if (str.size() > 0) {
+        str += "\n";
+      }
+      str += base;
+    }
+    // Add a newline at the end.
+    str += "\n";
+    return str;
+  }
+
+  template <typename AddrType>
+  std::string RepeatTemplatedMemImm(void (Ass::*f)(const AddrType&, const Imm&),
+                                    size_t imm_bytes,
+                                    const std::vector<AddrType> addresses,
+                                    std::string (AssemblerTest::*GetAName)(const AddrType&),
+                                    const std::string& fmt) {
+    std::vector<int64_t> imms = CreateImmediateValues(imm_bytes);
+    WarnOnCombinations(addresses.size() * imms.size());
+    std::string str;
+    for (auto addr : addresses) {
+      for (int64_t imm : imms) {
+        Imm new_imm = CreateImmediate(imm);
+        if (f != nullptr) {
+          (assembler_.get()->*f)(addr, new_imm);
+        }
+        std::string base = fmt;
+
+        std::string addr_string = (this->*GetAName)(addr);
+        size_t addr_index;
+        if ((addr_index = base.find(ADDRESS_TOKEN)) != std::string::npos) {
+          base.replace(addr_index, ConstexprStrLen(ADDRESS_TOKEN), addr_string);
+        }
+
+        size_t imm_index = base.find(IMM_TOKEN);
+        if (imm_index != std::string::npos) {
+          std::ostringstream sreg;
+          sreg << imm;
+          std::string imm_string = sreg.str();
+          base.replace(imm_index, ConstexprStrLen(IMM_TOKEN), imm_string);
+        }
+
+        if (str.size() > 0) {
+          str += "\n";
+        }
+        str += base;
+      }
+    }
+    // Add a newline at the end.
+    str += "\n";
+    return str;
+  }
+
+  template <typename RegType, typename AddrType>
+  std::string RepeatTemplatedRegMem(void (Ass::*f)(RegType, const AddrType&),
+                                    const std::vector<RegType*> registers,
+                                    const std::vector<AddrType> addresses,
+                                    std::string (AssemblerTest::*GetRName)(const RegType&),
+                                    std::string (AssemblerTest::*GetAName)(const AddrType&),
+                                    const std::string& fmt) {
+    WarnOnCombinations(addresses.size() * registers.size());
+    std::string str;
+    for (auto reg : registers) {
+      for (auto addr : addresses) {
+        if (f != nullptr) {
+          (assembler_.get()->*f)(*reg, addr);
+        }
+        std::string base = fmt;
+
+        std::string reg_string = (this->*GetRName)(*reg);
+        size_t reg_index;
+        if ((reg_index = base.find(REG_TOKEN)) != std::string::npos) {
+          base.replace(reg_index, ConstexprStrLen(REG_TOKEN), reg_string);
+        }
+
+        std::string addr_string = (this->*GetAName)(addr);
+        size_t addr_index;
+        if ((addr_index = base.find(ADDRESS_TOKEN)) != std::string::npos) {
+          base.replace(addr_index, ConstexprStrLen(ADDRESS_TOKEN), addr_string);
+        }
+
+        if (str.size() > 0) {
+          str += "\n";
+        }
+        str += base;
+      }
+    }
+    // Add a newline at the end.
+    str += "\n";
+    return str;
+  }
+
+  template <typename AddrType, typename RegType>
+  std::string RepeatTemplatedMemReg(void (Ass::*f)(const AddrType&, RegType),
+                                    const std::vector<AddrType> addresses,
+                                    const std::vector<RegType*> registers,
+                                    std::string (AssemblerTest::*GetAName)(const AddrType&),
+                                    std::string (AssemblerTest::*GetRName)(const RegType&),
+                                    const std::string& fmt) {
+    WarnOnCombinations(addresses.size() * registers.size());
+    std::string str;
+    for (auto addr : addresses) {
+      for (auto reg : registers) {
+        if (f != nullptr) {
+          (assembler_.get()->*f)(addr, *reg);
+        }
+        std::string base = fmt;
+
+        std::string addr_string = (this->*GetAName)(addr);
+        size_t addr_index;
+        if ((addr_index = base.find(ADDRESS_TOKEN)) != std::string::npos) {
+          base.replace(addr_index, ConstexprStrLen(ADDRESS_TOKEN), addr_string);
+        }
+
+        std::string reg_string = (this->*GetRName)(*reg);
+        size_t reg_index;
+        if ((reg_index = base.find(REG_TOKEN)) != std::string::npos) {
+          base.replace(reg_index, ConstexprStrLen(REG_TOKEN), reg_string);
+        }
+
+        if (str.size() > 0) {
+          str += "\n";
+        }
+        str += base;
+      }
+    }
+    // Add a newline at the end.
+    str += "\n";
+    return str;
+  }
+
+  //
+  // Register repeats.
+  //
+
   template <typename RegType>
   std::string RepeatTemplatedRegister(void (Ass::*f)(RegType),
                                       const std::vector<RegType*> registers,
@@ -749,7 +1284,9 @@ class AssemblerTest : public testing::Test {
                                       const std::string& fmt) {
     std::string str;
     for (auto reg : registers) {
-      (assembler_.get()->*f)(*reg);
+      if (f != nullptr) {
+        (assembler_.get()->*f)(*reg);
+      }
       std::string base = fmt;
 
       std::string reg_string = (this->*GetName)(*reg);
@@ -780,7 +1317,9 @@ class AssemblerTest : public testing::Test {
     std::string str;
     for (auto reg1 : reg1_registers) {
       for (auto reg2 : reg2_registers) {
-        (assembler_.get()->*f)(*reg1, *reg2);
+        if (f != nullptr) {
+          (assembler_.get()->*f)(*reg1, *reg2);
+        }
         std::string base = fmt;
 
         std::string reg1_string = (this->*GetName1)(*reg1);
@@ -819,7 +1358,9 @@ class AssemblerTest : public testing::Test {
     for (auto reg1 : reg1_registers) {
       for (auto reg2 : reg2_registers) {
         if (reg1 == reg2) continue;
-        (assembler_.get()->*f)(*reg1, *reg2);
+        if (f != nullptr) {
+          (assembler_.get()->*f)(*reg1, *reg2);
+        }
         std::string base = fmt;
 
         std::string reg1_string = (this->*GetName1)(*reg1);
@@ -858,7 +1399,9 @@ class AssemblerTest : public testing::Test {
     for (auto reg1 : reg1_registers) {
       for (auto reg2 : reg2_registers) {
         for (auto reg3 : reg3_registers) {
-          (assembler_.get()->*f)(*reg1, *reg2, *reg3);
+          if (f != nullptr) {
+            (assembler_.get()->*f)(*reg1, *reg2, *reg3);
+          }
           std::string base = fmt;
 
           std::string reg1_string = (this->*GetName1)(*reg1);
@@ -907,7 +1450,9 @@ class AssemblerTest : public testing::Test {
       for (auto reg2 : reg2_registers) {
         for (int64_t imm : imms) {
           Imm new_imm = CreateImmediate(imm);
-          (assembler_.get()->*f)(*reg1, *reg2, new_imm);
+          if (f != nullptr) {
+            (assembler_.get()->*f)(*reg1, *reg2, new_imm);
+          }
           std::string base = fmt;
 
           std::string reg1_string = (this->*GetName1)(*reg1);
@@ -942,6 +1487,12 @@ class AssemblerTest : public testing::Test {
     return str;
   }
 
+  std::string GetAddrName(const Addr& addr) {
+    std::ostringstream saddr;
+    saddr << addr;
+    return saddr.str();
+  }
+
   template <RegisterView kRegView>
   std::string GetRegName(const Reg& reg) {
     std::ostringstream sreg;
@@ -971,6 +1522,12 @@ class AssemblerTest : public testing::Test {
     return sreg.str();
   }
 
+  std::string GetVecRegName(const VecReg& reg) {
+    std::ostringstream sreg;
+    sreg << reg;
+    return sreg.str();
+  }
+
   // If the assembly file needs a header, return it in a sub-class.
   virtual const char* GetAssemblyHeader() {
     return nullptr;
@@ -982,6 +1539,7 @@ class AssemblerTest : public testing::Test {
     }
   }
 
+  static constexpr const char* ADDRESS_TOKEN = "{mem}";
   static constexpr const char* REG_TOKEN = "{reg}";
   static constexpr const char* REG1_TOKEN = "{reg1}";
   static constexpr const char* REG2_TOKEN = "{reg2}";
@@ -1002,7 +1560,9 @@ class AssemblerTest : public testing::Test {
     for (auto reg : registers) {
       for (int64_t imm : imms) {
         Imm new_imm = CreateImmediate(imm);
-        (assembler_.get()->*f)(*reg, new_imm);
+        if (f != nullptr) {
+          (assembler_.get()->*f)(*reg, new_imm);
+        }
         std::string base = fmt;
 
         std::string reg_string = GetRegName<kRegView>(*reg);
@@ -1047,7 +1607,7 @@ class AssemblerTest : public testing::Test {
   static constexpr size_t kWarnManyCombinationsThreshold = 500;
 
   ArenaPool pool_;
-  std::unique_ptr<ArenaAllocator> arena_;
+  std::unique_ptr<ArenaAllocator> allocator_;
   std::unique_ptr<Ass> assembler_;
   std::unique_ptr<AssemblerTestInfrastructure> test_helper_;
 

@@ -18,54 +18,17 @@
 #define ART_TEST_TI_AGENT_COMMON_HELPER_H_
 
 #include "jni.h"
-#include "openjdkjvmti/jvmti.h"
-#include "ScopedLocalRef.h"
+#include "jvmti.h"
 
 namespace art {
-namespace common_redefine {
 
-jint OnLoad(JavaVM* vm, char* options, void* reserved);
+// Taken from art/runtime/modifiers.h
+static constexpr uint32_t kAccStatic =       0x0008;  // field, method, ic
 
-}  // namespace common_redefine
-
-extern bool RuntimeIsJVM;
-
-bool IsJVM();
-
-template <typename T>
-static jobjectArray CreateObjectArray(JNIEnv* env,
-                                      jint length,
-                                      const char* component_type_descriptor,
-                                      T src) {
-  if (length < 0) {
-    return nullptr;
-  }
-
-  ScopedLocalRef<jclass> obj_class(env, env->FindClass(component_type_descriptor));
-  if (obj_class.get() == nullptr) {
-    return nullptr;
-  }
-
-  ScopedLocalRef<jobjectArray> ret(env, env->NewObjectArray(length, obj_class.get(), nullptr));
-  if (ret.get() == nullptr) {
-    return nullptr;
-  }
-
-  for (jint i = 0; i < length; ++i) {
-    jobject element = src(i);
-    env->SetObjectArrayElement(ret.get(), static_cast<jint>(i), element);
-    env->DeleteLocalRef(element);
-    if (env->ExceptionCheck()) {
-      return nullptr;
-    }
-  }
-
-  return ret.release();
-}
-
-void SetAllCapabilities(jvmtiEnv* env);
-
-bool JvmtiErrorToException(JNIEnv* env, jvmtiError error);
+jobject GetJavaField(jvmtiEnv* jvmti, JNIEnv* env, jclass field_klass, jfieldID f);
+jobject GetJavaMethod(jvmtiEnv* jvmti, JNIEnv* env, jmethodID m);
+jobject GetJavaValueByType(JNIEnv* env, char type, jvalue value);
+jobject GetJavaValue(jvmtiEnv* jvmtienv, JNIEnv* env, jmethodID m, jvalue value);
 
 }  // namespace art
 

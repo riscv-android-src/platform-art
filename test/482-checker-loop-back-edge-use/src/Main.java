@@ -164,12 +164,18 @@ public class Main {
     }
   }
 
+
+  static boolean $opt$noinline$ensureSideEffects() {
+    if (doThrow) throw new Error("");
+    return true;
+  }
+
   /// CHECK-START: void Main.loop9() liveness (after)
   /// CHECK:         <<Arg:z\d+>>  StaticFieldGet  liveness:<<ArgLiv:\d+>> ranges:{[<<ArgLiv>>,<<ArgLoopUse:\d+>>)} uses:[<<ArgUse:\d+>>,<<ArgLoopUse>>]
   /// CHECK:                       If [<<Arg>>]    liveness:<<IfLiv:\d+>>
   /// CHECK:                       Goto            liveness:<<GotoLiv1:\d+>>
-  /// CHECK:                       Exit
-  /// CHECK:                       Goto            liveness:<<GotoLiv2:\d+>>
+  /// CHECK-DAG:                   Goto            liveness:<<GotoLiv2:\d+>>
+  /// CHECK-DAG:                   Exit
   /// CHECK-EVAL:    <<IfLiv>> + 1 == <<ArgUse>>
   /// CHECK-EVAL:    <<GotoLiv1>> < <<GotoLiv2>>
   /// CHECK-EVAL:    <<GotoLiv1>> + 2 == <<ArgLoopUse>>
@@ -178,7 +184,7 @@ public class Main {
     // Add some code at entry to avoid having the entry block be a pre header.
     // This avoids having to create a synthesized block.
     System.out.println("Enter");
-    while (Runtime.getRuntime() != null) {
+    while ($opt$noinline$ensureSideEffects()) {
       // 'incoming' must only have a use in the inner loop.
       boolean incoming = field;
       while (incoming) {}
@@ -189,4 +195,5 @@ public class Main {
   }
 
   static boolean field;
+  static boolean doThrow = false;
 }

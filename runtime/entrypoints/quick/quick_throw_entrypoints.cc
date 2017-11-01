@@ -29,6 +29,15 @@ extern "C" NO_RETURN void artDeliverPendingExceptionFromCode(Thread* self)
   self->QuickDeliverException();
 }
 
+extern "C" NO_RETURN uint64_t artInvokeObsoleteMethod(ArtMethod* method, Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(method->IsObsolete());
+  ScopedQuickEntrypointChecks sqec(self);
+  ThrowInternalError("Attempting to invoke obsolete version of '%s'.",
+                     method->PrettyMethod().c_str());
+  self->QuickDeliverException();
+}
+
 // Called by generated code to throw an exception.
 extern "C" NO_RETURN void artDeliverExceptionFromCode(mirror::Throwable* exception, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -62,9 +71,7 @@ extern "C" NO_RETURN void artThrowNullPointerExceptionFromCode(Thread* self)
 extern "C" NO_RETURN void artThrowNullPointerExceptionFromSignal(uintptr_t addr, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
-  self->NoteSignalBeingHandled();
   ThrowNullPointerExceptionFromDexPC(/* check_address */ true, addr);
-  self->NoteSignalHandlerDone();
   self->QuickDeliverException();
 }
 
@@ -95,9 +102,7 @@ extern "C" NO_RETURN void artThrowStringBoundsFromCode(int index, int length, Th
 extern "C" NO_RETURN void artThrowStackOverflowFromCode(Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ScopedQuickEntrypointChecks sqec(self);
-  self->NoteSignalBeingHandled();
   ThrowStackOverflowError(self);
-  self->NoteSignalHandlerDone();
   self->QuickDeliverException();
 }
 

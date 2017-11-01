@@ -26,7 +26,7 @@ namespace art {
 void SsaLivenessAnalysis::Analyze() {
   // Compute the linear order directly in the graph's data structure
   // (there are no more following graph mutations).
-  LinearizeGraph(graph_, graph_->GetArena(), &graph_->linear_order_);
+  LinearizeGraph(graph_, &graph_->linear_order_);
 
   // Liveness analysis.
   NumberInstructions();
@@ -56,7 +56,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.push_back(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
       }
       current->SetLifetimePosition(lifetime_position);
     }
@@ -74,7 +74,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
         instructions_from_ssa_index_.push_back(current);
         current->SetSsaIndex(ssa_index++);
         current->SetLiveInterval(
-            LiveInterval::MakeInterval(graph_->GetArena(), current->GetType(), current));
+            LiveInterval::MakeInterval(allocator_, current->GetType(), current));
       }
       instructions_from_lifetime_position_.push_back(current);
       current->SetLifetimePosition(lifetime_position);
@@ -89,7 +89,7 @@ void SsaLivenessAnalysis::NumberInstructions() {
 void SsaLivenessAnalysis::ComputeLiveness() {
   for (HBasicBlock* block : graph_->GetLinearOrder()) {
     block_infos_[block->GetBlockId()] =
-        new (graph_->GetArena()) BlockInfo(graph_->GetArena(), *block, number_of_ssa_values_);
+        new (allocator_) BlockInfo(allocator_, *block, number_of_ssa_values_);
   }
 
   // Compute the live ranges, as well as the initial live_in, live_out, and kill sets.
@@ -197,7 +197,7 @@ void SsaLivenessAnalysis::ComputeLiveRanges() {
           HInstruction* instruction = environment->GetInstructionAt(i);
           bool should_be_live = ShouldBeLiveForEnvironment(current, instruction);
           if (should_be_live) {
-            DCHECK(instruction->HasSsaIndex());
+            CHECK(instruction->HasSsaIndex()) << instruction->DebugName();
             live_in->SetBit(instruction->GetSsaIndex());
           }
           if (instruction != nullptr) {
@@ -356,14 +356,16 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
     }
   }
 
-  UsePosition* use = first_use_;
   size_t start = GetStart();
   size_t end = GetEnd();
-  while (use != nullptr && use->GetPosition() <= end) {
-    size_t use_position = use->GetPosition();
-    if (use_position >= start && !use->IsSynthesized()) {
-      HInstruction* user = use->GetUser();
-      size_t input_index = use->GetInputIndex();
+  for (const UsePosition& use : GetUses()) {
+    size_t use_position = use.GetPosition();
+    if (use_position > end) {
+      break;
+    }
+    if (use_position >= start && !use.IsSynthesized()) {
+      HInstruction* user = use.GetUser();
+      size_t input_index = use.GetInputIndex();
       if (user->IsPhi()) {
         // If the phi has a register, try to use the same.
         Location phi_location = user->GetLiveInterval()->ToLocation();
@@ -395,7 +397,7 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
       } else {
         // If the instruction is expected in a register, try to use it.
         LocationSummary* locations = user->GetLocations();
-        Location expected = locations->InAt(use->GetInputIndex());
+        Location expected = locations->InAt(use.GetInputIndex());
         // We use the user's lifetime position - 1 (and not `use_position`) because the
         // register is blocked at the beginning of the user.
         size_t position = user->GetLifetimePosition() - 1;
@@ -408,7 +410,6 @@ int LiveInterval::FindFirstRegisterHint(size_t* free_until,
         }
       }
     }
-    use = use->GetNext();
   }
 
   return kNoRegister;
@@ -469,8 +470,17 @@ bool LiveInterval::SameRegisterKind(Location other) const {
   }
 }
 
-bool LiveInterval::NeedsTwoSpillSlots() const {
-  return type_ == Primitive::kPrimLong || type_ == Primitive::kPrimDouble;
+size_t LiveInterval::NumberOfSpillSlotsNeeded() const {
+  // For a SIMD operation, compute the number of needed spill slots.
+  // TODO: do through vector type?
+  HInstruction* definition = GetParent()->GetDefinedBy();
+  if (definition != nullptr &&
+      definition->IsVecOperation() &&
+      !definition->IsVecExtractScalar()) {
+    return definition->AsVecOperation()->GetVectorNumberOfBytes() / kVRegSize;
+  }
+  // Return number of needed spill slots based on type.
+  return (type_ == DataType::Type::kInt64 || type_ == DataType::Type::kFloat64) ? 2 : 1;
 }
 
 Location LiveInterval::ToLocation() const {
@@ -494,10 +504,11 @@ Location LiveInterval::ToLocation() const {
     if (defined_by->IsConstant()) {
       return defined_by->GetLocations()->Out();
     } else if (GetParent()->HasSpillSlot()) {
-      if (NeedsTwoSpillSlots()) {
-        return Location::DoubleStackSlot(GetParent()->GetSpillSlot());
-      } else {
-        return Location::StackSlot(GetParent()->GetSpillSlot());
+      switch (NumberOfSpillSlotsNeeded()) {
+        case 1: return Location::StackSlot(GetParent()->GetSpillSlot());
+        case 2: return Location::DoubleStackSlot(GetParent()->GetSpillSlot());
+        case 4: return Location::SIMDStackSlot(GetParent()->GetSpillSlot());
+        default: LOG(FATAL) << "Unexpected number of spill slots"; UNREACHABLE();
       }
     } else {
       return Location();

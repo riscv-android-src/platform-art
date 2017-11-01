@@ -22,15 +22,14 @@
 
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "obj_ptr.h"
-#include "object_callbacks.h"
 #include "gc_root.h"
+#include "obj_ptr.h"
 
 namespace art {
 
 namespace mirror {
   class Object;
-}
+}  // namespace mirror
 
 class Thread;
 

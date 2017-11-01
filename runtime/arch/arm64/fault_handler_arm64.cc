@@ -14,20 +14,18 @@
  * limitations under the License.
  */
 
-
 #include "fault_handler.h"
 
 #include <sys/ucontext.h>
 
-#include "art_method-inl.h"
+#include "art_method.h"
 #include "base/enums.h"
+#include "base/hex_dump.h"
+#include "base/logging.h"
 #include "base/macros.h"
 #include "globals.h"
-#include "base/logging.h"
-#include "base/hex_dump.h"
 #include "registers_arm64.h"
-#include "thread.h"
-#include "thread-inl.h"
+#include "thread-current-inl.h"
 
 extern "C" void art_quick_throw_stack_overflow();
 extern "C" void art_quick_throw_null_pointer_exception_from_signal();
@@ -38,21 +36,6 @@ extern "C" void art_quick_implicit_suspend();
 //
 
 namespace art {
-
-void FaultManager::HandleNestedSignal(int sig ATTRIBUTE_UNUSED, siginfo_t* info ATTRIBUTE_UNUSED,
-                                      void* context) {
-  // To match the case used in ARM we return directly to the longjmp function
-  // rather than through a trivial assembly language stub.
-
-  struct ucontext *uc = reinterpret_cast<struct ucontext*>(context);
-  struct sigcontext *sc = reinterpret_cast<struct sigcontext*>(&uc->uc_mcontext);
-  Thread* self = Thread::Current();
-  CHECK(self != nullptr);       // This will cause a SIGABRT if self is null.
-
-  sc->regs[0] = reinterpret_cast<uintptr_t>(*self->GetNestedSignalState());
-  sc->regs[1] = 1;
-  sc->pc = reinterpret_cast<uintptr_t>(longjmp);
-}
 
 void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo ATTRIBUTE_UNUSED, void* context,
                                              ArtMethod** out_method,

@@ -17,19 +17,19 @@
 #ifndef ART_RUNTIME_MIRROR_CLASS_H_
 #define ART_RUNTIME_MIRROR_CLASS_H_
 
+#include "base/bit_utils.h"
 #include "base/enums.h"
 #include "base/iteration_range.h"
+#include "class_flags.h"
+#include "class_status.h"
 #include "dex_file.h"
 #include "dex_file_types.h"
-#include "class_flags.h"
-#include "gc_root.h"
 #include "gc/allocator_type.h"
+#include "gc_root.h"
 #include "imtable.h"
-#include "invoke_type.h"
 #include "modifiers.h"
 #include "object.h"
 #include "object_array.h"
-#include "object_callbacks.h"
 #include "primitive.h"
 #include "read_barrier_option.h"
 #include "stride_iterator.h"
@@ -42,6 +42,7 @@ class ArtField;
 class ArtMethod;
 struct ClassOffsets;
 template<class T> class Handle;
+enum InvokeType : uint32_t;
 template<typename T> class LengthPrefixedArray;
 template<typename T> class ArraySlice;
 class Signature;
@@ -76,64 +77,27 @@ class MANAGED Class FINAL : public Object {
   static constexpr uint32_t kPrimitiveTypeSizeShiftShift = 16;
   static constexpr uint32_t kPrimitiveTypeMask = (1u << kPrimitiveTypeSizeShiftShift) - 1;
 
-  // Class Status
-  //
-  // kStatusRetired: Class that's temporarily used till class linking time
-  // has its (vtable) size figured out and has been cloned to one with the
-  // right size which will be the one used later. The old one is retired and
-  // will be gc'ed once all refs to the class point to the newly
-  // cloned version.
-  //
-  // kStatusNotReady: If a Class cannot be found in the class table by
-  // FindClass, it allocates an new one with AllocClass in the
-  // kStatusNotReady and calls LoadClass. Note if it does find a
-  // class, it may not be kStatusResolved and it will try to push it
-  // forward toward kStatusResolved.
-  //
-  // kStatusIdx: LoadClass populates with Class with information from
-  // the DexFile, moving the status to kStatusIdx, indicating that the
-  // Class value in super_class_ has not been populated. The new Class
-  // can then be inserted into the classes table.
-  //
-  // kStatusLoaded: After taking a lock on Class, the ClassLinker will
-  // attempt to move a kStatusIdx class forward to kStatusLoaded by
-  // using ResolveClass to initialize the super_class_ and ensuring the
-  // interfaces are resolved.
-  //
-  // kStatusResolving: Class is just cloned with the right size from
-  // temporary class that's acting as a placeholder for linking. The old
-  // class will be retired. New class is set to this status first before
-  // moving on to being resolved.
-  //
-  // kStatusResolved: Still holding the lock on Class, the ClassLinker
-  // shows linking is complete and fields of the Class populated by making
-  // it kStatusResolved. Java allows circularities of the form where a super
-  // class has a field that is of the type of the sub class. We need to be able
-  // to fully resolve super classes while resolving types for fields.
-  //
-  // kStatusRetryVerificationAtRuntime: The verifier sets a class to
-  // this state if it encounters a soft failure at compile time. This
-  // often happens when there are unresolved classes in other dex
-  // files, and this status marks a class as needing to be verified
-  // again at runtime.
-  //
-  // TODO: Explain the other states
-  enum Status {
-    kStatusRetired = -2,  // Retired, should not be used. Use the newly cloned one instead.
-    kStatusError = -1,
-    kStatusNotReady = 0,
-    kStatusIdx = 1,  // Loaded, DEX idx in super_class_type_idx_ and interfaces_type_idx_.
-    kStatusLoaded = 2,  // DEX idx values resolved.
-    kStatusResolving = 3,  // Just cloned from temporary class object.
-    kStatusResolved = 4,  // Part of linking.
-    kStatusVerifying = 5,  // In the process of being verified.
-    kStatusRetryVerificationAtRuntime = 6,  // Compile time verification failed, retry at runtime.
-    kStatusVerifyingAtRuntime = 7,  // Retrying verification at runtime.
-    kStatusVerified = 8,  // Logically part of linking; done pre-init.
-    kStatusInitializing = 9,  // Class init in progress.
-    kStatusInitialized = 10,  // Ready to go.
-    kStatusMax = 11,
-  };
+  // Make ClassStatus available as Class::Status.
+  using Status = ClassStatus;
+
+  // Required for a minimal change. Fix up and remove in a future change.
+  static constexpr Status kStatusRetired = Status::kStatusRetired;
+  static constexpr Status kStatusErrorResolved = Status::kStatusErrorResolved;
+  static constexpr Status kStatusErrorUnresolved = Status::kStatusErrorUnresolved;
+  static constexpr Status kStatusNotReady = Status::kStatusNotReady;
+  static constexpr Status kStatusIdx = Status::kStatusIdx;
+  static constexpr Status kStatusLoaded = Status::kStatusLoaded;
+  static constexpr Status kStatusResolving = Status::kStatusResolving;
+  static constexpr Status kStatusResolved = Status::kStatusResolved;
+  static constexpr Status kStatusVerifying = Status::kStatusVerifying;
+  static constexpr Status kStatusRetryVerificationAtRuntime =
+      Status::kStatusRetryVerificationAtRuntime;
+  static constexpr Status kStatusVerifyingAtRuntime = Status::kStatusVerifyingAtRuntime;
+  static constexpr Status kStatusVerified = Status::kStatusVerified;
+  static constexpr Status kStatusSuperclassValidated = Status::kStatusSuperclassValidated;
+  static constexpr Status kStatusInitializing = Status::kStatusInitializing;
+  static constexpr Status kStatusInitialized = Status::kStatusInitialized;
+  static constexpr Status kStatusMax = Status::kStatusMax;
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   Status GetStatus() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -158,8 +122,25 @@ class MANAGED Class FINAL : public Object {
 
   // Returns true if the class has failed to link.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsErroneousUnresolved() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetStatus<kVerifyFlags>() == kStatusErrorUnresolved;
+  }
+
+  // Returns true if the class has failed to initialize.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsErroneousResolved() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetStatus<kVerifyFlags>() == kStatusErrorResolved;
+  }
+
+  // Returns true if the class status indicets that the class has failed to link or initialize.
+  static bool IsErroneous(Status status) {
+    return status == kStatusErrorUnresolved || status == kStatusErrorResolved;
+  }
+
+  // Returns true if the class has failed to link or initialize.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsErroneous() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusError;
+    return IsErroneous(GetStatus<kVerifyFlags>());
   }
 
   // Returns true if the class has been loaded.
@@ -177,13 +158,14 @@ class MANAGED Class FINAL : public Object {
   // Returns true if the class has been linked.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsResolved() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusResolved;
+    Status status = GetStatus<kVerifyFlags>();
+    return status >= kStatusResolved || status == kStatusErrorResolved;
   }
 
-  // Returns true if the class was compile-time verified.
+  // Returns true if the class should be verified at runtime.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsCompileTimeVerified() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusRetryVerificationAtRuntime;
+  bool ShouldVerifyAtRuntime() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetStatus<kVerifyFlags>() == kStatusRetryVerificationAtRuntime;
   }
 
   // Returns true if the class has been verified.
@@ -205,7 +187,13 @@ class MANAGED Class FINAL : public Object {
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  ALWAYS_INLINE uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (kIsDebugBuild) {
+      GetAccessFlagsDCheck<kVerifyFlags>();
+    }
+    return GetField32<kVerifyFlags>(AccessFlagsOffset());
+  }
+
   static MemberOffset AccessFlagsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, access_flags_);
   }
@@ -345,7 +333,7 @@ class MANAGED Class FINAL : public Object {
   // be replaced with a class with the right size for embedded imt/vtable.
   bool IsTemp() REQUIRES_SHARED(Locks::mutator_lock_) {
     Status s = GetStatus();
-    return s < Status::kStatusResolving && ShouldHaveEmbeddedVTable();
+    return s < Status::kStatusResolving && s != kStatusErrorResolved && ShouldHaveEmbeddedVTable();
   }
 
   String* GetName() REQUIRES_SHARED(Locks::mutator_lock_);  // Returns the cached name.
@@ -376,7 +364,7 @@ class MANAGED Class FINAL : public Object {
     DCHECK_EQ(v32 & kPrimitiveTypeMask, v32) << "upper 16 bits aren't zero";
     // Store the component size shift in the upper 16 bits.
     v32 |= Primitive::ComponentSizeShift(new_type) << kPrimitiveTypeSizeShiftShift;
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -498,10 +486,7 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  bool IsObjectArrayClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    ObjPtr<Class> const component_type = GetComponentType<kVerifyFlags, kReadBarrierOption>();
-    return component_type != nullptr && !component_type->IsPrimitive();
-  }
+  ALWAYS_INLINE bool IsObjectArrayClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsIntArrayClass() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -529,12 +514,7 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  bool IsVariableSize() REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Classes, arrays, and strings vary in size, and so the object_size_ field cannot
-    // be used to Get their instance size
-    return IsClassClass<kVerifyFlags, kReadBarrierOption>() ||
-        IsArrayClass<kVerifyFlags, kReadBarrierOption>() || IsStringClass();
-  }
+  ALWAYS_INLINE bool IsVariableSize() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
@@ -563,7 +543,7 @@ class MANAGED Class FINAL : public Object {
   // The size of java.lang.Class.class.
   static uint32_t ClassClassSize(PointerSize pointer_size) {
     // The number of vtable entries in java.lang.Class.
-    uint32_t vtable_entries = Object::kVTableLength + 73;
+    uint32_t vtable_entries = Object::kVTableLength + 67;
     return ComputeClassSize(true, vtable_entries, 0, 0, 4, 1, 0, pointer_size);
   }
 
@@ -582,11 +562,7 @@ class MANAGED Class FINAL : public Object {
     return OFFSET_OF_OBJECT_MEMBER(Class, object_size_alloc_fast_path_);
   }
 
-  void SetObjectSize(uint32_t new_object_size) REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!IsVariableSize());
-    // Not called within a transaction.
-    return SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, object_size_), new_object_size);
-  }
+  ALWAYS_INLINE void SetObjectSize(uint32_t new_object_size) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetObjectSizeAllocFastPath(uint32_t new_object_size) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -623,7 +599,10 @@ class MANAGED Class FINAL : public Object {
                               ObjPtr<DexCache> dex_cache,
                               uint32_t field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  bool CheckResolvedFieldAccess(ObjPtr<Class> access_to, ArtField* field, uint32_t field_idx)
+  bool CheckResolvedFieldAccess(ObjPtr<Class> access_to,
+                                ArtField* field,
+                                ObjPtr<DexCache> dex_cache,
+                                uint32_t field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Can this class access a resolved method?
@@ -634,10 +613,11 @@ class MANAGED Class FINAL : public Object {
                                ObjPtr<DexCache> dex_cache,
                                uint32_t method_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  template <InvokeType throw_invoke_type>
   bool CheckResolvedMethodAccess(ObjPtr<Class> access_to,
                                  ArtMethod* resolved_method,
-                                 uint32_t method_idx)
+                                 ObjPtr<DexCache> dex_cache,
+                                 uint32_t method_idx,
+                                 InvokeType throw_invoke_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsSubClass(ObjPtr<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -657,14 +637,7 @@ class MANAGED Class FINAL : public Object {
   // `This` and `klass` must be classes.
   ObjPtr<Class> GetCommonSuperClass(Handle<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetSuperClass(ObjPtr<Class> new_super_class) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Super class is assigned once, except during class linker initialization.
-    ObjPtr<Class> old_super_class =
-        GetFieldObject<Class>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_));
-    DCHECK(old_super_class == nullptr || old_super_class == new_super_class);
-    DCHECK(new_super_class != nullptr);
-    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, super_class_), new_super_class);
-  }
+  void SetSuperClass(ObjPtr<Class> new_super_class) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool HasSuperClass() REQUIRES_SHARED(Locks::mutator_lock_) {
     return GetSuperClass() != nullptr;
@@ -696,13 +669,14 @@ class MANAGED Class FINAL : public Object {
 
   void DumpClass(std::ostream& os, int flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   DexCache* GetDexCache() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Also updates the dex_cache_strings_ variable from new_dex_cache.
   void SetDexCache(ObjPtr<DexCache> new_dex_cache) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetDirectMethods(PointerSize pointer_size)
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetDirectMethods(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE LengthPrefixedArray<ArtMethod>* GetMethodsPtr()
@@ -712,7 +686,7 @@ class MANAGED Class FINAL : public Object {
     return MemberOffset(OFFSETOF_MEMBER(Class, methods_));
   }
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetMethods(PointerSize pointer_size)
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetMethods(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetMethodsPtr(LengthPrefixedArray<ArtMethod>* new_methods,
@@ -749,7 +723,7 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE ArraySlice<ArtMethod> GetDeclaredMethodsSlice(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetDeclaredMethods(
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetDeclaredMethods(
         PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -770,7 +744,7 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE ArraySlice<ArtMethod> GetDeclaredVirtualMethodsSlice(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetDeclaredVirtualMethods(
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetDeclaredVirtualMethods(
         PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -778,14 +752,14 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE ArraySlice<ArtMethod> GetCopiedMethodsSlice(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetCopiedMethods(PointerSize pointer_size)
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetCopiedMethods(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE ArraySlice<ArtMethod> GetVirtualMethodsSlice(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE IterationRange<StrideIterator<ArtMethod>> GetVirtualMethods(
+  ALWAYS_INLINE ArraySlice<ArtMethod> GetVirtualMethods(
       PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -799,6 +773,8 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE uint32_t NumDeclaredVirtualMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE uint32_t NumMethods() REQUIRES_SHARED(Locks::mutator_lock_);
+  static ALWAYS_INLINE uint32_t NumMethods(LengthPrefixedArray<ArtMethod>* methods)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ArtMethod* GetVirtualMethod(size_t i, PointerSize pointer_size)
@@ -896,6 +872,13 @@ class MANAGED Class FINAL : public Object {
   ArtMethod* FindVirtualMethodForVirtualOrInterface(ArtMethod* method, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Find a method with the given name and signature in an interface class.
+  //
+  // Search for the method declared in the class, then search for a method declared in any
+  // superinterface, then search the superclass java.lang.Object (implicitly declared methods
+  // in an interface without superinterfaces, see JLS 9.2, can be inherited, see JLS 9.4.1).
+  // TODO: Implement search for a unique maximally-specific non-abstract superinterface method.
+
   ArtMethod* FindInterfaceMethod(const StringPiece& name,
                                  const StringPiece& signature,
                                  PointerSize pointer_size)
@@ -911,49 +894,46 @@ class MANAGED Class FINAL : public Object {
                                  PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ArtMethod* FindDeclaredDirectMethod(const StringPiece& name,
-                                      const StringPiece& signature,
-                                      PointerSize pointer_size)
+  // Find a method with the given name and signature in a non-interface class.
+  //
+  // Search for the method in the class, following the JLS rules which conflict with the RI
+  // in some cases. The JLS says that inherited methods are searched (JLS 15.12.2.1) and
+  // these can come from a superclass or a superinterface (JLS 8.4.8). We perform the
+  // following search:
+  //   1. Search the methods declared directly in the class. If we find a method with the
+  //      given name and signature, return that method.
+  //   2. Search the methods declared in superclasses until we find a method with the given
+  //      signature or complete the search in java.lang.Object. If we find a method with the
+  //      given name and signature, check if it's been inherited by the class where we're
+  //      performing the lookup (qualifying type). If it's inherited, return it. Otherwise,
+  //      just remember the method and its declaring class and proceed to step 3.
+  //   3. Search "copied" methods (containing methods inherited from interfaces) in the class
+  //      and its superclass chain. If we found a method in step 2 (which was not inherited,
+  //      otherwise we would not be performing step 3), end the search when we reach its
+  //      declaring class, otherwise search the entire superclass chain. If we find a method
+  //      with the given name and signature, return that method.
+  //   4. Return the method found in step 2 if any (not inherited), or null.
+  //
+  // It's the responsibility of the caller to throw exceptions if the returned method (or null)
+  // does not satisfy the request. Special consideration should be given to the case where this
+  // function returns a method that's not inherited (found in step 2, returned in step 4).
+
+  ArtMethod* FindClassMethod(const StringPiece& name,
+                             const StringPiece& signature,
+                             PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ArtMethod* FindDeclaredDirectMethod(const StringPiece& name,
-                                      const Signature& signature,
-                                      PointerSize pointer_size)
+  ArtMethod* FindClassMethod(const StringPiece& name,
+                             const Signature& signature,
+                             PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ArtMethod* FindDeclaredDirectMethod(ObjPtr<DexCache> dex_cache,
-                                      uint32_t dex_method_idx,
-                                      PointerSize pointer_size)
+  ArtMethod* FindClassMethod(ObjPtr<DexCache> dex_cache,
+                             uint32_t dex_method_idx,
+                             PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ArtMethod* FindDirectMethod(const StringPiece& name,
-                              const StringPiece& signature,
-                              PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindDirectMethod(const StringPiece& name,
-                              const Signature& signature,
-                              PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindDirectMethod(ObjPtr<DexCache> dex_cache,
-                              uint32_t dex_method_idx,
-                              PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindDeclaredVirtualMethod(const StringPiece& name,
-                                       const StringPiece& signature,
-                                       PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindDeclaredVirtualMethod(const StringPiece& name,
-                                       const Signature& signature,
-                                       PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindDeclaredVirtualMethod(ObjPtr<DexCache> dex_cache,
-                                       uint32_t dex_method_idx,
-                                       PointerSize pointer_size)
+  ArtMethod* FindConstructor(const StringPiece& signature, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArtMethod* FindDeclaredVirtualMethodByName(const StringPiece& name,
@@ -962,21 +942,6 @@ class MANAGED Class FINAL : public Object {
 
   ArtMethod* FindDeclaredDirectMethodByName(const StringPiece& name,
                                             PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindVirtualMethod(const StringPiece& name,
-                               const StringPiece& signature,
-                               PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindVirtualMethod(const StringPiece& name,
-                               const Signature& signature,
-                               PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  ArtMethod* FindVirtualMethod(ObjPtr<DexCache> dex_cache,
-                               uint32_t dex_method_idx,
-                               PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArtMethod* FindClassInitializer(PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1017,7 +982,7 @@ class MANAGED Class FINAL : public Object {
   // Returns the number of instance fields containing reference types. Does not count fields in any
   // super classes.
   uint32_t NumReferenceInstanceFields() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsResolved() || IsErroneous());
+    DCHECK(IsResolved());
     return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_instance_fields_));
   }
 
@@ -1045,7 +1010,7 @@ class MANAGED Class FINAL : public Object {
 
   // Returns the number of static fields containing reference types.
   uint32_t NumReferenceStaticFields() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsResolved() || IsErroneous());
+    DCHECK(IsResolved());
     return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_static_fields_));
   }
 
@@ -1136,6 +1101,8 @@ class MANAGED Class FINAL : public Object {
 
   void SetClinitThreadId(pid_t new_clinit_thread_id) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ClassExt* GetExtData() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the ExtData for this class, allocating one if necessary. This should be the only way
@@ -1149,8 +1116,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   void SetDexClassDefIndex(uint16_t class_def_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Not called within a transaction.
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
   }
 
   dex::TypeIndex GetDexTypeIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1159,8 +1125,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   void SetDexTypeIndex(dex::TypeIndex type_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Not called within a transaction.
-    SetField32<false>(OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
+    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
   }
 
   dex::TypeIndex FindTypeIndexInOtherDexFile(const DexFile& dex_file)
@@ -1236,10 +1201,10 @@ class MANAGED Class FINAL : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
   // For proxy class only.
-  ObjectArray<Class>* GetInterfaces() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjectArray<Class>* GetProxyInterfaces() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // For proxy class only.
-  ObjectArray<ObjectArray<Class>>* GetThrows() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjectArray<ObjectArray<Class>>* GetProxyThrows() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // For reference class only.
   MemberOffset GetDisableIntrinsicFlagOffset() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1331,18 +1296,26 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE void SetMethodsPtrInternal(LengthPrefixedArray<ArtMethod>* new_methods)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template <bool throw_on_failure, bool use_referrers_cache>
-  bool ResolvedFieldAccessTest(ObjPtr<Class> access_to,
-                               ArtField* field,
-                               uint32_t field_idx,
-                               ObjPtr<DexCache> dex_cache)
+  ALWAYS_INLINE static ArraySlice<ArtMethod> GetMethodsSliceRangeUnchecked(
+      LengthPrefixedArray<ArtMethod>* methods,
+      PointerSize pointer_size,
+      uint32_t start_offset,
+      uint32_t end_offset)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template <bool throw_on_failure, bool use_referrers_cache, InvokeType throw_invoke_type>
+  template <bool throw_on_failure>
+  bool ResolvedFieldAccessTest(ObjPtr<Class> access_to,
+                               ArtField* field,
+                               ObjPtr<DexCache> dex_cache,
+                               uint32_t field_idx)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template <bool throw_on_failure>
   bool ResolvedMethodAccessTest(ObjPtr<Class> access_to,
                                 ArtMethod* resolved_method,
+                                ObjPtr<DexCache> dex_cache,
                                 uint32_t method_idx,
-                                ObjPtr<DexCache> dex_cache)
+                                InvokeType throw_invoke_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool Implements(ObjPtr<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1369,6 +1342,9 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE uint32_t GetCopiedMethodsStartOffset() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool ProxyDescriptorEquals(const char* match) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<VerifyObjectFlags kVerifyFlags>
+  void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Check that the pointer size matches the one in the class linker.
   ALWAYS_INLINE static void CheckPointerSize(PointerSize pointer_size);
@@ -1538,8 +1514,6 @@ class MANAGED Class FINAL : public Object {
   friend class Object;  // For VisitReferences
   DISALLOW_IMPLICIT_CONSTRUCTORS(Class);
 };
-
-std::ostream& operator<<(std::ostream& os, const Class::Status& rhs);
 
 }  // namespace mirror
 }  // namespace art

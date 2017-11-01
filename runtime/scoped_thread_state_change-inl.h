@@ -19,8 +19,10 @@
 
 #include "scoped_thread_state_change.h"
 
+#include "base/casts.h"
 #include "jni_env_ext-inl.h"
 #include "obj_ptr-inl.h"
+#include "runtime.h"
 #include "thread-inl.h"
 
 namespace art {
@@ -74,16 +76,18 @@ inline ScopedThreadStateChange::~ScopedThreadStateChange() {
 template<typename T>
 inline T ScopedObjectAccessAlreadyRunnable::AddLocalReference(ObjPtr<mirror::Object> obj) const {
   Locks::mutator_lock_->AssertSharedHeld(Self());
-  DCHECK(IsRunnable());  // Don't work with raw objects in non-runnable states.
-  DCHECK_NE(obj, Runtime::Current()->GetClearedJniWeakGlobal());
+  if (kIsDebugBuild) {
+    CHECK(IsRunnable());  // Don't work with raw objects in non-runnable states.
+    DCheckObjIsNotClearedJniWeakGlobal(obj);
+  }
   return obj == nullptr ? nullptr : Env()->AddLocalReference<T>(obj);
 }
 
-template<typename T, bool kPoison>
-inline ObjPtr<T, kPoison> ScopedObjectAccessAlreadyRunnable::Decode(jobject obj) const {
+template<typename T>
+inline ObjPtr<T> ScopedObjectAccessAlreadyRunnable::Decode(jobject obj) const {
   Locks::mutator_lock_->AssertSharedHeld(Self());
   DCHECK(IsRunnable());  // Don't work with raw objects in non-runnable states.
-  return ObjPtr<T, kPoison>::DownCast(Self()->DecodeJObject(obj));
+  return ObjPtr<T>::DownCast(Self()->DecodeJObject(obj));
 }
 
 inline bool ScopedObjectAccessAlreadyRunnable::IsRunnable() const {
@@ -109,6 +113,10 @@ inline ScopedObjectAccessUnchecked::ScopedObjectAccessUnchecked(Thread* self)
   Self()->VerifyStack();
   Locks::mutator_lock_->AssertSharedHeld(Self());
 }
+
+inline ScopedObjectAccess::ScopedObjectAccess(JNIEnv* env) : ScopedObjectAccessUnchecked(env) {}
+inline ScopedObjectAccess::ScopedObjectAccess(Thread* self) : ScopedObjectAccessUnchecked(self) {}
+inline ScopedObjectAccess::~ScopedObjectAccess() {}
 
 inline ScopedThreadSuspension::ScopedThreadSuspension(Thread* self, ThreadState suspended_state)
     : self_(self), suspended_state_(suspended_state) {

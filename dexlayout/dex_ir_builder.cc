@@ -72,6 +72,8 @@ Header* DexIrBuilder(const DexFile& dex_file) {
   }
   // MapItem.
   collections.SetMapListOffset(disk_header.map_off_);
+  // CallSiteIds and MethodHandleItems.
+  collections.CreateCallSitesAndMethodHandles(dex_file);
 
   CheckAndSetRemainingOffsets(dex_file, &collections);
 
@@ -115,6 +117,14 @@ static void CheckAndSetRemainingOffsets(const DexFile& dex_file, Collections* co
         CHECK_EQ(item->size_, collections->ClassDefsSize());
         CHECK_EQ(item->offset_, collections->ClassDefsOffset());
         break;
+      case DexFile::kDexTypeCallSiteIdItem:
+        CHECK_EQ(item->size_, collections->CallSiteIdsSize());
+        CHECK_EQ(item->offset_, collections->CallSiteIdsOffset());
+        break;
+      case DexFile::kDexTypeMethodHandleItem:
+        CHECK_EQ(item->size_, collections->MethodHandleItemsSize());
+        CHECK_EQ(item->offset_, collections->MethodHandleItemsOffset());
+        break;
       case DexFile::kDexTypeMapList:
         CHECK_EQ(item->size_, 1u);
         CHECK_EQ(item->offset_, disk_header.map_off_);
@@ -142,6 +152,7 @@ static void CheckAndSetRemainingOffsets(const DexFile& dex_file, Collections* co
         break;
       case DexFile::kDexTypeAnnotationItem:
         collections->SetAnnotationItemsOffset(item->offset_);
+        collections->AddAnnotationsFromMapListSection(dex_file, item->offset_, item->size_);
         break;
       case DexFile::kDexTypeEncodedArrayItem:
         collections->SetEncodedArrayItemsOffset(item->offset_);

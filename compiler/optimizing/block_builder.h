@@ -17,8 +17,8 @@
 #ifndef ART_COMPILER_OPTIMIZING_BLOCK_BUILDER_H_
 #define ART_COMPILER_OPTIMIZING_BLOCK_BUILDER_H_
 
-#include "base/arena_containers.h"
-#include "base/arena_object.h"
+#include "base/scoped_arena_allocator.h"
+#include "base/scoped_arena_containers.h"
 #include "dex_file.h"
 #include "nodes.h"
 
@@ -28,16 +28,21 @@ class HBasicBlockBuilder : public ValueObject {
  public:
   HBasicBlockBuilder(HGraph* graph,
                      const DexFile* const dex_file,
-                     const DexFile::CodeItem& code_item)
-      : arena_(graph->GetArena()),
+                     const DexFile::CodeItem& code_item,
+                     ScopedArenaAllocator* local_allocator)
+      : allocator_(graph->GetAllocator()),
         graph_(graph),
         dex_file_(dex_file),
         code_item_(code_item),
+        local_allocator_(local_allocator),
         branch_targets_(code_item.insns_size_in_code_units_,
                         nullptr,
-                        arena_->Adapter(kArenaAllocGraphBuilder)),
-        throwing_blocks_(kDefaultNumberOfThrowingBlocks, arena_->Adapter(kArenaAllocGraphBuilder)),
-        number_of_branches_(0u) {}
+                        local_allocator->Adapter(kArenaAllocGraphBuilder)),
+        throwing_blocks_(kDefaultNumberOfThrowingBlocks,
+                         local_allocator->Adapter(kArenaAllocGraphBuilder)),
+        number_of_branches_(0u),
+        quicken_index_for_dex_pc_(std::less<uint32_t>(),
+                                  local_allocator->Adapter(kArenaAllocGraphBuilder)) {}
 
   // Creates basic blocks in `graph_` at branch target dex_pc positions of the
   // `code_item_`. Blocks are connected but left unpopulated with instructions.
@@ -47,6 +52,8 @@ class HBasicBlockBuilder : public ValueObject {
 
   size_t GetNumberOfBranches() const { return number_of_branches_; }
   HBasicBlock* GetBlockAt(uint32_t dex_pc) const { return branch_targets_[dex_pc]; }
+
+  size_t GetQuickenIndex(uint32_t dex_pc) const;
 
  private:
   // Creates a basic block starting at given `dex_pc`.
@@ -68,15 +75,19 @@ class HBasicBlockBuilder : public ValueObject {
   // handler dex_pcs.
   bool MightHaveLiveNormalPredecessors(HBasicBlock* catch_block);
 
-  ArenaAllocator* const arena_;
+  ArenaAllocator* const allocator_;
   HGraph* const graph_;
 
   const DexFile* const dex_file_;
   const DexFile::CodeItem& code_item_;
 
-  ArenaVector<HBasicBlock*> branch_targets_;
-  ArenaVector<HBasicBlock*> throwing_blocks_;
+  ScopedArenaAllocator* const local_allocator_;
+  ScopedArenaVector<HBasicBlock*> branch_targets_;
+  ScopedArenaVector<HBasicBlock*> throwing_blocks_;
   size_t number_of_branches_;
+
+  // A table to quickly find the quicken index for the first instruction of a basic block.
+  ScopedArenaSafeMap<uint32_t, uint32_t> quicken_index_for_dex_pc_;
 
   static constexpr size_t kDefaultNumberOfThrowingBlocks = 2u;
 

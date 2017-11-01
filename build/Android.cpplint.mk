@@ -18,10 +18,13 @@ include art/build/Android.common_build.mk
 
 ART_CPPLINT := $(LOCAL_PATH)/tools/cpplint.py
 ART_CPPLINT_FILTER := --filter=-whitespace/line_length,-build/include,-readability/function,-readability/streams,-readability/todo,-runtime/references,-runtime/sizeof,-runtime/threadsafe_fn,-runtime/printf
-ART_CPPLINT_FLAGS := --quiet --root=$(ANDROID_BUILD_TOP)
+# Use `pwd` instead of $TOP for root, $TOP is always . and --root doesn't seem
+# to work with a relative path (b/34787652).
+ART_CPPLINT_FLAGS := --root=`pwd`
+ART_CPPLINT_QUIET := --quiet
 ART_CPPLINT_INGORED := \
     runtime/elf.h \
-    runtime/openjdkjvmti/jvmti.h
+    openjdkjvmti/include/jvmti.h
 
 # This:
 #  1) Gets a list of all .h & .cc files in the art directory.
@@ -32,12 +35,12 @@ ART_CPPLINT_SRC := $(filter-out $(patsubst %,$(LOCAL_PATH)/%,$(ART_CPPLINT_INGOR
 # "mm cpplint-art" to verify we aren't regressing
 .PHONY: cpplint-art
 cpplint-art:
-	$(ART_CPPLINT) $(ART_CPPLINT_FILTER) $(ART_CPPLINT_SRC)
+	$(ART_CPPLINT) $(ART_CPPLINT_FLAGS) $(ART_CPPLINT_FILTER) $(ART_CPPLINT_SRC)
 
 # "mm cpplint-art-all" to see all warnings
 .PHONY: cpplint-art-all
 cpplint-art-all:
-	$(ART_CPPLINT) $(ART_CPPLINT_SRC)
+	$(ART_CPPLINT) $(ART_CPPLINT_FLAGS) $(ART_CPPLINT_SRC)
 
 OUT_CPPLINT := $(TARGET_COMMON_OUT_ROOT)/cpplint
 
@@ -48,7 +51,7 @@ art_cpplint_file := $(1)
 art_cpplint_touch := $$(OUT_CPPLINT)/$$(subst /,__,$$(art_cpplint_file))
 
 $$(art_cpplint_touch): $$(art_cpplint_file) $(ART_CPPLINT) art/build/Android.cpplint.mk
-	$(hide) $(ART_CPPLINT) $(ART_CPPLINT_FLAGS) $(ART_CPPLINT_FILTER) $$<
+	$(hide) $(ART_CPPLINT) $(ART_CPPLINT_QUIET) $(ART_CPPLINT_FLAGS) $(ART_CPPLINT_FILTER) $$<
 	$(hide) mkdir -p $$(dir $$@)
 	$(hide) touch $$@
 

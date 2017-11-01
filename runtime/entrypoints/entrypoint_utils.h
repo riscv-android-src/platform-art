@@ -20,15 +20,14 @@
 #include <jni.h>
 #include <stdint.h>
 
+#include "base/callee_save_type.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_instruction.h"
 #include "dex_file_types.h"
+#include "dex_instruction.h"
 #include "gc/allocator_type.h"
 #include "handle.h"
-#include "invoke_type.h"
 #include "jvalue.h"
-#include "runtime.h"
 
 namespace art {
 
@@ -41,31 +40,15 @@ namespace mirror {
 
 class ArtField;
 class ArtMethod;
+enum InvokeType : uint32_t;
 class OatQuickMethodHeader;
 class ScopedObjectAccessAlreadyRunnable;
 class Thread;
 
-template <const bool kAccessCheck>
-ALWAYS_INLINE inline mirror::Class* CheckObjectAlloc(dex::TypeIndex type_idx,
-                                                     ArtMethod* method,
-                                                     Thread* self,
-                                                     bool* slow_path)
-    REQUIRES_SHARED(Locks::mutator_lock_)
-    REQUIRES(!Roles::uninterruptible_);
-
-ALWAYS_INLINE inline mirror::Class* CheckClassInitializedForObjectAlloc(mirror::Class* klass,
-                                                                        Thread* self,
-                                                                        bool* slow_path)
-    REQUIRES_SHARED(Locks::mutator_lock_)
-    REQUIRES(!Roles::uninterruptible_);
-
 // Given the context of a calling Method, use its DexCache to resolve a type to a Class. If it
 // cannot be resolved, throw an error. If it can, use it to create an instance.
-// When verification/compiler hasn't been able to verify access, optionally perform an access
-// check.
-template <bool kAccessCheck, bool kInstrumented>
-ALWAYS_INLINE inline mirror::Object* AllocObjectFromCode(dex::TypeIndex type_idx,
-                                                         ArtMethod* method,
+template <bool kInstrumented>
+ALWAYS_INLINE inline mirror::Object* AllocObjectFromCode(mirror::Class* klass,
                                                          Thread* self,
                                                          gc::AllocatorType allocator_type)
     REQUIRES_SHARED(Locks::mutator_lock_)
@@ -110,30 +93,11 @@ ALWAYS_INLINE inline mirror::Array* AllocArrayFromCode(dex::TypeIndex type_idx,
     REQUIRES_SHARED(Locks::mutator_lock_)
     REQUIRES(!Roles::uninterruptible_);
 
-template <bool kAccessCheck, bool kInstrumented>
+template <bool kInstrumented>
 ALWAYS_INLINE inline mirror::Array* AllocArrayFromCodeResolved(mirror::Class* klass,
                                                                int32_t component_count,
-                                                               ArtMethod* method,
                                                                Thread* self,
                                                                gc::AllocatorType allocator_type)
-    REQUIRES_SHARED(Locks::mutator_lock_)
-    REQUIRES(!Roles::uninterruptible_);
-
-mirror::Array* CheckAndAllocArrayFromCode(dex::TypeIndex type_idx,
-                                          int32_t component_count,
-                                          ArtMethod* method,
-                                          Thread* self,
-                                          bool access_check,
-                                          gc::AllocatorType allocator_type)
-    REQUIRES_SHARED(Locks::mutator_lock_)
-    REQUIRES(!Roles::uninterruptible_);
-
-mirror::Array* CheckAndAllocArrayFromCodeInstrumented(dex::TypeIndex type_idx,
-                                                      int32_t component_count,
-                                                      ArtMethod* method,
-                                                      Thread* self,
-                                                      bool access_check,
-                                                      gc::AllocatorType allocator_type)
     REQUIRES_SHARED(Locks::mutator_lock_)
     REQUIRES(!Roles::uninterruptible_);
 
@@ -173,11 +137,10 @@ inline ArtField* FindFieldFast(uint32_t field_idx,
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 // Fast path method resolution that can't throw exceptions.
+template <InvokeType type, bool access_check>
 inline ArtMethod* FindMethodFast(uint32_t method_idx,
                                  ObjPtr<mirror::Object> this_object,
-                                 ArtMethod* referrer,
-                                 bool access_check,
-                                 InvokeType type)
+                                 ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 inline mirror::Class* ResolveVerifyAndClinit(dex::TypeIndex type_idx,
@@ -214,11 +177,19 @@ template <typename INT_TYPE, typename FLOAT_TYPE>
 inline INT_TYPE art_float_to_integral(FLOAT_TYPE f);
 
 ArtMethod* GetCalleeSaveMethodCaller(ArtMethod** sp,
-                                     Runtime::CalleeSaveType type,
+                                     CalleeSaveType type,
                                      bool do_caller_check = false)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
-ArtMethod* GetCalleeSaveMethodCaller(Thread* self, Runtime::CalleeSaveType type)
+struct CallerAndOuterMethod {
+  ArtMethod* caller;
+  ArtMethod* outer_method;
+};
+
+CallerAndOuterMethod GetCalleeSaveMethodCallerAndOuterMethod(Thread* self, CalleeSaveType type)
+    REQUIRES_SHARED(Locks::mutator_lock_);
+
+ArtMethod* GetCalleeSaveOuterMethod(Thread* self, CalleeSaveType type)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
 }  // namespace art

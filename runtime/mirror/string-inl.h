@@ -26,7 +26,6 @@
 #include "common_throws.h"
 #include "gc/heap-inl.h"
 #include "globals.h"
-#include "intern_table.h"
 #include "runtime.h"
 #include "thread.h"
 #include "utf.h"
@@ -36,7 +35,7 @@ namespace art {
 namespace mirror {
 
 inline uint32_t String::ClassSize(PointerSize pointer_size) {
-  uint32_t vtable_entries = Object::kVTableLength + 57;
+  uint32_t vtable_entries = Object::kVTableLength + 56;
   return Class::ComputeClassSize(true, vtable_entries, 0, 0, 0, 1, 2, pointer_size);
 }
 
@@ -161,10 +160,6 @@ class SetStringCountAndValueVisitorFromString {
   const int32_t offset_;
 };
 
-inline ObjPtr<String> String::Intern() {
-  return Runtime::Current()->GetInternTable()->InternWeak(this);
-}
-
 inline uint16_t String::CharAt(int32_t index) {
   int32_t count = GetLength();
   if (UNLIKELY((index < 0) || (index >= count))) {
@@ -256,6 +251,7 @@ inline String* String::AllocFromByteArray(Thread* self, int32_t byte_length,
                                           Handle<ByteArray> array, int32_t offset,
                                           int32_t high_byte, gc::AllocatorType allocator_type) {
   const uint8_t* const src = reinterpret_cast<uint8_t*>(array->GetData()) + offset;
+  high_byte &= 0xff;  // Extract the relevant bits before determining `compressible`.
   const bool compressible =
       kUseStringCompression && String::AllASCII<uint8_t>(src, byte_length) && (high_byte == 0);
   const int32_t length_with_flag = String::GetFlaggedCount(byte_length, compressible);
@@ -308,16 +304,21 @@ inline int32_t String::GetHashCode() {
 }
 
 template<typename MemoryType>
-bool String::AllASCII(const MemoryType* const chars, const int length) {
+inline bool String::AllASCII(const MemoryType* chars, const int length) {
   static_assert(std::is_unsigned<MemoryType>::value, "Expecting unsigned MemoryType");
   for (int i = 0; i < length; ++i) {
-    // Valid ASCII characters are in range 1..0x7f. Zero is not considered ASCII
-    // because it would complicate the detection of ASCII strings in Modified-UTF8.
-    if ((chars[i] - 1u) >= 0x7fu) {
+    if (!IsASCII(chars[i])) {
       return false;
     }
   }
   return true;
+}
+
+inline bool String::DexFileStringAllASCII(const char* chars, const int length) {
+  // For strings from the dex file we just need to check that
+  // the terminating character is at the right position.
+  DCHECK_EQ(AllASCII(reinterpret_cast<const uint8_t*>(chars), length), chars[length] == 0);
+  return chars[length] == 0;
 }
 
 }  // namespace mirror

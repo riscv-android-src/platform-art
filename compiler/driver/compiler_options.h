@@ -31,7 +31,7 @@ namespace art {
 
 namespace verifier {
   class VerifierDepsTest;
-}
+}  // namespace verifier
 
 class DexFile;
 
@@ -46,44 +46,11 @@ class CompilerOptions FINAL {
   static constexpr double kDefaultTopKProfileThreshold = 90.0;
   static const bool kDefaultGenerateDebugInfo = false;
   static const bool kDefaultGenerateMiniDebugInfo = false;
-  static const bool kDefaultIncludePatchInformation = false;
-  static const size_t kDefaultInlineDepthLimit = 3;
   static const size_t kDefaultInlineMaxCodeUnits = 32;
-  static constexpr size_t kUnsetInlineDepthLimit = -1;
   static constexpr size_t kUnsetInlineMaxCodeUnits = -1;
-
-  // Default inlining settings when the space filter is used.
-  static constexpr size_t kSpaceFilterInlineDepthLimit = 3;
-  static constexpr size_t kSpaceFilterInlineMaxCodeUnits = 10;
 
   CompilerOptions();
   ~CompilerOptions();
-
-  CompilerOptions(CompilerFilter::Filter compiler_filter,
-                  size_t huge_method_threshold,
-                  size_t large_method_threshold,
-                  size_t small_method_threshold,
-                  size_t tiny_method_threshold,
-                  size_t num_dex_methods_threshold,
-                  size_t inline_depth_limit,
-                  size_t inline_max_code_units,
-                  const std::vector<const DexFile*>* no_inline_from,
-                  bool include_patch_information,
-                  double top_k_profile_threshold,
-                  bool debuggable,
-                  bool generate_debug_info,
-                  bool implicit_null_checks,
-                  bool implicit_so_checks,
-                  bool implicit_suspend_checks,
-                  bool compile_pic,
-                  const std::vector<std::string>* verbose_methods,
-                  std::ostream* init_failure_output,
-                  bool abort_on_hard_verifier_failure,
-                  const std::string& dump_cfg_file_name,
-                  bool dump_cfg_append,
-                  bool force_determinism,
-                  RegisterAllocator::Strategy regalloc_strategy,
-                  const std::vector<std::string>* passes_to_run);
 
   CompilerFilter::Filter GetCompilerFilter() const {
     return compiler_filter_;
@@ -93,16 +60,16 @@ class CompilerOptions FINAL {
     compiler_filter_ = compiler_filter;
   }
 
-  bool VerifyAtRuntime() const {
-    return compiler_filter_ == CompilerFilter::kVerifyAtRuntime;
-  }
-
-  bool IsBytecodeCompilationEnabled() const {
-    return CompilerFilter::IsBytecodeCompilationEnabled(compiler_filter_);
+  bool IsAotCompilationEnabled() const {
+    return CompilerFilter::IsAotCompilationEnabled(compiler_filter_);
   }
 
   bool IsJniCompilationEnabled() const {
     return CompilerFilter::IsJniCompilationEnabled(compiler_filter_);
+  }
+
+  bool IsQuickeningCompilationEnabled() const {
+    return CompilerFilter::IsQuickeningCompilationEnabled(compiler_filter_);
   }
 
   bool IsVerificationEnabled() const {
@@ -110,15 +77,15 @@ class CompilerOptions FINAL {
   }
 
   bool AssumeClassesAreVerified() const {
-    return compiler_filter_ == CompilerFilter::kVerifyNone;
+    return compiler_filter_ == CompilerFilter::kAssumeVerified;
   }
 
-  bool VerifyOnlyProfile() const {
-    return compiler_filter_ == CompilerFilter::kVerifyProfile;
+  bool VerifyAtRuntime() const {
+    return compiler_filter_ == CompilerFilter::kExtract;
   }
 
-  bool IsAnyMethodCompilationEnabled() const {
-    return CompilerFilter::IsAnyMethodCompilationEnabled(compiler_filter_);
+  bool IsAnyCompilationEnabled() const {
+    return CompilerFilter::IsAnyCompilationEnabled(compiler_filter_);
   }
 
   size_t GetHugeMethodThreshold() const {
@@ -157,13 +124,6 @@ class CompilerOptions FINAL {
     return num_dex_methods_threshold_;
   }
 
-  size_t GetInlineDepthLimit() const {
-    return inline_depth_limit_;
-  }
-  void SetInlineDepthLimit(size_t limit) {
-    inline_depth_limit_ = limit;
-  }
-
   size_t GetInlineMaxCodeUnits() const {
     return inline_max_code_units_;
   }
@@ -177,6 +137,10 @@ class CompilerOptions FINAL {
 
   bool GetDebuggable() const {
     return debuggable_;
+  }
+
+  void SetDebuggable(bool value) {
+    debuggable_ = value;
   }
 
   bool GetNativeDebuggable() const {
@@ -197,6 +161,9 @@ class CompilerOptions FINAL {
     return generate_mini_debug_info_;
   }
 
+  // Should run-time checks be emitted in debug mode?
+  bool EmitRunTimeChecksInDebugMode() const;
+
   bool GetGenerateBuildId() const {
     return generate_build_id_;
   }
@@ -213,16 +180,25 @@ class CompilerOptions FINAL {
     return implicit_suspend_checks_;
   }
 
-  bool GetIncludePatchInformation() const {
-    return include_patch_information_;
-  }
-
+  // Are we compiling a boot image?
   bool IsBootImage() const {
     return boot_image_;
   }
 
+  // Are we compiling a core image (small boot image only used for ART testing)?
+  bool IsCoreImage() const {
+    // Ensure that `core_image_` => `boot_image_`.
+    DCHECK(!core_image_ || boot_image_);
+    return core_image_;
+  }
+
+  // Are we compiling an app image?
   bool IsAppImage() const {
     return app_image_;
+  }
+
+  void DisableAppImage() {
+    app_image_ = false;
   }
 
   // Should the code be compiled as position independent?
@@ -231,11 +207,11 @@ class CompilerOptions FINAL {
   }
 
   bool HasVerboseMethods() const {
-    return verbose_methods_ != nullptr && !verbose_methods_->empty();
+    return !verbose_methods_.empty();
   }
 
   bool IsVerboseMethod(const std::string& pretty_method) const {
-    for (const std::string& cur_method : *verbose_methods_) {
+    for (const std::string& cur_method : verbose_methods_) {
       if (pretty_method.find(cur_method) != std::string::npos) {
         return true;
       }
@@ -250,12 +226,21 @@ class CompilerOptions FINAL {
   bool AbortOnHardVerifierFailure() const {
     return abort_on_hard_verifier_failure_;
   }
+  bool AbortOnSoftVerifierFailure() const {
+    return abort_on_soft_verifier_failure_;
+  }
 
   const std::vector<const DexFile*>* GetNoInlineFromDexFile() const {
     return no_inline_from_;
   }
 
-  bool ParseCompilerOption(const StringPiece& option, UsageFn Usage);
+  bool ParseCompilerOptions(const std::vector<std::string>& options,
+                            bool ignore_unrecognized,
+                            std::string* error_msg);
+
+  void SetNonPic() {
+    compile_pic_ = false;
+  }
 
   const std::string& GetDumpCfgFileName() const {
     return dump_cfg_file_name_;
@@ -278,16 +263,15 @@ class CompilerOptions FINAL {
   }
 
  private:
-  void ParseDumpInitFailures(const StringPiece& option, UsageFn Usage);
+  bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
   void ParseDumpCfgPasses(const StringPiece& option, UsageFn Usage);
   void ParseInlineMaxCodeUnits(const StringPiece& option, UsageFn Usage);
-  void ParseInlineDepthLimit(const StringPiece& option, UsageFn Usage);
   void ParseNumDexMethods(const StringPiece& option, UsageFn Usage);
   void ParseTinyMethodMax(const StringPiece& option, UsageFn Usage);
   void ParseSmallMethodMax(const StringPiece& option, UsageFn Usage);
   void ParseLargeMethodMax(const StringPiece& option, UsageFn Usage);
   void ParseHugeMethodMax(const StringPiece& option, UsageFn Usage);
-  void ParseRegisterAllocationStrategy(const StringPiece& option, UsageFn Usage);
+  bool ParseRegisterAllocationStrategy(const std::string& option, std::string* error_msg);
 
   CompilerFilter::Filter compiler_filter_;
   size_t huge_method_threshold_;
@@ -295,7 +279,6 @@ class CompilerOptions FINAL {
   size_t small_method_threshold_;
   size_t tiny_method_threshold_;
   size_t num_dex_methods_threshold_;
-  size_t inline_depth_limit_;
   size_t inline_max_code_units_;
 
   // Dex files from which we should not inline code.
@@ -304,8 +287,8 @@ class CompilerOptions FINAL {
   const std::vector<const DexFile*>* no_inline_from_;
 
   bool boot_image_;
+  bool core_image_;
   bool app_image_;
-  bool include_patch_information_;
   // When using a profile file only the top K% of the profiled samples will be compiled.
   double top_k_profile_threshold_;
   bool debuggable_;
@@ -318,11 +301,13 @@ class CompilerOptions FINAL {
   bool compile_pic_;
 
   // Vector of methods to have verbose output enabled for.
-  const std::vector<std::string>* verbose_methods_;
+  std::vector<std::string> verbose_methods_;
 
   // Abort compilation with an error if we find a class that fails verification with a hard
   // failure.
   bool abort_on_hard_verifier_failure_;
+  // Same for soft failures.
+  bool abort_on_soft_verifier_failure_;
 
   // Log initialization of initialization failures to this stream if not null.
   std::unique_ptr<std::ostream> init_failure_output_;
@@ -348,6 +333,9 @@ class CompilerOptions FINAL {
   friend class DexToDexDecompilerTest;
   friend class CommonCompilerTest;
   friend class verifier::VerifierDepsTest;
+
+  template <class Base>
+  friend bool ReadCompilerOptions(Base& map, CompilerOptions* options, std::string* error_msg);
 
   DISALLOW_COPY_AND_ASSIGN(CompilerOptions);
 };

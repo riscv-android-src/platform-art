@@ -387,6 +387,8 @@ SYMBOL(ExecuteMterpImpl):
     movl    %eax, OUT_ARG0(%esp)
     leal    OFF_FP_SHADOWFRAME(rFP), %ecx
     movl    %ecx, OUT_ARG1(%esp)
+    movl    rSELF, %eax
+    movl    %eax, OUT_ARG2(%esp)
     call    SYMBOL(MterpSetUpHotnessCountdown)
 
     /* Starting ibase */
@@ -399,7 +401,6 @@ SYMBOL(ExecuteMterpImpl):
 
 
     .global SYMBOL(artMterpAsmInstructionStart)
-    FUNCTION_TYPE(SYMBOL(artMterpAsmInstructionStart))
 SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     .text
 
@@ -781,7 +782,12 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     .balign 128
 .L_op_const_string: /* 0x1a */
 /* File: x86/op_const_string.S */
-    /* const/string vAA, String@BBBB */
+/* File: x86/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstString
     EXPORT_PC
     movzwl  2(rPC), %eax                    # eax <- BBBB
     movl    %eax, OUT_ARG0(%esp)
@@ -790,11 +796,12 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)
     movl    rSELF, %eax
     movl    %eax, OUT_ARG3(%esp)
-    call    SYMBOL(MterpConstString)        # (index, tgt_reg, shadow_frame, self)
+    call    SYMBOL(MterpConstString)                 # (index, tgt_reg, shadow_frame, self)
     RESTORE_IBASE
     testb   %al, %al
     jnz     MterpPossibleException
     ADVANCE_PC_FETCH_AND_GOTO_NEXT 2
+
 
 /* ------------------------------ */
     .balign 128
@@ -819,20 +826,26 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     .balign 128
 .L_op_const_class: /* 0x1c */
 /* File: x86/op_const_class.S */
-    /* const/class vAA, Class@BBBB */
+/* File: x86/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstClass
     EXPORT_PC
-    movzwl  2(rPC), %eax                    # eax<- BBBB
+    movzwl  2(rPC), %eax                    # eax <- BBBB
     movl    %eax, OUT_ARG0(%esp)
     movl    rINST, OUT_ARG1(%esp)
     leal    OFF_FP_SHADOWFRAME(rFP), %eax
     movl    %eax, OUT_ARG2(%esp)
     movl    rSELF, %eax
     movl    %eax, OUT_ARG3(%esp)
-    call    SYMBOL(MterpConstClass)         # (index, tgt_reg, shadow_frame, self)
+    call    SYMBOL(MterpConstClass)                 # (index, tgt_reg, shadow_frame, self)
     RESTORE_IBASE
     testb   %al, %al
     jnz     MterpPossibleException
     ADVANCE_PC_FETCH_AND_GOTO_NEXT 2
+
 
 /* ------------------------------ */
     .balign 128
@@ -2535,7 +2548,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGet32StaticFromCode
+    .extern MterpGet32Static
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2543,7 +2556,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGet32StaticFromCode)
+    call    SYMBOL(MterpGet32Static)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2564,7 +2577,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  *
  */
     /* sget-wide vAA, field@BBBB */
-    .extern artGet64StaticFromCode
+    .extern MterpGet64Static
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2572,7 +2585,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGet64StaticFromCode)
+    call    SYMBOL(MterpGet64Static)
     movl    rSELF, %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
     jnz     MterpException
@@ -2592,7 +2605,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGetObjStaticFromCode
+    .extern MterpGetObjStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2600,7 +2613,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGetObjStaticFromCode)
+    call    SYMBOL(MterpGetObjStatic)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2624,7 +2637,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGetBooleanStaticFromCode
+    .extern MterpGetBooleanStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2632,7 +2645,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGetBooleanStaticFromCode)
+    call    SYMBOL(MterpGetBooleanStatic)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2656,7 +2669,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGetByteStaticFromCode
+    .extern MterpGetByteStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2664,7 +2677,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGetByteStaticFromCode)
+    call    SYMBOL(MterpGetByteStatic)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2688,7 +2701,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGetCharStaticFromCode
+    .extern MterpGetCharStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2696,7 +2709,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGetCharStaticFromCode)
+    call    SYMBOL(MterpGetCharStatic)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2720,7 +2733,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sget, sget-object, sget-boolean, sget-byte, sget-char, sget-short
  */
     /* op vAA, field@BBBB */
-    .extern artGetShortStaticFromCode
+    .extern MterpGetShortStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref CCCC
@@ -2728,7 +2741,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG1(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG2(%esp)            # self
-    call    SYMBOL(artGetShortStaticFromCode)
+    call    SYMBOL(MterpGetShortStatic)
     movl    rSELF, %ecx
     RESTORE_IBASE_FROM_SELF %ecx
     cmpl    $0, THREAD_EXCEPTION_OFFSET(%ecx)
@@ -2751,7 +2764,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sput, sput-boolean, sput-byte, sput-char, sput-short
  */
     /* op vAA, field@BBBB */
-    .extern artSet32StaticFromCode
+    .extern MterpSet32Static
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
@@ -2761,7 +2774,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet32StaticFromCode)
+    call    SYMBOL(MterpSet32Static)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -2776,17 +2789,17 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  *
  */
     /* sput-wide vAA, field@BBBB */
-    .extern artSet64IndirectStaticFromMterp
+    .extern MterpSet64Static
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
-    movl    OFF_FP_METHOD(rFP), %eax
-    movl    %eax, OUT_ARG1(%esp)            # referrer
     leal    VREG_ADDRESS(rINST), %eax
-    movl    %eax, OUT_ARG2(%esp)            # &fp[AA]
+    movl    %eax, OUT_ARG1(%esp)            # &fp[AA]
+    movl    OFF_FP_METHOD(rFP), %eax
+    movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet64IndirectStaticFromMterp)
+    call    SYMBOL(MterpSet64Static)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -2821,7 +2834,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sput, sput-boolean, sput-byte, sput-char, sput-short
  */
     /* op vAA, field@BBBB */
-    .extern artSet8StaticFromCode
+    .extern MterpSetBooleanStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
@@ -2831,7 +2844,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet8StaticFromCode)
+    call    SYMBOL(MterpSetBooleanStatic)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -2849,7 +2862,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sput, sput-boolean, sput-byte, sput-char, sput-short
  */
     /* op vAA, field@BBBB */
-    .extern artSet8StaticFromCode
+    .extern MterpSetByteStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
@@ -2859,7 +2872,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet8StaticFromCode)
+    call    SYMBOL(MterpSetByteStatic)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -2877,7 +2890,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sput, sput-boolean, sput-byte, sput-char, sput-short
  */
     /* op vAA, field@BBBB */
-    .extern artSet16StaticFromCode
+    .extern MterpSetCharStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
@@ -2887,7 +2900,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet16StaticFromCode)
+    call    SYMBOL(MterpSetCharStatic)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -2905,7 +2918,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
  * for: sput, sput-boolean, sput-byte, sput-char, sput-short
  */
     /* op vAA, field@BBBB */
-    .extern artSet16StaticFromCode
+    .extern MterpSetShortStatic
     EXPORT_PC
     movzwl  2(rPC), %eax
     movl    %eax, OUT_ARG0(%esp)            # field ref BBBB
@@ -2915,7 +2928,7 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
     movl    %eax, OUT_ARG2(%esp)            # referrer
     movl    rSELF, %ecx
     movl    %ecx, OUT_ARG3(%esp)            # self
-    call    SYMBOL(artSet16StaticFromCode)
+    call    SYMBOL(MterpSetShortStatic)
     testb   %al, %al
     jnz     MterpException
     RESTORE_IBASE
@@ -6279,63 +6292,178 @@ SYMBOL(artMterpAsmInstructionStart) = .L_op_nop
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic: /* 0xfa */
-/* Transfer stub to alternate interpreter */
-    jmp     MterpFallback
+/* File: x86/op_invoke_polymorphic.S */
+/* File: x86/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphic
+    EXPORT_PC
+    movl    rSELF, %ecx
+    movl    %ecx, OUT_ARG0(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG1(%esp)
+    movl    rPC, OUT_ARG2(%esp)
+    REFRESH_INST 250
+    movl    rINST, OUT_ARG3(%esp)
+    call    SYMBOL(MterpInvokePolymorphic)
+    testb   %al, %al
+    jz      MterpException
+    ADVANCE_PC 4
+    call    SYMBOL(MterpShouldSwitchInterpreters)
+    testb   %al, %al
+    jnz     MterpFallback
+    RESTORE_IBASE
+    FETCH_INST
+    GOTO_NEXT
 
 
 /* ------------------------------ */
     .balign 128
 .L_op_invoke_polymorphic_range: /* 0xfb */
-/* Transfer stub to alternate interpreter */
-    jmp     MterpFallback
+/* File: x86/op_invoke_polymorphic_range.S */
+/* File: x86/invoke_polymorphic.S */
+    /*
+     * invoke-polymorphic handler wrapper.
+     */
+    /* op {vC, vD, vE, vF, vG}, meth@BBBB, proto@HHHH */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB, proto@HHHH */
+    .extern MterpInvokePolymorphicRange
+    EXPORT_PC
+    movl    rSELF, %ecx
+    movl    %ecx, OUT_ARG0(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG1(%esp)
+    movl    rPC, OUT_ARG2(%esp)
+    REFRESH_INST 251
+    movl    rINST, OUT_ARG3(%esp)
+    call    SYMBOL(MterpInvokePolymorphicRange)
+    testb   %al, %al
+    jz      MterpException
+    ADVANCE_PC 4
+    call    SYMBOL(MterpShouldSwitchInterpreters)
+    testb   %al, %al
+    jnz     MterpFallback
+    RESTORE_IBASE
+    FETCH_INST
+    GOTO_NEXT
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_fc: /* 0xfc */
-/* File: x86/op_unused_fc.S */
-/* File: x86/unused.S */
+.L_op_invoke_custom: /* 0xfc */
+/* File: x86/op_invoke_custom.S */
+/* File: x86/invoke.S */
 /*
- * Bail to reference interpreter to throw.
+ * Generic invoke handler wrapper.
  */
-    jmp     MterpFallback
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustom
+    EXPORT_PC
+    movl    rSELF, %ecx
+    movl    %ecx, OUT_ARG0(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG1(%esp)
+    movl    rPC, OUT_ARG2(%esp)
+    REFRESH_INST 252
+    movl    rINST, OUT_ARG3(%esp)
+    call    SYMBOL(MterpInvokeCustom)
+    testb   %al, %al
+    jz      MterpException
+    ADVANCE_PC 3
+    call    SYMBOL(MterpShouldSwitchInterpreters)
+    testb   %al, %al
+    jnz     MterpFallback
+    RESTORE_IBASE
+    FETCH_INST
+    GOTO_NEXT
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_fd: /* 0xfd */
-/* File: x86/op_unused_fd.S */
-/* File: x86/unused.S */
+.L_op_invoke_custom_range: /* 0xfd */
+/* File: x86/op_invoke_custom_range.S */
+/* File: x86/invoke.S */
 /*
- * Bail to reference interpreter to throw.
+ * Generic invoke handler wrapper.
  */
-    jmp     MterpFallback
+    /* op vB, {vD, vE, vF, vG, vA}, class@CCCC */
+    /* op {vCCCC..v(CCCC+AA-1)}, meth@BBBB */
+    .extern MterpInvokeCustomRange
+    EXPORT_PC
+    movl    rSELF, %ecx
+    movl    %ecx, OUT_ARG0(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG1(%esp)
+    movl    rPC, OUT_ARG2(%esp)
+    REFRESH_INST 253
+    movl    rINST, OUT_ARG3(%esp)
+    call    SYMBOL(MterpInvokeCustomRange)
+    testb   %al, %al
+    jz      MterpException
+    ADVANCE_PC 3
+    call    SYMBOL(MterpShouldSwitchInterpreters)
+    testb   %al, %al
+    jnz     MterpFallback
+    RESTORE_IBASE
+    FETCH_INST
+    GOTO_NEXT
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_fe: /* 0xfe */
-/* File: x86/op_unused_fe.S */
-/* File: x86/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    jmp     MterpFallback
+.L_op_const_method_handle: /* 0xfe */
+/* File: x86/op_const_method_handle.S */
+/* File: x86/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodHandle
+    EXPORT_PC
+    movzwl  2(rPC), %eax                    # eax <- BBBB
+    movl    %eax, OUT_ARG0(%esp)
+    movl    rINST, OUT_ARG1(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG2(%esp)
+    movl    rSELF, %eax
+    movl    %eax, OUT_ARG3(%esp)
+    call    SYMBOL(MterpConstMethodHandle)                 # (index, tgt_reg, shadow_frame, self)
+    RESTORE_IBASE
+    testb   %al, %al
+    jnz     MterpPossibleException
+    ADVANCE_PC_FETCH_AND_GOTO_NEXT 2
 
 
 /* ------------------------------ */
     .balign 128
-.L_op_unused_ff: /* 0xff */
-/* File: x86/op_unused_ff.S */
-/* File: x86/unused.S */
-/*
- * Bail to reference interpreter to throw.
- */
-    jmp     MterpFallback
+.L_op_const_method_type: /* 0xff */
+/* File: x86/op_const_method_type.S */
+/* File: x86/const.S */
+    /* const/class vAA, type@BBBB */
+    /* const/method-handle vAA, method_handle@BBBB */
+    /* const/method-type vAA, proto@BBBB */
+    /* const/string vAA, string@@BBBB */
+    .extern MterpConstMethodType
+    EXPORT_PC
+    movzwl  2(rPC), %eax                    # eax <- BBBB
+    movl    %eax, OUT_ARG0(%esp)
+    movl    rINST, OUT_ARG1(%esp)
+    leal    OFF_FP_SHADOWFRAME(rFP), %eax
+    movl    %eax, OUT_ARG2(%esp)
+    movl    rSELF, %eax
+    movl    %eax, OUT_ARG3(%esp)
+    call    SYMBOL(MterpConstMethodType)                 # (index, tgt_reg, shadow_frame, self)
+    RESTORE_IBASE
+    testb   %al, %al
+    jnz     MterpPossibleException
+    ADVANCE_PC_FETCH_AND_GOTO_NEXT 2
 
 
     .balign 128
-    SIZE(SYMBOL(artMterpAsmInstructionStart),SYMBOL(artMterpAsmInstructionStart))
     .global SYMBOL(artMterpAsmInstructionEnd)
 SYMBOL(artMterpAsmInstructionEnd):
 
@@ -6345,18 +6473,14 @@ SYMBOL(artMterpAsmInstructionEnd):
  * ===========================================================================
  */
     .global SYMBOL(artMterpAsmSisterStart)
-    FUNCTION_TYPE(SYMBOL(artMterpAsmSisterStart))
     .text
     .balign 4
 SYMBOL(artMterpAsmSisterStart):
-
-    SIZE(SYMBOL(artMterpAsmSisterStart),SYMBOL(artMterpAsmSisterStart))
     .global SYMBOL(artMterpAsmSisterEnd)
 SYMBOL(artMterpAsmSisterEnd):
 
 
     .global SYMBOL(artMterpAsmAltInstructionStart)
-    FUNCTION_TYPE(SYMBOL(artMterpAsmAltInstructionStart))
     .text
 
 SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
@@ -12410,7 +12534,7 @@ SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fc: /* 0xfc */
+.L_ALT_op_invoke_custom: /* 0xfc */
 /* File: x86/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12434,7 +12558,7 @@ SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fd: /* 0xfd */
+.L_ALT_op_invoke_custom_range: /* 0xfd */
 /* File: x86/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12458,7 +12582,7 @@ SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_fe: /* 0xfe */
+.L_ALT_op_const_method_handle: /* 0xfe */
 /* File: x86/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12482,7 +12606,7 @@ SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
 
 /* ------------------------------ */
     .balign 128
-.L_ALT_op_unused_ff: /* 0xff */
+.L_ALT_op_const_method_type: /* 0xff */
 /* File: x86/alt_stub.S */
 /*
  * Inter-instruction transfer stub.  Call out to MterpCheckBefore to handle
@@ -12505,7 +12629,6 @@ SYMBOL(artMterpAsmAltInstructionStart) = .L_ALT_op_nop
     jmp     .L_op_nop+(255*128)
 
     .balign 128
-    SIZE(SYMBOL(artMterpAsmAltInstructionStart),SYMBOL(artMterpAsmAltInstructionStart))
     .global SYMBOL(artMterpAsmAltInstructionEnd)
 SYMBOL(artMterpAsmAltInstructionEnd):
 /* File: x86/footer.S */

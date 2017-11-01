@@ -16,16 +16,16 @@
 
 #include "register_allocation_resolver.h"
 
+#include "base/bit_vector-inl.h"
 #include "code_generator.h"
 #include "linear_order.h"
 #include "ssa_liveness_analysis.h"
 
 namespace art {
 
-RegisterAllocationResolver::RegisterAllocationResolver(ArenaAllocator* allocator,
-                                                       CodeGenerator* codegen,
+RegisterAllocationResolver::RegisterAllocationResolver(CodeGenerator* codegen,
                                                        const SsaLivenessAnalysis& liveness)
-      : allocator_(allocator),
+      : allocator_(codegen->GetGraph()->GetAllocator()),
         codegen_(codegen),
         liveness_(liveness) {}
 
@@ -36,7 +36,7 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
                                          size_t float_spill_slots,
                                          size_t double_spill_slots,
                                          size_t catch_phi_spill_slots,
-                                         const ArenaVector<LiveInterval*>& temp_intervals) {
+                                         ArrayRef<LiveInterval* const> temp_intervals) {
   size_t spill_slots = int_spill_slots
                      + long_spill_slots
                      + float_spill_slots
@@ -100,24 +100,25 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
       // [art method            ].
       size_t slot = current->GetSpillSlot();
       switch (current->GetType()) {
-        case Primitive::kPrimDouble:
+        case DataType::Type::kFloat64:
           slot += long_spill_slots;
           FALLTHROUGH_INTENDED;
-        case Primitive::kPrimLong:
+        case DataType::Type::kInt64:
           slot += float_spill_slots;
           FALLTHROUGH_INTENDED;
-        case Primitive::kPrimFloat:
+        case DataType::Type::kFloat32:
           slot += int_spill_slots;
           FALLTHROUGH_INTENDED;
-        case Primitive::kPrimNot:
-        case Primitive::kPrimInt:
-        case Primitive::kPrimChar:
-        case Primitive::kPrimByte:
-        case Primitive::kPrimBoolean:
-        case Primitive::kPrimShort:
+        case DataType::Type::kReference:
+        case DataType::Type::kInt32:
+        case DataType::Type::kUint16:
+        case DataType::Type::kUint8:
+        case DataType::Type::kInt8:
+        case DataType::Type::kBool:
+        case DataType::Type::kInt16:
           slot += reserved_out_slots;
           break;
-        case Primitive::kPrimVoid:
+        case DataType::Type::kVoid:
           LOG(FATAL) << "Unexpected type for interval " << current->GetType();
       }
       current->SetSpillSlot(slot * kVRegSize);
@@ -205,12 +206,12 @@ void RegisterAllocationResolver::Resolve(ArrayRef<HInstruction* const> safepoint
     size_t temp_index = liveness_.GetTempIndex(temp);
     LocationSummary* locations = at->GetLocations();
     switch (temp->GetType()) {
-      case Primitive::kPrimInt:
+      case DataType::Type::kInt32:
         locations->SetTempAt(temp_index, Location::RegisterLocation(temp->GetRegister()));
         break;
 
-      case Primitive::kPrimDouble:
-        if (codegen_->NeedsTwoRegisters(Primitive::kPrimDouble)) {
+      case DataType::Type::kFloat64:
+        if (codegen_->NeedsTwoRegisters(DataType::Type::kFloat64)) {
           Location location = Location::FpuRegisterPairLocation(
               temp->GetRegister(), temp->GetHighInterval()->GetRegister());
           locations->SetTempAt(temp_index, location);
@@ -299,14 +300,19 @@ void RegisterAllocationResolver::ConnectSiblings(LiveInterval* interval) {
       // Currently, we spill unconditionnally the current method in the code generators.
       && !interval->GetDefinedBy()->IsCurrentMethod()) {
     // We spill eagerly, so move must be at definition.
-    InsertMoveAfter(interval->GetDefinedBy(),
-                    interval->ToLocation(),
-                    interval->NeedsTwoSpillSlots()
-                        ? Location::DoubleStackSlot(interval->GetParent()->GetSpillSlot())
-                        : Location::StackSlot(interval->GetParent()->GetSpillSlot()));
+    Location loc;
+    switch (interval->NumberOfSpillSlotsNeeded()) {
+      case 1: loc = Location::StackSlot(interval->GetParent()->GetSpillSlot()); break;
+      case 2: loc = Location::DoubleStackSlot(interval->GetParent()->GetSpillSlot()); break;
+      case 4: loc = Location::SIMDStackSlot(interval->GetParent()->GetSpillSlot()); break;
+      default: LOG(FATAL) << "Unexpected number of spill slots"; UNREACHABLE();
+    }
+    InsertMoveAfter(interval->GetDefinedBy(), interval->ToLocation(), loc);
   }
-  UsePosition* use = current->GetFirstUse();
-  UsePosition* env_use = current->GetFirstEnvironmentUse();
+  UsePositionList::const_iterator use_it = current->GetUses().begin();
+  const UsePositionList::const_iterator use_end = current->GetUses().end();
+  EnvUsePositionList::const_iterator env_use_it = current->GetEnvironmentUses().begin();
+  const EnvUsePositionList::const_iterator env_use_end = current->GetEnvironmentUses().end();
 
   // Walk over all siblings, updating locations of use positions, and
   // connecting them when they are adjacent.
@@ -318,44 +324,47 @@ void RegisterAllocationResolver::ConnectSiblings(LiveInterval* interval) {
 
     LiveRange* range = current->GetFirstRange();
     while (range != nullptr) {
-      while (use != nullptr && use->GetPosition() < range->GetStart()) {
-        DCHECK(use->IsSynthesized());
-        use = use->GetNext();
-      }
-      while (use != nullptr && use->GetPosition() <= range->GetEnd()) {
-        DCHECK(!use->GetIsEnvironment());
-        DCHECK(current->CoversSlow(use->GetPosition()) || (use->GetPosition() == range->GetEnd()));
-        if (!use->IsSynthesized()) {
-          LocationSummary* locations = use->GetUser()->GetLocations();
-          Location expected_location = locations->InAt(use->GetInputIndex());
+      // Process uses in the closed interval [range->GetStart(), range->GetEnd()].
+      // FindMatchingUseRange() expects a half-open interval, so pass `range->GetEnd() + 1u`.
+      size_t range_begin = range->GetStart();
+      size_t range_end = range->GetEnd() + 1u;
+      auto matching_use_range =
+          FindMatchingUseRange(use_it, use_end, range_begin, range_end);
+      DCHECK(std::all_of(use_it,
+                         matching_use_range.begin(),
+                         [](const UsePosition& pos) { return pos.IsSynthesized(); }));
+      for (const UsePosition& use : matching_use_range) {
+        DCHECK(current->CoversSlow(use.GetPosition()) || (use.GetPosition() == range->GetEnd()));
+        if (!use.IsSynthesized()) {
+          LocationSummary* locations = use.GetUser()->GetLocations();
+          Location expected_location = locations->InAt(use.GetInputIndex());
           // The expected (actual) location may be invalid in case the input is unused. Currently
           // this only happens for intrinsics.
           if (expected_location.IsValid()) {
             if (expected_location.IsUnallocated()) {
-              locations->SetInAt(use->GetInputIndex(), source);
+              locations->SetInAt(use.GetInputIndex(), source);
             } else if (!expected_location.IsConstant()) {
-              AddInputMoveFor(interval->GetDefinedBy(), use->GetUser(), source, expected_location);
+              AddInputMoveFor(
+                  interval->GetDefinedBy(), use.GetUser(), source, expected_location);
             }
           } else {
-            DCHECK(use->GetUser()->IsInvoke());
-            DCHECK(use->GetUser()->AsInvoke()->GetIntrinsic() != Intrinsics::kNone);
+            DCHECK(use.GetUser()->IsInvoke());
+            DCHECK(use.GetUser()->AsInvoke()->GetIntrinsic() != Intrinsics::kNone);
           }
         }
-        use = use->GetNext();
       }
+      use_it = matching_use_range.end();
 
       // Walk over the environment uses, and update their locations.
-      while (env_use != nullptr && env_use->GetPosition() < range->GetStart()) {
-        env_use = env_use->GetNext();
+      auto matching_env_use_range =
+          FindMatchingUseRange(env_use_it, env_use_end, range_begin, range_end);
+      for (const EnvUsePosition& env_use : matching_env_use_range) {
+        DCHECK(current->CoversSlow(env_use.GetPosition())
+               || (env_use.GetPosition() == range->GetEnd()));
+        HEnvironment* environment = env_use.GetEnvironment();
+        environment->SetLocationAt(env_use.GetInputIndex(), source);
       }
-
-      while (env_use != nullptr && env_use->GetPosition() <= range->GetEnd()) {
-        DCHECK(current->CoversSlow(env_use->GetPosition())
-               || (env_use->GetPosition() == range->GetEnd()));
-        HEnvironment* environment = env_use->GetEnvironment();
-        environment->SetLocationAt(env_use->GetInputIndex(), source);
-        env_use = env_use->GetNext();
-      }
+      env_use_it = matching_env_use_range.end();
 
       range = range->GetNext();
     }
@@ -375,7 +384,7 @@ void RegisterAllocationResolver::ConnectSiblings(LiveInterval* interval) {
          safepoint_position = safepoint_position->GetNext()) {
       DCHECK(current->CoversSlow(safepoint_position->GetPosition()));
 
-      if (current->GetType() == Primitive::kPrimNot) {
+      if (current->GetType() == DataType::Type::kReference) {
         DCHECK(interval->GetDefinedBy()->IsActualObject())
             << interval->GetDefinedBy()->DebugName()
             << '(' << interval->GetDefinedBy()->GetId() << ')'
@@ -393,13 +402,8 @@ void RegisterAllocationResolver::ConnectSiblings(LiveInterval* interval) {
     current = next_sibling;
   } while (current != nullptr);
 
-  if (kIsDebugBuild) {
-    // Following uses can only be synthesized uses.
-    while (use != nullptr) {
-      DCHECK(use->IsSynthesized());
-      use = use->GetNext();
-    }
-  }
+  // Following uses can only be synthesized uses.
+  DCHECK(std::all_of(use_it, use_end, [](const UsePosition& pos) { return pos.IsSynthesized(); }));
 }
 
 static bool IsMaterializableEntryBlockInstructionOfGraphWithIrreducibleLoop(
@@ -460,9 +464,12 @@ void RegisterAllocationResolver::ConnectSplitSiblings(LiveInterval* interval,
       location_source = defined_by->GetLocations()->Out();
     } else {
       DCHECK(defined_by->IsCurrentMethod());
-      location_source = parent->NeedsTwoSpillSlots()
-          ? Location::DoubleStackSlot(parent->GetSpillSlot())
-          : Location::StackSlot(parent->GetSpillSlot());
+      switch (parent->NumberOfSpillSlotsNeeded()) {
+        case 1: location_source = Location::StackSlot(parent->GetSpillSlot()); break;
+        case 2: location_source = Location::DoubleStackSlot(parent->GetSpillSlot()); break;
+        case 4: location_source = Location::SIMDStackSlot(parent->GetSpillSlot()); break;
+        default: LOG(FATAL) << "Unexpected number of spill slots"; UNREACHABLE();
+      }
     }
   } else {
     DCHECK(source != nullptr);
@@ -493,20 +500,21 @@ static bool IsValidDestination(Location destination) {
       || destination.IsFpuRegister()
       || destination.IsFpuRegisterPair()
       || destination.IsStackSlot()
-      || destination.IsDoubleStackSlot();
+      || destination.IsDoubleStackSlot()
+      || destination.IsSIMDStackSlot();
 }
 
 void RegisterAllocationResolver::AddMove(HParallelMove* move,
                                          Location source,
                                          Location destination,
                                          HInstruction* instruction,
-                                         Primitive::Type type) const {
-  if (type == Primitive::kPrimLong
+                                         DataType::Type type) const {
+  if (type == DataType::Type::kInt64
       && codegen_->ShouldSplitLongMoves()
       // The parallel move resolver knows how to deal with long constants.
       && !source.IsConstant()) {
-    move->AddMove(source.ToLow(), destination.ToLow(), Primitive::kPrimInt, instruction);
-    move->AddMove(source.ToHigh(), destination.ToHigh(), Primitive::kPrimInt, nullptr);
+    move->AddMove(source.ToLow(), destination.ToLow(), DataType::Type::kInt32, instruction);
+    move->AddMove(source.ToHigh(), destination.ToHigh(), DataType::Type::kInt32, nullptr);
   } else {
     move->AddMove(source, destination, type, instruction);
   }

@@ -20,14 +20,15 @@
 
 #include "base/stl_util.h"
 #include "card_table-inl.h"
-#include "heap_bitmap.h"
-#include "gc/collector/mark_sweep.h"
 #include "gc/collector/mark_sweep-inl.h"
+#include "gc/collector/mark_sweep.h"
 #include "gc/collector/semi_space.h"
 #include "gc/heap.h"
 #include "gc/space/space.h"
-#include "mirror/object-inl.h"
+#include "heap_bitmap.h"
 #include "mirror/class-inl.h"
+#include "mirror/object-inl.h"
+#include "mirror/object-refvisitor-inl.h"
 #include "mirror/object_array-inl.h"
 #include "space_bitmap-inl.h"
 #include "thread.h"
@@ -74,7 +75,7 @@ class RememberedSetReferenceVisitor {
     mirror::HeapReference<mirror::Object>* ref_ptr = obj->GetFieldObjectReferenceAddr(offset);
     if (target_space_->HasAddress(ref_ptr->AsMirrorPtr())) {
       *contains_reference_to_target_space_ = true;
-      collector_->MarkHeapReference(ref_ptr);
+      collector_->MarkHeapReference(ref_ptr, /*do_atomic_update*/ false);
       DCHECK(!target_space_->HasAddress(ref_ptr->AsMirrorPtr()));
     }
   }

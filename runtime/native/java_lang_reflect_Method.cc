@@ -16,15 +16,18 @@
 
 #include "java_lang_reflect_Method.h"
 
+#include "nativehelper/jni_macros.h"
+
 #include "art_method-inl.h"
 #include "base/enums.h"
-#include "class_linker.h"
 #include "class_linker-inl.h"
+#include "class_linker.h"
 #include "dex_file_annotations.h"
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "native_util.h"
 #include "reflection.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "well_known_classes.h"
@@ -55,7 +58,8 @@ static jobjectArray Method_getExceptionTypes(JNIEnv* env, jobject javaMethod) {
       ++i;
     }
     CHECK_NE(throws_index, -1);
-    mirror::ObjectArray<mirror::Class>* declared_exceptions = klass->GetThrows()->Get(throws_index);
+    mirror::ObjectArray<mirror::Class>* declared_exceptions =
+        klass->GetProxyThrows()->Get(throws_index);
     return soa.AddLocalReference<jobjectArray>(declared_exceptions->Clone(soa.Self()));
   } else {
     mirror::ObjectArray<mirror::Class>* result_array =
@@ -84,9 +88,9 @@ static jobject Method_invoke(JNIEnv* env, jobject javaMethod, jobject javaReceiv
 }
 
 static JNINativeMethod gMethods[] = {
-  NATIVE_METHOD(Method, getDefaultValue, "!()Ljava/lang/Object;"),
-  NATIVE_METHOD(Method, getExceptionTypes, "!()[Ljava/lang/Class;"),
-  NATIVE_METHOD(Method, invoke, "!(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Method, getDefaultValue, "()Ljava/lang/Object;"),
+  FAST_NATIVE_METHOD(Method, getExceptionTypes, "()[Ljava/lang/Class;"),
+  FAST_NATIVE_METHOD(Method, invoke, "(Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;"),
 };
 
 void register_java_lang_reflect_Method(JNIEnv* env) {

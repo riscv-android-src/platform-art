@@ -18,12 +18,13 @@
 #define ART_RUNTIME_INTERPRETER_INTERPRETER_COMMON_H_
 
 #include "interpreter.h"
+#include "interpreter_intrinsics.h"
 
 #include <math.h>
 
+#include <atomic>
 #include <iostream>
 #include <sstream>
-#include <atomic>
 
 #include "android-base/stringprintf.h"
 
@@ -40,9 +41,11 @@
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "handle_scope-inl.h"
 #include "jit/jit.h"
+#include "mirror/call_site.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache.h"
 #include "mirror/method.h"
+#include "mirror/method_handles_lookup.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
@@ -62,9 +65,16 @@ template <bool kMonitorCounting>
 static inline void DoMonitorEnter(Thread* self, ShadowFrame* frame, ObjPtr<mirror::Object> ref)
     NO_THREAD_SAFETY_ANALYSIS
     REQUIRES(!Roles::uninterruptible_) {
+  DCHECK(!ref.IsNull());
   StackHandleScope<1> hs(self);
   Handle<mirror::Object> h_ref(hs.NewHandle(ref));
   h_ref->MonitorEnter(self);
+  DCHECK(self->HoldsLock(h_ref.Get()));
+  if (UNLIKELY(self->IsExceptionPending())) {
+    bool unlocked = h_ref->MonitorExit(self);
+    DCHECK(unlocked);
+    return;
+  }
   if (kMonitorCounting && frame->GetMethod()->MustCountLocks()) {
     frame->GetLockCountData().AddMonitor(self, h_ref.Get());
   }
@@ -102,12 +112,54 @@ void AbortTransactionV(Thread* self, const char* fmt, va_list args)
 void RecordArrayElementsInTransaction(ObjPtr<mirror::Array> array, int32_t count)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
-// Invokes the given method. This is part of the invocation support and is used by DoInvoke and
-// DoInvokeVirtualQuick functions.
+// Invokes the given method. This is part of the invocation support and is used by DoInvoke,
+// DoFastInvoke and DoInvokeVirtualQuick functions.
 // Returns true on success, otherwise throws an exception and returns false.
 template<bool is_range, bool do_assignability_check>
 bool DoCall(ArtMethod* called_method, Thread* self, ShadowFrame& shadow_frame,
             const Instruction* inst, uint16_t inst_data, JValue* result);
+
+// Handles streamlined non-range invoke static, direct and virtual instructions originating in
+// mterp. Access checks and instrumentation other than jit profiling are not supported, but does
+// support interpreter intrinsics if applicable.
+// Returns true on success, otherwise throws an exception and returns false.
+template<InvokeType type>
+static inline bool DoFastInvoke(Thread* self,
+                                ShadowFrame& shadow_frame,
+                                const Instruction* inst,
+                                uint16_t inst_data,
+                                JValue* result) {
+  const uint32_t method_idx = inst->VRegB_35c();
+  const uint32_t vregC = inst->VRegC_35c();
+  ObjPtr<mirror::Object> receiver = (type == kStatic)
+      ? nullptr
+      : shadow_frame.GetVRegReference(vregC);
+  ArtMethod* sf_method = shadow_frame.GetMethod();
+  ArtMethod* const called_method = FindMethodFromCode<type, false>(
+      method_idx, &receiver, sf_method, self);
+  // The shadow frame should already be pushed, so we don't need to update it.
+  if (UNLIKELY(called_method == nullptr)) {
+    CHECK(self->IsExceptionPending());
+    result->SetJ(0);
+    return false;
+  } else if (UNLIKELY(!called_method->IsInvokable())) {
+    called_method->ThrowInvocationTimeError();
+    result->SetJ(0);
+    return false;
+  } else {
+    jit::Jit* jit = Runtime::Current()->GetJit();
+    if (jit != nullptr && type == kVirtual) {
+      jit->InvokeVirtualOrInterface(receiver, sf_method, shadow_frame.GetDexPC(), called_method);
+    }
+    if (called_method->IsIntrinsic()) {
+      if (MterpHandleIntrinsic(&shadow_frame, called_method, inst, inst_data,
+                               shadow_frame.GetResultRegister())) {
+        return !self->IsExceptionPending();
+      }
+    }
+    return DoCall<false, false>(called_method, self, shadow_frame, inst, inst_data, result);
+  }
+}
 
 // Handles all invoke-XXX/range instructions except for invoke-polymorphic[/range].
 // Returns true on success, otherwise throws an exception and returns false.
@@ -117,6 +169,10 @@ static inline bool DoInvoke(Thread* self,
                             const Instruction* inst,
                             uint16_t inst_data,
                             JValue* result) {
+  // Make sure to check for async exceptions before anything else.
+  if (UNLIKELY(self->ObserveAsyncException())) {
+    return false;
+  }
   const uint32_t method_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
   const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
   ObjPtr<mirror::Object> receiver = (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
@@ -134,11 +190,8 @@ static inline bool DoInvoke(Thread* self,
     return false;
   } else {
     jit::Jit* jit = Runtime::Current()->GetJit();
-    if (jit != nullptr) {
-      if (type == kVirtual || type == kInterface) {
-        jit->InvokeVirtualOrInterface(receiver, sf_method, shadow_frame.GetDexPC(), called_method);
-      }
-      jit->AddSamples(self, sf_method, 1, /*with_backedges*/false);
+    if (jit != nullptr && (type == kVirtual || type == kInterface)) {
+      jit->InvokeVirtualOrInterface(receiver, sf_method, shadow_frame.GetDexPC(), called_method);
     }
     // TODO: Remove the InvokeVirtualOrInterface instrumentation, as it was only used by the JIT.
     if (type == kVirtual || type == kInterface) {
@@ -153,13 +206,48 @@ static inline bool DoInvoke(Thread* self,
   }
 }
 
-// Performs a signature polymorphic invoke (invoke-polymorphic/invoke-polymorphic-range).
-template<bool is_range, bool do_access_check>
+static inline mirror::MethodHandle* ResolveMethodHandle(Thread* self,
+                                                        uint32_t method_handle_index,
+                                                        ArtMethod* referrer)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  return class_linker->ResolveMethodHandle(self, method_handle_index, referrer);
+}
+
+static inline mirror::MethodType* ResolveMethodType(Thread* self,
+                                                    uint32_t method_type_index,
+                                                    ArtMethod* referrer)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  return class_linker->ResolveMethodType(self, method_type_index, referrer);
+}
+
+#define DECLARE_SIGNATURE_POLYMORPHIC_HANDLER(Name, ...)              \
+bool Do ## Name(Thread* self,                                         \
+                ShadowFrame& shadow_frame,                            \
+                const Instruction* inst,                              \
+                uint16_t inst_data,                                   \
+                JValue* result) REQUIRES_SHARED(Locks::mutator_lock_);
+#include "intrinsics_list.h"
+INTRINSICS_LIST(DECLARE_SIGNATURE_POLYMORPHIC_HANDLER)
+#undef INTRINSICS_LIST
+#undef DECLARE_SIGNATURE_POLYMORPHIC_HANDLER
+
+// Performs a invoke-polymorphic or invoke-polymorphic-range.
+template<bool is_range>
 bool DoInvokePolymorphic(Thread* self,
                          ShadowFrame& shadow_frame,
                          const Instruction* inst,
                          uint16_t inst_data,
                          JValue* result);
+
+// Performs a custom invoke (invoke-custom/invoke-custom-range).
+template<bool is_range>
+bool DoInvokeCustom(Thread* self,
+                    ShadowFrame& shadow_frame,
+                    const Instruction* inst,
+                    uint16_t inst_data,
+                    JValue* result);
 
 // Handles invoke-virtual-quick and invoke-virtual-quick-range instructions.
 // Returns true on success, otherwise throws an exception and returns false.
@@ -185,7 +273,7 @@ static inline bool DoInvokeVirtualQuick(Thread* self, ShadowFrame& shadow_frame,
   }
   CHECK(receiver->GetClass()->ShouldHaveEmbeddedVTable());
   ArtMethod* const called_method = receiver->GetClass()->GetEmbeddedVTableEntry(
-      vtable_idx, kRuntimePointerSize);
+      vtable_idx, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
   if (UNLIKELY(called_method == nullptr)) {
     CHECK(self->IsExceptionPending());
     result->SetJ(0);
@@ -214,7 +302,8 @@ static inline bool DoInvokeVirtualQuick(Thread* self, ShadowFrame& shadow_frame,
 
 // Handles iget-XXX and sget-XXX instructions.
 // Returns true on success, otherwise throws an exception and returns false.
-template<FindFieldType find_type, Primitive::Type field_type, bool do_access_check>
+template<FindFieldType find_type, Primitive::Type field_type, bool do_access_check,
+         bool transaction_active = false>
 bool DoFieldGet(Thread* self, ShadowFrame& shadow_frame, const Instruction* inst,
                 uint16_t inst_data) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -255,17 +344,11 @@ static inline ObjPtr<mirror::String> ResolveString(Thread* self,
     }
   }
   ArtMethod* method = shadow_frame.GetMethod();
-  // MethodVerifier refuses methods with string_idx out of bounds.
-  DCHECK_LT(string_idx.index_ % mirror::DexCache::kDexCacheStringCacheSize,
-            method->GetDexFile()->NumStringIds());
-  ObjPtr<mirror::String> string_ptr =
-      mirror::StringDexCachePair::Lookup(method->GetDexCache()->GetStrings(),
-                                         string_idx.index_,
-                                         mirror::DexCache::kDexCacheStringCacheSize).Read();
+  ObjPtr<mirror::String> string_ptr = method->GetDexCache()->GetResolvedString(string_idx);
   if (UNLIKELY(string_ptr == nullptr)) {
     StackHandleScope<1> hs(self);
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
-    string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(*method->GetDexFile(),
+    string_ptr = Runtime::Current()->GetClassLinker()->ResolveString(*dex_cache->GetDexFile(),
                                                                      string_idx,
                                                                      dex_cache);
   }
@@ -417,9 +500,17 @@ static inline int32_t DoSparseSwitch(const Instruction* inst, const ShadowFrame&
   return 3;
 }
 
-uint32_t FindNextInstructionFollowingException(Thread* self, ShadowFrame& shadow_frame,
-    uint32_t dex_pc, const instrumentation::Instrumentation* instrumentation)
-        REQUIRES_SHARED(Locks::mutator_lock_);
+// We execute any instrumentation events triggered by throwing and/or handing the pending exception
+// and change the shadow_frames dex_pc to the appropriate exception handler if the current method
+// has one. If the exception has been handled and the shadow_frame is now pointing to a catch clause
+// we return true. If the current method is unable to handle the exception we return false.
+// This function accepts a null Instrumentation* as a way to cause instrumentation events not to be
+// reported.
+// TODO We might wish to reconsider how we cause some events to be ignored.
+bool MoveToExceptionHandler(Thread* self,
+                            ShadowFrame& shadow_frame,
+                            const instrumentation::Instrumentation* instrumentation)
+    REQUIRES_SHARED(Locks::mutator_lock_);
 
 NO_RETURN void UnexpectedOpcode(const Instruction* inst, const ShadowFrame& shadow_frame)
   __attribute__((cold))
@@ -477,11 +568,40 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
   }
 }
 
+// The arg_offset is the offset to the first input register in the frame.
 void ArtInterpreterToCompiledCodeBridge(Thread* self,
                                         ArtMethod* caller,
-                                        const DexFile::CodeItem* code_item,
                                         ShadowFrame* shadow_frame,
+                                        uint16_t arg_offset,
                                         JValue* result);
+
+static inline bool IsStringInit(const DexFile* dex_file, uint32_t method_idx)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  const DexFile::MethodId& method_id = dex_file->GetMethodId(method_idx);
+  const char* class_name = dex_file->StringByTypeIdx(method_id.class_idx_);
+  const char* method_name = dex_file->GetMethodName(method_id);
+  // Instead of calling ResolveMethod() which has suspend point and can trigger
+  // GC, look up the method symbolically.
+  // Compare method's class name and method name against string init.
+  // It's ok since it's not allowed to create your own java/lang/String.
+  // TODO: verify that assumption.
+  if ((strcmp(class_name, "Ljava/lang/String;") == 0) &&
+      (strcmp(method_name, "<init>") == 0)) {
+    return true;
+  }
+  return false;
+}
+
+static inline bool IsStringInit(const Instruction* instr, ArtMethod* caller)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (instr->Opcode() == Instruction::INVOKE_DIRECT ||
+      instr->Opcode() == Instruction::INVOKE_DIRECT_RANGE) {
+    uint16_t callee_method_idx = (instr->Opcode() == Instruction::INVOKE_DIRECT_RANGE) ?
+        instr->VRegB_3rc() : instr->VRegB_35c();
+    return IsStringInit(caller->GetDexFile(), callee_method_idx);
+  }
+  return false;
+}
 
 // Set string value created from StringFactory.newStringFromXXX() into all aliases of
 // StringFactory.newEmptyString().
@@ -491,8 +611,9 @@ void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,
 
 // Explicitly instantiate all DoInvoke functions.
 #define EXPLICIT_DO_INVOKE_TEMPLATE_DECL(_type, _is_range, _do_check)                      \
-  template REQUIRES_SHARED(Locks::mutator_lock_)                                     \
-  bool DoInvoke<_type, _is_range, _do_check>(Thread* self, ShadowFrame& shadow_frame,      \
+  template REQUIRES_SHARED(Locks::mutator_lock_)                                           \
+  bool DoInvoke<_type, _is_range, _do_check>(Thread* self,                                 \
+                                             ShadowFrame& shadow_frame,                    \
                                              const Instruction* inst, uint16_t inst_data,  \
                                              JValue* result)
 
@@ -509,6 +630,19 @@ EXPLICIT_DO_INVOKE_ALL_TEMPLATE_DECL(kSuper)       // invoke-super/range.
 EXPLICIT_DO_INVOKE_ALL_TEMPLATE_DECL(kInterface)   // invoke-interface/range.
 #undef EXPLICIT_DO_INVOKE_ALL_TEMPLATE_DECL
 #undef EXPLICIT_DO_INVOKE_TEMPLATE_DECL
+
+// Explicitly instantiate all DoFastInvoke functions.
+#define EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL(_type)                     \
+  template REQUIRES_SHARED(Locks::mutator_lock_)                         \
+  bool DoFastInvoke<_type>(Thread* self,                                 \
+                           ShadowFrame& shadow_frame,                    \
+                           const Instruction* inst, uint16_t inst_data,  \
+                           JValue* result)
+
+EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL(kStatic);     // invoke-static
+EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL(kDirect);     // invoke-direct
+EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL(kVirtual);    // invoke-virtual
+#undef EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL
 
 // Explicitly instantiate all DoInvokeVirtualQuick functions.
 #define EXPLICIT_DO_INVOKE_VIRTUAL_QUICK_TEMPLATE_DECL(_is_range)                    \

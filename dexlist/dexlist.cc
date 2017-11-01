@@ -23,10 +23,11 @@
  * List all methods in all concrete classes in one or more DEX files.
  */
 
-#include <stdlib.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 #include "dex_file-inl.h"
+#include "dex_file_loader.h"
 #include "mem_map.h"
 #include "runtime.h"
 
@@ -149,9 +150,7 @@ void dumpClass(const DexFile* pDexFile, u4 idx) {
   const u1* pEncodedData = pDexFile->GetClassData(pClassDef);
   if (pEncodedData != nullptr) {
     ClassDataItemIterator pClassData(*pDexFile, pEncodedData);
-    // Skip the fields.
-    for (; pClassData.HasNextStaticField(); pClassData.Next()) {}
-    for (; pClassData.HasNextInstanceField(); pClassData.Next()) {}
+    pClassData.SkipAllFields();
     // Direct methods.
     for (; pClassData.HasNextDirectMethod(); pClassData.Next()) {
       dumpMethod(pDexFile, fileName,
@@ -180,7 +179,8 @@ static int processFile(const char* fileName) {
   static constexpr bool kVerifyChecksum = true;
   std::string error_msg;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  if (!DexFile::Open(fileName, fileName, kVerifyChecksum, &error_msg, &dex_files)) {
+  if (!DexFileLoader::Open(
+        fileName, fileName, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files)) {
     fputs(error_msg.c_str(), stderr);
     fputc('\n', stderr);
     return -1;
@@ -213,7 +213,7 @@ static void usage(void) {
  */
 int dexlistDriver(int argc, char** argv) {
   // Art specific set up.
-  InitLogging(argv, Runtime::Aborter);
+  InitLogging(argv, Runtime::Abort);
   MemMap::Init();
 
   // Reset options.

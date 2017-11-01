@@ -17,28 +17,10 @@
 # make us exit on a failure
 set -e
 
-# We will be making more files than the ulimit is set to allow. Remove it temporarily.
-OLD_ULIMIT=`ulimit -S`
-ulimit -S unlimited
-
-restore_ulimit() {
-  ulimit -S "$OLD_ULIMIT"
-}
-trap 'restore_ulimit' ERR
-
-if [[ $@ != *"--jvm"* ]]; then
-  # Don't do anything with jvm
-  # Hard-wired use of experimental jack.
-  # TODO: fix this temporary work-around for default-methods, see b/19467889
-  export USE_JACK=true
-fi
-
 mkdir -p ./src
 
 # Generate the smali files and expected.txt or fail
 ./util-src/generate_java.py ./src ./expected.txt
 
-./default-build "$@" --experimental default-methods
-
-# Reset the ulimit back to its initial value
-restore_ulimit
+# dx runs out of memory with just 256m, so increase it.
+./default-build "$@" --experimental default-methods --dx-vm-option -JXmx1024M

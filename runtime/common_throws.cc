@@ -19,7 +19,6 @@
 #include <sstream>
 
 #include "android-base/stringprintf.h"
-#include "ScopedLocalRef.h"
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -32,9 +31,11 @@
 #include "mirror/method_type.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "obj_ptr-inl.h"
 #include "thread.h"
 #include "verifier/method_verifier.h"
+#include "well_known_classes.h"
 
 namespace art {
 
@@ -124,6 +125,22 @@ void ThrowArrayStoreException(ObjPtr<mirror::Class> element_class,
                  StringPrintf("%s cannot be stored in an array of type %s",
                               mirror::Class::PrettyDescriptor(element_class).c_str(),
                               mirror::Class::PrettyDescriptor(array_class).c_str()).c_str());
+}
+
+// BootstrapMethodError
+
+void ThrowBootstrapMethodError(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  ThrowException("Ljava/lang/BootstrapMethodError;", nullptr, fmt, &args);
+  va_end(args);
+}
+
+void ThrowWrappedBootstrapMethodError(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  ThrowWrappedException("Ljava/lang/BootstrapMethodError;", nullptr, fmt, &args);
+  va_end(args);
 }
 
 // ClassCastException
@@ -297,6 +314,14 @@ void ThrowIncompatibleClassChangeErrorForMethodConflict(ArtMethod* method) {
                               ArtMethod::PrettyMethod(method).c_str()).c_str());
 }
 
+// InternalError
+
+void ThrowInternalError(const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  ThrowException("Ljava/lang/InternalError;", nullptr, fmt, &args);
+  va_end(args);
+}
 
 // IOException
 
@@ -428,6 +453,8 @@ static bool IsValidImplicitCheck(uintptr_t addr, ArtMethod* method, const Instru
     case Instruction::INVOKE_VIRTUAL_RANGE:
     case Instruction::INVOKE_INTERFACE:
     case Instruction::INVOKE_INTERFACE_RANGE:
+    case Instruction::INVOKE_POLYMORPHIC:
+    case Instruction::INVOKE_POLYMORPHIC_RANGE:
     case Instruction::INVOKE_VIRTUAL_QUICK:
     case Instruction::INVOKE_VIRTUAL_RANGE_QUICK: {
       // Without inlining, we could just check that the offset is the class offset.
@@ -550,6 +577,12 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
       break;
     case Instruction::INVOKE_INTERFACE_RANGE:
       ThrowNullPointerExceptionForMethodAccess(instr->VRegB_3rc(), kInterface);
+      break;
+    case Instruction::INVOKE_POLYMORPHIC:
+      ThrowNullPointerExceptionForMethodAccess(instr->VRegB_45cc(), kVirtual);
+      break;
+    case Instruction::INVOKE_POLYMORPHIC_RANGE:
+      ThrowNullPointerExceptionForMethodAccess(instr->VRegB_4rcc(), kVirtual);
       break;
     case Instruction::INVOKE_VIRTUAL_QUICK:
     case Instruction::INVOKE_VIRTUAL_RANGE_QUICK: {

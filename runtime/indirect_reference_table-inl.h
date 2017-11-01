@@ -24,8 +24,7 @@
 #include "base/dumpable.h"
 #include "gc_root-inl.h"
 #include "obj_ptr-inl.h"
-#include "runtime-inl.h"
-#include "verify_object-inl.h"
+#include "verify_object.h"
 
 namespace art {
 namespace mirror {
@@ -112,12 +111,12 @@ inline void IrtEntry::Add(ObjPtr<mirror::Object> obj) {
   if (serial_ == kIRTPrevCount) {
     serial_ = 0;
   }
-  references_[serial_] = GcRoot<mirror::Object>(obj);
+  references_[serial_] = GcRoot<mirror::Object>(obj.Ptr());
 }
 
 inline void IrtEntry::SetReference(ObjPtr<mirror::Object> obj) {
   DCHECK_LT(serial_, kIRTPrevCount);
-  references_[serial_] = GcRoot<mirror::Object>(obj);
+  references_[serial_] = GcRoot<mirror::Object>(obj.Ptr());
 }
 
 }  // namespace art

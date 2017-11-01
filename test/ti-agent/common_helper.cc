@@ -14,118 +14,104 @@
  * limitations under the License.
  */
 
-#include "ti-agent/common_helper.h"
+#include "common_helper.h"
 
-#include <stdio.h>
 #include <sstream>
+#include <string>
 
-#include "art_method.h"
+#include "android-base/stringprintf.h"
 #include "jni.h"
-#include "openjdkjvmti/jvmti.h"
-#include "scoped_thread_state_change-inl.h"
-#include "stack.h"
-#include "ti-agent/common_load.h"
-#include "utils.h"
+#include "jvmti.h"
+
+#include "jvmti_helper.h"
 
 namespace art {
-bool RuntimeIsJVM;
 
-bool IsJVM() {
-  return RuntimeIsJVM;
-}
-
-void SetAllCapabilities(jvmtiEnv* env) {
-  jvmtiCapabilities caps;
-  env->GetPotentialCapabilities(&caps);
-  env->AddCapabilities(&caps);
-}
-
-bool JvmtiErrorToException(JNIEnv* env, jvmtiError error) {
-  if (error == JVMTI_ERROR_NONE) {
-    return false;
+jobject GetJavaField(jvmtiEnv* jvmti, JNIEnv* env, jclass field_klass, jfieldID f) {
+  jint mods = 0;
+  if (JvmtiErrorToException(env, jvmti, jvmti->GetFieldModifiers(field_klass, f, &mods))) {
+    return nullptr;
   }
 
-  ScopedLocalRef<jclass> rt_exception(env, env->FindClass("java/lang/RuntimeException"));
-  if (rt_exception.get() == nullptr) {
-    // CNFE should be pending.
-    return true;
+  bool is_static = (mods & kAccStatic) != 0;
+  return env->ToReflectedField(field_klass, f, is_static);
+}
+
+jobject GetJavaMethod(jvmtiEnv* jvmti, JNIEnv* env, jmethodID m) {
+  jint mods = 0;
+  if (JvmtiErrorToException(env, jvmti, jvmti->GetMethodModifiers(m, &mods))) {
+    return nullptr;
   }
 
-  char* err;
-  jvmti_env->GetErrorName(error, &err);
-
-  env->ThrowNew(rt_exception.get(), err);
-
-  jvmti_env->Deallocate(reinterpret_cast<unsigned char*>(err));
-  return true;
-}
-
-namespace common_redefine {
-
-static void throwRedefinitionError(jvmtiEnv* jvmti, JNIEnv* env, jclass target, jvmtiError res) {
-  std::stringstream err;
-  char* signature = nullptr;
-  char* generic = nullptr;
-  jvmti->GetClassSignature(target, &signature, &generic);
-  char* error = nullptr;
-  jvmti->GetErrorName(res, &error);
-  err << "Failed to redefine class <" << signature << "> due to " << error;
-  std::string message = err.str();
-  jvmti->Deallocate(reinterpret_cast<unsigned char*>(signature));
-  jvmti->Deallocate(reinterpret_cast<unsigned char*>(generic));
-  jvmti->Deallocate(reinterpret_cast<unsigned char*>(error));
-  env->ThrowNew(env->FindClass("java/lang/Exception"), message.c_str());
-}
-
-using RedefineDirectFunction = jvmtiError (*)(jvmtiEnv*, jclass, jint, const unsigned char*);
-static void DoClassTransformation(jvmtiEnv* jvmti_env,
-                                  JNIEnv* env,
-                                  jclass target,
-                                  jbyteArray class_file_bytes,
-                                  jbyteArray dex_file_bytes) {
-  jbyteArray desired_array = IsJVM() ? class_file_bytes : dex_file_bytes;
-  jint len = static_cast<jint>(env->GetArrayLength(desired_array));
-  const unsigned char* redef_bytes = reinterpret_cast<const unsigned char*>(
-      env->GetByteArrayElements(desired_array, nullptr));
-  jvmtiError res;
-  if (IsJVM()) {
-    jvmtiClassDefinition def;
-    def.klass = target;
-    def.class_byte_count = static_cast<jint>(len);
-    def.class_bytes = redef_bytes;
-    res = jvmti_env->RedefineClasses(1, &def);
-  } else {
-    RedefineDirectFunction f =
-        reinterpret_cast<RedefineDirectFunction>(jvmti_env->functions->reserved3);
-    res = f(jvmti_env, target, len, redef_bytes);
+  bool is_static = (mods & kAccStatic) != 0;
+  jclass method_klass = nullptr;
+  if (JvmtiErrorToException(env, jvmti, jvmti->GetMethodDeclaringClass(m, &method_klass))) {
+    return nullptr;
   }
-  if (res != JVMTI_ERROR_NONE) {
-    throwRedefinitionError(jvmti_env, env, target, res);
+  jobject res = env->ToReflectedMethod(method_klass, m, is_static);
+  env->DeleteLocalRef(method_klass);
+  return res;
+}
+
+jobject GetJavaValueByType(JNIEnv* env, char type, jvalue value) {
+  std::string name;
+  switch (type) {
+    case 'V':
+      return nullptr;
+    case '[':
+    case 'L':
+      return value.l;
+    case 'Z':
+      name = "java/lang/Boolean";
+      break;
+    case 'B':
+      name = "java/lang/Byte";
+      break;
+    case 'C':
+      name = "java/lang/Character";
+      break;
+    case 'S':
+      name = "java/lang/Short";
+      break;
+    case 'I':
+      name = "java/lang/Integer";
+      break;
+    case 'J':
+      name = "java/lang/Long";
+      break;
+    case 'F':
+      name = "java/lang/Float";
+      break;
+    case 'D':
+      name = "java/lang/Double";
+      break;
+    default:
+      LOG(FATAL) << "Unable to figure out type!";
+      return nullptr;
   }
+  std::ostringstream oss;
+  oss << "(" << type << ")L" << name << ";";
+  std::string args = oss.str();
+  jclass target = env->FindClass(name.c_str());
+  jmethodID valueOfMethod = env->GetStaticMethodID(target, "valueOf", args.c_str());
+
+  CHECK(valueOfMethod != nullptr) << args;
+  jobject res = env->CallStaticObjectMethodA(target, valueOfMethod, &value);
+  env->DeleteLocalRef(target);
+  return res;
 }
 
-// Magic JNI export that classes can use for redefining classes.
-// To use classes should declare this as a native function with signature (Ljava/lang/Class;[B[B)V
-extern "C" JNIEXPORT void JNICALL Java_Main_doCommonClassRedefinition(JNIEnv* env,
-                                                                      jclass,
-                                                                      jclass target,
-                                                                      jbyteArray class_file_bytes,
-                                                                      jbyteArray dex_file_bytes) {
-  DoClassTransformation(jvmti_env, env, target, class_file_bytes, dex_file_bytes);
-}
-
-// Don't do anything
-jint OnLoad(JavaVM* vm,
-            char* options ATTRIBUTE_UNUSED,
-            void* reserved ATTRIBUTE_UNUSED) {
-  if (vm->GetEnv(reinterpret_cast<void**>(&jvmti_env), JVMTI_VERSION_1_0)) {
-    printf("Unable to get jvmti env!\n");
-    return 1;
+jobject GetJavaValue(jvmtiEnv* jvmtienv, JNIEnv* env, jmethodID m, jvalue value) {
+  char *fname, *fsig, *fgen;
+  if (JvmtiErrorToException(env, jvmtienv, jvmtienv->GetMethodName(m, &fname, &fsig, &fgen))) {
+    return nullptr;
   }
-  SetAllCapabilities(jvmti_env);
-  return 0;
+  std::string type(fsig);
+  type = type.substr(type.find(')') + 1);
+  jvmtienv->Deallocate(reinterpret_cast<unsigned char*>(fsig));
+  jvmtienv->Deallocate(reinterpret_cast<unsigned char*>(fname));
+  jvmtienv->Deallocate(reinterpret_cast<unsigned char*>(fgen));
+  return GetJavaValueByType(env, type[0], value);
 }
-
-}  // namespace common_redefine
 
 }  // namespace art

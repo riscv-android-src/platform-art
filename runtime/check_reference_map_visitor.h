@@ -18,8 +18,10 @@
 #define ART_RUNTIME_CHECK_REFERENCE_MAP_VISITOR_H_
 
 #include "art_method-inl.h"
+#include "dex_file_types.h"
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stack.h"
 #include "stack_map.h"
 
 namespace art {
@@ -34,7 +36,7 @@ class CheckReferenceMapVisitor : public StackVisitor {
   bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* m = GetMethod();
     if (m->IsCalleeSaveMethod() || m->IsNative()) {
-      CHECK_EQ(GetDexPc(), DexFile::kDexNoIndex);
+      CHECK_EQ(GetDexPc(), dex::kDexNoIndex);
     }
 
     if (m == nullptr || m->IsNative() || m->IsRuntimeMethod() || IsShadowFrame()) {
@@ -67,7 +69,8 @@ class CheckReferenceMapVisitor : public StackVisitor {
     uint16_t number_of_dex_registers = m->GetCodeItem()->registers_size_;
     DexRegisterMap dex_register_map =
         code_info.GetDexRegisterMapOf(stack_map, encoding, number_of_dex_registers);
-    uint32_t register_mask = stack_map.GetRegisterMask(encoding.stack_map_encoding);
+    uint32_t register_mask = code_info.GetRegisterMaskOf(encoding, stack_map);
+    BitMemoryRegion stack_mask = code_info.GetStackMaskOf(encoding, stack_map);
     for (int i = 0; i < number_of_references; ++i) {
       int reg = registers[i];
       CHECK(reg < m->GetCodeItem()->registers_size_);
@@ -80,8 +83,7 @@ class CheckReferenceMapVisitor : public StackVisitor {
           break;
         case DexRegisterLocation::Kind::kInStack:
           DCHECK_EQ(location.GetValue() % kFrameSlotSize, 0);
-          CHECK(stack_map.GetStackMaskBit(encoding.stack_map_encoding,
-                                          location.GetValue() / kFrameSlotSize));
+          CHECK(stack_mask.LoadBit(location.GetValue() / kFrameSlotSize));
           break;
         case DexRegisterLocation::Kind::kInRegister:
         case DexRegisterLocation::Kind::kInRegisterHigh:

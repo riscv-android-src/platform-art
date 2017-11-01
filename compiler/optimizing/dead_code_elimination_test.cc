@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
+#include "dead_code_elimination.h"
+
 #include "arch/x86/instruction_set_features_x86.h"
 #include "code_generator_x86.h"
-#include "dead_code_elimination.h"
 #include "driver/compiler_options.h"
 #include "graph_checker.h"
 #include "optimizing_unit_test.h"
@@ -26,14 +27,17 @@
 
 namespace art {
 
-class DeadCodeEliminationTest : public CommonCompilerTest {};
+class DeadCodeEliminationTest : public OptimizingUnitTest {
+ protected:
+  void TestCode(const uint16_t* data,
+                const std::string& expected_before,
+                const std::string& expected_after);
+};
 
-static void TestCode(const uint16_t* data,
-                     const std::string& expected_before,
-                     const std::string& expected_after) {
-  ArenaPool pool;
-  ArenaAllocator allocator(&pool);
-  HGraph* graph = CreateCFG(&allocator, data);
+void DeadCodeEliminationTest::TestCode(const uint16_t* data,
+                                       const std::string& expected_before,
+                                       const std::string& expected_after) {
+  HGraph* graph = CreateCFG(data);
   ASSERT_NE(graph, nullptr);
 
   StringPrettyPrinter printer_before(graph);

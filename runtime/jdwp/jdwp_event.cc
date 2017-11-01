@@ -164,7 +164,7 @@ static uint32_t GetInstrumentationEventFor(JdwpEventKind eventKind) {
       return instrumentation::Instrumentation::kDexPcMoved;
     case EK_EXCEPTION:
     case EK_EXCEPTION_CATCH:
-      return instrumentation::Instrumentation::kExceptionCaught;
+      return instrumentation::Instrumentation::kExceptionThrown;
     case EK_METHOD_ENTRY:
       return instrumentation::Instrumentation::kMethodEntered;
     case EK_METHOD_EXIT:
@@ -249,6 +249,43 @@ JdwpError JdwpState::RegisterEvent(JdwpEvent* pEvent) {
   Dbg::ManageDeoptimization();
 
   return ERR_NONE;
+}
+
+void JdwpState::UnregisterLocationEventsOnClass(ObjPtr<mirror::Class> klass) {
+  VLOG(jdwp) << "Removing events within " << klass->PrettyClass();
+  StackHandleScope<1> hs(Thread::Current());
+  Handle<mirror::Class> h_klass(hs.NewHandle(klass));
+  std::vector<JdwpEvent*> to_remove;
+  MutexLock mu(Thread::Current(), event_list_lock_);
+  for (JdwpEvent* cur_event = event_list_; cur_event != nullptr; cur_event = cur_event->next) {
+    // Fill in the to_remove list
+    bool found_event = false;
+    for (int i = 0; i < cur_event->modCount && !found_event; i++) {
+      JdwpEventMod& mod = cur_event->mods[i];
+      switch (mod.modKind) {
+        case MK_LOCATION_ONLY: {
+          JdwpLocation& loc = mod.locationOnly.loc;
+          JdwpError error;
+          ObjPtr<mirror::Class> breakpoint_class(
+              Dbg::GetObjectRegistry()->Get<art::mirror::Class*>(loc.class_id, &error));
+          DCHECK_EQ(error, ERR_NONE);
+          if (breakpoint_class == h_klass.Get()) {
+            to_remove.push_back(cur_event);
+            found_event = true;
+          }
+          break;
+        }
+        default:
+          // TODO Investigate how we should handle non-locationOnly events.
+          break;
+      }
+    }
+  }
+
+  for (JdwpEvent* event : to_remove) {
+    UnregisterEvent(event);
+    EventFree(event);
+  }
 }
 
 /*
@@ -463,8 +500,8 @@ static bool ModsMatch(JdwpEvent* pEvent, const ModBasket& basket)
       }
       break;
     case MK_CONDITIONAL:
-      CHECK(false);  // should not be getting these
-      break;
+      LOG(FATAL) << "Unexpected MK_CONDITIONAL";  // should not be getting these
+      UNREACHABLE();
     case MK_THREAD_ONLY:
       if (!Dbg::MatchThread(pMod->threadOnly.threadId, basket.thread)) {
         return false;

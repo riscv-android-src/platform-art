@@ -1,6 +1,6 @@
 /*
  * This file contains expectations for ART's buildbot. The purpose of this file is
- * to temporary and quickly list failing tests and not break the bots, until the
+ * to temporarily list failing tests and not break the bots, until the
  * libcore expectation files get properly updated. The script that uses this file
  * is art/tools/run-libcore-tests.sh.
  *
@@ -105,18 +105,6 @@
   names: ["org.apache.harmony.tests.java.lang.ProcessTest#test_getErrorStream"]
 },
 {
-  description: "Short date format flag ignored for es_US locale.",
-  result: EXEC_FAILED,
-  name: "libcore.icu.DateIntervalFormatTest#test_formatDateInterval",
-  bug: 18619426
-},
-{
-  description: "Error decoding digital signature bytes.",
-  result: EXEC_FAILED,
-  name: "org.apache.harmony.security.tests.java.security.Signature2Test#test_verify$BII",
-  bug: 18869265
-},
-{
   description: "Test sometimes timeouts on volantis, and on most modes in debug mode",
   result: EXEC_TIMEOUT,
   names: ["libcore.java.lang.SystemTest#testArrayCopyConcurrentModification"],
@@ -132,12 +120,6 @@
   modes: [device],
   result: EXEC_FAILED,
   names: ["org.apache.harmony.tests.java.lang.ProcessManagerTest#testEnvironment"]
-},
-{
-  description: "Crypto failures",
-  result: EXEC_FAILED,
-  names: ["libcore.javax.crypto.CipherTest#testCipher_ShortBlock_Failure",
-          "libcore.javax.crypto.CipherTest#testCipher_Success"]
 },
 {
   description: "Flake when running with libartd.so or interpreter",
@@ -157,13 +139,6 @@
   result: EXEC_FAILED,
   modes: [device],
   names: ["org.apache.harmony.tests.java.lang.ClassTest#test_forNameLjava_lang_String"]
-},
-{
-  description: "TimeZoneTest.testAllDisplayNames times out, needs investigation",
-  result: EXEC_TIMEOUT,
-  modes: [device],
-  names: ["libcore.java.util.TimeZoneTest#testAllDisplayNames"],
-  bug: 22786792
 },
 {
   description: "Lack of IPv6 on some buildbot slaves",
@@ -234,5 +209,17 @@
   modes: [device],
   names: ["libcore.java.lang.ProcessBuilderTest#testRedirectInherit",
           "libcore.java.lang.ProcessBuilderTest#testRedirect_nullStreams"]
+},
+{
+  description: "Repeated annotations do not work in javac (OpenJDK8), fixed in OpenJDK9.
+                Blacklisted to support javac/dx build (b/36902714)",
+  result: EXEC_FAILED,
+  bug: 62408076,
+  names: ["libcore.java.lang.reflect.annotations.AnnotatedElementParameterTest#testImplicitConstructorParameters_singleAnnotation"]
+},
+{
+  description: "java.io.IOException: Error writing ASN.1 encoding",
+  result: EXEC_FAILED,
+  names: ["libcore.javax.crypto.spec.AlgorithmParametersTestGCM#testEncoding"]
 }
 ]

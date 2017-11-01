@@ -22,41 +22,54 @@
 
 namespace art {
 
+class CompilerDriver;
 class VerificationResults;
 
 class QuickCompilerCallbacks FINAL : public CompilerCallbacks {
-  public:
-    QuickCompilerCallbacks(VerificationResults* verification_results,
-                           CompilerCallbacks::CallbackMode mode)
-        : CompilerCallbacks(mode),
-          verification_results_(verification_results),
-          verifier_deps_(nullptr) {
-      CHECK(verification_results != nullptr);
-    }
+ public:
+  explicit QuickCompilerCallbacks(CompilerCallbacks::CallbackMode mode)
+      : CompilerCallbacks(mode) {}
 
-    ~QuickCompilerCallbacks() { }
+  ~QuickCompilerCallbacks() { }
 
-    void MethodVerified(verifier::MethodVerifier* verifier)
-        REQUIRES_SHARED(Locks::mutator_lock_) OVERRIDE;
+  void MethodVerified(verifier::MethodVerifier* verifier)
+      REQUIRES_SHARED(Locks::mutator_lock_) OVERRIDE;
 
-    void ClassRejected(ClassReference ref) OVERRIDE;
+  void ClassRejected(ClassReference ref) OVERRIDE;
 
-    // We are running in an environment where we can call patchoat safely so we should.
-    bool IsRelocationPossible() OVERRIDE {
-      return true;
-    }
+  // We are running in an environment where we can call patchoat safely so we should.
+  bool IsRelocationPossible() OVERRIDE {
+    return true;
+  }
 
-    verifier::VerifierDeps* GetVerifierDeps() const OVERRIDE {
-      return verifier_deps_.get();
-    }
+  verifier::VerifierDeps* GetVerifierDeps() const OVERRIDE {
+    return verifier_deps_.get();
+  }
 
-    void SetVerifierDeps(verifier::VerifierDeps* deps) OVERRIDE {
-      verifier_deps_.reset(deps);
-    }
+  void SetVerifierDeps(verifier::VerifierDeps* deps) OVERRIDE {
+    verifier_deps_.reset(deps);
+  }
 
-  private:
-    VerificationResults* const verification_results_;
-    std::unique_ptr<verifier::VerifierDeps> verifier_deps_;
+  void SetVerificationResults(VerificationResults* verification_results) {
+    verification_results_ = verification_results;
+  }
+
+  ClassStatus GetPreviousClassState(ClassReference ref) OVERRIDE;
+
+  void SetDoesClassUnloading(bool does_class_unloading, CompilerDriver* compiler_driver)
+      OVERRIDE {
+    does_class_unloading_ = does_class_unloading;
+    compiler_driver_ = compiler_driver;
+    DCHECK(!does_class_unloading || compiler_driver_ != nullptr);
+  }
+
+  void UpdateClassState(ClassReference ref, ClassStatus state) OVERRIDE;
+
+ private:
+  VerificationResults* verification_results_ = nullptr;
+  bool does_class_unloading_ = false;
+  CompilerDriver* compiler_driver_ = nullptr;
+  std::unique_ptr<verifier::VerifierDeps> verifier_deps_;
 };
 
 }  // namespace art

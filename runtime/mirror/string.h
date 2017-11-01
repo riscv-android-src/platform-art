@@ -17,10 +17,9 @@
 #ifndef ART_RUNTIME_MIRROR_STRING_H_
 #define ART_RUNTIME_MIRROR_STRING_H_
 
-#include "gc_root.h"
 #include "gc/allocator_type.h"
+#include "gc_root.h"
 #include "object.h"
-#include "object_callbacks.h"
 
 namespace art {
 
@@ -32,7 +31,7 @@ class StubTest_ReadBarrierForRoot_Test;
 namespace mirror {
 
 // String Compression
-static constexpr bool kUseStringCompression = false;
+static constexpr bool kUseStringCompression = true;
 enum class StringCompressionFlag : uint32_t {
     kCompressed = 0u,
     kUncompressed = 1u
@@ -94,7 +93,10 @@ class MANAGED String FINAL : public Object {
 
   uint16_t CharAt(int32_t index) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetCharAt(int32_t index, uint16_t c) REQUIRES_SHARED(Locks::mutator_lock_);
+  // Create a new string where all occurences of `old_c` are replaced with `new_c`.
+  // String.doReplace(char, char) is called from String.replace(char, char) when there is a match.
+  static ObjPtr<String> DoReplace(Thread* self, Handle<String> src, uint16_t old_c, uint16_t new_c)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   ObjPtr<String> Intern() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -184,7 +186,9 @@ class MANAGED String FINAL : public Object {
   bool IsValueNull() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<typename MemoryType>
-  static bool AllASCII(const MemoryType* const chars, const int length);
+  static bool AllASCII(const MemoryType* chars, const int length);
+
+  static bool DexFileStringAllASCII(const char* chars, const int length);
 
   ALWAYS_INLINE static bool IsCompressed(int32_t count) {
     return GetCompressionFlagFromCount(count) == StringCompressionFlag::kCompressed;
@@ -227,6 +231,14 @@ class MANAGED String FINAL : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
+  static constexpr bool IsASCII(uint16_t c) {
+    // Valid ASCII characters are in range 1..0x7f. Zero is not considered ASCII
+    // because it would complicate the detection of ASCII strings in Modified-UTF8.
+    return (c - 1u) < 0x7fu;
+  }
+
+  static bool AllASCIIExcept(const uint16_t* chars, int32_t length, uint16_t non_ascii);
+
   void SetHashCode(int32_t new_hash_code) REQUIRES_SHARED(Locks::mutator_lock_) {
     // Hash code is invariant so use non-transactional mode. Also disable check as we may run inside
     // a transaction.
@@ -241,8 +253,9 @@ class MANAGED String FINAL : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
-  // First bit (uppermost/leftmost) is taken out for Compressed/Uncompressed flag
-  // [0] Uncompressed: string uses 16-bit memory | [1] Compressed: 8-bit memory
+
+  // If string compression is enabled, count_ holds the StringCompressionFlag in the
+  // least significant bit and the length in the remaining bits, length = count_ >> 1.
   int32_t count_;
 
   uint32_t hash_code_;

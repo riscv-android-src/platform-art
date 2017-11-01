@@ -21,6 +21,8 @@
 
 #include <sstream>
 
+#include "nativehelper/jni_macros.h"
+
 #include "base/histogram-inl.h"
 #include "base/time_utils.h"
 #include "class_linker.h"
@@ -31,11 +33,15 @@
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
 #include "gc/space/zygote_space.h"
+#include "handle_scope-inl.h"
 #include "hprof/hprof.h"
+#include "java_vm_ext.h"
 #include "jni_internal.h"
 #include "mirror/class.h"
-#include "ScopedLocalRef.h"
-#include "ScopedUtfChars.h"
+#include "mirror/object_array-inl.h"
+#include "native_util.h"
+#include "nativehelper/scoped_local_ref.h"
+#include "nativehelper/scoped_utf_chars.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "trace.h"
 #include "well_known_classes.h"
@@ -89,9 +95,10 @@ static void VMDebug_startMethodTracingDdmsImpl(JNIEnv*, jclass, jint bufferSize,
 }
 
 static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceFilename,
-                                         jobject javaFd, jint bufferSize, jint flags,
-                                         jboolean samplingEnabled, jint intervalUs) {
-  int originalFd = jniGetFDFromFileDescriptor(env, javaFd);
+                                         jint javaFd, jint bufferSize, jint flags,
+                                         jboolean samplingEnabled, jint intervalUs,
+                                         jboolean streamingOutput) {
+  int originalFd = javaFd;
   if (originalFd < 0) {
     return;
   }
@@ -108,7 +115,10 @@ static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceF
   if (traceFilename.c_str() == nullptr) {
     return;
   }
-  Trace::Start(traceFilename.c_str(), fd, bufferSize, flags, Trace::TraceOutputMode::kFile,
+  Trace::TraceOutputMode outputMode = streamingOutput
+                                          ? Trace::TraceOutputMode::kStreaming
+                                          : Trace::TraceOutputMode::kFile;
+  Trace::Start(traceFilename.c_str(), fd, bufferSize, flags, outputMode,
                samplingEnabled ? Trace::TraceMode::kSampling : Trace::TraceMode::kMethodTracing,
                intervalUs);
 }
@@ -214,9 +224,9 @@ static jlong VMDebug_threadCpuTimeNanos(JNIEnv*, jclass) {
  * Cause "hprof" data to be dumped.  We can throw an IOException if an
  * error occurs during file handling.
  */
-static void VMDebug_dumpHprofData(JNIEnv* env, jclass, jstring javaFilename, jobject javaFd) {
+static void VMDebug_dumpHprofData(JNIEnv* env, jclass, jstring javaFilename, jint javaFd) {
   // Only one of these may be null.
-  if (javaFilename == nullptr && javaFd == nullptr) {
+  if (javaFilename == nullptr && javaFd < 0) {
     ScopedObjectAccess soa(env);
     ThrowNullPointerException("fileName == null && fd == null");
     return;
@@ -233,15 +243,7 @@ static void VMDebug_dumpHprofData(JNIEnv* env, jclass, jstring javaFilename, job
     filename = "[fd]";
   }
 
-  int fd = -1;
-  if (javaFd != nullptr) {
-    fd = jniGetFDFromFileDescriptor(env, javaFd);
-    if (fd < 0) {
-      ScopedObjectAccess soa(env);
-      ThrowRuntimeException("Invalid file descriptor");
-      return;
-    }
-  }
+  int fd = javaFd;
 
   hprof::DumpHeap(filename.c_str(), fd, false);
 }
@@ -527,33 +529,33 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMDebug, countInstancesOfClass, "(Ljava/lang/Class;Z)J"),
   NATIVE_METHOD(VMDebug, countInstancesOfClasses, "([Ljava/lang/Class;Z)[J"),
   NATIVE_METHOD(VMDebug, crash, "()V"),
-  NATIVE_METHOD(VMDebug, dumpHprofData, "(Ljava/lang/String;Ljava/io/FileDescriptor;)V"),
+  NATIVE_METHOD(VMDebug, dumpHprofData, "(Ljava/lang/String;I)V"),
   NATIVE_METHOD(VMDebug, dumpHprofDataDdms, "()V"),
   NATIVE_METHOD(VMDebug, dumpReferenceTables, "()V"),
   NATIVE_METHOD(VMDebug, getAllocCount, "(I)I"),
   NATIVE_METHOD(VMDebug, getHeapSpaceStats, "([J)V"),
   NATIVE_METHOD(VMDebug, getInstructionCount, "([I)V"),
-  NATIVE_METHOD(VMDebug, getLoadedClassCount, "!()I"),
+  FAST_NATIVE_METHOD(VMDebug, getLoadedClassCount, "()I"),
   NATIVE_METHOD(VMDebug, getVmFeatureList, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMDebug, infopoint, "(I)V"),
-  NATIVE_METHOD(VMDebug, isDebuggerConnected, "!()Z"),
-  NATIVE_METHOD(VMDebug, isDebuggingEnabled, "!()Z"),
+  FAST_NATIVE_METHOD(VMDebug, isDebuggerConnected, "()Z"),
+  FAST_NATIVE_METHOD(VMDebug, isDebuggingEnabled, "()Z"),
   NATIVE_METHOD(VMDebug, getMethodTracingMode, "()I"),
-  NATIVE_METHOD(VMDebug, lastDebuggerActivity, "!()J"),
-  NATIVE_METHOD(VMDebug, printLoadedClasses, "!(I)V"),
+  FAST_NATIVE_METHOD(VMDebug, lastDebuggerActivity, "()J"),
+  FAST_NATIVE_METHOD(VMDebug, printLoadedClasses, "(I)V"),
   NATIVE_METHOD(VMDebug, resetAllocCount, "(I)V"),
   NATIVE_METHOD(VMDebug, resetInstructionCount, "()V"),
   NATIVE_METHOD(VMDebug, startAllocCounting, "()V"),
   NATIVE_METHOD(VMDebug, startEmulatorTracing, "()V"),
   NATIVE_METHOD(VMDebug, startInstructionCounting, "()V"),
   NATIVE_METHOD(VMDebug, startMethodTracingDdmsImpl, "(IIZI)V"),
-  NATIVE_METHOD(VMDebug, startMethodTracingFd, "(Ljava/lang/String;Ljava/io/FileDescriptor;IIZI)V"),
+  NATIVE_METHOD(VMDebug, startMethodTracingFd, "(Ljava/lang/String;IIIZIZ)V"),
   NATIVE_METHOD(VMDebug, startMethodTracingFilename, "(Ljava/lang/String;IIZI)V"),
   NATIVE_METHOD(VMDebug, stopAllocCounting, "()V"),
   NATIVE_METHOD(VMDebug, stopEmulatorTracing, "()V"),
   NATIVE_METHOD(VMDebug, stopInstructionCounting, "()V"),
   NATIVE_METHOD(VMDebug, stopMethodTracing, "()V"),
-  NATIVE_METHOD(VMDebug, threadCpuTimeNanos, "!()J"),
+  FAST_NATIVE_METHOD(VMDebug, threadCpuTimeNanos, "()J"),
   NATIVE_METHOD(VMDebug, getRuntimeStatInternal, "(I)Ljava/lang/String;"),
   NATIVE_METHOD(VMDebug, getRuntimeStatsInternal, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMDebug, attachAgent, "(Ljava/lang/String;)V"),

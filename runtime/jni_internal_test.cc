@@ -24,8 +24,8 @@
 #include "java_vm_ext.h"
 #include "jni_env_ext.h"
 #include "mirror/string-inl.h"
+#include "nativehelper/scoped_local_ref.h"
 #include "scoped_thread_state_change-inl.h"
-#include "ScopedLocalRef.h"
 
 namespace art {
 
@@ -626,9 +626,9 @@ class JniInternalTest : public CommonCompilerTest {
             hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader_)));
         mirror::Class* c = class_linker_->FindClass(soa.Self(), "LMyClassNatives;", loader);
         const auto pointer_size = class_linker_->GetImagePointerSize();
-        ArtMethod* method = direct ? c->FindDirectMethod(method_name, method_sig, pointer_size) :
-            c->FindVirtualMethod(method_name, method_sig, pointer_size);
+        ArtMethod* method = c->FindClassMethod(method_name, method_sig, pointer_size);
         ASSERT_TRUE(method != nullptr) << method_name << " " << method_sig;
+        ASSERT_EQ(direct, method->IsDirect());
         method->SetEntryPointFromQuickCompiledCode(class_linker_->GetRuntimeQuickGenericJniStub());
       }
       // Start runtime.
@@ -1908,9 +1908,6 @@ TEST_F(JniInternalTest, PushLocalFrame_10395422) {
 
   // Negative capacities are not allowed.
   ASSERT_EQ(JNI_ERR, env_->PushLocalFrame(-1));
-
-  // And it's okay to have an upper limit. Ours is currently 512.
-  ASSERT_EQ(JNI_ERR, env_->PushLocalFrame(8192));
 }
 
 TEST_F(JniInternalTest, PushLocalFrame_PopLocalFrame) {
@@ -1960,6 +1957,28 @@ TEST_F(JniInternalTest, PushLocalFrame_PopLocalFrame) {
   check_jni_abort_catcher.Check("use of deleted local reference");
   EXPECT_EQ(JNIInvalidRefType, env_->GetObjectRefType(inner2));
   check_jni_abort_catcher.Check("use of deleted local reference");
+}
+
+TEST_F(JniInternalTest, PushLocalFrame_LimitAndOverflow) {
+  // Try a very large value that should fail.
+  ASSERT_NE(JNI_OK, env_->PushLocalFrame(std::numeric_limits<jint>::max()));
+  ASSERT_TRUE(env_->ExceptionCheck());
+  env_->ExceptionClear();
+
+  // On 32-bit, also check for some overflow conditions.
+#ifndef __LP64__
+  ASSERT_EQ(JNI_OK, env_->PushLocalFrame(10));
+  ASSERT_NE(JNI_OK, env_->PushLocalFrame(std::numeric_limits<jint>::max() - 10));
+  ASSERT_TRUE(env_->ExceptionCheck());
+  env_->ExceptionClear();
+  EXPECT_EQ(env_->PopLocalFrame(nullptr), nullptr);
+#endif
+}
+
+TEST_F(JniInternalTest, PushLocalFrame_b62223672) {
+  // The 512 entry limit has been lifted, try a larger value.
+  ASSERT_EQ(JNI_OK, env_->PushLocalFrame(1024));
+  EXPECT_EQ(env_->PopLocalFrame(nullptr), nullptr);
 }
 
 TEST_F(JniInternalTest, NewGlobalRef_nullptr) {
@@ -2344,6 +2363,41 @@ TEST_F(JniInternalTest, JNIEnvExtOffsets) {
       IndirectReferenceTable::SegmentStateOffset(sizeof(void*)).Uint32Value();
   uint32_t segment_state_computed = JNIEnvExt::SegmentStateOffset(sizeof(void*)).Uint32Value();
   EXPECT_EQ(segment_state_now, segment_state_computed);
+}
+
+static size_t gGlobalRefCount = 0;
+static const JNINativeInterface* gOriginalEnv = nullptr;
+
+static jobject CountNewGlobalRef(JNIEnv* env, jobject o) {
+  ++gGlobalRefCount;
+  return gOriginalEnv->NewGlobalRef(env, o);
+}
+
+// Test the table override.
+TEST_F(JniInternalTest, JNIEnvExtTableOverride) {
+  JNINativeInterface env_override;
+  memcpy(&env_override, env_->functions, sizeof(JNINativeInterface));
+
+  gOriginalEnv = env_->functions;
+  env_override.NewGlobalRef = CountNewGlobalRef;
+  gGlobalRefCount = 0;
+
+  jclass local = env_->FindClass("java/lang/Object");
+  ASSERT_TRUE(local != nullptr);
+
+  // Set the table, add a global ref, see whether the counter increases.
+  JNIEnvExt::SetTableOverride(&env_override);
+
+  jobject global = env_->NewGlobalRef(local);
+  EXPECT_EQ(1u, gGlobalRefCount);
+  env_->DeleteGlobalRef(global);
+
+  // Reset
+  JNIEnvExt::SetTableOverride(nullptr);
+
+  jobject global2 = env_->NewGlobalRef(local);
+  EXPECT_EQ(1u, gGlobalRefCount);
+  env_->DeleteGlobalRef(global2);
 }
 
 }  // namespace art

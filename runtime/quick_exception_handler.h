@@ -20,6 +20,7 @@
 #include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "deoptimization_kind.h"
 #include "stack_reference.h"
 
 namespace art {
@@ -62,7 +63,7 @@ class QuickExceptionHandler {
   //   the result of IsDeoptimizeable().
   // - It can be either full-fragment, or partial-fragment deoptimization, depending
   //   on whether that single frame covers full or partial fragment.
-  void DeoptimizeSingleFrame() REQUIRES_SHARED(Locks::mutator_lock_);
+  void DeoptimizeSingleFrame(DeoptimizationKind kind) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void DeoptimizePartialFragmentFixup(uintptr_t return_pc)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -109,6 +110,10 @@ class QuickExceptionHandler {
 
   void SetHandlerDexPc(uint32_t dex_pc) {
     handler_dex_pc_ = dex_pc;
+  }
+
+  bool GetClearException() const {
+    return clear_exception_;
   }
 
   void SetClearException(bool clear_exception) {
