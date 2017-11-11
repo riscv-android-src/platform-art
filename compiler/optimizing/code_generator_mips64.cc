@@ -415,6 +415,10 @@ class SuspendCheckSlowPathMIPS64 : public SlowPathCodeMIPS64 {
 
   const char* GetDescription() const OVERRIDE { return "SuspendCheckSlowPathMIPS64"; }
 
+  HBasicBlock* GetSuccessor() const {
+    return successor_;
+  }
+
  private:
   // If not null, the block to branch to after the suspend check.
   HBasicBlock* const successor_;
@@ -1076,7 +1080,7 @@ void CodeGeneratorMIPS64::Finalize(CodeAllocator* allocator) {
   StackMapStream* stack_map_stream = GetStackMapStream();
   for (size_t i = 0, num = stack_map_stream->GetNumberOfStackMaps(); i != num; ++i) {
     uint32_t old_position =
-        stack_map_stream->GetStackMap(i).native_pc_code_offset.Uint32Value(kMips64);
+        stack_map_stream->GetStackMap(i).native_pc_code_offset.Uint32Value(InstructionSet::kMips64);
     uint32_t new_position = __ GetAdjustedPosition(old_position);
     DCHECK_GE(new_position, old_position);
     stack_map_stream->SetStackMapNativePcOffset(i, new_position);
@@ -1161,13 +1165,15 @@ static dwarf::Reg DWARFReg(FpuRegister reg) {
 void CodeGeneratorMIPS64::GenerateFrameEntry() {
   __ Bind(&frame_entry_label_);
 
-  bool do_overflow_check = FrameNeedsStackCheck(GetFrameSize(), kMips64) || !IsLeafMethod();
+  bool do_overflow_check =
+      FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kMips64) || !IsLeafMethod();
 
   if (do_overflow_check) {
-    __ LoadFromOffset(kLoadWord,
-                      ZERO,
-                      SP,
-                      -static_cast<int32_t>(GetStackOverflowReservedBytes(kMips64)));
+    __ LoadFromOffset(
+        kLoadWord,
+        ZERO,
+        SP,
+        -static_cast<int32_t>(GetStackOverflowReservedBytes(InstructionSet::kMips64)));
     RecordPcInfo(nullptr, 0);
   }
 
@@ -1176,8 +1182,9 @@ void CodeGeneratorMIPS64::GenerateFrameEntry() {
   }
 
   // Make sure the frame size isn't unreasonably large.
-  if (GetFrameSize() > GetStackOverflowReservedBytes(kMips64)) {
-    LOG(FATAL) << "Stack frame larger than " << GetStackOverflowReservedBytes(kMips64) << " bytes";
+  if (GetFrameSize() > GetStackOverflowReservedBytes(InstructionSet::kMips64)) {
+    LOG(FATAL) << "Stack frame larger than "
+        << GetStackOverflowReservedBytes(InstructionSet::kMips64) << " bytes";
   }
 
   // Spill callee-saved registers.
@@ -1816,7 +1823,7 @@ void CodeGeneratorMIPS64::GenerateInvokeRuntime(int32_t entry_point_offset) {
 
 void InstructionCodeGeneratorMIPS64::GenerateClassInitializationCheck(SlowPathCodeMIPS64* slow_path,
                                                                       GpuRegister class_reg) {
-  __ LoadFromOffset(kLoadWord, TMP, class_reg, mirror::Class::StatusOffset().Int32Value());
+  __ LoadFromOffset(kLoadSignedByte, TMP, class_reg, mirror::Class::StatusOffset().Int32Value());
   __ LoadConst32(AT, mirror::Class::kStatusInitialized);
   __ Bltc(TMP, AT, slow_path->GetEntryLabel());
   // Even if the initialized flag is set, we need to ensure consistent memory ordering.
@@ -1831,8 +1838,19 @@ void InstructionCodeGeneratorMIPS64::GenerateMemoryBarrier(MemBarrierKind kind A
 void InstructionCodeGeneratorMIPS64::GenerateSuspendCheck(HSuspendCheck* instruction,
                                                           HBasicBlock* successor) {
   SuspendCheckSlowPathMIPS64* slow_path =
-    new (codegen_->GetScopedAllocator()) SuspendCheckSlowPathMIPS64(instruction, successor);
-  codegen_->AddSlowPath(slow_path);
+      down_cast<SuspendCheckSlowPathMIPS64*>(instruction->GetSlowPath());
+
+  if (slow_path == nullptr) {
+    slow_path =
+        new (codegen_->GetScopedAllocator()) SuspendCheckSlowPathMIPS64(instruction, successor);
+    instruction->SetSlowPath(slow_path);
+    codegen_->AddSlowPath(slow_path);
+    if (successor != nullptr) {
+      DCHECK(successor->IsLoopHeader());
+    }
+  } else {
+    DCHECK_EQ(slow_path->GetSuccessor(), successor);
+  }
 
   __ LoadFromOffset(kLoadUnsignedHalfword,
                     TMP,
@@ -7142,6 +7160,16 @@ void InstructionCodeGeneratorMIPS64::VisitClassTableGet(HClassTableGet* instruct
                       locations->Out().AsRegister<GpuRegister>(),
                       method_offset);
   }
+}
+
+void LocationsBuilderMIPS64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                      ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
+}
+
+void InstructionCodeGeneratorMIPS64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                              ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
 }
 
 }  // namespace mips64

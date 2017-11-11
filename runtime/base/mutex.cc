@@ -63,6 +63,7 @@ Mutex* Locks::reference_queue_soft_references_lock_ = nullptr;
 Mutex* Locks::reference_queue_weak_references_lock_ = nullptr;
 Mutex* Locks::runtime_shutdown_lock_ = nullptr;
 Mutex* Locks::cha_lock_ = nullptr;
+Mutex* Locks::subtype_check_lock_ = nullptr;
 Mutex* Locks::thread_list_lock_ = nullptr;
 ConditionVariable* Locks::thread_exit_cond_ = nullptr;
 Mutex* Locks::thread_suspend_count_lock_ = nullptr;
@@ -1021,7 +1022,7 @@ bool ConditionVariable::TimedWait(Thread* self, int64_t ms, int32_t ns) {
 void Locks::Init() {
   if (logging_lock_ != nullptr) {
     // Already initialized.
-    if (kRuntimeISA == kX86 || kRuntimeISA == kX86_64) {
+    if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
       DCHECK(modify_ldt_lock_ != nullptr);
     } else {
       DCHECK(modify_ldt_lock_ == nullptr);
@@ -1044,6 +1045,7 @@ void Locks::Init() {
     DCHECK(mutator_lock_ != nullptr);
     DCHECK(profiler_lock_ != nullptr);
     DCHECK(cha_lock_ != nullptr);
+    DCHECK(subtype_check_lock_ != nullptr);
     DCHECK(thread_list_lock_ != nullptr);
     DCHECK(thread_suspend_count_lock_ != nullptr);
     DCHECK(trace_lock_ != nullptr);
@@ -1109,6 +1111,10 @@ void Locks::Init() {
     DCHECK(breakpoint_lock_ == nullptr);
     breakpoint_lock_ = new ReaderWriterMutex("breakpoint lock", current_lock_level);
 
+    UPDATE_CURRENT_LOCK_LEVEL(kSubtypeCheckLock);
+    DCHECK(subtype_check_lock_ == nullptr);
+    subtype_check_lock_ = new Mutex("SubtypeCheck lock", current_lock_level);
+
     UPDATE_CURRENT_LOCK_LEVEL(kCHALock);
     DCHECK(cha_lock_ == nullptr);
     cha_lock_ = new Mutex("CHA lock", current_lock_level);
@@ -1126,7 +1132,7 @@ void Locks::Init() {
     DCHECK(allocated_thread_ids_lock_ == nullptr);
     allocated_thread_ids_lock_ =  new Mutex("allocated thread ids lock", current_lock_level);
 
-    if (kRuntimeISA == kX86 || kRuntimeISA == kX86_64) {
+    if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
       UPDATE_CURRENT_LOCK_LEVEL(kModifyLdtLock);
       DCHECK(modify_ldt_lock_ == nullptr);
       modify_ldt_lock_ = new Mutex("modify_ldt lock", current_lock_level);

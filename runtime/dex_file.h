@@ -32,10 +32,12 @@
 
 namespace art {
 
+class CompactDexFile;
 enum InvokeType : uint32_t;
 class MemMap;
 class OatDexFile;
 class Signature;
+class StandardDexFile;
 class StringPiece;
 class ZipArchive;
 
@@ -78,35 +80,32 @@ class DexFile {
 
   // Raw header_item.
   struct Header {
-    uint8_t magic_[8];
-    uint32_t checksum_;  // See also location_checksum_
-    uint8_t signature_[kSha1DigestSize];
-    uint32_t file_size_;  // size of entire file
-    uint32_t header_size_;  // offset to start of next section
-    uint32_t endian_tag_;
-    uint32_t link_size_;  // unused
-    uint32_t link_off_;  // unused
-    uint32_t map_off_;  // unused
-    uint32_t string_ids_size_;  // number of StringIds
-    uint32_t string_ids_off_;  // file offset of StringIds array
-    uint32_t type_ids_size_;  // number of TypeIds, we don't support more than 65535
-    uint32_t type_ids_off_;  // file offset of TypeIds array
-    uint32_t proto_ids_size_;  // number of ProtoIds, we don't support more than 65535
-    uint32_t proto_ids_off_;  // file offset of ProtoIds array
-    uint32_t field_ids_size_;  // number of FieldIds
-    uint32_t field_ids_off_;  // file offset of FieldIds array
-    uint32_t method_ids_size_;  // number of MethodIds
-    uint32_t method_ids_off_;  // file offset of MethodIds array
-    uint32_t class_defs_size_;  // number of ClassDefs
-    uint32_t class_defs_off_;  // file offset of ClassDef array
-    uint32_t data_size_;  // size of data section
-    uint32_t data_off_;  // file offset of data section
+    uint8_t magic_[8] = {};
+    uint32_t checksum_ = 0;  // See also location_checksum_
+    uint8_t signature_[kSha1DigestSize] = {};
+    uint32_t file_size_ = 0;  // size of entire file
+    uint32_t header_size_ = 0;  // offset to start of next section
+    uint32_t endian_tag_ = 0;
+    uint32_t link_size_ = 0;  // unused
+    uint32_t link_off_ = 0;  // unused
+    uint32_t map_off_ = 0;  // unused
+    uint32_t string_ids_size_ = 0;  // number of StringIds
+    uint32_t string_ids_off_ = 0;  // file offset of StringIds array
+    uint32_t type_ids_size_ = 0;  // number of TypeIds, we don't support more than 65535
+    uint32_t type_ids_off_ = 0;  // file offset of TypeIds array
+    uint32_t proto_ids_size_ = 0;  // number of ProtoIds, we don't support more than 65535
+    uint32_t proto_ids_off_ = 0;  // file offset of ProtoIds array
+    uint32_t field_ids_size_ = 0;  // number of FieldIds
+    uint32_t field_ids_off_ = 0;  // file offset of FieldIds array
+    uint32_t method_ids_size_ = 0;  // number of MethodIds
+    uint32_t method_ids_off_ = 0;  // file offset of MethodIds array
+    uint32_t class_defs_size_ = 0;  // number of ClassDefs
+    uint32_t class_defs_off_ = 0;  // file offset of ClassDef array
+    uint32_t data_size_ = 0;  // size of data section
+    uint32_t data_off_ = 0;  // file offset of data section
 
     // Decode the dex magic version
     uint32_t GetVersion() const;
-
-   private:
-    DISALLOW_COPY_AND_ASSIGN(Header);
   };
 
   // Map item type codes.
@@ -304,9 +303,10 @@ class DexFile {
 
   // Raw code_item.
   struct CodeItem {
-    IterationRange<DexInstructionIterator> Instructions() const {
-      return { DexInstructionIterator(insns_),
-               DexInstructionIterator(insns_ + insns_size_in_code_units_)};
+    IterationRange<DexInstructionIterator> Instructions(uint32_t start_dex_pc = 0u) const {
+      DCHECK_LE(start_dex_pc, insns_size_in_code_units_);
+      return { DexInstructionIterator(insns_, start_dex_pc),
+               DexInstructionIterator(insns_, insns_size_in_code_units_) };
     }
 
     const Instruction& InstructionAt(uint32_t dex_pc) const {
@@ -995,13 +995,15 @@ class DexFile {
   // Returns a human-readable form of the type at an index.
   std::string PrettyType(dex::TypeIndex type_idx) const;
 
-  // Helper functions.
-  virtual bool IsCompactDexFile() const {
-    return false;
+  // Not virtual for performance reasons.
+  ALWAYS_INLINE bool IsCompactDexFile() const {
+    return is_compact_dex_;
   }
-  virtual bool IsStandardDexFile() const {
-    return false;
+  ALWAYS_INLINE bool IsStandardDexFile() const {
+    return !is_compact_dex_;
   }
+  ALWAYS_INLINE const StandardDexFile* AsStandardDexFile() const;
+  ALWAYS_INLINE const CompactDexFile* AsCompactDexFile() const;
 
  protected:
   DexFile(const uint8_t* base,
@@ -1009,7 +1011,8 @@ class DexFile {
           const std::string& location,
           uint32_t location_checksum,
           const OatDexFile* oat_dex_file,
-          DexFileContainer* container);
+          DexFileContainer* container,
+          bool is_compact_dex);
 
   // Top-level initializer that calls other Init methods.
   bool Init(std::string* error_msg);
@@ -1074,6 +1077,9 @@ class DexFile {
 
   // Manages the underlying memory allocation.
   std::unique_ptr<DexFileContainer> container_;
+
+  // If the dex file is a compact dex file. If false then the dex file is a standard dex file.
+  const bool is_compact_dex_;
 
   friend class DexFileLoader;
   friend class DexFileVerifierTest;

@@ -72,7 +72,7 @@ static bool MayHaveReorderingDependency(SideEffects node, SideEffects other) {
 
 size_t SchedulingGraph::ArrayAccessHeapLocation(HInstruction* array, HInstruction* index) const {
   DCHECK(heap_location_collector_ != nullptr);
-  size_t heap_loc = heap_location_collector_->GetArrayAccessHeapLocation(array, index);
+  size_t heap_loc = heap_location_collector_->GetArrayHeapLocation(array, index);
   // This array access should be analyzed and added to HeapLocationCollector before.
   DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
   return heap_loc;
@@ -153,12 +153,7 @@ size_t SchedulingGraph::FieldAccessHeapLocation(HInstruction* obj, const FieldIn
   DCHECK(field != nullptr);
   DCHECK(heap_location_collector_ != nullptr);
 
-  size_t heap_loc = heap_location_collector_->FindHeapLocationIndex(
-     heap_location_collector_->FindReferenceInfoOf(
-         heap_location_collector_->HuntForOriginalReference(obj)),
-     field->GetFieldOffset().SizeValue(),
-     nullptr,
-     field->GetDeclaringClassDefIndex());
+  size_t heap_loc = heap_location_collector_->GetFieldHeapLocation(obj, field);
   // This field access should be analyzed and added to HeapLocationCollector before.
   DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
 
@@ -796,7 +791,7 @@ void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
 
   switch (instruction_set_) {
 #ifdef ART_ENABLE_CODEGEN_arm64
-    case kArm64: {
+    case InstructionSet::kArm64: {
       arm64::HSchedulerARM64 scheduler(&allocator, selector);
       scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);
       scheduler.Schedule(graph_);
@@ -804,8 +799,8 @@ void HInstructionScheduling::Run(bool only_optimize_loop_blocks,
     }
 #endif
 #if defined(ART_ENABLE_CODEGEN_arm)
-    case kThumb2:
-    case kArm: {
+    case InstructionSet::kThumb2:
+    case InstructionSet::kArm: {
       arm::SchedulingLatencyVisitorARM arm_latency_visitor(codegen_);
       arm::HSchedulerARM scheduler(&allocator, selector, &arm_latency_visitor);
       scheduler.SetOnlyOptimizeLoopBlocks(only_optimize_loop_blocks);

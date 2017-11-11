@@ -961,9 +961,13 @@ extern "C" uint64_t artQuickProxyInvokeHandler(
   self->EndAssertNoThreadSuspension(old_cause);
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
-  jobject interface_method_jobj = soa.AddLocalReference<jobject>(
-      mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(),
-                                                                      interface_method));
+  ObjPtr<mirror::Method> interface_reflect_method =
+      mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), interface_method);
+  if (interface_reflect_method == nullptr) {
+    soa.Self()->AssertPendingOOMException();
+    return 0;
+  }
+  jobject interface_method_jobj = soa.AddLocalReference<jobject>(interface_reflect_method);
 
   // All naked Object*s should now be in jobjects, so its safe to go into the main invoke code
   // that performs allocations.
@@ -2167,32 +2171,14 @@ static void artQuickGenericJniEndJNINonRef(Thread* self,
  */
 extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** sp)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Note: We cannot walk the stack properly until fixed up below.
   ArtMethod* called = *sp;
   DCHECK(called->IsNative()) << called->PrettyMethod(true);
-  // Fix up a callee-save frame at the bottom of the stack (at `*sp`,
-  // above the alloca region) while we check for optimization
-  // annotations, thus allowing stack walking until the completion of
-  // the JNI frame creation.
-  //
-  // Note however that the Generic JNI trampoline does not expect
-  // exception being thrown at that stage.
-  *sp = Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs);
-  self->SetTopOfStack(sp);
   uint32_t shorty_len = 0;
   const char* shorty = called->GetShorty(&shorty_len);
-  // Optimization annotations lookup does not try to resolve classes,
-  // as this may throw an exception, which is not supported by the
-  // Generic JNI trampoline at this stage; instead, method's
-  // annotations' classes are looked up in the bootstrap class
-  // loader's resolved types (which won't trigger an exception).
-  CHECK(!self->IsExceptionPending());
-  bool critical_native = called->IsAnnotatedWithCriticalNative();
-  CHECK(!self->IsExceptionPending());
-  bool fast_native = called->IsAnnotatedWithFastNative();
-  CHECK(!self->IsExceptionPending());
+  bool critical_native = called->IsCriticalNative();
+  bool fast_native = called->IsFastNative();
   bool normal_native = !critical_native && !fast_native;
-  // Restore the initial ArtMethod pointer at `*sp`.
-  *sp = called;
 
   // Run the visitor and update sp.
   BuildGenericJniFrameVisitor visitor(self,
@@ -2208,7 +2194,7 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
     visitor.FinalizeHandleScope(self);
   }
 
-  // Fix up managed-stack things in Thread.
+  // Fix up managed-stack things in Thread. After this we can walk the stack.
   self->SetTopOfStack(sp);
 
   self->VerifyStack();

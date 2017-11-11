@@ -26,7 +26,6 @@
 #include "class_linker-inl.h"
 #include "debugger.h"
 #include "dex_file-inl.h"
-#include "dex_file_annotations.h"
 #include "dex_instruction.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
@@ -392,13 +391,9 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
   self->PopManagedStackFragment(fragment);
 }
 
-const void* ArtMethod::RegisterNative(const void* native_method, bool is_fast) {
+const void* ArtMethod::RegisterNative(const void* native_method) {
   CHECK(IsNative()) << PrettyMethod();
-  CHECK(!IsFastNative()) << PrettyMethod();
   CHECK(native_method != nullptr) << PrettyMethod();
-  if (is_fast) {
-    AddAccessFlags(kAccFastNative);
-  }
   void* new_native_method = nullptr;
   Runtime::Current()->GetRuntimeCallbacks()->RegisterNativeMethod(this,
                                                                   native_method,
@@ -408,7 +403,7 @@ const void* ArtMethod::RegisterNative(const void* native_method, bool is_fast) {
 }
 
 void ArtMethod::UnregisterNative() {
-  CHECK(IsNative() && !IsFastNative()) << PrettyMethod();
+  CHECK(IsNative()) << PrettyMethod();
   // restore stub to lookup native pointer via dlsym
   SetEntryPointFromJni(GetJniDlsymLookupStub());
 }
@@ -417,37 +412,15 @@ bool ArtMethod::IsOverridableByDefaultMethod() {
   return GetDeclaringClass()->IsInterface();
 }
 
-bool ArtMethod::IsAnnotatedWithFastNative() {
-  return IsAnnotatedWith(WellKnownClasses::dalvik_annotation_optimization_FastNative,
-                         DexFile::kDexVisibilityBuild,
-                         /* lookup_in_resolved_boot_classes */ true);
-}
-
-bool ArtMethod::IsAnnotatedWithCriticalNative() {
-  return IsAnnotatedWith(WellKnownClasses::dalvik_annotation_optimization_CriticalNative,
-                         DexFile::kDexVisibilityBuild,
-                         /* lookup_in_resolved_boot_classes */ true);
-}
-
-bool ArtMethod::IsAnnotatedWithPolymorphicSignature() {
-  return IsAnnotatedWith(WellKnownClasses::java_lang_invoke_MethodHandle_PolymorphicSignature,
-                         DexFile::kDexVisibilityRuntime,
-                         /* lookup_in_resolved_boot_classes */ true);
-}
-
-bool ArtMethod::IsAnnotatedWith(jclass klass,
-                                uint32_t visibility,
-                                bool lookup_in_resolved_boot_classes) {
-  Thread* self = Thread::Current();
-  ScopedObjectAccess soa(self);
-  StackHandleScope<1> shs(self);
-
-  ObjPtr<mirror::Class> annotation = soa.Decode<mirror::Class>(klass);
-  DCHECK(annotation->IsAnnotation());
-  Handle<mirror::Class> annotation_handle(shs.NewHandle(annotation));
-
-  return annotations::IsMethodAnnotationPresent(
-      this, annotation_handle, visibility, lookup_in_resolved_boot_classes);
+bool ArtMethod::IsPolymorphicSignature() {
+  // Methods with a polymorphic signature have constraints that they
+  // are native and varargs and belong to either MethodHandle or VarHandle.
+  if (!IsNative() || !IsVarargs()) {
+    return false;
+  }
+  mirror::Class* cls = GetDeclaringClass();
+  return (cls == WellKnownClasses::ToClass(WellKnownClasses::java_lang_invoke_MethodHandle) ||
+          cls == WellKnownClasses::ToClass(WellKnownClasses::java_lang_invoke_VarHandle));
 }
 
 static uint32_t GetOatMethodIndexFromMethodIndex(const DexFile& dex_file,

@@ -2568,7 +2568,7 @@ void CodeGeneratorARMVIXL::GenerateFrameEntry() {
   if (!skip_overflow_check) {
     UseScratchRegisterScope temps(GetVIXLAssembler());
     vixl32::Register temp = temps.Acquire();
-    __ Sub(temp, sp, Operand::From(GetStackOverflowReservedBytes(kArm)));
+    __ Sub(temp, sp, Operand::From(GetStackOverflowReservedBytes(InstructionSet::kArm)));
     // The load must immediately precede RecordPcInfo.
     ExactAssemblyScope aas(GetVIXLAssembler(),
                            vixl32::kMaxInstructionSizeInBytes,
@@ -3891,7 +3891,7 @@ void LocationsBuilderARMVIXL::VisitTypeConversion(HTypeConversion* conversion) {
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     case DataType::Type::kFloat64:
@@ -3921,7 +3921,7 @@ void LocationsBuilderARMVIXL::VisitTypeConversion(HTypeConversion* conversion) {
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     default:
@@ -4102,7 +4102,7 @@ void InstructionCodeGeneratorARMVIXL::VisitTypeConversion(HTypeConversion* conve
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     case DataType::Type::kFloat64:
@@ -4146,7 +4146,7 @@ void InstructionCodeGeneratorARMVIXL::VisitTypeConversion(HTypeConversion* conve
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     default:
@@ -5303,7 +5303,7 @@ void InstructionCodeGeneratorARMVIXL::VisitCompare(HCompare* compare) {
   vixl32::Label less, greater, done;
   vixl32::Label* final_label = codegen_->GetFinalLabel(compare, &done);
   DataType::Type type = compare->InputAt(0)->GetType();
-  vixl32::Condition less_cond = vixl32::Condition(kNone);
+  vixl32::Condition less_cond = vixl32::Condition::None();
   switch (type) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -7255,7 +7255,7 @@ void InstructionCodeGeneratorARMVIXL::GenerateClassInitializationCheck(
     LoadClassSlowPathARMVIXL* slow_path, vixl32::Register class_reg) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   vixl32::Register temp = temps.Acquire();
-  GetAssembler()->LoadFromOffset(kLoadWord,
+  GetAssembler()->LoadFromOffset(kLoadSignedByte,
                                  temp,
                                  class_reg,
                                  mirror::Class::StatusOffset().Int32Value());

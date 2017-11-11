@@ -452,6 +452,9 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  --compact-dex-level=none|fast: None avoids generating compact dex, fast");
   UsageError("      generates compact dex with low compile time.");
   UsageError("");
+  UsageError("  --deduplicate-code=true|false: enable|disable code deduplication. Deduplicated");
+  UsageError("      code will have an arbitrary symbol tagged with [DEDUPED].");
+  UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
 }
@@ -589,7 +592,7 @@ class Dex2Oat FINAL {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
       compiler_kind_(Compiler::kOptimizing),
-      instruction_set_(kRuntimeISA == kArm ? kThumb2 : kRuntimeISA),
+      instruction_set_(kRuntimeISA == InstructionSet::kArm ? InstructionSet::kThumb2 : kRuntimeISA),
       // Take the default set of instruction features from the build.
       image_file_location_oat_checksum_(0),
       image_file_location_oat_data_begin_(0),
@@ -893,13 +896,13 @@ class Dex2Oat FINAL {
     // Checks are all explicit until we know the architecture.
     // Set the compilation target's implicit checks options.
     switch (instruction_set_) {
-      case kArm:
-      case kThumb2:
-      case kArm64:
-      case kX86:
-      case kX86_64:
-      case kMips:
-      case kMips64:
+      case InstructionSet::kArm:
+      case InstructionSet::kThumb2:
+      case InstructionSet::kArm64:
+      case InstructionSet::kX86:
+      case InstructionSet::kX86_64:
+      case InstructionSet::kMips:
+      case InstructionSet::kMips64:
         compiler_options_->implicit_null_checks_ = true;
         compiler_options_->implicit_so_checks_ = true;
         break;

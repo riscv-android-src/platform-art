@@ -46,6 +46,7 @@
 #include "dex/verified_method.h"
 #include "dex_compilation_unit.h"
 #include "dex_file-inl.h"
+#include "dex_file_annotations.h"
 #include "dex_instruction-inl.h"
 #include "driver/compiler_options.h"
 #include "gc/accounting/card_table-inl.h"
@@ -290,7 +291,8 @@ CompilerDriver::CompilerDriver(
       verification_results_(verification_results),
       compiler_(Compiler::Create(this, compiler_kind)),
       compiler_kind_(compiler_kind),
-      instruction_set_(instruction_set == kArm ? kThumb2 : instruction_set),
+      instruction_set_(
+          instruction_set == InstructionSet::kArm ? InstructionSet::kThumb2 : instruction_set),
       instruction_set_features_(instruction_set_features),
       requires_constructor_barrier_lock_("constructor barrier lock"),
       non_relative_linker_patch_count_(0u),
@@ -319,6 +321,8 @@ CompilerDriver::CompilerDriver(
   if (GetCompilerOptions().IsBootImage()) {
     CHECK(image_classes_.get() != nullptr) << "Expected image classes for boot image";
   }
+
+  compiled_method_storage_.SetDedupeEnabled(compiler_options_->DeduplicateCode());
 }
 
 CompilerDriver::~CompilerDriver() {
@@ -451,13 +455,13 @@ static optimizer::DexToDexCompilationLevel GetDexToDexCompilationLevel(
 // GetQuickGenericJniStub allowing down calls that aren't compiled using a JNI compiler?
 static bool InstructionSetHasGenericJniStub(InstructionSet isa) {
   switch (isa) {
-    case kArm:
-    case kArm64:
-    case kThumb2:
-    case kMips:
-    case kMips64:
-    case kX86:
-    case kX86_64: return true;
+    case InstructionSet::kArm:
+    case InstructionSet::kArm64:
+    case InstructionSet::kThumb2:
+    case InstructionSet::kMips:
+    case InstructionSet::kMips64:
+    case InstructionSet::kX86:
+    case InstructionSet::kX86_64: return true;
     default: return false;
   }
 }
@@ -508,40 +512,11 @@ static void CompileMethod(Thread* self,
         InstructionSetHasGenericJniStub(driver->GetInstructionSet())) {
       // Leaving this empty will trigger the generic JNI version
     } else {
-      // Look-up the ArtMethod associated with this code_item (if any)
-      // -- It is later used to lookup any [optimization] annotations for this method.
-      ScopedObjectAccess soa(self);
-
-      // TODO: Lookup annotation from DexFile directly without resolving method.
-      ArtMethod* method =
-          Runtime::Current()->GetClassLinker()->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
-              dex_file,
-              method_idx,
-              dex_cache,
-              class_loader,
-              /* referrer */ nullptr,
-              invoke_type);
-
       // Query any JNI optimization annotations such as @FastNative or @CriticalNative.
-      Compiler::JniOptimizationFlags optimization_flags = Compiler::kNone;
-      if (UNLIKELY(method == nullptr)) {
-        // Failed method resolutions happen very rarely, e.g. ancestor class cannot be resolved.
-        DCHECK(self->IsExceptionPending());
-        self->ClearException();
-      } else if (method->IsAnnotatedWithFastNative()) {
-        // TODO: Will no longer need this CHECK once we have verifier checking this.
-        CHECK(!method->IsAnnotatedWithCriticalNative());
-        optimization_flags = Compiler::kFastNative;
-      } else if (method->IsAnnotatedWithCriticalNative()) {
-        // TODO: Will no longer need this CHECK once we have verifier checking this.
-        CHECK(!method->IsAnnotatedWithFastNative());
-        optimization_flags = Compiler::kCriticalNative;
-      }
+      access_flags |= annotations::GetNativeMethodAnnotationAccessFlags(
+          dex_file, dex_file.GetClassDef(class_def_idx), method_idx);
 
-      compiled_method = driver->GetCompiler()->JniCompile(access_flags,
-                                                          method_idx,
-                                                          dex_file,
-                                                          optimization_flags);
+      compiled_method = driver->GetCompiler()->JniCompile(access_flags, method_idx, dex_file);
       CHECK(compiled_method != nullptr);
     }
   } else if ((access_flags & kAccAbstract) != 0) {
@@ -736,13 +711,13 @@ static void ResolveConstStrings(Handle<mirror::DexCache> dex_cache,
   }
 
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
-  for (const Instruction& inst : code_item->Instructions()) {
-    switch (inst.Opcode()) {
+  for (const DexInstructionPcPair& inst : code_item->Instructions()) {
+    switch (inst->Opcode()) {
       case Instruction::CONST_STRING:
       case Instruction::CONST_STRING_JUMBO: {
-        dex::StringIndex string_index((inst.Opcode() == Instruction::CONST_STRING)
-            ? inst.VRegB_21c()
-            : inst.VRegB_31c());
+        dex::StringIndex string_index((inst->Opcode() == Instruction::CONST_STRING)
+            ? inst->VRegB_21c()
+            : inst->VRegB_31c());
         mirror::String* string = class_linker->ResolveString(dex_file, string_index, dex_cache);
         CHECK(string != nullptr) << "Could not allocate a string when forcing determinism";
         break;
@@ -2416,14 +2391,14 @@ class InitializeClassVisitor : public CompilationVisitor {
     if (clinit != nullptr) {
       const DexFile::CodeItem* code_item = clinit->GetCodeItem();
       DCHECK(code_item != nullptr);
-      for (const Instruction& inst : code_item->Instructions()) {
-        if (inst.Opcode() == Instruction::CONST_STRING) {
+      for (const DexInstructionPcPair& inst : code_item->Instructions()) {
+        if (inst->Opcode() == Instruction::CONST_STRING) {
           ObjPtr<mirror::String> s = class_linker->ResolveString(
-              *dex_file, dex::StringIndex(inst.VRegB_21c()), h_dex_cache);
+              *dex_file, dex::StringIndex(inst->VRegB_21c()), h_dex_cache);
           CHECK(s != nullptr);
-        } else if (inst.Opcode() == Instruction::CONST_STRING_JUMBO) {
+        } else if (inst->Opcode() == Instruction::CONST_STRING_JUMBO) {
           ObjPtr<mirror::String> s = class_linker->ResolveString(
-              *dex_file, dex::StringIndex(inst.VRegB_31c()), h_dex_cache);
+              *dex_file, dex::StringIndex(inst->VRegB_31c()), h_dex_cache);
           CHECK(s != nullptr);
         }
       }

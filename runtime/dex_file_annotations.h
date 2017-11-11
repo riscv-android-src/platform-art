@@ -24,8 +24,8 @@
 namespace art {
 
 namespace mirror {
-  class ClassLoader;
-  class DexCache;
+class ClassLoader;
+class DexCache;
 }  // namespace mirror
 class ArtField;
 class ArtMethod;
@@ -72,9 +72,15 @@ mirror::ObjectArray<mirror::String>* GetSignatureAnnotationForMethod(ArtMethod* 
 // side effect.
 bool IsMethodAnnotationPresent(ArtMethod* method,
                                Handle<mirror::Class> annotation_class,
-                               uint32_t visibility = DexFile::kDexVisibilityRuntime,
-                               bool lookup_in_resolved_boot_classes = false)
+                               uint32_t visibility = DexFile::kDexVisibilityRuntime)
     REQUIRES_SHARED(Locks::mutator_lock_);
+// Check whether a method from the `dex_file` with the given `method_index`
+// is annotated with @dalvik.annotation.optimization.FastNative or
+// @dalvik.annotation.optimization.CriticalNative with build visibility.
+// If yes, return the associated access flags, i.e. kAccFastNative or kAccCriticalNative.
+uint32_t GetNativeMethodAnnotationAccessFlags(const DexFile& dex_file,
+                                              const DexFile::ClassDef& class_def,
+                                              uint32_t method_index);
 
 // Class annotations.
 mirror::Object* GetAnnotationForClass(Handle<mirror::Class> klass,

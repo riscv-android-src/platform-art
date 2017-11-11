@@ -1557,12 +1557,13 @@ void CodeGeneratorARM64::GenerateFrameEntry() {
   MacroAssembler* masm = GetVIXLAssembler();
   __ Bind(&frame_entry_label_);
 
-  bool do_overflow_check = FrameNeedsStackCheck(GetFrameSize(), kArm64) || !IsLeafMethod();
+  bool do_overflow_check =
+      FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kArm64) || !IsLeafMethod();
   if (do_overflow_check) {
     UseScratchRegisterScope temps(masm);
     Register temp = temps.AcquireX();
     DCHECK(GetCompilerOptions().GetImplicitStackOverflowChecks());
-    __ Sub(temp, sp, static_cast<int32_t>(GetStackOverflowReservedBytes(kArm64)));
+    __ Sub(temp, sp, static_cast<int32_t>(GetStackOverflowReservedBytes(InstructionSet::kArm64)));
     {
       // Ensure that between load and RecordPcInfo there are no pools emitted.
       ExactAssemblyScope eas(GetVIXLAssembler(),
@@ -2170,9 +2171,10 @@ void InstructionCodeGeneratorARM64::GenerateClassInitializationCheck(SlowPathCod
   // Even if the initialized flag is set, we need to ensure consistent memory ordering.
   // TODO(vixl): Let the MacroAssembler handle MemOperand.
   __ Add(temp, class_reg, status_offset);
-  __ Ldar(temp, HeapOperand(temp));
+  __ Ldarb(temp, HeapOperand(temp));
   __ Cmp(temp, mirror::Class::kStatusInitialized);
-  __ B(lt, slow_path->GetEntryLabel());
+  __ B(ne, slow_path->GetEntryLabel());
+  // Use Bne instead of Blt because ARM64 doesn't have Ldarsb.
   __ Bind(slow_path->GetExitLabel());
 }
 

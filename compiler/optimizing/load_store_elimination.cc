@@ -83,7 +83,8 @@ class LSEVisitor : public HGraphDelegateVisitor {
       DCHECK(load != nullptr);
       DCHECK(load->IsInstanceFieldGet() ||
              load->IsStaticFieldGet() ||
-             load->IsArrayGet());
+             load->IsArrayGet() ||
+             load->IsVecLoad());
       HInstruction* substitute = substitute_instructions_for_loads_[i];
       DCHECK(substitute != nullptr);
       // Keep tracing substitute till one that's not removed.
@@ -98,7 +99,10 @@ class LSEVisitor : public HGraphDelegateVisitor {
 
     // At this point, stores in possibly_removed_stores_ can be safely removed.
     for (HInstruction* store : possibly_removed_stores_) {
-      DCHECK(store->IsInstanceFieldSet() || store->IsStaticFieldSet() || store->IsArraySet());
+      DCHECK(store->IsInstanceFieldSet() ||
+             store->IsStaticFieldSet() ||
+             store->IsArraySet() ||
+             store->IsVecStore());
       store->GetBlock()->RemoveInstruction(store);
     }
 
@@ -137,7 +141,9 @@ class LSEVisitor : public HGraphDelegateVisitor {
   void KeepIfIsStore(HInstruction* heap_value) {
     if (heap_value == kDefaultHeapValue ||
         heap_value == kUnknownHeapValue ||
-        !(heap_value->IsInstanceFieldSet() || heap_value->IsArraySet())) {
+        !(heap_value->IsInstanceFieldSet() ||
+          heap_value->IsArraySet() ||
+          heap_value->IsVecStore())) {
       return;
     }
     auto idx = std::find(possibly_removed_stores_.begin(),
@@ -183,7 +189,6 @@ class LSEVisitor : public HGraphDelegateVisitor {
             !location->IsValueKilledByLoopSideEffects()) {
           // A removable singleton's field that's not stored into inside a loop is
           // invariant throughout the loop. Nothing to do.
-          DCHECK(ref_info->IsSingletonAndRemovable());
         } else {
           // heap value is killed by loop side effects (stored into directly, or
           // due to aliasing). Or the heap value may be needed after method return
@@ -303,11 +308,12 @@ class LSEVisitor : public HGraphDelegateVisitor {
                         HInstruction* ref,
                         size_t offset,
                         HInstruction* index,
+                        size_t vector_length,
                         int16_t declaring_class_def_index) {
     HInstruction* original_ref = heap_location_collector_.HuntForOriginalReference(ref);
     ReferenceInfo* ref_info = heap_location_collector_.FindReferenceInfoOf(original_ref);
     size_t idx = heap_location_collector_.FindHeapLocationIndex(
-        ref_info, offset, index, declaring_class_def_index);
+        ref_info, offset, index, vector_length, declaring_class_def_index);
     DCHECK_NE(idx, HeapLocationCollector::kHeapLocationNotFound);
     ScopedArenaVector<HInstruction*>& heap_values =
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
@@ -320,7 +326,9 @@ class LSEVisitor : public HGraphDelegateVisitor {
       return;
     }
     if (heap_value != kUnknownHeapValue) {
-      if (heap_value->IsInstanceFieldSet() || heap_value->IsArraySet()) {
+      if (heap_value->IsInstanceFieldSet() ||
+          heap_value->IsArraySet() ||
+          heap_value->IsVecStore()) {
         HInstruction* store = heap_value;
         // This load must be from a singleton since it's from the same
         // field/element that a "removed" store puts the value. That store
@@ -368,12 +376,13 @@ class LSEVisitor : public HGraphDelegateVisitor {
                         HInstruction* ref,
                         size_t offset,
                         HInstruction* index,
+                        size_t vector_length,
                         int16_t declaring_class_def_index,
                         HInstruction* value) {
     HInstruction* original_ref = heap_location_collector_.HuntForOriginalReference(ref);
     ReferenceInfo* ref_info = heap_location_collector_.FindReferenceInfoOf(original_ref);
     size_t idx = heap_location_collector_.FindHeapLocationIndex(
-        ref_info, offset, index, declaring_class_def_index);
+        ref_info, offset, index, vector_length, declaring_class_def_index);
     DCHECK_NE(idx, HeapLocationCollector::kHeapLocationNotFound);
     ScopedArenaVector<HInstruction*>& heap_values =
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
@@ -383,10 +392,12 @@ class LSEVisitor : public HGraphDelegateVisitor {
     if (Equal(heap_value, value)) {
       // Store into the heap location with the same value.
       same_value = true;
-    } else if (index != nullptr && ref_info->HasIndexAliasing()) {
-      // For array element, don't eliminate stores if the index can be aliased.
+    } else if (index != nullptr &&
+               heap_location_collector_.GetHeapLocation(idx)->HasAliasedLocations()) {
+      // For array element, don't eliminate stores if the location can be aliased
+      // (due to either ref or index aliasing).
     } else if (ref_info->IsSingleton()) {
-      // Store into a field of a singleton. The value cannot be killed due to
+      // Store into a field/element of a singleton. The value cannot be killed due to
       // aliasing/invocation. It can be redundant since future loads can
       // directly get the value set by this instruction. The value can still be killed due to
       // merging or loop side effects. Stores whose values are killed due to merging/loop side
@@ -394,24 +405,18 @@ class LSEVisitor : public HGraphDelegateVisitor {
       // Stores whose values may be needed after method return or deoptimization
       // are also removed from possibly_removed_stores_ when that is detected.
       possibly_redundant = true;
-      HNewInstance* new_instance = ref_info->GetReference()->AsNewInstance();
-      if (new_instance != nullptr && new_instance->IsFinalizable()) {
-        // Finalizable objects escape globally. Need to keep the store.
-        possibly_redundant = false;
-      } else {
-        HLoopInformation* loop_info = instruction->GetBlock()->GetLoopInformation();
-        if (loop_info != nullptr) {
-          // instruction is a store in the loop so the loop must does write.
-          DCHECK(side_effects_.GetLoopEffects(loop_info->GetHeader()).DoesAnyWrite());
+      HLoopInformation* loop_info = instruction->GetBlock()->GetLoopInformation();
+      if (loop_info != nullptr) {
+        // instruction is a store in the loop so the loop must does write.
+        DCHECK(side_effects_.GetLoopEffects(loop_info->GetHeader()).DoesAnyWrite());
 
-          if (loop_info->IsDefinedOutOfTheLoop(original_ref)) {
-            DCHECK(original_ref->GetBlock()->Dominates(loop_info->GetPreHeader()));
-            // Keep the store since its value may be needed at the loop header.
-            possibly_redundant = false;
-          } else {
-            // The singleton is created inside the loop. Value stored to it isn't needed at
-            // the loop header. This is true for outer loops also.
-          }
+        if (loop_info->IsDefinedOutOfTheLoop(original_ref)) {
+          DCHECK(original_ref->GetBlock()->Dominates(loop_info->GetPreHeader()));
+          // Keep the store since its value may be needed at the loop header.
+          possibly_redundant = false;
+        } else {
+          // The singleton is created inside the loop. Value stored to it isn't needed at
+          // the loop header. This is true for outer loops also.
         }
       }
     }
@@ -421,7 +426,9 @@ class LSEVisitor : public HGraphDelegateVisitor {
 
     if (!same_value) {
       if (possibly_redundant) {
-        DCHECK(instruction->IsInstanceFieldSet() || instruction->IsArraySet());
+        DCHECK(instruction->IsInstanceFieldSet() ||
+               instruction->IsArraySet() ||
+               instruction->IsVecStore());
         // Put the store as the heap value. If the value is loaded from heap
         // by a load later, this store isn't really redundant.
         heap_values[idx] = instruction;
@@ -434,8 +441,24 @@ class LSEVisitor : public HGraphDelegateVisitor {
       if (i == idx) {
         continue;
       }
-      if (heap_values[i] == value) {
-        // Same value should be kept even if aliasing happens.
+      if (heap_values[i] == value && !instruction->IsVecOperation()) {
+        // For field/array, same value should be kept even if aliasing happens.
+        //
+        // For vector values , this is NOT safe. For example:
+        //   packed_data = [0xA, 0xB, 0xC, 0xD];            <-- Different values in each lane.
+        //   VecStore array[i  ,i+1,i+2,i+3] = packed_data;
+        //   VecStore array[i+1,i+2,i+3,i+4] = packed_data; <-- We are here (partial overlap).
+        //   VecLoad  vx = array[i,i+1,i+2,i+3];            <-- Cannot be eliminated.
+        //
+        // TODO: to allow such 'same value' optimization on vector data,
+        // LSA needs to report more fine-grain MAY alias information:
+        // (1) May alias due to two vector data partial overlap.
+        //     e.g. a[i..i+3] and a[i+1,..,i+4].
+        // (2) May alias due to two vector data may complete overlap each other.
+        //     e.g. a[i..i+3] and b[i..i+3].
+        // (3) May alias but the exact relationship between two locations is unknown.
+        //     e.g. a[i..i+3] and b[j..j+3], where values of a,b,i,j are all unknown.
+        // This 'same value' optimization can apply only on case (2).
         continue;
       }
       if (heap_values[i] == kUnknownHeapValue) {
@@ -453,7 +476,12 @@ class LSEVisitor : public HGraphDelegateVisitor {
     HInstruction* obj = instruction->InputAt(0);
     size_t offset = instruction->GetFieldInfo().GetFieldOffset().SizeValue();
     int16_t declaring_class_def_index = instruction->GetFieldInfo().GetDeclaringClassDefIndex();
-    VisitGetLocation(instruction, obj, offset, nullptr, declaring_class_def_index);
+    VisitGetLocation(instruction,
+                     obj,
+                     offset,
+                     nullptr,
+                     HeapLocation::kScalar,
+                     declaring_class_def_index);
   }
 
   void VisitInstanceFieldSet(HInstanceFieldSet* instruction) OVERRIDE {
@@ -461,14 +489,25 @@ class LSEVisitor : public HGraphDelegateVisitor {
     size_t offset = instruction->GetFieldInfo().GetFieldOffset().SizeValue();
     int16_t declaring_class_def_index = instruction->GetFieldInfo().GetDeclaringClassDefIndex();
     HInstruction* value = instruction->InputAt(1);
-    VisitSetLocation(instruction, obj, offset, nullptr, declaring_class_def_index, value);
+    VisitSetLocation(instruction,
+                     obj,
+                     offset,
+                     nullptr,
+                     HeapLocation::kScalar,
+                     declaring_class_def_index,
+                     value);
   }
 
   void VisitStaticFieldGet(HStaticFieldGet* instruction) OVERRIDE {
     HInstruction* cls = instruction->InputAt(0);
     size_t offset = instruction->GetFieldInfo().GetFieldOffset().SizeValue();
     int16_t declaring_class_def_index = instruction->GetFieldInfo().GetDeclaringClassDefIndex();
-    VisitGetLocation(instruction, cls, offset, nullptr, declaring_class_def_index);
+    VisitGetLocation(instruction,
+                     cls,
+                     offset,
+                     nullptr,
+                     HeapLocation::kScalar,
+                     declaring_class_def_index);
   }
 
   void VisitStaticFieldSet(HStaticFieldSet* instruction) OVERRIDE {
@@ -476,7 +515,13 @@ class LSEVisitor : public HGraphDelegateVisitor {
     size_t offset = instruction->GetFieldInfo().GetFieldOffset().SizeValue();
     int16_t declaring_class_def_index = instruction->GetFieldInfo().GetDeclaringClassDefIndex();
     HInstruction* value = instruction->InputAt(1);
-    VisitSetLocation(instruction, cls, offset, nullptr, declaring_class_def_index, value);
+    VisitSetLocation(instruction,
+                     cls,
+                     offset,
+                     nullptr,
+                     HeapLocation::kScalar,
+                     declaring_class_def_index,
+                     value);
   }
 
   void VisitArrayGet(HArrayGet* instruction) OVERRIDE {
@@ -486,6 +531,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
                      array,
                      HeapLocation::kInvalidFieldOffset,
                      index,
+                     HeapLocation::kScalar,
                      HeapLocation::kDeclaringClassDefIndexForArrays);
   }
 
@@ -497,6 +543,33 @@ class LSEVisitor : public HGraphDelegateVisitor {
                      array,
                      HeapLocation::kInvalidFieldOffset,
                      index,
+                     HeapLocation::kScalar,
+                     HeapLocation::kDeclaringClassDefIndexForArrays,
+                     value);
+  }
+
+  void VisitVecLoad(HVecLoad* instruction) OVERRIDE {
+    HInstruction* array = instruction->InputAt(0);
+    HInstruction* index = instruction->InputAt(1);
+    size_t vector_length = instruction->GetVectorLength();
+    VisitGetLocation(instruction,
+                     array,
+                     HeapLocation::kInvalidFieldOffset,
+                     index,
+                     vector_length,
+                     HeapLocation::kDeclaringClassDefIndexForArrays);
+  }
+
+  void VisitVecStore(HVecStore* instruction) OVERRIDE {
+    HInstruction* array = instruction->InputAt(0);
+    HInstruction* index = instruction->InputAt(1);
+    HInstruction* value = instruction->InputAt(2);
+    size_t vector_length = instruction->GetVectorLength();
+    VisitSetLocation(instruction,
+                     array,
+                     HeapLocation::kInvalidFieldOffset,
+                     index,
+                     vector_length,
                      HeapLocation::kDeclaringClassDefIndexForArrays,
                      value);
   }
@@ -510,7 +583,9 @@ class LSEVisitor : public HGraphDelegateVisitor {
         continue;
       }
       // A store is kept as the heap value for possibly removed stores.
-      if (heap_value->IsInstanceFieldSet() || heap_value->IsArraySet()) {
+      if (heap_value->IsInstanceFieldSet() ||
+          heap_value->IsArraySet() ||
+          heap_value->IsVecStore()) {
         // Check whether the reference for a store is used by an environment local of
         // HDeoptimize.
         HInstruction* reference = heap_value->InputAt(0);
@@ -528,15 +603,21 @@ class LSEVisitor : public HGraphDelegateVisitor {
     }
   }
 
-  void HandleInvoke(HInstruction* invoke) {
+  void HandleInvoke(HInstruction* instruction) {
+    SideEffects side_effects = instruction->GetSideEffects();
     ScopedArenaVector<HInstruction*>& heap_values =
-        heap_values_for_[invoke->GetBlock()->GetBlockId()];
+        heap_values_for_[instruction->GetBlock()->GetBlockId()];
     for (size_t i = 0; i < heap_values.size(); i++) {
       ReferenceInfo* ref_info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
       if (ref_info->IsSingleton()) {
         // Singleton references cannot be seen by the callee.
       } else {
-        heap_values[i] = kUnknownHeapValue;
+        if (side_effects.DoesAnyRead()) {
+          KeepIfIsStore(heap_values[i]);
+        }
+        if (side_effects.DoesAnyWrite()) {
+          heap_values[i] = kUnknownHeapValue;
+        }
       }
     }
   }
@@ -575,9 +656,8 @@ class LSEVisitor : public HGraphDelegateVisitor {
       // new_instance isn't used for field accesses. No need to process it.
       return;
     }
-    if (ref_info->IsSingletonAndRemovable() &&
-        !new_instance->IsFinalizable() &&
-        !new_instance->NeedsChecks()) {
+    if (ref_info->IsSingletonAndRemovable() && !new_instance->NeedsChecks()) {
+      DCHECK(!new_instance->IsFinalizable());
       singleton_new_instances_.push_back(new_instance);
     }
     ScopedArenaVector<HInstruction*>& heap_values =
@@ -660,11 +740,6 @@ void LoadStoreElimination::Run() {
   const HeapLocationCollector& heap_location_collector = lsa_.GetHeapLocationCollector();
   if (heap_location_collector.GetNumberOfHeapLocations() == 0) {
     // No HeapLocation information from LSA, skip this optimization.
-    return;
-  }
-
-  // TODO: analyze VecLoad/VecStore better.
-  if (graph_->HasSIMD()) {
     return;
   }
 

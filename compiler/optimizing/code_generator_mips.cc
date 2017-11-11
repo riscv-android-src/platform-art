@@ -461,6 +461,10 @@ class SuspendCheckSlowPathMIPS : public SlowPathCodeMIPS {
 
   const char* GetDescription() const OVERRIDE { return "SuspendCheckSlowPathMIPS"; }
 
+  HBasicBlock* GetSuccessor() const {
+    return successor_;
+  }
+
  private:
   // If not null, the block to branch to after the suspend check.
   HBasicBlock* const successor_;
@@ -1132,7 +1136,7 @@ void CodeGeneratorMIPS::Finalize(CodeAllocator* allocator) {
   StackMapStream* stack_map_stream = GetStackMapStream();
   for (size_t i = 0, num = stack_map_stream->GetNumberOfStackMaps(); i != num; ++i) {
     uint32_t old_position =
-        stack_map_stream->GetStackMap(i).native_pc_code_offset.Uint32Value(kMips);
+        stack_map_stream->GetStackMap(i).native_pc_code_offset.Uint32Value(InstructionSet::kMips);
     uint32_t new_position = __ GetAdjustedPosition(old_position);
     DCHECK_GE(new_position, old_position);
     stack_map_stream->SetStackMapNativePcOffset(i, new_position);
@@ -1347,13 +1351,14 @@ static dwarf::Reg DWARFReg(Register reg) {
 void CodeGeneratorMIPS::GenerateFrameEntry() {
   __ Bind(&frame_entry_label_);
 
-  bool do_overflow_check = FrameNeedsStackCheck(GetFrameSize(), kMips) || !IsLeafMethod();
+  bool do_overflow_check =
+      FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kMips) || !IsLeafMethod();
 
   if (do_overflow_check) {
     __ LoadFromOffset(kLoadWord,
                       ZERO,
                       SP,
-                      -static_cast<int32_t>(GetStackOverflowReservedBytes(kMips)));
+                      -static_cast<int32_t>(GetStackOverflowReservedBytes(InstructionSet::kMips)));
     RecordPcInfo(nullptr, 0);
   }
 
@@ -1365,8 +1370,9 @@ void CodeGeneratorMIPS::GenerateFrameEntry() {
   }
 
   // Make sure the frame size isn't unreasonably large.
-  if (GetFrameSize() > GetStackOverflowReservedBytes(kMips)) {
-    LOG(FATAL) << "Stack frame larger than " << GetStackOverflowReservedBytes(kMips) << " bytes";
+  if (GetFrameSize() > GetStackOverflowReservedBytes(InstructionSet::kMips)) {
+    LOG(FATAL) << "Stack frame larger than "
+        << GetStackOverflowReservedBytes(InstructionSet::kMips) << " bytes";
   }
 
   // Spill callee-saved registers.
@@ -1979,7 +1985,7 @@ void CodeGeneratorMIPS::GenerateInvokeRuntime(int32_t entry_point_offset, bool d
 
 void InstructionCodeGeneratorMIPS::GenerateClassInitializationCheck(SlowPathCodeMIPS* slow_path,
                                                                     Register class_reg) {
-  __ LoadFromOffset(kLoadWord, TMP, class_reg, mirror::Class::StatusOffset().Int32Value());
+  __ LoadFromOffset(kLoadSignedByte, TMP, class_reg, mirror::Class::StatusOffset().Int32Value());
   __ LoadConst32(AT, mirror::Class::kStatusInitialized);
   __ Blt(TMP, AT, slow_path->GetEntryLabel());
   // Even if the initialized flag is set, we need to ensure consistent memory ordering.
@@ -1994,8 +2000,19 @@ void InstructionCodeGeneratorMIPS::GenerateMemoryBarrier(MemBarrierKind kind ATT
 void InstructionCodeGeneratorMIPS::GenerateSuspendCheck(HSuspendCheck* instruction,
                                                         HBasicBlock* successor) {
   SuspendCheckSlowPathMIPS* slow_path =
-    new (codegen_->GetScopedAllocator()) SuspendCheckSlowPathMIPS(instruction, successor);
-  codegen_->AddSlowPath(slow_path);
+      down_cast<SuspendCheckSlowPathMIPS*>(instruction->GetSlowPath());
+
+  if (slow_path == nullptr) {
+    slow_path =
+        new (codegen_->GetScopedAllocator()) SuspendCheckSlowPathMIPS(instruction, successor);
+    instruction->SetSlowPath(slow_path);
+    codegen_->AddSlowPath(slow_path);
+    if (successor != nullptr) {
+      DCHECK(successor->IsLoopHeader());
+    }
+  } else {
+    DCHECK_EQ(slow_path->GetSuccessor(), successor);
+  }
 
   __ LoadFromOffset(kLoadUnsignedHalfword,
                     TMP,
@@ -9241,6 +9258,16 @@ void InstructionCodeGeneratorMIPS::VisitClassTableGet(HClassTableGet* instructio
                       locations->Out().AsRegister<Register>(),
                       method_offset);
   }
+}
+
+void LocationsBuilderMIPS::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                    ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
+}
+
+void InstructionCodeGeneratorMIPS::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                            ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
 }
 
 #undef __

@@ -970,7 +970,7 @@ inline Condition X86_64FPCondition(IfCondition cond) {
     case kCondGT: return kAbove;
     case kCondGE: return kAboveEqual;
     default:      break;  // should not happen
-  };
+  }
   LOG(FATAL) << "Unreachable";
   UNREACHABLE();
 }
@@ -1277,8 +1277,8 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
   DCHECK(GetCompilerOptions().GetImplicitStackOverflowChecks());
 
   if (!skip_overflow_check) {
-    __ testq(CpuRegister(RAX), Address(
-        CpuRegister(RSP), -static_cast<int32_t>(GetStackOverflowReservedBytes(kX86_64))));
+    size_t reserved_bytes = GetStackOverflowReservedBytes(InstructionSet::kX86_64);
+    __ testq(CpuRegister(RAX), Address(CpuRegister(RSP), -static_cast<int32_t>(reserved_bytes)));
     RecordPcInfo(nullptr, 0);
   }
 
@@ -2635,7 +2635,7 @@ void LocationsBuilderX86_64::VisitTypeConversion(HTypeConversion* conversion) {
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     case DataType::Type::kFloat64:
@@ -2948,7 +2948,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     case DataType::Type::kFloat64:
@@ -3000,7 +3000,7 @@ void InstructionCodeGeneratorX86_64::VisitTypeConversion(HTypeConversion* conver
         default:
           LOG(FATAL) << "Unexpected type conversion from " << input_type
                      << " to " << result_type;
-      };
+      }
       break;
 
     default:
@@ -5403,7 +5403,7 @@ void ParallelMoveResolverX86_64::RestoreScratch(int reg) {
 
 void InstructionCodeGeneratorX86_64::GenerateClassInitializationCheck(
     SlowPathCode* slow_path, CpuRegister class_reg) {
-  __ cmpl(Address(class_reg,  mirror::Class::StatusOffset().Int32Value()),
+  __ cmpb(Address(class_reg,  mirror::Class::StatusOffset().Int32Value()),
           Immediate(mirror::Class::kStatusInitialized));
   __ j(kLess, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
@@ -6831,6 +6831,16 @@ void InstructionCodeGeneratorX86_64::VisitPackedSwitch(HPackedSwitch* switch_ins
 
   // And jump.
   __ jmp(temp_reg);
+}
+
+void LocationsBuilderX86_64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                      ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
+}
+
+void InstructionCodeGeneratorX86_64::VisitIntermediateAddress(HIntermediateAddress* instruction
+                                                              ATTRIBUTE_UNUSED) {
+  LOG(FATAL) << "Unreachable";
 }
 
 void CodeGeneratorX86_64::Load32BitValue(CpuRegister dest, int32_t value) {
