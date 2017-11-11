@@ -52,8 +52,6 @@
 
 namespace art {
 
-using JniOptimizationFlags = Compiler::JniOptimizationFlags;
-
 template <PointerSize kPointerSize>
 static void CopyParameter(JNIMacroAssembler<kPointerSize>* jni_asm,
                           ManagedRuntimeCallingConvention* mr_conv,
@@ -120,8 +118,7 @@ template <PointerSize kPointerSize>
 static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
                                                    uint32_t access_flags,
                                                    uint32_t method_idx,
-                                                   const DexFile& dex_file,
-                                                   JniOptimizationFlags optimization_flags) {
+                                                   const DexFile& dex_file) {
   const bool is_native = (access_flags & kAccNative) != 0;
   CHECK(is_native);
   const bool is_static = (access_flags & kAccStatic) != 0;
@@ -131,10 +128,10 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   const InstructionSetFeatures* instruction_set_features = driver->GetInstructionSetFeatures();
 
   // i.e. if the method was annotated with @FastNative
-  const bool is_fast_native = (optimization_flags == Compiler::kFastNative);
+  const bool is_fast_native = (access_flags & kAccFastNative) != 0u;
 
   // i.e. if the method was annotated with @CriticalNative
-  bool is_critical_native = (optimization_flags == Compiler::kCriticalNative);
+  bool is_critical_native = (access_flags & kAccCriticalNative) != 0u;
 
   VLOG(jni) << "JniCompile: Method :: "
               << dex_file.PrettyMethod(method_idx, /* with signature */ true)
@@ -323,7 +320,7 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
   // Note that we always have outgoing param space available for at least two params.
   if (kUseReadBarrier && is_static && !is_critical_native) {
     const bool kReadBarrierFastPath =
-        (instruction_set != kMips) && (instruction_set != kMips64);
+        (instruction_set != InstructionSet::kMips) && (instruction_set != InstructionSet::kMips64);
     std::unique_ptr<JNIMacroLabel> skip_cold_path_label;
     if (kReadBarrierFastPath) {
       skip_cold_path_label = __ CreateLabel();
@@ -531,7 +528,8 @@ static CompiledMethod* ArtJniCompileMethodInternal(CompilerDriver* driver,
     if (LIKELY(!is_critical_native)) {
       // For normal JNI, store the return value on the stack because the call to
       // JniMethodEnd will clobber the return value. It will be restored in (13).
-      if ((instruction_set == kMips || instruction_set == kMips64) &&
+      if ((instruction_set == InstructionSet::kMips ||
+           instruction_set == InstructionSet::kMips64) &&
           main_jni_conv->GetReturnType() == Primitive::kPrimDouble &&
           return_save_location.Uint32Value() % 8 != 0) {
         // Ensure doubles are 8-byte aligned for MIPS
@@ -780,14 +778,13 @@ static void SetNativeParameter(JNIMacroAssembler<kPointerSize>* jni_asm,
 CompiledMethod* ArtQuickJniCompileMethod(CompilerDriver* compiler,
                                          uint32_t access_flags,
                                          uint32_t method_idx,
-                                         const DexFile& dex_file,
-                                         Compiler::JniOptimizationFlags optimization_flags) {
+                                         const DexFile& dex_file) {
   if (Is64BitInstructionSet(compiler->GetInstructionSet())) {
     return ArtJniCompileMethodInternal<PointerSize::k64>(
-        compiler, access_flags, method_idx, dex_file, optimization_flags);
+        compiler, access_flags, method_idx, dex_file);
   } else {
     return ArtJniCompileMethodInternal<PointerSize::k32>(
-        compiler, access_flags, method_idx, dex_file, optimization_flags);
+        compiler, access_flags, method_idx, dex_file);
   }
 }
 

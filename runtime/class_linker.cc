@@ -98,6 +98,7 @@
 #include "mirror/reference-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "mirror/string-inl.h"
+#include "mirror/var_handle.h"
 #include "native/dalvik_system_DexFile.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "oat.h"
@@ -283,7 +284,7 @@ struct FieldGap {
   uint32_t size;  // The gap size of 1, 2, or 4 bytes.
 };
 struct FieldGapsComparator {
-  explicit FieldGapsComparator() {
+  FieldGapsComparator() {
   }
   bool operator() (const FieldGap& lhs, const FieldGap& rhs)
       NO_THREAD_SAFETY_ANALYSIS {
@@ -452,6 +453,19 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
                                                          java_lang_Object.Get(),
                                                          java_lang_Object->GetObjectSize(),
                                                          VoidFunctor()));
+
+  // Initialize the SubtypeCheck bitstring for java.lang.Object and java.lang.Class.
+  {
+    // It might seem the lock here is unnecessary, however all the SubtypeCheck
+    // functions are annotated to require locks all the way down.
+    //
+    // We take the lock here to avoid using NO_THREAD_SAFETY_ANALYSIS.
+    MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+    mirror::Class* java_lang_Object_ptr = java_lang_Object.Get();
+    SubtypeCheck<mirror::Class*>::EnsureInitialized(java_lang_Object_ptr);
+    mirror::Class* java_lang_Class_ptr =  java_lang_Class.Get();
+    SubtypeCheck<mirror::Class*>::EnsureInitialized(java_lang_Class_ptr);
+  }
 
   // Object[] next to hold class roots.
   Handle<mirror::Class> object_array_class(hs.NewHandle(
@@ -698,6 +712,12 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   SetClassRoot(kJavaLangReflectMethodArrayClass, class_root);
   mirror::Method::SetArrayClass(class_root);
 
+  // Create java.lang.invoke.CallSite.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/CallSite;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(kJavaLangInvokeCallSite, class_root);
+  mirror::CallSite::SetClass(class_root);
+
   // Create java.lang.invoke.MethodType.class root
   class_root = FindSystemClass(self, "Ljava/lang/invoke/MethodType;");
   CHECK(class_root != nullptr);
@@ -716,11 +736,35 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   SetClassRoot(kJavaLangInvokeMethodHandlesLookup, class_root);
   mirror::MethodHandlesLookup::SetClass(class_root);
 
-  // Create java.lang.invoke.CallSite.class root
-  class_root = FindSystemClass(self, "Ljava/lang/invoke/CallSite;");
+  // Create java.lang.invoke.VarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/VarHandle;");
   CHECK(class_root != nullptr);
-  SetClassRoot(kJavaLangInvokeCallSite, class_root);
-  mirror::CallSite::SetClass(class_root);
+  SetClassRoot(kJavaLangInvokeVarHandle, class_root);
+  mirror::VarHandle::SetClass(class_root);
+
+  // Create java.lang.invoke.FieldVarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/FieldVarHandle;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(kJavaLangInvokeFieldVarHandle, class_root);
+  mirror::FieldVarHandle::SetClass(class_root);
+
+  // Create java.lang.invoke.ArrayElementVarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/ArrayElementVarHandle;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(kJavaLangInvokeArrayElementVarHandle, class_root);
+  mirror::ArrayElementVarHandle::SetClass(class_root);
+
+  // Create java.lang.invoke.ByteArrayViewVarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/ByteArrayViewVarHandle;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(kJavaLangInvokeByteArrayViewVarHandle, class_root);
+  mirror::ByteArrayViewVarHandle::SetClass(class_root);
+
+  // Create java.lang.invoke.ByteBufferViewVarHandle.class root
+  class_root = FindSystemClass(self, "Ljava/lang/invoke/ByteBufferViewVarHandle;");
+  CHECK(class_root != nullptr);
+  SetClassRoot(kJavaLangInvokeByteBufferViewVarHandle, class_root);
+  mirror::ByteBufferViewVarHandle::SetClass(class_root);
 
   class_root = FindSystemClass(self, "Ldalvik/system/EmulatedStackFrame;");
   CHECK(class_root != nullptr);
@@ -988,10 +1032,15 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   mirror::Constructor::SetArrayClass(GetClassRoot(kJavaLangReflectConstructorArrayClass));
   mirror::Method::SetClass(GetClassRoot(kJavaLangReflectMethod));
   mirror::Method::SetArrayClass(GetClassRoot(kJavaLangReflectMethodArrayClass));
-  mirror::MethodType::SetClass(GetClassRoot(kJavaLangInvokeMethodType));
+  mirror::CallSite::SetClass(GetClassRoot(kJavaLangInvokeCallSite));
   mirror::MethodHandleImpl::SetClass(GetClassRoot(kJavaLangInvokeMethodHandleImpl));
   mirror::MethodHandlesLookup::SetClass(GetClassRoot(kJavaLangInvokeMethodHandlesLookup));
-  mirror::CallSite::SetClass(GetClassRoot(kJavaLangInvokeCallSite));
+  mirror::MethodType::SetClass(GetClassRoot(kJavaLangInvokeMethodType));
+  mirror::VarHandle::SetClass(GetClassRoot(kJavaLangInvokeVarHandle));
+  mirror::FieldVarHandle::SetClass(GetClassRoot(kJavaLangInvokeFieldVarHandle));
+  mirror::ArrayElementVarHandle::SetClass(GetClassRoot(kJavaLangInvokeArrayElementVarHandle));
+  mirror::ByteArrayViewVarHandle::SetClass(GetClassRoot(kJavaLangInvokeByteArrayViewVarHandle));
+  mirror::ByteBufferViewVarHandle::SetClass(GetClassRoot(kJavaLangInvokeByteBufferViewVarHandle));
   mirror::Reference::SetClass(GetClassRoot(kJavaLangRefReference));
   mirror::BooleanArray::SetArrayClass(GetClassRoot(kBooleanArrayClass));
   mirror::ByteArray::SetArrayClass(GetClassRoot(kByteArrayClass));
@@ -1806,11 +1855,32 @@ bool ClassLinker::AddImageSpace(
     for (const ClassTable::TableSlot& root : temp_set) {
       visitor(root.Read());
     }
+
+    {
+      // Every class in the app image has initially SubtypeCheckInfo in the
+      // Uninitialized state.
+      //
+      // The SubtypeCheck invariants imply that a SubtypeCheckInfo is at least Initialized
+      // after class initialization is complete. The app image ClassStatus as-is
+      // are almost all ClassStatus::Initialized, and being in the
+      // SubtypeCheckInfo::kUninitialized state is violating that invariant.
+      //
+      // Force every app image class's SubtypeCheck to be at least kIninitialized.
+      //
+      // See also ImageWriter::FixupClass.
+      ScopedTrace trace("Recalculate app image SubtypeCheck bitstrings");
+      MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+      for (const ClassTable::TableSlot& root : temp_set) {
+        mirror::Class* root_klass = root.Read();
+        SubtypeCheck<mirror::Class*>::EnsureInitialized(root_klass);
+      }
+    }
   }
   if (!oat_file->GetBssGcRoots().empty()) {
     // Insert oat file to class table for visiting .bss GC roots.
     class_table->InsertOatFile(oat_file);
   }
+
   if (added_class_table) {
     WriterMutexLock mu(self, *Locks::classlinker_classes_lock_);
     class_table->AddClassSet(std::move(temp_set));
@@ -2083,10 +2153,15 @@ ClassLinker::~ClassLinker() {
   mirror::IntArray::ResetArrayClass();
   mirror::LongArray::ResetArrayClass();
   mirror::ShortArray::ResetArrayClass();
+  mirror::CallSite::ResetClass();
   mirror::MethodType::ResetClass();
   mirror::MethodHandleImpl::ResetClass();
   mirror::MethodHandlesLookup::ResetClass();
-  mirror::CallSite::ResetClass();
+  mirror::VarHandle::ResetClass();
+  mirror::FieldVarHandle::ResetClass();
+  mirror::ArrayElementVarHandle::ResetClass();
+  mirror::ByteArrayViewVarHandle::ResetClass();
+  mirror::ByteBufferViewVarHandle::ResetClass();
   mirror::EmulatedStackFrame::ResetClass();
   Thread* const self = Thread::Current();
   for (const ClassLoaderData& data : class_loaders_) {
@@ -3265,6 +3340,11 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
       }
     }
   }
+  if (UNLIKELY((access_flags & kAccNative) != 0u)) {
+    // Check if the native method is annotated with @FastNative or @CriticalNative.
+    access_flags |= annotations::GetNativeMethodAnnotationAccessFlags(
+        dex_file, dst->GetClassDef(), dex_method_idx);
+  }
   dst->SetAccessFlags(access_flags);
 }
 
@@ -3823,7 +3903,7 @@ mirror::Class* ClassLinker::LookupClass(Thread* self,
 
 class MoveClassTableToPreZygoteVisitor : public ClassLoaderVisitor {
  public:
-  explicit MoveClassTableToPreZygoteVisitor() {}
+  MoveClassTableToPreZygoteVisitor() {}
 
   void Visit(ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(Locks::classlinker_classes_lock_)
@@ -5123,10 +5203,27 @@ bool ClassLinker::EnsureInitialized(Thread* self,
                                     bool can_init_fields,
                                     bool can_init_parents) {
   DCHECK(c != nullptr);
+
   if (c->IsInitialized()) {
     EnsureSkipAccessChecksMethods(c, image_pointer_size_);
     self->AssertNoPendingException();
     return true;
+  }
+  // SubtypeCheckInfo::Initialized must happen-before any new-instance for that type.
+  //
+  // Ensure the bitstring is initialized before any of the class initialization
+  // logic occurs. Once a class initializer starts running, objects can
+  // escape into the heap and use the subtype checking code.
+  //
+  // Note: A class whose SubtypeCheckInfo is at least Initialized means it
+  // can be used as a source for the IsSubClass check, and that all ancestors
+  // of the class are Assigned (can be used as a target for IsSubClass check)
+  // or Overflowed (can be used as a source for IsSubClass check).
+  {
+    MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+    ObjPtr<mirror::Class> c_ptr(c.Get());
+    SubtypeCheck<ObjPtr<mirror::Class>>::EnsureInitialized(c_ptr);
+    // TODO: Avoid taking subtype_check_lock_ if SubtypeCheck is already initialized.
   }
   const bool success = InitializeClass(self, c, can_init_fields, can_init_parents);
   if (!success) {
@@ -6956,6 +7053,7 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
       // verified yet it shouldn't have methods that are skipping access checks.
       // TODO This is rather arbitrary. We should maybe support classes where only some of its
       // methods are skip_access_checks.
+      DCHECK_EQ(new_method.GetAccessFlags() & kAccNative, 0u);
       constexpr uint32_t kSetFlags = kAccDefault | kAccCopied;
       constexpr uint32_t kMaskFlags = ~kAccSkipAccessChecks;
       new_method.SetAccessFlags((new_method.GetAccessFlags() | kSetFlags) & kMaskFlags);
@@ -6978,6 +7076,7 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
       // mark this as a default, non-abstract method, since thats what it is. Also clear the
       // kAccSkipAccessChecks bit since this class hasn't been verified yet it shouldn't have
       // methods that are skipping access checks.
+      DCHECK_EQ(new_method.GetAccessFlags() & kAccNative, 0u);
       constexpr uint32_t kSetFlags = kAccDefault | kAccDefaultConflict | kAccCopied;
       constexpr uint32_t kMaskFlags = ~(kAccAbstract | kAccSkipAccessChecks);
       new_method.SetAccessFlags((new_method.GetAccessFlags() | kSetFlags) & kMaskFlags);
@@ -7376,7 +7475,7 @@ bool ClassLinker::LinkStaticFields(Thread* self, Handle<mirror::Class> klass, si
 }
 
 struct LinkFieldsComparator {
-  explicit LinkFieldsComparator() REQUIRES_SHARED(Locks::mutator_lock_) {
+  LinkFieldsComparator() REQUIRES_SHARED(Locks::mutator_lock_) {
   }
   // No thread safety analysis as will be called from STL. Checked lock held in constructor.
   bool operator()(ArtField* field1, ArtField* field2)
@@ -8118,23 +8217,23 @@ mirror::MethodHandle* ClassLinker::ResolveMethodHandleForField(
   Handle<mirror::Class> return_type;
   switch (handle_type) {
     case DexFile::MethodHandleType::kStaticPut: {
-      method_params->Set(0, target_field->GetType<true>());
+      method_params->Set(0, target_field->ResolveType());
       return_type = hs.NewHandle(FindPrimitiveClass('V'));
       break;
     }
     case DexFile::MethodHandleType::kStaticGet: {
-      return_type = hs.NewHandle(target_field->GetType<true>());
+      return_type = hs.NewHandle(target_field->ResolveType());
       break;
     }
     case DexFile::MethodHandleType::kInstancePut: {
       method_params->Set(0, target_field->GetDeclaringClass());
-      method_params->Set(1, target_field->GetType<true>());
+      method_params->Set(1, target_field->ResolveType());
       return_type = hs.NewHandle(FindPrimitiveClass('V'));
       break;
     }
     case DexFile::MethodHandleType::kInstanceGet: {
       method_params->Set(0, target_field->GetDeclaringClass());
-      return_type = hs.NewHandle(target_field->GetType<true>());
+      return_type = hs.NewHandle(target_field->ResolveType());
       break;
     }
     case DexFile::MethodHandleType::kInvokeStatic:
@@ -8484,6 +8583,11 @@ const char* ClassLinker::GetClassRootDescriptor(ClassRoot class_root) {
     "Ljava/lang/invoke/MethodHandleImpl;",
     "Ljava/lang/invoke/MethodHandles$Lookup;",
     "Ljava/lang/invoke/MethodType;",
+    "Ljava/lang/invoke/VarHandle;",
+    "Ljava/lang/invoke/FieldVarHandle;",
+    "Ljava/lang/invoke/ArrayElementVarHandle;",
+    "Ljava/lang/invoke/ByteArrayViewVarHandle;",
+    "Ljava/lang/invoke/ByteBufferViewVarHandle;",
     "Ljava/lang/ClassLoader;",
     "Ljava/lang/Throwable;",
     "Ljava/lang/ClassNotFoundException;",
@@ -8536,7 +8640,7 @@ jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
   ArtField* dex_elements_field =
       jni::DecodeArtField(WellKnownClasses::dalvik_system_DexPathList_dexElements);
 
-  Handle<mirror::Class> dex_elements_class(hs.NewHandle(dex_elements_field->GetType<true>()));
+  Handle<mirror::Class> dex_elements_class(hs.NewHandle(dex_elements_field->ResolveType()));
   DCHECK(dex_elements_class != nullptr);
   DCHECK(dex_elements_class->IsArrayClass());
   Handle<mirror::ObjectArray<mirror::Object>> h_dex_elements(hs.NewHandle(
@@ -8551,10 +8655,10 @@ jobject ClassLinker::CreateWellKnownClassLoader(Thread* self,
   DCHECK_EQ(h_dex_element_class.Get(), element_file_field->GetDeclaringClass());
 
   ArtField* cookie_field = jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
-  DCHECK_EQ(cookie_field->GetDeclaringClass(), element_file_field->GetType<false>());
+  DCHECK_EQ(cookie_field->GetDeclaringClass(), element_file_field->LookupType());
 
   ArtField* file_name_field = jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_fileName);
-  DCHECK_EQ(file_name_field->GetDeclaringClass(), element_file_field->GetType<false>());
+  DCHECK_EQ(file_name_field->GetDeclaringClass(), element_file_field->LookupType());
 
   // Fill the elements array.
   int32_t index = 0;

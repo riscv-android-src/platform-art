@@ -44,10 +44,7 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
   DCHECK(!method->IsNative());
 
   std::vector<uint32_t> entries;
-
-  IterationRange<DexInstructionIterator> instructions = method->GetCodeItem()->Instructions();
-  for (auto inst = instructions.begin(); inst != instructions.end(); ++inst) {
-    const uint32_t dex_pc = inst.GetDexPC(instructions.begin());
+  for (const DexInstructionPcPair& inst : method->DexInstructions()) {
     switch (inst->Opcode()) {
       case Instruction::INVOKE_VIRTUAL:
       case Instruction::INVOKE_VIRTUAL_RANGE:
@@ -55,7 +52,7 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
       case Instruction::INVOKE_VIRTUAL_RANGE_QUICK:
       case Instruction::INVOKE_INTERFACE:
       case Instruction::INVOKE_INTERFACE_RANGE:
-        entries.push_back(dex_pc);
+        entries.push_back(inst.DexPc());
         break;
 
       default:
