@@ -21,6 +21,7 @@
 
 #include "art_method-inl.h"
 #include "cdex/compact_dex_file.h"
+#include "dex_file-inl.h"
 #include "standard_dex_file.h"
 
 namespace art {
@@ -113,16 +114,40 @@ inline CodeItemDataAccessor::CodeItemDataAccessor(const DexFile* dex_file,
 inline CodeItemDataAccessor::CodeItemDataAccessor(ArtMethod* method)
     : CodeItemDataAccessor(method->GetDexFile(), method->GetCodeItem()) {}
 
-inline CodeItemDataAccessor CodeItemDataAccessor::CreateNullable(ArtMethod* method) {
-  DCHECK(method != nullptr);
+inline CodeItemDataAccessor CodeItemDataAccessor::CreateNullable(
+    const DexFile* dex_file,
+    const DexFile::CodeItem* code_item) {
   CodeItemDataAccessor ret;
-  const DexFile::CodeItem* code_item = method->GetCodeItem();
   if (code_item != nullptr) {
-    ret.Init(method->GetDexFile(), code_item);
+    ret.Init(dex_file, code_item);
   } else {
     DCHECK(!ret.HasCodeItem()) << "Should be null initialized";
   }
   return ret;
+}
+
+inline CodeItemDataAccessor CodeItemDataAccessor::CreateNullable(ArtMethod* method) {
+  DCHECK(method != nullptr);
+  return CreateNullable(method->GetDexFile(), method->GetCodeItem());
+}
+
+inline IterationRange<const DexFile::TryItem*> CodeItemDataAccessor::TryItems() const {
+  const DexFile::TryItem* try_items = DexFile::GetTryItems(end(), 0u);
+  return {
+    try_items,
+    try_items + TriesSize() };
+}
+
+inline const uint8_t* CodeItemDataAccessor::GetCatchHandlerData(size_t offset) const {
+  return DexFile::GetCatchHandlerData(end(), TriesSize(), offset);
+}
+
+inline const DexFile::TryItem* CodeItemDataAccessor::FindTryItem(uint32_t try_dex_pc) const {
+  IterationRange<const DexFile::TryItem*> try_items(TryItems());
+  int32_t index = DexFile::FindTryItem(try_items.begin(),
+                                       try_items.end() - try_items.begin(),
+                                       try_dex_pc);
+  return index != -1 ? &try_items.begin()[index] : nullptr;
 }
 
 }  // namespace art
