@@ -190,7 +190,7 @@ class CmdlineParserTest : public ::testing::Test {
 #define EXPECT_SINGLE_PARSE_VALUE(expected, argv, key)        \
     _EXPECT_SINGLE_PARSE_EXISTS(argv, key);                   \
     EXPECT_KEY_VALUE(args, key, expected);                    \
-  } while (false)                                             // NOLINT [readability/namespace] [5]
+  } while (false)
 
 #define EXPECT_SINGLE_PARSE_VALUE_STR(expected, argv, key)    \
   EXPECT_SINGLE_PARSE_VALUE(std::string(expected), argv, key)
@@ -244,7 +244,7 @@ TEST_F(CmdlineParserTest, TestLogVerbosity) {
   {
     const char* log_args = "-verbose:"
         "class,compiler,gc,heap,jdwp,jni,monitor,profiler,signals,simulator,startup,"
-        "third-party-jni,threads,verifier";
+        "third-party-jni,threads,verifier,verifier-debug";
 
     LogVerbosity log_verbosity = LogVerbosity();
     log_verbosity.class_linker = true;
@@ -261,6 +261,7 @@ TEST_F(CmdlineParserTest, TestLogVerbosity) {
     log_verbosity.third_party_jni = true;
     log_verbosity.threads = true;
     log_verbosity.verifier = true;
+    log_verbosity.verifier_debug = true;
 
     EXPECT_SINGLE_PARSE_VALUE(log_verbosity, log_args, M::Verbose);
   }
@@ -318,7 +319,7 @@ TEST_F(CmdlineParserTest, DISABLED_TestXGcOption) {
    * Test success
    */
   {
-    XGcOption option_all_true{};  // NOLINT [readability/braces] [4]
+    XGcOption option_all_true{};
     option_all_true.collector_type_ = gc::CollectorType::kCollectorTypeCMS;
     option_all_true.verify_pre_gc_heap_ = true;
     option_all_true.verify_pre_sweeping_heap_ = true;
@@ -335,7 +336,7 @@ TEST_F(CmdlineParserTest, DISABLED_TestXGcOption) {
 
     EXPECT_SINGLE_PARSE_VALUE(option_all_true, xgc_args_all_true, M::GcOption);
 
-    XGcOption option_all_false{};  // NOLINT [readability/braces] [4]
+    XGcOption option_all_false{};
     option_all_false.collector_type_ = gc::CollectorType::kCollectorTypeMS;
     option_all_false.verify_pre_gc_heap_ = false;
     option_all_false.verify_pre_sweeping_heap_ = false;
@@ -350,7 +351,7 @@ TEST_F(CmdlineParserTest, DISABLED_TestXGcOption) {
 
     EXPECT_SINGLE_PARSE_VALUE(option_all_false, xgc_args_all_false, M::GcOption);
 
-    XGcOption option_all_default{};  // NOLINT [readability/braces] [4]
+    XGcOption option_all_default{};
 
     const char* xgc_args_blank = "-Xgc:";
     EXPECT_SINGLE_PARSE_VALUE(option_all_default, xgc_args_blank, M::GcOption);
@@ -566,10 +567,10 @@ TEST_F(CmdlineParserTest, MultipleArguments) {
 
   auto&& map = parser_->ReleaseArgumentsMap();
   EXPECT_EQ(5u, map.Size());
-  EXPECT_KEY_VALUE(map, M::Help, Unit{});  // NOLINT [whitespace/braces] [5]
+  EXPECT_KEY_VALUE(map, M::Help, Unit{});
   EXPECT_KEY_VALUE(map, M::ForegroundHeapGrowthMultiplier, 0.5);
   EXPECT_KEY_VALUE(map, M::Dex2Oat, false);
-  EXPECT_KEY_VALUE(map, M::MethodTrace, Unit{});  // NOLINT [whitespace/braces] [5]
+  EXPECT_KEY_VALUE(map, M::MethodTrace, Unit{});
   EXPECT_KEY_VALUE(map, M::LargeObjectSpace, gc::space::LargeObjectSpaceType::kMap);
 }  //  TEST_F
 }  // namespace art

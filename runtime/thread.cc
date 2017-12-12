@@ -1884,9 +1884,7 @@ static bool ShouldShowNativeStack(const Thread* thread)
   }
 
   // Threads with no managed stack frames should be shown.
-  const ManagedStack* managed_stack = thread->GetManagedStack();
-  if (managed_stack == nullptr || (managed_stack->GetTopQuickFrame() == nullptr &&
-      managed_stack->GetTopShadowFrame() == nullptr)) {
+  if (!thread->HasManagedStack()) {
     return true;
   }
 
@@ -3702,6 +3700,7 @@ void Thread::DeoptimizeWithDeoptimizationException(JValue* result) {
 
 void Thread::SetAsyncException(ObjPtr<mirror::Throwable> new_exception) {
   CHECK(new_exception != nullptr);
+  Runtime::Current()->SetAsyncExceptionsThrown();
   if (kIsDebugBuild) {
     // Make sure we are in a checkpoint.
     MutexLock mu(Thread::Current(), *Locks::thread_suspend_count_lock_);

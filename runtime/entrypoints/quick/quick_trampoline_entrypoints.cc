@@ -28,10 +28,11 @@
 #include "gc/accounting/card_table-inl.h"
 #include "imt_conflict_table.h"
 #include "imtable-inl.h"
+#include "index_bss_mapping.h"
 #include "instrumentation.h"
 #include "interpreter/interpreter.h"
+#include "jit/jit.h"
 #include "linear_alloc.h"
-#include "method_bss_mapping.h"
 #include "method_handles.h"
 #include "method_reference.h"
 #include "mirror/class-inl.h"
@@ -1214,27 +1215,20 @@ extern "C" const void* artQuickResolutionTrampoline(
 
     // Update .bss entry in oat file if any.
     if (called != nullptr && called_method.dex_file->GetOatDexFile() != nullptr) {
-      const MethodBssMapping* mapping =
-          called_method.dex_file->GetOatDexFile()->GetMethodBssMapping();
-      if (mapping != nullptr) {
-        auto pp = std::partition_point(
-            mapping->begin(),
-            mapping->end(),
-            [called_method](const MethodBssMappingEntry& entry) {
-              return entry.method_index < called_method.index;
-            });
-        if (pp != mapping->end() && pp->CoversIndex(called_method.index)) {
-          size_t bss_offset = pp->GetBssOffset(called_method.index,
-                                               static_cast<size_t>(kRuntimePointerSize));
-          DCHECK_ALIGNED(bss_offset, static_cast<size_t>(kRuntimePointerSize));
-          const OatFile* oat_file = called_method.dex_file->GetOatDexFile()->GetOatFile();
-          ArtMethod** method_entry = reinterpret_cast<ArtMethod**>(const_cast<uint8_t*>(
-              oat_file->BssBegin() + bss_offset));
-          DCHECK_GE(method_entry, oat_file->GetBssMethods().data());
-          DCHECK_LT(method_entry,
-                    oat_file->GetBssMethods().data() + oat_file->GetBssMethods().size());
-          *method_entry = called;
-        }
+      size_t bss_offset = IndexBssMappingLookup::GetBssOffset(
+          called_method.dex_file->GetOatDexFile()->GetMethodBssMapping(),
+          called_method.index,
+          called_method.dex_file->NumMethodIds(),
+          static_cast<size_t>(kRuntimePointerSize));
+      if (bss_offset != IndexBssMappingLookup::npos) {
+        DCHECK_ALIGNED(bss_offset, static_cast<size_t>(kRuntimePointerSize));
+        const OatFile* oat_file = called_method.dex_file->GetOatDexFile()->GetOatFile();
+        ArtMethod** method_entry = reinterpret_cast<ArtMethod**>(const_cast<uint8_t*>(
+            oat_file->BssBegin() + bss_offset));
+        DCHECK_GE(method_entry, oat_file->GetBssMethods().data());
+        DCHECK_LT(method_entry,
+                  oat_file->GetBssMethods().data() + oat_file->GetBssMethods().size());
+        *method_entry = called;
       }
     }
   }
@@ -1256,17 +1250,8 @@ extern "C" const void* artQuickResolutionTrampoline(
       } else {
         DCHECK_EQ(invoke_type, kSuper);
         CHECK(caller != nullptr) << invoke_type;
-        StackHandleScope<2> hs(self);
-        Handle<mirror::DexCache> dex_cache(
-            hs.NewHandle(caller->GetDeclaringClass()->GetDexCache()));
-        Handle<mirror::ClassLoader> class_loader(
-            hs.NewHandle(caller->GetDeclaringClass()->GetClassLoader()));
-        // TODO Maybe put this into a mirror::Class function.
         ObjPtr<mirror::Class> ref_class = linker->LookupResolvedType(
-            *dex_cache->GetDexFile(),
-            dex_cache->GetDexFile()->GetMethodId(called_method.index).class_idx_,
-            dex_cache.Get(),
-            class_loader.Get());
+            caller->GetDexFile()->GetMethodId(called_method.index).class_idx_, caller);
         if (ref_class->IsInterface()) {
           called = ref_class->FindVirtualMethodForInterfaceSuper(called, kRuntimePointerSize);
         } else {
@@ -2174,6 +2159,11 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   // Note: We cannot walk the stack properly until fixed up below.
   ArtMethod* called = *sp;
   DCHECK(called->IsNative()) << called->PrettyMethod(true);
+  Runtime* runtime = Runtime::Current();
+  jit::Jit* jit = runtime->GetJit();
+  if (jit != nullptr) {
+    jit->AddSamples(self, called, 1u, /*with_backedges*/ false);
+  }
   uint32_t shorty_len = 0;
   const char* shorty = called->GetShorty(&shorty_len);
   bool critical_native = called->IsCriticalNative();
@@ -2195,7 +2185,7 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   }
 
   // Fix up managed-stack things in Thread. After this we can walk the stack.
-  self->SetTopOfStack(sp);
+  self->SetTopOfStackTagged(sp);
 
   self->VerifyStack();
 
@@ -2315,6 +2305,7 @@ extern "C" uint64_t artQuickGenericJniEndTrampoline(Thread* self,
   // anything that requires a mutator lock before that would cause problems as GC may have the
   // exclusive mutator lock and may be moving objects, etc.
   ArtMethod** sp = self->GetManagedStack()->GetTopQuickFrame();
+  DCHECK(self->GetManagedStack()->GetTopQuickFrameTag());
   uint32_t* sp32 = reinterpret_cast<uint32_t*>(sp);
   ArtMethod* called = *sp;
   uint32_t cookie = *(sp32 - 1);
@@ -2580,9 +2571,8 @@ extern "C" uintptr_t artInvokePolymorphic(
   const Instruction& inst = code->InstructionAt(dex_pc);
   DCHECK(inst.Opcode() == Instruction::INVOKE_POLYMORPHIC ||
          inst.Opcode() == Instruction::INVOKE_POLYMORPHIC_RANGE);
-  const DexFile* dex_file = caller_method->GetDexFile();
   const uint32_t proto_idx = inst.VRegH();
-  const char* shorty = dex_file->GetShorty(proto_idx);
+  const char* shorty = caller_method->GetDexFile()->GetShorty(proto_idx);
   const size_t shorty_length = strlen(shorty);
   static const bool kMethodIsStatic = false;  // invoke() and invokeExact() are not static.
   RememberForGcArgumentVisitor gc_visitor(sp, kMethodIsStatic, shorty, shorty_length, &soa);
@@ -2649,28 +2639,24 @@ extern "C" uintptr_t artInvokePolymorphic(
 
   // Call DoInvokePolymorphic with |is_range| = true, as shadow frame has argument registers in
   // consecutive order.
-  uint32_t unused_args[Instruction::kMaxVarArgRegs] = {};
-  uint32_t first_callee_arg = first_arg + 1;
-
+  RangeInstructionOperands operands(first_arg + 1, num_vregs - 1);
   bool isExact = (jni::EncodeArtMethod(resolved_method) ==
                   WellKnownClasses::java_lang_invoke_MethodHandle_invokeExact);
   bool success = false;
   if (isExact) {
-    success = MethodHandleInvokeExact<true/*is_range*/>(self,
-                                                        *shadow_frame,
-                                                        method_handle,
-                                                        method_type,
-                                                        unused_args,
-                                                        first_callee_arg,
-                                                        result);
+    success = MethodHandleInvokeExact(self,
+                                      *shadow_frame,
+                                      method_handle,
+                                      method_type,
+                                      &operands,
+                                      result);
   } else {
-    success = MethodHandleInvoke<true/*is_range*/>(self,
-                                                   *shadow_frame,
-                                                   method_handle,
-                                                   method_type,
-                                                   unused_args,
-                                                   first_callee_arg,
-                                                   result);
+    success = MethodHandleInvoke(self,
+                                 *shadow_frame,
+                                 method_handle,
+                                 method_type,
+                                 &operands,
+                                 result);
   }
   DCHECK(success || self->IsExceptionPending());
 

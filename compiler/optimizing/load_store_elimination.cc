@@ -74,35 +74,122 @@ class LSEVisitor : public HGraphDelegateVisitor {
     HGraphVisitor::VisitBasicBlock(block);
   }
 
+  HTypeConversion* AddTypeConversionIfNecessary(HInstruction* instruction,
+                                                HInstruction* value,
+                                                DataType::Type expected_type) {
+    HTypeConversion* type_conversion = nullptr;
+    // Should never add type conversion into boolean value.
+    if (expected_type != DataType::Type::kBool &&
+        !DataType::IsTypeConversionImplicit(value->GetType(), expected_type)) {
+      type_conversion = new (GetGraph()->GetAllocator()) HTypeConversion(
+          expected_type, value, instruction->GetDexPc());
+      instruction->GetBlock()->InsertInstructionBefore(type_conversion, instruction);
+    }
+    return type_conversion;
+  }
+
+  // Find an instruction's substitute if it should be removed.
+  // Return the same instruction if it should not be removed.
+  HInstruction* FindSubstitute(HInstruction* instruction) {
+    size_t size = removed_loads_.size();
+    for (size_t i = 0; i < size; i++) {
+      if (removed_loads_[i] == instruction) {
+        return substitute_instructions_for_loads_[i];
+      }
+    }
+    return instruction;
+  }
+
+  void AddRemovedLoad(HInstruction* load, HInstruction* heap_value) {
+    DCHECK_EQ(FindSubstitute(heap_value), heap_value) <<
+        "Unexpected heap_value that has a substitute " << heap_value->DebugName();
+    removed_loads_.push_back(load);
+    substitute_instructions_for_loads_.push_back(heap_value);
+  }
+
+  // Scan the list of removed loads to see if we can reuse `type_conversion`, if
+  // the other removed load has the same substitute and type and is dominated
+  // by `type_conversioni`.
+  void TryToReuseTypeConversion(HInstruction* type_conversion, size_t index) {
+    size_t size = removed_loads_.size();
+    HInstruction* load = removed_loads_[index];
+    HInstruction* substitute = substitute_instructions_for_loads_[index];
+    for (size_t j = index + 1; j < size; j++) {
+      HInstruction* load2 = removed_loads_[j];
+      HInstruction* substitute2 = substitute_instructions_for_loads_[j];
+      if (load2 == nullptr) {
+        DCHECK(substitute2->IsTypeConversion());
+        continue;
+      }
+      DCHECK(load2->IsInstanceFieldGet() ||
+             load2->IsStaticFieldGet() ||
+             load2->IsArrayGet());
+      DCHECK(substitute2 != nullptr);
+      if (substitute2 == substitute &&
+          load2->GetType() == load->GetType() &&
+          type_conversion->GetBlock()->Dominates(load2->GetBlock()) &&
+          // Don't share across irreducible loop headers.
+          // TODO: can be more fine-grained than this by testing each dominator.
+          (load2->GetBlock() == type_conversion->GetBlock() ||
+           !GetGraph()->HasIrreducibleLoops())) {
+        // The removed_loads_ are added in reverse post order.
+        DCHECK(type_conversion->StrictlyDominates(load2));
+        load2->ReplaceWith(type_conversion);
+        load2->GetBlock()->RemoveInstruction(load2);
+        removed_loads_[j] = nullptr;
+        substitute_instructions_for_loads_[j] = type_conversion;
+      }
+    }
+  }
+
   // Remove recorded instructions that should be eliminated.
   void RemoveInstructions() {
     size_t size = removed_loads_.size();
     DCHECK_EQ(size, substitute_instructions_for_loads_.size());
     for (size_t i = 0; i < size; i++) {
       HInstruction* load = removed_loads_[i];
-      DCHECK(load != nullptr);
+      if (load == nullptr) {
+        // The load has been handled in the scan for type conversion below.
+        DCHECK(substitute_instructions_for_loads_[i]->IsTypeConversion());
+        continue;
+      }
       DCHECK(load->IsInstanceFieldGet() ||
              load->IsStaticFieldGet() ||
-             load->IsArrayGet() ||
-             load->IsVecLoad());
+             load->IsArrayGet());
       HInstruction* substitute = substitute_instructions_for_loads_[i];
       DCHECK(substitute != nullptr);
-      // Keep tracing substitute till one that's not removed.
-      HInstruction* sub_sub = FindSubstitute(substitute);
-      while (sub_sub != substitute) {
-        substitute = sub_sub;
-        sub_sub = FindSubstitute(substitute);
+      // We proactively retrieve the substitute for a removed load, so
+      // a load that has a substitute should not be observed as a heap
+      // location value.
+      DCHECK_EQ(FindSubstitute(substitute), substitute);
+
+      // The load expects to load the heap value as type load->GetType().
+      // However the tracked heap value may not be of that type. An explicit
+      // type conversion may be needed.
+      // There are actually three types involved here:
+      // (1) tracked heap value's type (type A)
+      // (2) heap location (field or element)'s type (type B)
+      // (3) load's type (type C)
+      // We guarantee that type A stored as type B and then fetched out as
+      // type C is the same as casting from type A to type C directly, since
+      // type B and type C will have the same size which is guarenteed in
+      // HInstanceFieldGet/HStaticFieldGet/HArrayGet's SetType().
+      // So we only need one type conversion from type A to type C.
+      HTypeConversion* type_conversion = AddTypeConversionIfNecessary(
+          load, substitute, load->GetType());
+      if (type_conversion != nullptr) {
+        TryToReuseTypeConversion(type_conversion, i);
+        load->ReplaceWith(type_conversion);
+        substitute_instructions_for_loads_[i] = type_conversion;
+      } else {
+        load->ReplaceWith(substitute);
       }
-      load->ReplaceWith(substitute);
       load->GetBlock()->RemoveInstruction(load);
     }
 
     // At this point, stores in possibly_removed_stores_ can be safely removed.
     for (HInstruction* store : possibly_removed_stores_) {
-      DCHECK(store->IsInstanceFieldSet() ||
-             store->IsStaticFieldSet() ||
-             store->IsArraySet() ||
-             store->IsVecStore());
+      DCHECK(store->IsInstanceFieldSet() || store->IsStaticFieldSet() || store->IsArraySet());
       store->GetBlock()->RemoveInstruction(store);
     }
 
@@ -141,9 +228,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
   void KeepIfIsStore(HInstruction* heap_value) {
     if (heap_value == kDefaultHeapValue ||
         heap_value == kUnknownHeapValue ||
-        !(heap_value->IsInstanceFieldSet() ||
-          heap_value->IsArraySet() ||
-          heap_value->IsVecStore())) {
+        !(heap_value->IsInstanceFieldSet() || heap_value->IsArraySet())) {
       return;
     }
     auto idx = std::find(possibly_removed_stores_.begin(),
@@ -205,6 +290,12 @@ class LSEVisitor : public HGraphDelegateVisitor {
     if (predecessors.size() == 0) {
       return;
     }
+    if (block->IsExitBlock()) {
+      // Exit block doesn't really merge values since the control flow ends in
+      // its predecessors. Each predecessor needs to make sure stores are kept
+      // if necessary.
+      return;
+    }
 
     ScopedArenaVector<HInstruction*>& heap_values = heap_values_for_[block->GetBlockId()];
     for (size_t i = 0; i < heap_values.size(); i++) {
@@ -239,15 +330,23 @@ class LSEVisitor : public HGraphDelegateVisitor {
         }
       }
 
-      if (merged_value == kUnknownHeapValue || ref_info->IsSingletonAndNonRemovable()) {
-        // There are conflicting heap values from different predecessors,
-        // or the heap value may be needed after method return or deoptimization.
-        // Keep the last store in each predecessor since future loads cannot be eliminated.
-        for (HBasicBlock* predecessor : predecessors) {
-          ScopedArenaVector<HInstruction*>& pred_values =
-              heap_values_for_[predecessor->GetBlockId()];
-          KeepIfIsStore(pred_values[i]);
+      if (ref_info->IsSingleton()) {
+        if (ref_info->IsSingletonAndNonRemovable() ||
+            (merged_value == kUnknownHeapValue &&
+             !block->IsSingleReturnOrReturnVoidAllowingPhis())) {
+          // The heap value may be needed after method return or deoptimization,
+          // or there are conflicting heap values from different predecessors and
+          // this block is not a single return,
+          // keep the last store in each predecessor since future loads may not
+          // be eliminated.
+          for (HBasicBlock* predecessor : predecessors) {
+            ScopedArenaVector<HInstruction*>& pred_values =
+                heap_values_for_[predecessor->GetBlockId()];
+            KeepIfIsStore(pred_values[i]);
+          }
         }
+      } else {
+        // Currenctly we don't eliminate stores to non-singletons.
       }
 
       if ((merged_value == nullptr) || !from_all_predecessors) {
@@ -320,15 +419,12 @@ class LSEVisitor : public HGraphDelegateVisitor {
     HInstruction* heap_value = heap_values[idx];
     if (heap_value == kDefaultHeapValue) {
       HInstruction* constant = GetDefaultValue(instruction->GetType());
-      removed_loads_.push_back(instruction);
-      substitute_instructions_for_loads_.push_back(constant);
+      AddRemovedLoad(instruction, constant);
       heap_values[idx] = constant;
       return;
     }
     if (heap_value != kUnknownHeapValue) {
-      if (heap_value->IsInstanceFieldSet() ||
-          heap_value->IsArraySet() ||
-          heap_value->IsVecStore()) {
+      if (heap_value->IsInstanceFieldSet() || heap_value->IsArraySet()) {
         HInstruction* store = heap_value;
         // This load must be from a singleton since it's from the same
         // field/element that a "removed" store puts the value. That store
@@ -336,6 +432,8 @@ class LSEVisitor : public HGraphDelegateVisitor {
         DCHECK(ref_info->IsSingleton());
         // Get the real heap value of the store.
         heap_value = heap_value->IsInstanceFieldSet() ? store->InputAt(1) : store->InputAt(2);
+        // heap_value may already have a substitute.
+        heap_value = FindSubstitute(heap_value);
       }
     }
     if (heap_value == kUnknownHeapValue) {
@@ -356,8 +454,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
         }
         return;
       }
-      removed_loads_.push_back(instruction);
-      substitute_instructions_for_loads_.push_back(heap_value);
+      AddRemovedLoad(instruction, heap_value);
       TryRemovingNullCheck(instruction);
     }
   }
@@ -379,6 +476,8 @@ class LSEVisitor : public HGraphDelegateVisitor {
                         size_t vector_length,
                         int16_t declaring_class_def_index,
                         HInstruction* value) {
+    // value may already have a substitute.
+    value = FindSubstitute(value);
     HInstruction* original_ref = heap_location_collector_.HuntForOriginalReference(ref);
     ReferenceInfo* ref_info = heap_location_collector_.FindReferenceInfoOf(original_ref);
     size_t idx = heap_location_collector_.FindHeapLocationIndex(
@@ -426,9 +525,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
 
     if (!same_value) {
       if (possibly_redundant) {
-        DCHECK(instruction->IsInstanceFieldSet() ||
-               instruction->IsArraySet() ||
-               instruction->IsVecStore());
+        DCHECK(instruction->IsInstanceFieldSet() || instruction->IsArraySet());
         // Put the store as the heap value. If the value is loaded from heap
         // by a load later, this store isn't really redundant.
         heap_values[idx] = instruction;
@@ -441,24 +538,8 @@ class LSEVisitor : public HGraphDelegateVisitor {
       if (i == idx) {
         continue;
       }
-      if (heap_values[i] == value && !instruction->IsVecOperation()) {
-        // For field/array, same value should be kept even if aliasing happens.
-        //
-        // For vector values , this is NOT safe. For example:
-        //   packed_data = [0xA, 0xB, 0xC, 0xD];            <-- Different values in each lane.
-        //   VecStore array[i  ,i+1,i+2,i+3] = packed_data;
-        //   VecStore array[i+1,i+2,i+3,i+4] = packed_data; <-- We are here (partial overlap).
-        //   VecLoad  vx = array[i,i+1,i+2,i+3];            <-- Cannot be eliminated.
-        //
-        // TODO: to allow such 'same value' optimization on vector data,
-        // LSA needs to report more fine-grain MAY alias information:
-        // (1) May alias due to two vector data partial overlap.
-        //     e.g. a[i..i+3] and a[i+1,..,i+4].
-        // (2) May alias due to two vector data may complete overlap each other.
-        //     e.g. a[i..i+3] and b[i..i+3].
-        // (3) May alias but the exact relationship between two locations is unknown.
-        //     e.g. a[i..i+3] and b[j..j+3], where values of a,b,i,j are all unknown.
-        // This 'same value' optimization can apply only on case (2).
+      if (heap_values[i] == value) {
+        // Same value should be kept even if aliasing happens.
         continue;
       }
       if (heap_values[i] == kUnknownHeapValue) {
@@ -548,32 +629,6 @@ class LSEVisitor : public HGraphDelegateVisitor {
                      value);
   }
 
-  void VisitVecLoad(HVecLoad* instruction) OVERRIDE {
-    HInstruction* array = instruction->InputAt(0);
-    HInstruction* index = instruction->InputAt(1);
-    size_t vector_length = instruction->GetVectorLength();
-    VisitGetLocation(instruction,
-                     array,
-                     HeapLocation::kInvalidFieldOffset,
-                     index,
-                     vector_length,
-                     HeapLocation::kDeclaringClassDefIndexForArrays);
-  }
-
-  void VisitVecStore(HVecStore* instruction) OVERRIDE {
-    HInstruction* array = instruction->InputAt(0);
-    HInstruction* index = instruction->InputAt(1);
-    HInstruction* value = instruction->InputAt(2);
-    size_t vector_length = instruction->GetVectorLength();
-    VisitSetLocation(instruction,
-                     array,
-                     HeapLocation::kInvalidFieldOffset,
-                     index,
-                     vector_length,
-                     HeapLocation::kDeclaringClassDefIndexForArrays,
-                     value);
-  }
-
   void VisitDeoptimize(HDeoptimize* instruction) {
     const ScopedArenaVector<HInstruction*>& heap_values =
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
@@ -583,9 +638,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
         continue;
       }
       // A store is kept as the heap value for possibly removed stores.
-      if (heap_value->IsInstanceFieldSet() ||
-          heap_value->IsArraySet() ||
-          heap_value->IsVecStore()) {
+      if (heap_value->IsInstanceFieldSet() || heap_value->IsArraySet()) {
         // Check whether the reference for a store is used by an environment local of
         // HDeoptimize.
         HInstruction* reference = heap_value->InputAt(0);
@@ -601,6 +654,31 @@ class LSEVisitor : public HGraphDelegateVisitor {
         }
       }
     }
+  }
+
+  // Keep necessary stores before exiting a method via return/throw.
+  void HandleExit(HBasicBlock* block) {
+    const ScopedArenaVector<HInstruction*>& heap_values =
+        heap_values_for_[block->GetBlockId()];
+    for (size_t i = 0; i < heap_values.size(); i++) {
+      HInstruction* heap_value = heap_values[i];
+      ReferenceInfo* ref_info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
+      if (!ref_info->IsSingletonAndRemovable()) {
+        KeepIfIsStore(heap_value);
+      }
+    }
+  }
+
+  void VisitReturn(HReturn* instruction) OVERRIDE {
+    HandleExit(instruction->GetBlock());
+  }
+
+  void VisitReturnVoid(HReturnVoid* return_void) OVERRIDE {
+    HandleExit(return_void->GetBlock());
+  }
+
+  void VisitThrow(HThrow* throw_instruction) OVERRIDE {
+    HandleExit(throw_instruction->GetBlock());
   }
 
   void HandleInvoke(HInstruction* instruction) {
@@ -694,18 +772,6 @@ class LSEVisitor : public HGraphDelegateVisitor {
     }
   }
 
-  // Find an instruction's substitute if it should be removed.
-  // Return the same instruction if it should not be removed.
-  HInstruction* FindSubstitute(HInstruction* instruction) {
-    size_t size = removed_loads_.size();
-    for (size_t i = 0; i < size; i++) {
-      if (removed_loads_[i] == instruction) {
-        return substitute_instructions_for_loads_[i];
-      }
-    }
-    return instruction;
-  }
-
   const HeapLocationCollector& heap_location_collector_;
   const SideEffectsAnalysis& side_effects_;
 
@@ -740,6 +806,11 @@ void LoadStoreElimination::Run() {
   const HeapLocationCollector& heap_location_collector = lsa_.GetHeapLocationCollector();
   if (heap_location_collector.GetNumberOfHeapLocations() == 0) {
     // No HeapLocation information from LSA, skip this optimization.
+    return;
+  }
+
+  // TODO: analyze VecLoad/VecStore better.
+  if (graph_->HasSIMD()) {
     return;
   }
 

@@ -18,8 +18,10 @@
 
 #include <sstream>
 
+#include <android-base/logging.h>
+
 #include "base/file_utils.h"
-#include "base/logging.h"
+#include "base/macros.h"
 #include "base/stringpiece.h"
 #include "debugger.h"
 #include "gc/heap.h"
@@ -548,7 +550,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
-    gc::CollectorType collector_type_ = (XGcOption{}).collector_type_;  // NOLINT [whitespace/braces] [5]
+    gc::CollectorType collector_type_ = (XGcOption{}).collector_type_;
     bool low_memory_mode_ = args.Exists(M::LowMemoryMode);
 
     background_collector_type_ = args.GetOrDefault(M::BackgroundGc);

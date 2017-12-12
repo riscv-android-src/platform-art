@@ -134,15 +134,14 @@ uint16_t ArtMethod::FindObsoleteDexClassDefIndex() {
   return dex_file->GetIndexForClassDef(*class_def);
 }
 
-mirror::String* ArtMethod::GetNameAsString(Thread* self) {
+ObjPtr<mirror::String> ArtMethod::GetNameAsString(Thread* self) {
   CHECK(!IsProxyMethod());
   StackHandleScope<1> hs(self);
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(GetDexCache()));
   auto* dex_file = dex_cache->GetDexFile();
   uint32_t dex_method_idx = GetDexMethodIndex();
   const DexFile::MethodId& method_id = dex_file->GetMethodId(dex_method_idx);
-  return Runtime::Current()->GetClassLinker()->ResolveString(*dex_file, method_id.name_idx_,
-                                                             dex_cache);
+  return Runtime::Current()->GetClassLinker()->ResolveString(method_id.name_idx_, dex_cache);
 }
 
 void ArtMethod::ThrowInvocationTimeError() {
@@ -550,8 +549,8 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
   }
   auto* cl = Runtime::Current()->GetClassLinker();
   for (size_t i = 0; i < count; ++i) {
-    auto type_idx = proto_params->GetTypeItem(i).type_idx_;
-    auto* type = cl->ResolveType(type_idx, this);
+    dex::TypeIndex type_idx = proto_params->GetTypeItem(i).type_idx_;
+    ObjPtr<mirror::Class> type = cl->ResolveType(type_idx, this);
     if (type == nullptr) {
       Thread::Current()->AssertPendingException();
       return false;
@@ -563,23 +562,14 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
   return true;
 }
 
-const uint8_t* ArtMethod::GetQuickenedInfo(PointerSize pointer_size) {
-  if (kIsVdexEnabled) {
-    const DexFile& dex_file = GetDeclaringClass()->GetDexFile();
-    const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
-    if (oat_dex_file == nullptr || (oat_dex_file->GetOatFile() == nullptr)) {
-      return nullptr;
-    }
-    return oat_dex_file->GetOatFile()->GetVdexFile()->GetQuickenedInfoOf(
-        dex_file, GetCodeItemOffset());
-  } else {
-    bool found = false;
-    OatFile::OatMethod oat_method = FindOatMethodFor(this, pointer_size, &found);
-    if (!found || (oat_method.GetQuickCode() != nullptr)) {
-      return nullptr;
-    }
-    return oat_method.GetVmapTable();
+const uint8_t* ArtMethod::GetQuickenedInfo() {
+  const DexFile& dex_file = GetDeclaringClass()->GetDexFile();
+  const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  if (oat_dex_file == nullptr || (oat_dex_file->GetOatFile() == nullptr)) {
+    return nullptr;
   }
+  return oat_dex_file->GetOatFile()->GetVdexFile()->GetQuickenedInfoOf(
+      dex_file, GetCodeItemOffset());
 }
 
 const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
@@ -596,11 +586,6 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   CHECK(existing_entry_point != nullptr) << PrettyMethod() << "@" << this;
   ClassLinker* class_linker = runtime->GetClassLinker();
 
-  if (class_linker->IsQuickGenericJniStub(existing_entry_point)) {
-    // The generic JNI does not have any method header.
-    return nullptr;
-  }
-
   if (existing_entry_point == GetQuickProxyInvokeHandler()) {
     DCHECK(IsProxyMethod() && !IsConstructor());
     // The proxy entry point does not have any method header.
@@ -608,7 +593,8 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   }
 
   // Check whether the current entry point contains this pc.
-  if (!class_linker->IsQuickResolutionStub(existing_entry_point) &&
+  if (!class_linker->IsQuickGenericJniStub(existing_entry_point) &&
+      !class_linker->IsQuickResolutionStub(existing_entry_point) &&
       !class_linker->IsQuickToInterpreterBridge(existing_entry_point)) {
     OatQuickMethodHeader* method_header =
         OatQuickMethodHeader::FromEntryPoint(existing_entry_point);
@@ -641,19 +627,13 @@ const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   OatFile::OatMethod oat_method =
       FindOatMethodFor(this, class_linker->GetImagePointerSize(), &found);
   if (!found) {
-    if (class_linker->IsQuickResolutionStub(existing_entry_point)) {
-      // We are running the generic jni stub, but the entry point of the method has not
-      // been updated yet.
-      DCHECK_EQ(pc, 0u) << "Should be a downcall";
-      DCHECK(IsNative());
-      return nullptr;
-    }
-    if (existing_entry_point == GetQuickInstrumentationEntryPoint()) {
-      // We are running the generic jni stub, but the method is being instrumented.
-      // NB We would normally expect the pc to be zero but we can have non-zero pc's if
-      // instrumentation is installed or removed during the call which is using the generic jni
-      // trampoline.
-      DCHECK(IsNative());
+    if (IsNative()) {
+      // We are running the GenericJNI stub. The entrypoint may point
+      // to different entrypoints or to a JIT-compiled JNI stub.
+      DCHECK(class_linker->IsQuickGenericJniStub(existing_entry_point) ||
+             class_linker->IsQuickResolutionStub(existing_entry_point) ||
+             existing_entry_point == GetQuickInstrumentationEntryPoint() ||
+             (jit != nullptr && jit->GetCodeCache()->ContainsPc(existing_entry_point)));
       return nullptr;
     }
     // Only for unit tests.
@@ -711,13 +691,15 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   declaring_class_ = GcRoot<mirror::Class>(const_cast<ArtMethod*>(src)->GetDeclaringClass());
 
   // If the entry point of the method we are copying from is from JIT code, we just
-  // put the entry point of the new method to interpreter. We could set the entry point
-  // to the JIT code, but this would require taking the JIT code cache lock to notify
-  // it, which we do not want at this level.
+  // put the entry point of the new method to interpreter or GenericJNI. We could set
+  // the entry point to the JIT code, but this would require taking the JIT code cache
+  // lock to notify it, which we do not want at this level.
   Runtime* runtime = Runtime::Current();
   if (runtime->UseJitCompilation()) {
     if (runtime->GetJit()->GetCodeCache()->ContainsPc(GetEntryPointFromQuickCompiledCode())) {
-      SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);
+      SetEntryPointFromQuickCompiledCodePtrSize(
+          src->IsNative() ? GetQuickGenericJniStub() : GetQuickToInterpreterBridge(),
+          image_pointer_size);
     }
   }
   // Clear the profiling info for the same reasons as the JIT code.

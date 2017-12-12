@@ -35,6 +35,7 @@
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
+#include "oat_file.h"
 
 namespace art {
 namespace debug {
@@ -49,7 +50,8 @@ static std::vector<const char*> GetParamNames(const MethodDebugInfo* mi) {
   std::vector<const char*> names;
   if (mi->code_item != nullptr) {
     DCHECK(mi->dex_file != nullptr);
-    const uint8_t* stream = mi->dex_file->GetDebugInfoStream(mi->code_item);
+    uint32_t debug_info_offset = OatFile::GetDebugInfoOffset(*mi->dex_file, mi->code_item);
+    const uint8_t* stream = mi->dex_file->GetDebugInfoStream(debug_info_offset);
     if (stream != nullptr) {
       DecodeUnsignedLeb128(&stream);  // line.
       uint32_t parameters_size = DecodeUnsignedLeb128(&stream);
@@ -202,7 +204,7 @@ class ElfCompilationUnitWriter {
       // Decode dex register locations for all stack maps.
       // It might be expensive, so do it just once and reuse the result.
       std::vector<DexRegisterMap> dex_reg_maps;
-      if (mi->code_info != nullptr) {
+      if (dex_code != nullptr && mi->code_info != nullptr) {
         const CodeInfo code_info(mi->code_info);
         CodeInfoEncoding encoding = code_info.ExtractEncoding();
         for (size_t s = 0; s < code_info.GetNumberOfStackMaps(encoding); ++s) {
@@ -257,7 +259,9 @@ class ElfCompilationUnitWriter {
 
       // Write local variables.
       LocalInfos local_infos;
+      uint32_t debug_info_offset = OatFile::GetDebugInfoOffset(*dex, dex_code);
       if (dex->DecodeDebugLocalInfo(dex_code,
+                                    debug_info_offset,
                                     is_static,
                                     mi->dex_method_index,
                                     LocalInfoCallback,

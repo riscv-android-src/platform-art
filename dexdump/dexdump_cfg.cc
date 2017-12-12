@@ -23,6 +23,7 @@
 #include <map>
 #include <ostream>
 #include <set>
+#include <sstream>
 
 #include "dex_file-inl.h"
 #include "dex_instruction-inl.h"
@@ -377,7 +378,7 @@ void DumpMethodCFG(const DexFile* dex_file, uint32_t dex_method_idx, std::ostrea
   it.SkipAllFields();
 
   // Find method, and dump it.
-  while (it.HasNextDirectMethod() || it.HasNextVirtualMethod()) {
+  while (it.HasNextMethod()) {
     uint32_t method_idx = it.GetMemberIndex();
     if (method_idx == dex_method_idx) {
       dumpMethodCFGImpl(dex_file, dex_method_idx, it.GetMethodCodeItem(), os);

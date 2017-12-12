@@ -46,10 +46,6 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 		cflags = append(cflags, "-DART_USE_TLAB=1")
 	}
 
-	if !envFalse(ctx, "ART_ENABLE_VDEX") {
-		cflags = append(cflags, "-DART_ENABLE_VDEX")
-	}
-
 	imtSize := envDefault(ctx, "ART_IMT_SIZE", "43")
 	cflags = append(cflags, "-DIMT_SIZE="+imtSize)
 
@@ -69,6 +65,9 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_USE_READ_BARRIER=1",
 			"-DART_READ_BARRIER_TYPE_IS_"+barrierType+"=1")
 	}
+
+  cdexLevel := envDefault(ctx, "ART_DEFAULT_COMPACT_DEX_LEVEL", "none")
+  cflags = append(cflags, "-DART_DEFAULT_COMPACT_DEX_LEVEL="+cdexLevel)
 
 	// We need larger stack overflow guards for ASAN, as the compiled code will have
 	// larger frame sizes. For simplicity, just use global not-target-specific cflags.

@@ -28,6 +28,7 @@
 #include "jvalue-inl.h"
 #include "mirror/field.h"
 #include "mirror/method.h"
+#include "oat_file.h"
 #include "reflection.h"
 #include "thread.h"
 #include "well_known_classes.h"
@@ -342,8 +343,7 @@ mirror::Object* ProcessEncodedAnnotation(const ClassData& klass, const uint8_t**
   StackHandleScope<4> hs(self);
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Handle<mirror::Class> annotation_class(hs.NewHandle(
-      class_linker->ResolveType(klass.GetDexFile(),
-                                dex::TypeIndex(type_index),
+      class_linker->ResolveType(dex::TypeIndex(type_index),
                                 hs.NewHandle(klass.GetDexCache()),
                                 hs.NewHandle(klass.GetClassLoader()))));
   if (annotation_class == nullptr) {
@@ -457,7 +457,7 @@ bool ProcessAnnotationValue(const ClassData& klass,
       } else {
         StackHandleScope<1> hs(self);
         element_object = Runtime::Current()->GetClassLinker()->ResolveString(
-            klass.GetDexFile(), dex::StringIndex(index), hs.NewHandle(klass.GetDexCache()));
+            dex::StringIndex(index), hs.NewHandle(klass.GetDexCache()));
         set_object = true;
         if (element_object == nullptr) {
           return false;
@@ -473,7 +473,6 @@ bool ProcessAnnotationValue(const ClassData& klass,
         dex::TypeIndex type_index(index);
         StackHandleScope<2> hs(self);
         element_object = Runtime::Current()->GetClassLinker()->ResolveType(
-            klass.GetDexFile(),
             type_index,
             hs.NewHandle(klass.GetDexCache()),
             hs.NewHandle(klass.GetClassLoader()));
@@ -500,7 +499,6 @@ bool ProcessAnnotationValue(const ClassData& klass,
         ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
         StackHandleScope<2> hs(self);
         ArtMethod* method = class_linker->ResolveMethodWithoutInvokeType(
-            klass.GetDexFile(),
             index,
             hs.NewHandle(klass.GetDexCache()),
             hs.NewHandle(klass.GetClassLoader()));
@@ -539,7 +537,6 @@ bool ProcessAnnotationValue(const ClassData& klass,
       } else {
         StackHandleScope<2> hs(self);
         ArtField* field = Runtime::Current()->GetClassLinker()->ResolveFieldJLS(
-            klass.GetDexFile(),
             index,
             hs.NewHandle(klass.GetDexCache()),
             hs.NewHandle(klass.GetClassLoader()));
@@ -568,7 +565,6 @@ bool ProcessAnnotationValue(const ClassData& klass,
       } else {
         StackHandleScope<3> hs(self);
         ArtField* enum_field = Runtime::Current()->GetClassLinker()->ResolveField(
-            klass.GetDexFile(),
             index,
             hs.NewHandle(klass.GetDexCache()),
             hs.NewHandle(klass.GetClassLoader()),
@@ -782,10 +778,8 @@ const DexFile::AnnotationItem* GetAnnotationItemFromAnnotationSet(
     uint32_t type_index = DecodeUnsignedLeb128(&annotation);
     ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     Thread* self = Thread::Current();
-    mirror::Class* resolved_class;
     StackHandleScope<2> hs(self);
-    resolved_class = class_linker->ResolveType(
-        klass.GetDexFile(),
+    ObjPtr<mirror::Class> resolved_class = class_linker->ResolveType(
         dex::TypeIndex(type_index),
         hs.NewHandle(klass.GetDexCache()),
         hs.NewHandle(klass.GetClassLoader()));
@@ -1400,7 +1394,6 @@ mirror::Class* GetEnclosingClass(Handle<mirror::Class> klass) {
   }
   StackHandleScope<2> hs(Thread::Current());
   ArtMethod* method = Runtime::Current()->GetClassLinker()->ResolveMethodWithoutInvokeType(
-      data.GetDexFile(),
       annotation_value.value_.GetI(),
       hs.NewHandle(data.GetDexCache()),
       hs.NewHandle(data.GetClassLoader()));
@@ -1571,14 +1564,15 @@ int32_t GetLineNumFromPC(const DexFile* dex_file, ArtMethod* method, uint32_t re
 
   // A method with no line number info should return -1
   DexFile::LineNumFromPcContext context(rel_pc, -1);
-  dex_file->DecodeDebugPositionInfo(code_item, DexFile::LineNumForPcCb, &context);
+  uint32_t debug_info_offset = OatFile::GetDebugInfoOffset(*dex_file, code_item);
+  dex_file->DecodeDebugPositionInfo(
+      code_item, debug_info_offset, DexFile::LineNumForPcCb, &context);
   return context.line_num_;
 }
 
 template<bool kTransactionActive>
 void RuntimeEncodedStaticFieldValueIterator::ReadValueToField(ArtField* field) const {
   DCHECK(dex_cache_ != nullptr);
-  DCHECK(class_loader_ != nullptr);
   switch (type_) {
     case kBoolean: field->SetBoolean<kTransactionActive>(field->GetDeclaringClass(), jval_.z);
         break;
@@ -1591,17 +1585,15 @@ void RuntimeEncodedStaticFieldValueIterator::ReadValueToField(ArtField* field) c
     case kDouble:  field->SetDouble<kTransactionActive>(field->GetDeclaringClass(), jval_.d); break;
     case kNull:    field->SetObject<kTransactionActive>(field->GetDeclaringClass(), nullptr); break;
     case kString: {
-      mirror::String* resolved = linker_->ResolveString(dex_file_,
-                                                        dex::StringIndex(jval_.i),
-                                                        *dex_cache_);
+      ObjPtr<mirror::String> resolved = linker_->ResolveString(dex::StringIndex(jval_.i),
+                                                               dex_cache_);
       field->SetObject<kTransactionActive>(field->GetDeclaringClass(), resolved);
       break;
     }
     case kType: {
-      mirror::Class* resolved = linker_->ResolveType(dex_file_,
-                                                     dex::TypeIndex(jval_.i),
-                                                     *dex_cache_,
-                                                     *class_loader_);
+      ObjPtr<mirror::Class> resolved = linker_->ResolveType(dex::TypeIndex(jval_.i),
+                                                            dex_cache_,
+                                                            class_loader_);
       field->SetObject<kTransactionActive>(field->GetDeclaringClass(), resolved);
       break;
     }

@@ -57,7 +57,7 @@ template <>
 struct CmdlineType<Unit> : CmdlineTypeParser<Unit> {
   Result Parse(const std::string& args) {
     if (args == "") {
-      return Result::Success(Unit{});  // NOLINT [whitespace/braces] [5]
+      return Result::Success(Unit{});
     }
     return Result::Failure("Unexpected extra characters " + args);
   }
@@ -532,7 +532,7 @@ struct XGcOption {
 template <>
 struct CmdlineType<XGcOption> : CmdlineTypeParser<XGcOption> {
   Result Parse(const std::string& option) {  // -Xgc: already stripped
-    XGcOption xgc{};  // NOLINT [readability/braces] [4]
+    XGcOption xgc{};
 
     std::vector<std::string> gc_options;
     Split(option, ',', &gc_options);
@@ -669,6 +669,8 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.threads = true;
       } else if (verbose_options[j] == "verifier") {
         log_verbosity.verifier = true;
+      } else if (verbose_options[j] == "verifier-debug") {
+        log_verbosity.verifier_debug = true;
       } else if (verbose_options[j] == "image") {
         log_verbosity.image = true;
       } else if (verbose_options[j] == "systrace-locks") {
