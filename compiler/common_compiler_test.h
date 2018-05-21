@@ -23,7 +23,6 @@
 
 #include "common_runtime_test.h"
 #include "compiler.h"
-#include "jit/profile_compilation_info.h"
 #include "oat_file.h"
 
 namespace art {
@@ -34,6 +33,7 @@ class ClassLoader;
 class CompilerDriver;
 class CompilerOptions;
 class CumulativeLogger;
+class ProfileCompilationInfo;
 class VerificationResults;
 
 template<class T> class Handle;
@@ -66,14 +66,6 @@ class CommonCompilerTest : public CommonRuntimeTest {
   // Get the set of image classes given to the compiler-driver in SetUp. Note: the compiler
   // driver assumes ownership of the set, so the test should properly release the set.
   virtual std::unordered_set<std::string>* GetImageClasses();
-
-  // Get the set of compiled classes given to the compiler-driver in SetUp. Note: the compiler
-  // driver assumes ownership of the set, so the test should properly release the set.
-  virtual std::unordered_set<std::string>* GetCompiledClasses();
-
-  // Get the set of compiled methods given to the compiler-driver in SetUp. Note: the compiler
-  // driver assumes ownership of the set, so the test should properly release the set.
-  virtual std::unordered_set<std::string>* GetCompiledMethods();
 
   virtual ProfileCompilationInfo* GetProfileCompilationInfo();
 

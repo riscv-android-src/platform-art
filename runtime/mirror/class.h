@@ -18,23 +18,24 @@
 #define ART_RUNTIME_MIRROR_CLASS_H_
 
 #include "base/bit_utils.h"
+#include "base/casts.h"
 #include "base/enums.h"
 #include "base/iteration_range.h"
+#include "base/stride_iterator.h"
+#include "base/utils.h"
 #include "class_flags.h"
 #include "class_status.h"
-#include "dex_file.h"
-#include "dex_file_types.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_types.h"
+#include "dex/modifiers.h"
+#include "dex/primitive.h"
 #include "gc/allocator_type.h"
 #include "gc_root.h"
 #include "imtable.h"
-#include "modifiers.h"
 #include "object.h"
 #include "object_array.h"
-#include "primitive.h"
 #include "read_barrier_option.h"
-#include "stride_iterator.h"
 #include "thread.h"
-#include "utils.h"
 
 namespace art {
 
@@ -77,38 +78,16 @@ class MANAGED Class FINAL : public Object {
   static constexpr uint32_t kPrimitiveTypeSizeShiftShift = 16;
   static constexpr uint32_t kPrimitiveTypeMask = (1u << kPrimitiveTypeSizeShiftShift) - 1;
 
-  // Make ClassStatus available as Class::Status.
-  using Status = ClassStatus;
-
-  // Required for a minimal change. Fix up and remove in a future change.
-  static constexpr Status kStatusRetired = Status::kStatusRetired;
-  static constexpr Status kStatusErrorResolved = Status::kStatusErrorResolved;
-  static constexpr Status kStatusErrorUnresolved = Status::kStatusErrorUnresolved;
-  static constexpr Status kStatusNotReady = Status::kStatusNotReady;
-  static constexpr Status kStatusIdx = Status::kStatusIdx;
-  static constexpr Status kStatusLoaded = Status::kStatusLoaded;
-  static constexpr Status kStatusResolving = Status::kStatusResolving;
-  static constexpr Status kStatusResolved = Status::kStatusResolved;
-  static constexpr Status kStatusVerifying = Status::kStatusVerifying;
-  static constexpr Status kStatusRetryVerificationAtRuntime =
-      Status::kStatusRetryVerificationAtRuntime;
-  static constexpr Status kStatusVerifyingAtRuntime = Status::kStatusVerifyingAtRuntime;
-  static constexpr Status kStatusVerified = Status::kStatusVerified;
-  static constexpr Status kStatusSuperclassValidated = Status::kStatusSuperclassValidated;
-  static constexpr Status kStatusInitializing = Status::kStatusInitializing;
-  static constexpr Status kStatusInitialized = Status::kStatusInitialized;
-  static constexpr Status kStatusMax = Status::kStatusMax;
-
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  Status GetStatus() REQUIRES_SHARED(Locks::mutator_lock_) {
+  ClassStatus GetStatus() REQUIRES_SHARED(Locks::mutator_lock_) {
     // Avoid including "subtype_check_bits_and_status.h" to get the field.
-    // The ClassStatus is always in the least-significant bits of status_.
-    return static_cast<Status>(static_cast<uint8_t>(
-        static_cast<uint32_t>(GetField32Volatile<kVerifyFlags>(StatusOffset())) & 0xff));
+    // The ClassStatus is always in the 4 most-significant bits of status_.
+    return enum_cast<ClassStatus>(
+        static_cast<uint32_t>(GetField32Volatile<kVerifyFlags>(StatusOffset())) >> (32 - 4));
   }
 
   // This is static because 'this' may be moved by GC.
-  static void SetStatus(Handle<Class> h_this, Status new_status, Thread* self)
+  static void SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
   static MemberOffset StatusOffset() {
@@ -118,24 +97,24 @@ class MANAGED Class FINAL : public Object {
   // Returns true if the class has been retired.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsRetired() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusRetired;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kRetired;
   }
 
   // Returns true if the class has failed to link.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsErroneousUnresolved() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusErrorUnresolved;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kErrorUnresolved;
   }
 
   // Returns true if the class has failed to initialize.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsErroneousResolved() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusErrorResolved;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kErrorResolved;
   }
 
   // Returns true if the class status indicets that the class has failed to link or initialize.
-  static bool IsErroneous(Status status) {
-    return status == kStatusErrorUnresolved || status == kStatusErrorResolved;
+  static bool IsErroneous(ClassStatus status) {
+    return status == ClassStatus::kErrorUnresolved || status == ClassStatus::kErrorResolved;
   }
 
   // Returns true if the class has failed to link or initialize.
@@ -147,44 +126,44 @@ class MANAGED Class FINAL : public Object {
   // Returns true if the class has been loaded.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsIdxLoaded() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusIdx;
+    return GetStatus<kVerifyFlags>() >= ClassStatus::kIdx;
   }
 
   // Returns true if the class has been loaded.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsLoaded() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusLoaded;
+    return GetStatus<kVerifyFlags>() >= ClassStatus::kLoaded;
   }
 
   // Returns true if the class has been linked.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsResolved() REQUIRES_SHARED(Locks::mutator_lock_) {
-    Status status = GetStatus<kVerifyFlags>();
-    return status >= kStatusResolved || status == kStatusErrorResolved;
+    ClassStatus status = GetStatus<kVerifyFlags>();
+    return status >= ClassStatus::kResolved || status == ClassStatus::kErrorResolved;
   }
 
   // Returns true if the class should be verified at runtime.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool ShouldVerifyAtRuntime() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusRetryVerificationAtRuntime;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kRetryVerificationAtRuntime;
   }
 
   // Returns true if the class has been verified.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsVerified() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusVerified;
+    return GetStatus<kVerifyFlags>() >= ClassStatus::kVerified;
   }
 
   // Returns true if the class is initializing.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsInitializing() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= kStatusInitializing;
+    return GetStatus<kVerifyFlags>() >= ClassStatus::kInitializing;
   }
 
   // Returns true if the class is initialized.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() == kStatusInitialized;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kInitialized;
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -207,6 +186,11 @@ class MANAGED Class FINAL : public Object {
 
   void SetAccessFlags(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Returns true if the class is an enum.
+  ALWAYS_INLINE bool IsEnum() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccEnum) != 0;
+  }
+
   // Returns true if the class is an interface.
   ALWAYS_INLINE bool IsInterface() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccInterface) != 0;
@@ -224,6 +208,15 @@ class MANAGED Class FINAL : public Object {
 
   ALWAYS_INLINE bool IsFinalizable() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccClassIsFinalizable) != 0;
+  }
+
+  ALWAYS_INLINE bool ShouldSkipHiddenApiChecks() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccSkipHiddenApiChecks) != 0;
+  }
+
+  ALWAYS_INLINE void SetSkipHiddenApiChecks() REQUIRES_SHARED(Locks::mutator_lock_) {
+    uint32_t flags = GetAccessFlags();
+    SetAccessFlags(flags | kAccSkipHiddenApiChecks);
   }
 
   ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -333,8 +326,10 @@ class MANAGED Class FINAL : public Object {
   // Returns true if this class is the placeholder and should retire and
   // be replaced with a class with the right size for embedded imt/vtable.
   bool IsTemp() REQUIRES_SHARED(Locks::mutator_lock_) {
-    Status s = GetStatus();
-    return s < Status::kStatusResolving && s != kStatusErrorResolved && ShouldHaveEmbeddedVTable();
+    ClassStatus s = GetStatus();
+    return s < ClassStatus::kResolving &&
+           s != ClassStatus::kErrorResolved &&
+           ShouldHaveEmbeddedVTable();
   }
 
   String* GetName() REQUIRES_SHARED(Locks::mutator_lock_);  // Returns the cached name.
@@ -822,8 +817,12 @@ class MANAGED Class FINAL : public Object {
 
   static MemberOffset EmbeddedVTableEntryOffset(uint32_t i, PointerSize pointer_size);
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   int32_t GetVTableLength() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ArtMethod* GetVTableEntry(uint32_t i, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -955,6 +954,8 @@ class MANAGED Class FINAL : public Object {
     return (GetAccessFlags() & kAccRecursivelyInitialized) != 0;
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
+           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ALWAYS_INLINE int32_t GetIfTableCount() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -1151,6 +1152,10 @@ class MANAGED Class FINAL : public Object {
   // ArtMethods.
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
   void VisitNativeRoots(Visitor& visitor, PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Get one of the primitive classes.
+  static ObjPtr<mirror::Class> GetPrimitiveClass(ObjPtr<mirror::String> name)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // When class is verified, set the kAccSkipAccessChecks flag on each method.

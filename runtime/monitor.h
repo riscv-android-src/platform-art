@@ -25,8 +25,8 @@
 #include <list>
 #include <vector>
 
-#include "atomic.h"
 #include "base/allocator.h"
+#include "base/atomic.h"
 #include "base/mutex.h"
 #include "gc_root.h"
 #include "lock_word.h"
@@ -94,7 +94,9 @@ class Monitor {
                    bool interruptShouldThrow, ThreadState why)
       REQUIRES_SHARED(Locks::mutator_lock_) NO_THREAD_SAFETY_ANALYSIS;
 
-  static void DescribeWait(std::ostream& os, const Thread* thread)
+  static ThreadState FetchState(const Thread* thread,
+                                /* out */ mirror::Object** monitor_object,
+                                /* out */ uint32_t* lock_owner_tid)
       REQUIRES(!Locks::thread_suspend_count_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -128,7 +130,7 @@ class Monitor {
   bool IsLocked() REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!monitor_lock_);
 
   bool HasHashCode() const {
-    return hash_code_.LoadRelaxed() != 0;
+    return hash_code_.load(std::memory_order_relaxed) != 0;
   }
 
   MonitorId GetMonitorId() const {

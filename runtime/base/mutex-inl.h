@@ -21,9 +21,9 @@
 
 #include "mutex.h"
 
+#include "base/utils.h"
 #include "base/value_object.h"
 #include "thread.h"
-#include "utils.h"
 
 #if ART_USE_FUTEXES
 #include "linux/futex.h"
@@ -161,10 +161,10 @@ inline void ReaderWriterMutex::SharedLock(Thread* self) {
 #if ART_USE_FUTEXES
   bool done = false;
   do {
-    int32_t cur_state = state_.LoadRelaxed();
+    int32_t cur_state = state_.load(std::memory_order_relaxed);
     if (LIKELY(cur_state >= 0)) {
       // Add as an extra reader.
-      done = state_.CompareExchangeWeakAcquire(cur_state, cur_state + 1);
+      done = state_.CompareAndSetWeakAcquire(cur_state, cur_state + 1);
     } else {
       HandleSharedLockContention(self, cur_state);
     }
@@ -185,16 +185,16 @@ inline void ReaderWriterMutex::SharedUnlock(Thread* self) {
 #if ART_USE_FUTEXES
   bool done = false;
   do {
-    int32_t cur_state = state_.LoadRelaxed();
+    int32_t cur_state = state_.load(std::memory_order_relaxed);
     if (LIKELY(cur_state > 0)) {
       // Reduce state by 1 and impose lock release load/store ordering.
-      // Note, the relaxed loads below musn't reorder before the CompareExchange.
+      // Note, the relaxed loads below musn't reorder before the CompareAndSet.
       // TODO: the ordering here is non-trivial as state is split across 3 fields, fix by placing
       // a status bit into the state on contention.
-      done = state_.CompareExchangeWeakSequentiallyConsistent(cur_state, cur_state - 1);
+      done = state_.CompareAndSetWeakSequentiallyConsistent(cur_state, cur_state - 1);
       if (done && (cur_state - 1) == 0) {  // Weak CAS may fail spuriously.
-        if (num_pending_writers_.LoadRelaxed() > 0 ||
-            num_pending_readers_.LoadRelaxed() > 0) {
+        if (num_pending_writers_.load(std::memory_order_relaxed) > 0 ||
+            num_pending_readers_.load(std::memory_order_relaxed) > 0) {
           // Wake any exclusive waiters as there are now no readers.
           futex(state_.Address(), FUTEX_WAKE, -1, nullptr, nullptr, 0);
         }
@@ -221,7 +221,7 @@ inline bool Mutex::IsExclusiveHeld(const Thread* self) const {
 }
 
 inline pid_t Mutex::GetExclusiveOwnerTid() const {
-  return exclusive_owner_.LoadRelaxed();
+  return exclusive_owner_.load(std::memory_order_relaxed);
 }
 
 inline void Mutex::AssertExclusiveHeld(const Thread* self) const {
@@ -248,16 +248,16 @@ inline bool ReaderWriterMutex::IsExclusiveHeld(const Thread* self) const {
 
 inline pid_t ReaderWriterMutex::GetExclusiveOwnerTid() const {
 #if ART_USE_FUTEXES
-  int32_t state = state_.LoadRelaxed();
+  int32_t state = state_.load(std::memory_order_relaxed);
   if (state == 0) {
     return 0;  // No owner.
   } else if (state > 0) {
     return -1;  // Shared.
   } else {
-    return exclusive_owner_.LoadRelaxed();
+    return exclusive_owner_.load(std::memory_order_relaxed);
   }
 #else
-  return exclusive_owner_.LoadRelaxed();
+  return exclusive_owner_.load(std::memory_order_relaxed);
 #endif
 }
 

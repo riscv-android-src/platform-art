@@ -124,12 +124,17 @@ void HInliner::UpdateInliningBudget() {
   }
 }
 
-void HInliner::Run() {
-  if (graph_->IsDebuggable()) {
+bool HInliner::Run() {
+  if (compiler_driver_->GetCompilerOptions().GetInlineMaxCodeUnits() == 0) {
+    // Inlining effectively disabled.
+    return false;
+  } else if (graph_->IsDebuggable()) {
     // For simplicity, we currently never inline when the graph is debuggable. This avoids
     // doing some logic in the runtime to discover if a method could have been inlined.
-    return;
+    return false;
   }
+
+  bool didInline = false;
 
   // Initialize the number of instructions for the method being compiled. Recursive calls
   // to HInliner::Run have already updated the instruction count.
@@ -147,10 +152,11 @@ void HInliner::Run() {
   //   that this method is actually inlined;
   // - if a method's name contains the substring "$noinline$", do not
   //   inline that method.
-  // We limit this to AOT compilation, as the JIT may or may not inline
+  // We limit the latter to AOT compilation, as the JIT may or may not inline
   // depending on the state of classes at runtime.
-  const bool honor_inlining_directives =
-      IsCompilingWithCoreImage() && Runtime::Current()->IsAotCompiler();
+  const bool honor_noinline_directives = IsCompilingWithCoreImage();
+  const bool honor_inline_directives =
+      honor_noinline_directives && Runtime::Current()->IsAotCompiler();
 
   // Keep a copy of all blocks when starting the visit.
   ArenaVector<HBasicBlock*> blocks = graph_->GetReversePostOrder();
@@ -164,25 +170,32 @@ void HInliner::Run() {
       HInvoke* call = instruction->AsInvoke();
       // As long as the call is not intrinsified, it is worth trying to inline.
       if (call != nullptr && call->GetIntrinsic() == Intrinsics::kNone) {
-        if (honor_inlining_directives) {
+        if (honor_noinline_directives) {
           // Debugging case: directives in method names control or assert on inlining.
           std::string callee_name = outer_compilation_unit_.GetDexFile()->PrettyMethod(
               call->GetDexMethodIndex(), /* with_signature */ false);
           // Tests prevent inlining by having $noinline$ in their method names.
           if (callee_name.find("$noinline$") == std::string::npos) {
-            if (!TryInline(call)) {
+            if (TryInline(call)) {
+              didInline = true;
+            } else if (honor_inline_directives) {
               bool should_have_inlined = (callee_name.find("$inline$") != std::string::npos);
               CHECK(!should_have_inlined) << "Could not inline " << callee_name;
             }
           }
         } else {
+          DCHECK(!honor_inline_directives);
           // Normal case: try to inline.
-          TryInline(call);
+          if (TryInline(call)) {
+            didInline = true;
+          }
         }
       }
       instruction = next;
     }
   }
+
+  return didInline;
 }
 
 static bool IsMethodOrDeclaringClassFinal(ArtMethod* method)
@@ -392,6 +405,58 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
   return single_impl;
 }
 
+static bool IsMethodUnverified(CompilerDriver* const compiler_driver, ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!method->GetDeclaringClass()->IsVerified()) {
+    if (Runtime::Current()->UseJitCompilation()) {
+      // We're at runtime, we know this is cold code if the class
+      // is not verified, so don't bother analyzing.
+      return true;
+    }
+    uint16_t class_def_idx = method->GetDeclaringClass()->GetDexClassDefIndex();
+    if (!compiler_driver->IsMethodVerifiedWithoutFailures(
+        method->GetDexMethodIndex(), class_def_idx, *method->GetDexFile())) {
+      // Method has soft or hard failures, don't analyze.
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool AlwaysThrows(CompilerDriver* const compiler_driver, ArtMethod* method)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(method != nullptr);
+  // Skip non-compilable and unverified methods.
+  if (!method->IsCompilable() || IsMethodUnverified(compiler_driver, method)) {
+    return false;
+  }
+  // Skip native methods, methods with try blocks, and methods that are too large.
+  CodeItemDataAccessor accessor(method->DexInstructionData());
+  if (!accessor.HasCodeItem() ||
+      accessor.TriesSize() != 0 ||
+      accessor.InsnsSizeInCodeUnits() > kMaximumNumberOfTotalInstructions) {
+    return false;
+  }
+  // Scan for exits.
+  bool throw_seen = false;
+  for (const DexInstructionPcPair& pair : accessor) {
+    switch (pair.Inst().Opcode()) {
+      case Instruction::RETURN:
+      case Instruction::RETURN_VOID:
+      case Instruction::RETURN_WIDE:
+      case Instruction::RETURN_OBJECT:
+      case Instruction::RETURN_VOID_NO_BARRIER:
+        return false;  // found regular control flow back
+      case Instruction::THROW:
+        throw_seen = true;
+        break;
+      default:
+        break;
+    }
+  }
+  return throw_seen;
+}
+
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
   if (invoke_instruction->IsInvokeUnresolved() ||
       invoke_instruction->IsInvokePolymorphic()) {
@@ -431,20 +496,29 @@ bool HInliner::TryInline(HInvoke* invoke_instruction) {
   }
 
   if (actual_method != nullptr) {
+    // Single target.
     bool result = TryInlineAndReplace(invoke_instruction,
                                       actual_method,
                                       ReferenceTypeInfo::CreateInvalid(),
                                       /* do_rtp */ true,
                                       cha_devirtualize);
-    if (result && !invoke_instruction->IsInvokeStaticOrDirect()) {
-      if (cha_devirtualize) {
-        // Add dependency due to devirtulization. We've assumed resolved_method
-        // has single implementation.
-        outermost_graph_->AddCHASingleImplementationDependency(resolved_method);
-        MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
-      } else {
-        MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+    if (result) {
+      // Successfully inlined.
+      if (!invoke_instruction->IsInvokeStaticOrDirect()) {
+        if (cha_devirtualize) {
+          // Add dependency due to devirtualization. We've assumed resolved_method
+          // has single implementation.
+          outermost_graph_->AddCHASingleImplementationDependency(resolved_method);
+          MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
+        } else {
+          MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+        }
       }
+    } else if (!cha_devirtualize && AlwaysThrows(compiler_driver_, actual_method)) {
+      // Set always throws property for non-inlined method call with single target
+      // (unless it was obtained through CHA, because that would imply we have
+      // to add the CHA dependency, which seems not worth it).
+      invoke_instruction->SetAlwaysThrows(true);
     }
     return result;
   }
@@ -1381,26 +1455,26 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
 
   bool same_dex_file = IsSameDexFile(*outer_compilation_unit_.GetDexFile(), *method->GetDexFile());
 
-  const DexFile::CodeItem* code_item = method->GetCodeItem();
+  CodeItemDataAccessor accessor(method->DexInstructionData());
 
-  if (code_item == nullptr) {
+  if (!accessor.HasCodeItem()) {
     LOG_FAIL_NO_STAT()
         << "Method " << method->PrettyMethod() << " is not inlined because it is native";
     return false;
   }
 
   size_t inline_max_code_units = compiler_driver_->GetCompilerOptions().GetInlineMaxCodeUnits();
-  if (code_item->insns_size_in_code_units_ > inline_max_code_units) {
+  if (accessor.InsnsSizeInCodeUnits() > inline_max_code_units) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedCodeItem)
         << "Method " << method->PrettyMethod()
         << " is not inlined because its code item is too big: "
-        << code_item->insns_size_in_code_units_
+        << accessor.InsnsSizeInCodeUnits()
         << " > "
         << inline_max_code_units;
     return false;
   }
 
-  if (code_item->tries_size_ != 0) {
+  if (accessor.TriesSize() != 0) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedTryCatch)
         << "Method " << method->PrettyMethod() << " is not inlined because of try block";
     return false;
@@ -1410,18 +1484,14 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedNotVerified)
         << "Method " << method->PrettyMethod()
         << " has soft failures un-handled by the compiler, so it cannot be inlined";
+    return false;
   }
 
-  if (!method->GetDeclaringClass()->IsVerified()) {
-    uint16_t class_def_idx = method->GetDeclaringClass()->GetDexClassDefIndex();
-    if (Runtime::Current()->UseJitCompilation() ||
-        !compiler_driver_->IsMethodVerifiedWithoutFailures(
-            method->GetDexMethodIndex(), class_def_idx, *method->GetDexFile())) {
-      LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedNotVerified)
-          << "Method " << method->PrettyMethod()
-          << " couldn't be verified, so it cannot be inlined";
-      return false;
-    }
+  if (IsMethodUnverified(compiler_driver_, method)) {
+    LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedNotVerified)
+        << "Method " << method->PrettyMethod()
+        << " couldn't be verified, so it cannot be inlined";
+    return false;
   }
 
   if (invoke_instruction->IsInvokeStaticOrDirect() &&
@@ -1660,6 +1730,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
   const DexFile::CodeItem* code_item = resolved_method->GetCodeItem();
   const DexFile& callee_dex_file = *resolved_method->GetDexFile();
   uint32_t method_index = resolved_method->GetDexMethodIndex();
+  CodeItemDebugInfoAccessor code_item_accessor(resolved_method->DexInstructionDebugInfo());
   ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
   Handle<mirror::DexCache> dex_cache = NewHandleIfDifferent(resolved_method->GetDexCache(),
                                                             caller_compilation_unit_.GetDexCache(),
@@ -1714,7 +1785,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
     }
   }
   HGraphBuilder builder(callee_graph,
-                        code_item,
+                        code_item_accessor,
                         &dex_compilation_unit,
                         &outer_compilation_unit_,
                         compiler_driver_,
@@ -1967,6 +2038,7 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
     return;
   }
 
+  CodeItemDataAccessor accessor(callee_graph->GetDexFile(), code_item);
   HInliner inliner(callee_graph,
                    outermost_graph_,
                    codegen_,
@@ -1975,7 +2047,7 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
                    compiler_driver_,
                    handles_,
                    inline_stats_,
-                   total_number_of_dex_registers_ + code_item->registers_size_,
+                   total_number_of_dex_registers_ + accessor.RegistersSize(),
                    total_number_of_instructions_ + number_of_instructions,
                    this,
                    depth_ + 1);

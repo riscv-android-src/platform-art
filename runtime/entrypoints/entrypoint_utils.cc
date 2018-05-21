@@ -21,12 +21,12 @@
 #include "base/enums.h"
 #include "base/mutex.h"
 #include "class_linker-inl.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/quick/callee_save_frame.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
-#include "java_vm_ext.h"
+#include "jni/java_vm_ext.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
@@ -258,6 +258,28 @@ ArtMethod* GetCalleeSaveOuterMethod(Thread* self, CalleeSaveType type) {
   ScopedAssertNoThreadSuspension ants(__FUNCTION__);
   ArtMethod** sp = self->GetManagedStack()->GetTopQuickFrameKnownNotTagged();
   return DoGetCalleeSaveMethodOuterCallerAndPc(sp, type).first;
+}
+
+ObjPtr<mirror::MethodHandle> ResolveMethodHandleFromCode(ArtMethod* referrer,
+                                                         uint32_t method_handle_idx) {
+  Thread::PoisonObjectPointersIfDebug();
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  return class_linker->ResolveMethodHandle(Thread::Current(), method_handle_idx, referrer);
+}
+
+ObjPtr<mirror::MethodType> ResolveMethodTypeFromCode(ArtMethod* referrer,
+                                                     dex::ProtoIndex proto_idx) {
+  Thread::PoisonObjectPointersIfDebug();
+  ObjPtr<mirror::MethodType> method_type =
+      referrer->GetDexCache()->GetResolvedMethodType(proto_idx);
+  if (UNLIKELY(method_type == nullptr)) {
+    StackHandleScope<2> hs(Thread::Current());
+    Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
+    Handle<mirror::ClassLoader> class_loader(hs.NewHandle(referrer->GetClassLoader()));
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    method_type = class_linker->ResolveMethodType(hs.Self(), proto_idx, dex_cache, class_loader);
+  }
+  return method_type;
 }
 
 }  // namespace art

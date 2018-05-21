@@ -23,9 +23,9 @@
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/enums.h"
+#include "base/globals.h"
 #include "base/macros.h"
 #include "constants_x86.h"
-#include "globals.h"
 #include "heap_poisoning.h"
 #include "managed_register_x86.h"
 #include "offsets.h"
@@ -449,6 +449,15 @@ class X86Assembler FINAL : public Assembler {
   void paddq(XmmRegister dst, XmmRegister src);
   void psubq(XmmRegister dst, XmmRegister src);
 
+  void paddusb(XmmRegister dst, XmmRegister src);
+  void paddsb(XmmRegister dst, XmmRegister src);
+  void paddusw(XmmRegister dst, XmmRegister src);
+  void paddsw(XmmRegister dst, XmmRegister src);
+  void psubusb(XmmRegister dst, XmmRegister src);
+  void psubsb(XmmRegister dst, XmmRegister src);
+  void psubusw(XmmRegister dst, XmmRegister src);
+  void psubsw(XmmRegister dst, XmmRegister src);
+
   void cvtsi2ss(XmmRegister dst, Register src);
   void cvtsi2sd(XmmRegister dst, Register src);
 
@@ -634,6 +643,7 @@ class X86Assembler FINAL : public Assembler {
 
   void addl(const Address& address, Register reg);
   void addl(const Address& address, const Immediate& imm);
+  void addw(const Address& address, const Immediate& imm);
 
   void adcl(Register dst, Register src);
   void adcl(Register reg, const Immediate& imm);
@@ -817,8 +827,9 @@ class X86Assembler FINAL : public Assembler {
   inline void EmitOperandSizeOverride();
 
   void EmitOperand(int rm, const Operand& operand);
-  void EmitImmediate(const Immediate& imm);
-  void EmitComplex(int rm, const Operand& operand, const Immediate& immediate);
+  void EmitImmediate(const Immediate& imm, bool is_16_op = false);
+  void EmitComplex(
+      int rm, const Operand& operand, const Immediate& immediate, bool is_16_op = false);
   void EmitLabel(Label* label, int instruction_size);
   void EmitLabelLink(Label* label);
   void EmitLabelLink(NearLabel* label);

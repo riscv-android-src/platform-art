@@ -246,6 +246,47 @@ static MethodType* MethodTypeOf(const std::string& method_descriptor) {
   return MethodType::Create(self, rtype, ptypes);
 }
 
+static bool AccessModeMatch(VarHandle* vh,
+                            VarHandle::AccessMode access_mode,
+                            MethodType* method_type,
+                            VarHandle::MatchKind expected_match)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return vh->GetMethodTypeMatchForAccessMode(access_mode, method_type) == expected_match;
+}
+
+template <typename VH>
+static bool AccessModeExactMatch(Handle<VH> vh,
+                                 VarHandle::AccessMode access_mode,
+                                 const char* descriptor)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return AccessModeMatch(vh.Get(),
+                         access_mode,
+                         MethodTypeOf(descriptor),
+                         VarHandle::MatchKind::kExact);
+}
+
+template <typename VH>
+static bool AccessModeWithConversionsMatch(Handle<VH> vh,
+                                          VarHandle::AccessMode access_mode,
+                                          const char* descriptor)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return AccessModeMatch(vh.Get(),
+                         access_mode,
+                         MethodTypeOf(descriptor),
+                         VarHandle::MatchKind::kWithConversions);
+}
+
+template <typename VH>
+static bool AccessModeNoMatch(Handle<VH> vh,
+                              VarHandle::AccessMode access_mode,
+                              const char* descriptor)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return AccessModeMatch(vh.Get(),
+                         access_mode,
+                         MethodTypeOf(descriptor),
+                         VarHandle::MatchKind::kNone);
+}
+
 TEST_F(VarHandleTest, InstanceFieldVarHandle) {
   Thread * const self = Thread::Current();
   ScopedObjectAccess soa(self);
@@ -296,47 +337,53 @@ TEST_F(VarHandleTest, InstanceFieldVarHandle) {
   // Check compatibility - "Get" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)Z")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;)I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;)V"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;)D"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Z)Z"));
   }
 
   // Check compatibility - "Set" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kSet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;I)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;I)V"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;S)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndSet" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndSet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;II)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode,
-                                             MethodTypeOf("(Ljava/lang/Integer;II)I")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;II)Z"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;II)V"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;II)Ljava/lang/Boolean;"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;IB)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;II)I"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndExchange" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndExchange;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;II)I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;II)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;I)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(III)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;II)I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;II)V"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;II)J"));
+    EXPECT_TRUE(AccessModeWithConversionsMatch(fvh, access_mode, "(Ljava/lang/Integer;BS)F"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(IIII)V"));
   }
 
   // Check compatibility - "GetAndUpdate" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGetAndAdd;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;I)I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;I)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/lang/Integer;I)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;I)I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(Ljava/lang/Integer;I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Ljava/lang/Integer;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(II)S"));
   }
 
   // Check synthesized method types match expected forms.
@@ -430,48 +477,47 @@ TEST_F(VarHandleTest, StaticFieldVarHandle) {
   // Check compatibility - "Get" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)Z")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "()I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "()V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "()Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Z)Z"));
   }
 
   // Check compatibility - "Set" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kSet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(I)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(F)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "()V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "()Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(F)V"));
   }
 
   // Check compatibility - "CompareAndSet" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndSet;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode,
-                                             MethodTypeOf("(II)Ljava/lang/String;")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("()Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(II)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(II)Ljava/lang/String;"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "()Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndExchange" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndExchange;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(ID)I")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)D")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(III)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(II)I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(II)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(ID)I"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(II)S"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(IIJ)V"));
   }
 
   // Check compatibility - "GetAndUpdate" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGetAndAdd;
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(I)I")));
-    EXPECT_TRUE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(I)V")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(I)Z")));
-    EXPECT_FALSE(fvh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(I)I"));
+    EXPECT_TRUE(AccessModeExactMatch(fvh, access_mode, "(I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(fvh, access_mode, "(II)V"));
   }
 
   // Check synthesized method types match expected forms.
@@ -594,50 +640,46 @@ TEST_F(VarHandleTest, ArrayElementVarHandle) {
   // Check compatibility - "Get" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;I)Ljava/lang/String;")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;I)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;Ljava/lang/String;)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)Z")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;I)Ljava/lang/String;"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;Ljava/lang/String;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)Z"));
   }
 
   // Check compatibility - "Set" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kSet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;I)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;I)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndSet" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndSet;
-    EXPECT_TRUE(
-        vh->IsMethodTypeCompatible(
-            access_mode,
-            MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode,
-                                             MethodTypeOf("([Ljava/lang/String;III)I")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;I)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;III)I"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndExchange" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndExchange;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;II)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(III)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)Ljava/lang/String;"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;Ljava/lang/String;)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;II)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(III)V"));
   }
 
   // Check compatibility - "GetAndUpdate" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGetAndAdd;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([Ljava/lang/String;ILjava/lang/String;)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;)Ljava/lang/String;"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([Ljava/lang/String;ILjava/lang/String;)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(II)V"));
   }
 
   // Check synthesized method types match expected forms.
@@ -747,50 +789,46 @@ TEST_F(VarHandleTest, ByteArrayViewVarHandle) {
   // Check compatibility - "Get" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BI)C")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BI)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BC)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)Z")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BI)C"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BI)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BC)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)Z"));
   }
 
   // Check compatibility - "Set" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kSet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BIC)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BI)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BI)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BIC)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BI)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BI)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndSet" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndSet;
-    EXPECT_TRUE(
-        vh->IsMethodTypeCompatible(
-            access_mode,
-            MethodTypeOf("([BICC)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode,
-                                             MethodTypeOf("([BIII)I")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BI)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BICC)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BIII)I"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BI)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndExchange" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndExchange;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BICC)C")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BICC)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BII)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(III)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BICC)C"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BICC)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BII)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(III)V"));
   }
 
   // Check compatibility - "GetAndUpdate" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGetAndAdd;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BIC)C")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BIC)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("([BIC)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BIC)C"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "([BIC)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "([BIC)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(II)V"));
   }
 
   // Check synthesized method types match expected forms.
@@ -900,50 +938,46 @@ TEST_F(VarHandleTest, ByteBufferViewVarHandle) {
   // Check compatibility - "Get" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;I)D")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;I)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;D)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)Z")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;I)D"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;D)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)Z"));
   }
 
   // Check compatibility - "Set" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kSet;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;ID)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;I)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;I)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;ID)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;I)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndSet" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndSet;
-    EXPECT_TRUE(
-        vh->IsMethodTypeCompatible(
-            access_mode,
-            MethodTypeOf("(Ljava/nio/ByteBuffer;IDD)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode,
-                                             MethodTypeOf("(Ljava/nio/ByteBuffer;IDI)D")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;I)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Z)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;IDD)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;IDI)D"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;I)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Z)V"));
   }
 
   // Check compatibility - "CompareAndExchange" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kCompareAndExchange;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;IDD)D")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;IDD)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;II)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(III)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;IDD)D"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;IDD)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;II)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(III)V"));
   }
 
   // Check compatibility - "GetAndUpdate" pattern
   {
     const VarHandle::AccessMode access_mode = VarHandle::AccessMode::kGetAndAdd;
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;ID)D")));
-    EXPECT_TRUE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;ID)V")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(Ljava/nio/ByteBuffer;ID)Z")));
-    EXPECT_FALSE(vh->IsMethodTypeCompatible(access_mode, MethodTypeOf("(II)V")));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;ID)D"));
+    EXPECT_TRUE(AccessModeExactMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;ID)V"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(Ljava/nio/ByteBuffer;ID)Z"));
+    EXPECT_TRUE(AccessModeNoMatch(vh, access_mode, "(II)V"));
   }
 
   // Check synthesized method types match expected forms.
@@ -985,6 +1019,80 @@ TEST_F(VarHandleTest, ByteBufferViewVarHandle) {
     EXPECT_TRUE(vh->GetMethodTypeForAccessMode(self, VarHandle::AccessMode::kGetAndBitwiseXorRelease)->IsExactMatch(getAndUpdate));
     EXPECT_TRUE(vh->GetMethodTypeForAccessMode(self, VarHandle::AccessMode::kGetAndBitwiseXorAcquire)->IsExactMatch(getAndUpdate));
   }
+}
+
+TEST_F(VarHandleTest, GetMethodTypeForAccessMode) {
+  VarHandle::AccessMode access_mode;
+
+  // Invalid access mode names
+  EXPECT_FALSE(VarHandle::GetAccessModeByMethodName(nullptr, &access_mode));
+  EXPECT_FALSE(VarHandle::GetAccessModeByMethodName("", &access_mode));
+  EXPECT_FALSE(VarHandle::GetAccessModeByMethodName("CompareAndExchange", &access_mode));
+  EXPECT_FALSE(VarHandle::GetAccessModeByMethodName("compareAndExchangX", &access_mode));
+
+  // Valid access mode names
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("compareAndExchange", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kCompareAndExchange, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("compareAndExchangeAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kCompareAndExchangeAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("compareAndExchangeRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kCompareAndExchangeRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("compareAndSet", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kCompareAndSet, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("get", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGet, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndAdd", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndAdd, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndAddAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndAddAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndAddRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndAddRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseAnd", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseAnd, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseAndAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseAndAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseAndRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseAndRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseOr", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseOr, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseOrAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseOrAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseOrRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseOrRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseXor", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseXor, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseXorAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseXorAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndBitwiseXorRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndBitwiseXorRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndSet", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndSet, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndSetAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndSetAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getAndSetRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetAndSetRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getOpaque", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetOpaque, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("getVolatile", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kGetVolatile, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("set", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kSet, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("setOpaque", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kSetOpaque, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("setRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kSetRelease, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("setVolatile", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kSetVolatile, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("weakCompareAndSet", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kWeakCompareAndSet, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("weakCompareAndSetAcquire", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kWeakCompareAndSetAcquire, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("weakCompareAndSetPlain", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kWeakCompareAndSetPlain, access_mode);
+  EXPECT_TRUE(VarHandle::GetAccessModeByMethodName("weakCompareAndSetRelease", &access_mode));
+  EXPECT_EQ(VarHandle::AccessMode::kWeakCompareAndSetRelease, access_mode);
 }
 
 }  // namespace mirror

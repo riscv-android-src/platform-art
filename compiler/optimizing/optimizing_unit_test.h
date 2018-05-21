@@ -17,11 +17,17 @@
 #ifndef ART_COMPILER_OPTIMIZING_OPTIMIZING_UNIT_TEST_H_
 #define ART_COMPILER_OPTIMIZING_OPTIMIZING_UNIT_TEST_H_
 
+#include <memory>
+#include <vector>
+
+#include "base/malloc_arena_pool.h"
 #include "base/scoped_arena_allocator.h"
 #include "builder.h"
 #include "common_compiler_test.h"
-#include "dex_file.h"
-#include "dex_instruction.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction.h"
+#include "dex/standard_dex_file.h"
 #include "driver/dex_compilation_unit.h"
 #include "handle_scope-inl.h"
 #include "mirror/class_loader.h"
@@ -92,24 +98,17 @@ class ArenaPoolAndAllocator {
   ScopedArenaAllocator* GetScopedAllocator() { return &scoped_allocator_; }
 
  private:
-  ArenaPool pool_;
+  MallocArenaPool pool_;
   ArenaAllocator allocator_;
   ArenaStack arena_stack_;
   ScopedArenaAllocator scoped_allocator_;
 };
 
-inline HGraph* CreateGraph(ArenaPoolAndAllocator* pool_and_allocator) {
-  return new (pool_and_allocator->GetAllocator()) HGraph(
-      pool_and_allocator->GetAllocator(),
-      pool_and_allocator->GetArenaStack(),
-      *reinterpret_cast<DexFile*>(pool_and_allocator->GetAllocator()->Alloc(sizeof(DexFile))),
-      /*method_idx*/-1,
-      kRuntimeISA);
-}
-
-class OptimizingUnitTest : public CommonCompilerTest {
- protected:
-  OptimizingUnitTest() : pool_and_allocator_(new ArenaPoolAndAllocator()) { }
+// Have a separate helper so the OptimizingCFITest can inherit it without causing
+// multiple inheritance errors from having two gtest as a parent twice.
+class OptimizingUnitTestHelper {
+ public:
+  OptimizingUnitTestHelper() : pool_and_allocator_(new ArenaPoolAndAllocator()) { }
 
   ArenaAllocator* GetAllocator() { return pool_and_allocator_->GetAllocator(); }
   ArenaStack* GetArenaStack() { return pool_and_allocator_->GetArenaStack(); }
@@ -121,13 +120,41 @@ class OptimizingUnitTest : public CommonCompilerTest {
   }
 
   HGraph* CreateGraph() {
-    return art::CreateGraph(pool_and_allocator_.get());
+    ArenaAllocator* const allocator = pool_and_allocator_->GetAllocator();
+
+    // Reserve a big array of 0s so the dex file constructor can offsets from the header.
+    static constexpr size_t kDexDataSize = 4 * KB;
+    const uint8_t* dex_data = reinterpret_cast<uint8_t*>(allocator->Alloc(kDexDataSize));
+
+    // Create the dex file based on the fake data. Call the constructor so that we can use virtual
+    // functions. Don't use the arena for the StandardDexFile otherwise the dex location leaks.
+    dex_files_.emplace_back(new StandardDexFile(
+        dex_data,
+        sizeof(StandardDexFile::Header),
+        "no_location",
+        /*location_checksum*/ 0,
+        /*oat_dex_file*/ nullptr,
+        /*container*/ nullptr));
+
+    return new (allocator) HGraph(
+        allocator,
+        pool_and_allocator_->GetArenaStack(),
+        *dex_files_.back(),
+        /*method_idx*/-1,
+        kRuntimeISA);
   }
 
   // Create a control-flow graph from Dex instructions.
-  HGraph* CreateCFG(const uint16_t* data, DataType::Type return_type = DataType::Type::kInt32) {
-    const DexFile::CodeItem* code_item = reinterpret_cast<const DexFile::CodeItem*>(data);
+  HGraph* CreateCFG(const std::vector<uint16_t>& data,
+                    DataType::Type return_type = DataType::Type::kInt32) {
     HGraph* graph = CreateGraph();
+
+    // The code item data might not aligned to 4 bytes, copy it to ensure that.
+    const size_t code_item_size = data.size() * sizeof(data.front());
+    void* aligned_data = GetAllocator()->Alloc(code_item_size);
+    memcpy(aligned_data, &data[0], code_item_size);
+    CHECK_ALIGNED(aligned_data, StandardDexFile::CodeItem::kAlignment);
+    const DexFile::CodeItem* code_item = reinterpret_cast<const DexFile::CodeItem*>(aligned_data);
 
     {
       ScopedObjectAccess soa(Thread::Current());
@@ -145,16 +172,20 @@ class OptimizingUnitTest : public CommonCompilerTest {
               /* access_flags */ 0u,
               /* verified_method */ nullptr,
               handles_->NewHandle<mirror::DexCache>(nullptr));
-      HGraphBuilder builder(graph, dex_compilation_unit, *code_item, handles_.get(), return_type);
+      CodeItemDebugInfoAccessor accessor(graph->GetDexFile(), code_item, /*dex_method_idx*/ 0u);
+      HGraphBuilder builder(graph, dex_compilation_unit, accessor, handles_.get(), return_type);
       bool graph_built = (builder.BuildGraph() == kAnalysisSuccess);
       return graph_built ? graph : nullptr;
     }
   }
 
  private:
+  std::vector<std::unique_ptr<const StandardDexFile>> dex_files_;
   std::unique_ptr<ArenaPoolAndAllocator> pool_and_allocator_;
   std::unique_ptr<VariableSizedHandleScope> handles_;
 };
+
+class OptimizingUnitTest : public CommonCompilerTest, public OptimizingUnitTestHelper {};
 
 // Naive string diff data type.
 typedef std::list<std::pair<std::string, std::string>> diff_t;

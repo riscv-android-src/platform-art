@@ -27,23 +27,46 @@
 #include "android-base/strings.h"
 
 #include "art_field-inl.h"
+#include "base/os.h"
+#include "base/utils.h"
 #include "class_linker-inl.h"
 #include "class_loader_context.h"
 #include "common_runtime_test.h"
 #include "dexopt_test.h"
+#include "hidden_api.h"
 #include "oat_file.h"
 #include "oat_file_manager.h"
-#include "os.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
-#include "utils.h"
 
 namespace art {
 
 static const std::string kSpecialSharedLibrary = "&";  // NOLINT [runtime/string] [4]
 static ClassLoaderContext* kSpecialSharedLibraryContext = nullptr;
 
-class OatFileAssistantTest : public DexoptTest {};
+static constexpr char kDex2oatCmdLineHiddenApiArg[] = " --runtime-arg -Xhidden-api-checks";
+
+class OatFileAssistantTest : public DexoptTest {
+ public:
+  void VerifyOptimizationStatus(const std::string& file,
+                                const std::string& expected_filter,
+                                const std::string& expected_reason) {
+    std::string compilation_filter;
+    std::string compilation_reason;
+    OatFileAssistant::GetOptimizationStatus(
+        file, kRuntimeISA, &compilation_filter, &compilation_reason);
+
+    ASSERT_EQ(expected_filter, compilation_filter);
+    ASSERT_EQ(expected_reason, compilation_reason);
+  }
+
+  void VerifyOptimizationStatus(const std::string& file,
+                                CompilerFilter::Filter expected_filter,
+                                const std::string& expected_reason) {
+      VerifyOptimizationStatus(
+          file, CompilerFilter::NameOfFilter(expected_filter), expected_reason);
+  }
+};
 
 class OatFileAssistantNoDex2OatTest : public DexoptTest {
  public:
@@ -107,6 +130,8 @@ TEST_F(OatFileAssistantTest, DexNoOat) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasOriginalDexFiles());
+
+  VerifyOptimizationStatus(dex_location, "run-from-apk", "unknown");
 }
 
 // Case: We have no DEX file and no OAT file.
@@ -136,7 +161,7 @@ TEST_F(OatFileAssistantTest, OdexUpToDate) {
   std::string dex_location = GetScratchDir() + "/OdexUpToDate.jar";
   std::string odex_location = GetOdexDir() + "/OdexUpToDate.odex";
   Copy(GetDexSrc1(), dex_location);
-  GeneratePicOdexForTest(dex_location, odex_location, CompilerFilter::kSpeed);
+  GeneratePicOdexForTest(dex_location, odex_location, CompilerFilter::kSpeed, "install");
 
   // For the use of oat location by making the dex parent not writable.
   OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
@@ -154,6 +179,8 @@ TEST_F(OatFileAssistantTest, OdexUpToDate) {
   EXPECT_EQ(OatFileAssistant::kOatUpToDate, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasOriginalDexFiles());
+
+  VerifyOptimizationStatus(dex_location, CompilerFilter::kSpeed, "install");
 }
 
 // Case: We have a DEX file and a PIC ODEX file, but no OAT file. We load the dex
@@ -221,6 +248,8 @@ TEST_F(OatFileAssistantTest, OatUpToDate) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatUpToDate, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasOriginalDexFiles());
+
+  VerifyOptimizationStatus(dex_location, CompilerFilter::kSpeed, "unknown");
 }
 
 // Case: Passing valid file descriptors of updated odex/vdex filesalong with
@@ -245,6 +274,7 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithFd) {
 
   OatFileAssistant oat_file_assistant(dex_location.c_str(),
                                       kRuntimeISA,
+                                      false,
                                       false,
                                       vdex_fd.get(),
                                       odex_fd.get(),
@@ -285,6 +315,7 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithInvalidOdexFd) {
   OatFileAssistant oat_file_assistant(dex_location.c_str(),
                                       kRuntimeISA,
                                       false,
+                                      false,
                                       vdex_fd.get(),
                                       -1 /* oat_fd */,
                                       zip_fd.get());
@@ -319,6 +350,7 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithInvalidVdexFd) {
   OatFileAssistant oat_file_assistant(dex_location.c_str(),
                                       kRuntimeISA,
                                       false,
+                                      false,
                                       -1 /* vdex_fd */,
                                       odex_fd.get(),
                                       zip_fd.get());
@@ -341,6 +373,7 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithInvalidOdexVdexFd) {
   android::base::unique_fd zip_fd(open(dex_location.c_str(), O_RDONLY));
   OatFileAssistant oat_file_assistant(dex_location.c_str(),
                                       kRuntimeISA,
+                                      false,
                                       false,
                                       -1 /* vdex_fd */,
                                       -1 /* oat_fd */,
@@ -377,6 +410,8 @@ TEST_F(OatFileAssistantTest, VdexUpToDateNoOdex) {
   // Make sure we don't crash in this case when we dump the status. We don't
   // care what the actual dumped value is.
   oat_file_assistant.GetStatusDump();
+
+  VerifyOptimizationStatus(dex_location, "run-from-apk", "unknown");
 }
 
 // Case: We have a DEX file and empty VDEX and ODEX files.
@@ -1381,6 +1416,46 @@ TEST_F(OatFileAssistantTest, MakeUpToDateWithContext) {
       oat_file->GetOatHeader().GetStoreValueByKey(OatHeader::kClassPathKey));
 }
 
+TEST_F(OatFileAssistantTest, MakeUpToDateWithHiddenApiDisabled) {
+  hiddenapi::ScopedHiddenApiEnforcementPolicySetting hiddenapi_exemption(
+      hiddenapi::EnforcementPolicy::kNoChecks);
+
+  std::string dex_location = GetScratchDir() + "/TestDexHiddenApiDisabled.jar";
+  Copy(GetDexSrc1(), dex_location);
+
+  OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
+  std::string error_msg;
+  int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+  EXPECT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+
+  std::unique_ptr<OatFile> oat_file = oat_file_assistant.GetBestOatFile();
+  EXPECT_NE(nullptr, oat_file.get());
+
+  const char* cmd_line = oat_file->GetOatHeader().GetStoreValueByKey(OatHeader::kDex2OatCmdLineKey);
+  EXPECT_NE(nullptr, cmd_line);
+  EXPECT_EQ(nullptr, strstr(cmd_line, kDex2oatCmdLineHiddenApiArg));
+}
+
+TEST_F(OatFileAssistantTest, MakeUpToDateWithHiddenApiEnabled) {
+  hiddenapi::ScopedHiddenApiEnforcementPolicySetting hiddenapi_exemption(
+      hiddenapi::EnforcementPolicy::kBlacklistOnly);
+
+  std::string dex_location = GetScratchDir() + "/TestDexHiddenApiEnabled.jar";
+  Copy(GetDexSrc1(), dex_location);
+
+  OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
+  std::string error_msg;
+  int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+  EXPECT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+
+  std::unique_ptr<OatFile> oat_file = oat_file_assistant.GetBestOatFile();
+  EXPECT_NE(nullptr, oat_file.get());
+
+  const char* cmd_line = oat_file->GetOatHeader().GetStoreValueByKey(OatHeader::kDex2OatCmdLineKey);
+  EXPECT_NE(nullptr, cmd_line);
+  EXPECT_NE(nullptr, strstr(cmd_line, kDex2oatCmdLineHiddenApiArg));
+}
+
 TEST_F(OatFileAssistantTest, GetDexOptNeededWithOutOfDateContext) {
   std::string dex_location = GetScratchDir() + "/TestDex.jar";
   std::string context_location = GetScratchDir() + "/ContextDex.jar";
@@ -1437,6 +1512,60 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithUpToDateContextRelative) {
   EXPECT_EQ(-OatFileAssistant::kNoDexOptNeeded,
             oat_file_assistant.GetDexOptNeeded(
                 default_filter, false, false, relative_context.get()));
+}
+
+TEST_F(OatFileAssistantTest, SystemOdex) {
+  std::string dex_location = GetScratchDir() + "/OatUpToDate.jar";
+  std::string odex_location = GetScratchDir() + "/OatUpToDate.odex";
+  std::string system_location = GetAndroidRoot() + "/OatUpToDate.jar";
+
+  std::string error_msg;
+
+  Copy(GetDexSrc1(), dex_location);
+  EXPECT_FALSE(LocationIsOnSystem(dex_location.c_str()));
+
+  {
+    OatFileAssistant oat_file_assistant(dex_location.c_str(),
+                                        kRuntimeISA,
+                                        true,
+                                        false);
+    int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+    ASSERT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+    EXPECT_TRUE(oat_file_assistant.GetBestOatFile()->IsExecutable());
+  }
+
+  {
+    OatFileAssistant oat_file_assistant(dex_location.c_str(),
+                                        kRuntimeISA,
+                                        true,
+                                        true);
+    int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+    ASSERT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+    EXPECT_FALSE(oat_file_assistant.GetBestOatFile()->IsExecutable());
+  }
+
+  Copy(GetDexSrc1(), system_location);
+  EXPECT_TRUE(LocationIsOnSystem(system_location.c_str()));
+
+  {
+    OatFileAssistant oat_file_assistant(system_location.c_str(),
+                                        kRuntimeISA,
+                                        true,
+                                        false);
+    int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+    ASSERT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+    EXPECT_TRUE(oat_file_assistant.GetBestOatFile()->IsExecutable());
+  }
+
+  {
+    OatFileAssistant oat_file_assistant(system_location.c_str(),
+                                        kRuntimeISA,
+                                        true,
+                                        true);
+    int status = oat_file_assistant.MakeUpToDate(false, kSpecialSharedLibraryContext, &error_msg);
+    ASSERT_EQ(OatFileAssistant::kUpdateSucceeded, status) << error_msg;
+    EXPECT_TRUE(oat_file_assistant.GetBestOatFile()->IsExecutable());
+  }
 }
 
 // TODO: More Tests:

@@ -17,16 +17,16 @@
 #ifndef ART_RUNTIME_GC_SPACE_ZYGOTE_SPACE_H_
 #define ART_RUNTIME_GC_SPACE_ZYGOTE_SPACE_H_
 
+#include "base/mem_map.h"
 #include "gc/accounting/space_bitmap.h"
 #include "malloc_space.h"
-#include "mem_map.h"
 
 namespace art {
 namespace gc {
 
 namespace space {
 
-// An zygote space is a space which you cannot allocate into or free from.
+// A zygote space is a space which you cannot allocate into or free from.
 class ZygoteSpace FINAL : public ContinuousMemMapAllocSpace {
  public:
   // Returns the remaining storage in the out_map field.
@@ -67,7 +67,7 @@ class ZygoteSpace FINAL : public ContinuousMemMapAllocSpace {
   }
 
   uint64_t GetObjectsAllocated() {
-    return objects_allocated_.LoadSequentiallyConsistent();
+    return objects_allocated_.load(std::memory_order_seq_cst);
   }
 
   void Clear() OVERRIDE;

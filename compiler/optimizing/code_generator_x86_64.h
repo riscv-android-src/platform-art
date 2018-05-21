@@ -139,11 +139,12 @@ class ParallelMoveResolverX86_64 : public ParallelMoveResolverWithSwap {
  private:
   void Exchange32(CpuRegister reg, int mem);
   void Exchange32(XmmRegister reg, int mem);
-  void Exchange32(int mem1, int mem2);
   void Exchange64(CpuRegister reg1, CpuRegister reg2);
   void Exchange64(CpuRegister reg, int mem);
   void Exchange64(XmmRegister reg, int mem);
-  void Exchange64(int mem1, int mem2);
+  void Exchange128(XmmRegister reg, int mem);
+  void ExchangeMemory32(int mem1, int mem2);
+  void ExchangeMemory64(int mem1, int mem2, int num_of_qwords);
 
   CodeGeneratorX86_64* const codegen_;
 
@@ -207,6 +208,7 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
   // the suspend call.
   void GenerateSuspendCheck(HSuspendCheck* instruction, HBasicBlock* successor);
   void GenerateClassInitializationCheck(SlowPathCode* slow_path, CpuRegister class_reg);
+  void GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check, CpuRegister temp);
   void HandleBitwiseOperation(HBinaryOperation* operation);
   void GenerateRemFP(HRem* rem);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
@@ -220,6 +222,10 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
                       const FieldInfo& field_info,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+
+  void GenerateMinMaxInt(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMax(HBinaryOperation* minmax, bool is_min);
 
   // Generate a heap reference load using one register `out`:
   //
@@ -409,11 +415,12 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   void GenerateVirtualCall(
       HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
-  void RecordBootMethodPatch(HInvokeStaticOrDirect* invoke);
-  Label* NewMethodBssEntryPatch(MethodReference target_method);
-  void RecordBootTypePatch(HLoadClass* load_class);
+  void RecordBootImageRelRoPatch(uint32_t boot_image_offset);
+  void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
+  void RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke);
+  void RecordBootImageTypePatch(HLoadClass* load_class);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
-  void RecordBootStringPatch(HLoadString* load_string);
+  void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
   Label* NewJitRootStringPatch(const DexFile& dex_file,
                                dex::StringIndex string_index,
@@ -603,17 +610,18 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   // Used for fixups to the constant area.
   int constant_area_start_;
 
-  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
+  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
   ArenaDeque<PatchInfo<Label>> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_type_patches_;
-  // Type patch locations for kBssEntry.
+  // PC-relative type patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> type_bss_entry_patches_;
-  // String patch locations; type depends on configuration (intern table or boot image PIC).
-  ArenaDeque<PatchInfo<Label>> string_patches_;
-  // String patch locations for kBssEntry.
+  // PC-relative String patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PatchInfo<Label>> boot_image_string_patches_;
+  // PC-relative String patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> string_bss_entry_patches_;
 
   // Patches for string literals in JIT compiled code.

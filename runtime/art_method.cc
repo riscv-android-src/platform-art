@@ -25,15 +25,17 @@
 #include "base/stringpiece.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
-#include "dex_file-inl.h"
-#include "dex_instruction.h"
+#include "dex/descriptors_names.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_instruction.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/card_table-inl.h"
 #include "interpreter/interpreter.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jit/profiling_info.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/executable.h"
@@ -41,6 +43,7 @@
 #include "mirror/object_array-inl.h"
 #include "mirror/string.h"
 #include "oat_file-inl.h"
+#include "quicken_info.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "vdex_file.h"
@@ -86,13 +89,18 @@ ArtMethod* ArtMethod::GetNonObsoleteMethod() {
   }
 }
 
+template <ReadBarrierOption kReadBarrierOption>
 ArtMethod* ArtMethod::GetSingleImplementation(PointerSize pointer_size) {
-  if (!IsAbstract()) {
+  if (!IsAbstract<kReadBarrierOption>()) {
     // A non-abstract's single implementation is itself.
     return this;
   }
   return reinterpret_cast<ArtMethod*>(GetDataPtrSize(pointer_size));
 }
+template ArtMethod* ArtMethod::GetSingleImplementation<ReadBarrierOption::kWithReadBarrier>(
+    PointerSize pointer_size);
+template ArtMethod* ArtMethod::GetSingleImplementation<ReadBarrierOption::kWithoutReadBarrier>(
+    PointerSize pointer_size);
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
                                           jobject jlr_method) {
@@ -263,7 +271,6 @@ uint32_t ArtMethod::FindDexMethodIndexInOtherDexFile(const DexFile& other_dexfil
 
 uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
                                    uint32_t dex_pc, bool* has_no_move_exception) {
-  const DexFile::CodeItem* code_item = GetCodeItem();
   // Set aside the exception while we resolve its type.
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
@@ -272,7 +279,8 @@ uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
   // Default to handler not found.
   uint32_t found_dex_pc = dex::kDexNoIndex;
   // Iterate over the catch handlers associated with dex_pc.
-  for (CatchHandlerIterator it(*code_item, dex_pc); it.HasNext(); it.Next()) {
+  CodeItemDataAccessor accessor(DexInstructionData());
+  for (CatchHandlerIterator it(accessor, dex_pc); it.HasNext(); it.Next()) {
     dex::TypeIndex iter_type_idx = it.GetHandlerTypeIndex();
     // Catch all case
     if (!iter_type_idx.IsValid()) {
@@ -297,9 +305,8 @@ uint32_t ArtMethod::FindCatchBlock(Handle<mirror::Class> exception_type,
     }
   }
   if (found_dex_pc != dex::kDexNoIndex) {
-    const Instruction* first_catch_instr =
-        Instruction::At(&code_item->insns_[found_dex_pc]);
-    *has_no_move_exception = (first_catch_instr->Opcode() != Instruction::MOVE_EXCEPTION);
+    const Instruction& first_catch_instr = accessor.InstructionAt(found_dex_pc);
+    *has_no_move_exception = (first_catch_instr.Opcode() != Instruction::MOVE_EXCEPTION);
   }
   // Put the exception back.
   if (exception != nullptr) {
@@ -562,14 +569,32 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
   return true;
 }
 
-const uint8_t* ArtMethod::GetQuickenedInfo() {
+ArrayRef<const uint8_t> ArtMethod::GetQuickenedInfo() {
   const DexFile& dex_file = GetDeclaringClass()->GetDexFile();
   const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   if (oat_dex_file == nullptr || (oat_dex_file->GetOatFile() == nullptr)) {
-    return nullptr;
+    return ArrayRef<const uint8_t>();
   }
-  return oat_dex_file->GetOatFile()->GetVdexFile()->GetQuickenedInfoOf(
-      dex_file, GetCodeItemOffset());
+  return oat_dex_file->GetOatFile()->GetVdexFile()->GetQuickenedInfoOf(dex_file,
+                                                                       GetDexMethodIndex());
+}
+
+uint16_t ArtMethod::GetIndexFromQuickening(uint32_t dex_pc) {
+  ArrayRef<const uint8_t> data = GetQuickenedInfo();
+  if (data.empty()) {
+    return DexFile::kDexNoIndex16;
+  }
+  QuickenInfoTable table(data);
+  uint32_t quicken_index = 0;
+  for (const DexInstructionPcPair& pair : DexInstructions()) {
+    if (pair.DexPc() == dex_pc) {
+      return table.GetData(quicken_index);
+    }
+    if (QuickenInfoTable::NeedsIndexForInstruction(&pair.Inst())) {
+      ++quicken_index;
+    }
+  }
+  return DexFile::kDexNoIndex16;
 }
 
 const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
@@ -684,6 +709,23 @@ bool ArtMethod::HasAnyCompiledCode() {
   // Check whether we have AOT code.
   return GetOatMethodQuickCode(runtime->GetClassLinker()->GetImagePointerSize()) != nullptr;
 }
+
+void ArtMethod::SetNotIntrinsic() {
+  if (!IsIntrinsic()) {
+    return;
+  }
+
+  // Query the hidden API access flags of the intrinsic.
+  HiddenApiAccessFlags::ApiList intrinsic_api_list = GetHiddenApiAccessFlags();
+
+  // Clear intrinsic-related access flags.
+  ClearAccessFlags(kAccIntrinsic | kAccIntrinsicBits);
+
+  // Re-apply hidden API access flags now that the method is not an intrinsic.
+  SetAccessFlags(HiddenApiAccessFlags::EncodeForRuntime(GetAccessFlags(), intrinsic_api_list));
+  DCHECK_EQ(GetHiddenApiAccessFlags(), intrinsic_api_list);
+}
+
 
 void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   memcpy(reinterpret_cast<void*>(this), reinterpret_cast<const void*>(src),

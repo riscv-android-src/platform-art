@@ -17,6 +17,7 @@ cc_library_headers {
     name: "libopenjdkjvmti_headers",
     host_supported: true,
     export_include_dirs: ["include"],
+    sdk_version: "current",
 }
 
 cc_defaults {
@@ -68,6 +69,9 @@ art_cc_library {
     shared_libs: [
         "libart",
         "libart-compiler",
+        "libart-dexlayout",
+        "libdexfile",
+        "libartbase",
     ],
 }
 
@@ -80,5 +84,8 @@ art_cc_library {
     shared_libs: [
         "libartd",
         "libartd-compiler",
+        "libartd-dexlayout",
+        "libdexfiled",
+        "libartbased",
     ],
 }

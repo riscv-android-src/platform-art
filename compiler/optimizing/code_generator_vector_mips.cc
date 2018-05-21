@@ -42,7 +42,7 @@ void LocationsBuilderMIPS::VisitVecReplicateScalar(HVecReplicateScalar* instruct
       locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -89,7 +89,7 @@ void InstructionCodeGeneratorMIPS::VisitVecReplicateScalar(HVecReplicateScalar* 
                                      /* is_double */ true);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -113,7 +113,7 @@ void LocationsBuilderMIPS::VisitVecExtractScalar(HVecExtractScalar* instruction)
       locations->SetOut(Location::SameAsFirstInput());
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -138,7 +138,7 @@ void InstructionCodeGeneratorMIPS::VisitVecExtractScalar(HVecExtractScalar* inst
       DCHECK(locations->InAt(0).Equals(locations->Out()));  // no code required
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -170,7 +170,7 @@ static void CreateVecUnOpLocations(ArenaAllocator* allocator, HVecUnaryOperation
                             : Location::kNoOutputOverlap);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -225,7 +225,7 @@ void InstructionCodeGeneratorMIPS::VisitVecReduce(HVecReduce* instruction) {
       }
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -244,7 +244,7 @@ void InstructionCodeGeneratorMIPS::VisitVecCnv(HVecCnv* instruction) {
     DCHECK_EQ(4u, instruction->GetVectorLength());
     __ Ffint_sW(dst, src);
   } else {
-    LOG(FATAL) << "Unsupported SIMD type";
+    LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
   }
 }
 
@@ -290,7 +290,7 @@ void InstructionCodeGeneratorMIPS::VisitVecNeg(HVecNeg* instruction) {
       __ FsubD(dst, dst, src);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -337,7 +337,7 @@ void InstructionCodeGeneratorMIPS::VisitVecAbs(HVecAbs* instruction) {
       __ AndV(dst, dst, src);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -369,7 +369,7 @@ void InstructionCodeGeneratorMIPS::VisitVecNot(HVecNot* instruction) {
       __ NorV(dst, src, src);  // lanes do not matter
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -392,7 +392,7 @@ static void CreateVecBinOpLocations(ArenaAllocator* allocator, HVecBinaryOperati
       locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -434,9 +434,17 @@ void InstructionCodeGeneratorMIPS::VisitVecAdd(HVecAdd* instruction) {
       __ FaddD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
+}
+
+void LocationsBuilderMIPS::VisitVecSaturationAdd(HVecSaturationAdd* instruction) {
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+}
+
+void InstructionCodeGeneratorMIPS::VisitVecSaturationAdd(HVecSaturationAdd* instruction) {
+  LOG(FATAL) << "Unsupported SIMD " << instruction->GetId();
 }
 
 void LocationsBuilderMIPS::VisitVecHalvingAdd(HVecHalvingAdd* instruction) {
@@ -474,7 +482,7 @@ void InstructionCodeGeneratorMIPS::VisitVecHalvingAdd(HVecHalvingAdd* instructio
           : __ Ave_sH(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -516,9 +524,17 @@ void InstructionCodeGeneratorMIPS::VisitVecSub(HVecSub* instruction) {
       __ FsubD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
+}
+
+void LocationsBuilderMIPS::VisitVecSaturationSub(HVecSaturationSub* instruction) {
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
+}
+
+void InstructionCodeGeneratorMIPS::VisitVecSaturationSub(HVecSaturationSub* instruction) {
+  LOG(FATAL) << "Unsupported SIMD " << instruction->GetId();
 }
 
 void LocationsBuilderMIPS::VisitVecMul(HVecMul* instruction) {
@@ -558,7 +574,7 @@ void InstructionCodeGeneratorMIPS::VisitVecMul(HVecMul* instruction) {
       __ FmulD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -582,7 +598,7 @@ void InstructionCodeGeneratorMIPS::VisitVecDiv(HVecDiv* instruction) {
       __ FdivD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -613,36 +629,34 @@ void InstructionCodeGeneratorMIPS::VisitVecMin(HVecMin* instruction) {
       DCHECK_EQ(8u, instruction->GetVectorLength());
       __ Min_sH(dst, lhs, rhs);
       break;
+    case DataType::Type::kUint32:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      __ Min_uW(dst, lhs, rhs);
+      break;
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      if (instruction->IsUnsigned()) {
-        __ Min_uW(dst, lhs, rhs);
-      } else {
-        __ Min_sW(dst, lhs, rhs);
-      }
+      __ Min_sW(dst, lhs, rhs);
+      break;
+    case DataType::Type::kUint64:
+      DCHECK_EQ(2u, instruction->GetVectorLength());
+      __ Min_uD(dst, lhs, rhs);
       break;
     case DataType::Type::kInt64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      if (instruction->IsUnsigned()) {
-        __ Min_uD(dst, lhs, rhs);
-      } else {
-        __ Min_sD(dst, lhs, rhs);
-      }
+      __ Min_sD(dst, lhs, rhs);
       break;
     // When one of arguments is NaN, fmin.df returns other argument, but Java expects a NaN value.
     // TODO: Fix min(x, NaN) cases for float and double.
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      DCHECK(!instruction->IsUnsigned());
       __ FminW(dst, lhs, rhs);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      DCHECK(!instruction->IsUnsigned());
       __ FminD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -673,36 +687,34 @@ void InstructionCodeGeneratorMIPS::VisitVecMax(HVecMax* instruction) {
       DCHECK_EQ(8u, instruction->GetVectorLength());
       __ Max_sH(dst, lhs, rhs);
       break;
+    case DataType::Type::kUint32:
+      DCHECK_EQ(4u, instruction->GetVectorLength());
+      __ Max_uW(dst, lhs, rhs);
+      break;
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      if (instruction->IsUnsigned()) {
-        __ Max_uW(dst, lhs, rhs);
-      } else {
-        __ Max_sW(dst, lhs, rhs);
-      }
+      __ Max_sW(dst, lhs, rhs);
+      break;
+    case DataType::Type::kUint64:
+      DCHECK_EQ(2u, instruction->GetVectorLength());
+      __ Max_uD(dst, lhs, rhs);
       break;
     case DataType::Type::kInt64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      if (instruction->IsUnsigned()) {
-        __ Max_uD(dst, lhs, rhs);
-      } else {
-        __ Max_sD(dst, lhs, rhs);
-      }
+      __ Max_sD(dst, lhs, rhs);
       break;
     // When one of arguments is NaN, fmax.df returns other argument, but Java expects a NaN value.
     // TODO: Fix max(x, NaN) cases for float and double.
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      DCHECK(!instruction->IsUnsigned());
       __ FmaxW(dst, lhs, rhs);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      DCHECK(!instruction->IsUnsigned());
       __ FmaxD(dst, lhs, rhs);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -731,7 +743,7 @@ void InstructionCodeGeneratorMIPS::VisitVecAnd(HVecAnd* instruction) {
       __ AndV(dst, lhs, rhs);  // lanes do not matter
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -768,7 +780,7 @@ void InstructionCodeGeneratorMIPS::VisitVecOr(HVecOr* instruction) {
       __ OrV(dst, lhs, rhs);  // lanes do not matter
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -797,7 +809,7 @@ void InstructionCodeGeneratorMIPS::VisitVecXor(HVecXor* instruction) {
       __ XorV(dst, lhs, rhs);  // lanes do not matter
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -817,7 +829,7 @@ static void CreateVecShiftLocations(ArenaAllocator* allocator, HVecBinaryOperati
       locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -851,7 +863,7 @@ void InstructionCodeGeneratorMIPS::VisitVecShl(HVecShl* instruction) {
       __ SlliD(dst, lhs, value);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -885,7 +897,7 @@ void InstructionCodeGeneratorMIPS::VisitVecShr(HVecShr* instruction) {
       __ SraiD(dst, lhs, value);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -919,7 +931,7 @@ void InstructionCodeGeneratorMIPS::VisitVecUShr(HVecUShr* instruction) {
       __ SrliD(dst, lhs, value);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -951,7 +963,7 @@ void LocationsBuilderMIPS::VisitVecSetScalars(HVecSetScalars* instruction) {
       locations->SetOut(Location::RequiresFpuRegister());
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -993,7 +1005,7 @@ void InstructionCodeGeneratorMIPS::VisitVecSetScalars(HVecSetScalars* instructio
       __ InsertW(dst, locations->InAt(0).AsRegisterPairHigh<Register>(), 1);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1014,7 +1026,7 @@ static void CreateVecAccumLocations(ArenaAllocator* allocator, HVecOperation* in
       locations->SetOut(Location::SameAsFirstInput());
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1064,7 +1076,7 @@ void InstructionCodeGeneratorMIPS::VisitVecMultiplyAccumulate(HVecMultiplyAccumu
       }
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1166,7 +1178,7 @@ void InstructionCodeGeneratorMIPS::VisitVecSADAccumulate(HVecSADAccumulate* inst
           break;
         }
         default:
-          LOG(FATAL) << "Unsupported SIMD type";
+          LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
           UNREACHABLE();
       }
       break;
@@ -1205,7 +1217,7 @@ void InstructionCodeGeneratorMIPS::VisitVecSADAccumulate(HVecSADAccumulate* inst
           break;
         }
         default:
-          LOG(FATAL) << "Unsupported SIMD type";
+          LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
           UNREACHABLE();
       }
       break;
@@ -1235,7 +1247,7 @@ void InstructionCodeGeneratorMIPS::VisitVecSADAccumulate(HVecSADAccumulate* inst
           break;
         }
         default:
-          LOG(FATAL) << "Unsupported SIMD type";
+          LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
           UNREACHABLE();
       }
       break;
@@ -1251,13 +1263,13 @@ void InstructionCodeGeneratorMIPS::VisitVecSADAccumulate(HVecSADAccumulate* inst
           break;
         }
         default:
-          LOG(FATAL) << "Unsupported SIMD type";
+          LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
           UNREACHABLE();
       }
       break;
     }
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1286,7 +1298,7 @@ static void CreateVecMemLocations(ArenaAllocator* allocator,
       }
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1361,7 +1373,7 @@ void InstructionCodeGeneratorMIPS::VisitVecLoad(HVecLoad* instruction) {
       __ LdD(reg, base, offset);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }
@@ -1399,7 +1411,7 @@ void InstructionCodeGeneratorMIPS::VisitVecStore(HVecStore* instruction) {
       __ StD(reg, base, offset);
       break;
     default:
-      LOG(FATAL) << "Unsupported SIMD type";
+      LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
 }

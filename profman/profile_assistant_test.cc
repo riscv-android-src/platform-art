@@ -16,19 +16,23 @@
 
 #include <gtest/gtest.h>
 
+#include "android-base/strings.h"
 #include "art_method-inl.h"
 #include "base/unix_file/fd_file.h"
+#include "base/utils.h"
 #include "common_runtime_test.h"
+#include "dex/descriptors_names.h"
 #include "exec_utils.h"
-#include "jit/profile_compilation_info.h"
 #include "linear_alloc.h"
 #include "mirror/class-inl.h"
 #include "obj_ptr-inl.h"
+#include "profile/profile_compilation_info.h"
 #include "profile_assistant.h"
 #include "scoped_thread_state_change-inl.h"
-#include "utils.h"
 
 namespace art {
+
+using Hotness = ProfileCompilationInfo::MethodHotness;
 
 static constexpr size_t kMaxMethodIds = 65535;
 
@@ -51,25 +55,55 @@ class ProfileAssistantTest : public CommonRuntimeTest {
     uint32_t dex_location_checksum1 = checksum;
     std::string dex_location2 = "location2" + id;
     uint32_t dex_location_checksum2 = 10 * checksum;
+    SetupProfile(dex_location1,
+                 dex_location_checksum1,
+                 dex_location2,
+                 dex_location_checksum2,
+                 number_of_methods,
+                 number_of_classes,
+                 profile,
+                 info,
+                 start_method_index,
+                 reverse_dex_write_order);
+  }
+
+  void SetupProfile(const std::string& dex_location1,
+                    uint32_t dex_location_checksum1,
+                    const std::string& dex_location2,
+                    uint32_t dex_location_checksum2,
+                    uint16_t number_of_methods,
+                    uint16_t number_of_classes,
+                    const ScratchFile& profile,
+                    ProfileCompilationInfo* info,
+                    uint16_t start_method_index = 0,
+                    bool reverse_dex_write_order = false,
+                    uint32_t number_of_methods1 = kMaxMethodIds,
+                    uint32_t number_of_methods2 = kMaxMethodIds) {
     for (uint16_t i = start_method_index; i < start_method_index + number_of_methods; i++) {
       // reverse_dex_write_order controls the order in which the dex files will be added to
       // the profile and thus written to disk.
       ProfileCompilationInfo::OfflineProfileMethodInfo pmi =
           GetOfflineProfileMethodInfo(dex_location1, dex_location_checksum1,
-                                      dex_location2, dex_location_checksum2);
+                                      dex_location2, dex_location_checksum2,
+                                      number_of_methods1, number_of_methods2);
+      Hotness::Flag flags = Hotness::kFlagPostStartup;
       if (reverse_dex_write_order) {
-        ASSERT_TRUE(info->AddMethod(dex_location2, dex_location_checksum2, i, kMaxMethodIds, pmi));
-        ASSERT_TRUE(info->AddMethod(dex_location1, dex_location_checksum1, i, kMaxMethodIds, pmi));
+        ASSERT_TRUE(info->AddMethod(
+            dex_location2, dex_location_checksum2, i, number_of_methods2, pmi, flags));
+        ASSERT_TRUE(info->AddMethod(
+            dex_location1, dex_location_checksum1, i, number_of_methods1, pmi, flags));
       } else {
-        ASSERT_TRUE(info->AddMethod(dex_location1, dex_location_checksum1, i, kMaxMethodIds, pmi));
-        ASSERT_TRUE(info->AddMethod(dex_location2, dex_location_checksum2, i, kMaxMethodIds, pmi));
+        ASSERT_TRUE(info->AddMethod(
+            dex_location1, dex_location_checksum1, i, number_of_methods1, pmi, flags));
+        ASSERT_TRUE(info->AddMethod(
+            dex_location2, dex_location_checksum2, i, number_of_methods2, pmi, flags));
       }
     }
     for (uint16_t i = 0; i < number_of_classes; i++) {
       ASSERT_TRUE(info->AddClassIndex(dex_location1,
                                       dex_location_checksum1,
                                       dex::TypeIndex(i),
-                                      kMaxMethodIds));
+                                      number_of_methods1));
     }
 
     ASSERT_TRUE(info->Save(GetFd(profile)));
@@ -86,7 +120,6 @@ class ProfileAssistantTest : public CommonRuntimeTest {
                          const ScratchFile& profile,
                          ProfileCompilationInfo* info) {
     std::string dex_location = "location1" + id;
-    using Hotness = ProfileCompilationInfo::MethodHotness;
     for (uint32_t idx : hot_methods) {
       info->AddMethodIndex(Hotness::kFlagHot, dex_location, checksum, idx, number_of_methods);
     }
@@ -114,11 +147,12 @@ class ProfileAssistantTest : public CommonRuntimeTest {
 
   ProfileCompilationInfo::OfflineProfileMethodInfo GetOfflineProfileMethodInfo(
         const std::string& dex_location1, uint32_t dex_checksum1,
-        const std::string& dex_location2, uint32_t dex_checksum2) {
+        const std::string& dex_location2, uint32_t dex_checksum2,
+        uint32_t number_of_methods1 = kMaxMethodIds, uint32_t number_of_methods2 = kMaxMethodIds) {
     ProfileCompilationInfo::InlineCacheMap* ic_map = CreateInlineCacheMap();
     ProfileCompilationInfo::OfflineProfileMethodInfo pmi(ic_map);
-    pmi.dex_references.emplace_back(dex_location1, dex_checksum1, kMaxMethodIds);
-    pmi.dex_references.emplace_back(dex_location2, dex_checksum2, kMaxMethodIds);
+    pmi.dex_references.emplace_back(dex_location1, dex_checksum1, number_of_methods1);
+    pmi.dex_references.emplace_back(dex_location2, dex_checksum2, number_of_methods2);
 
     // Monomorphic
     for (uint16_t dex_pc = 0; dex_pc < 11; dex_pc++) {
@@ -731,7 +765,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "H" + kHotMethod + "\n" +
       kUncommonDirtyClass;
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex1, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex1, profiles.back().GetFilename(), core_dex));
 
   // Create a bunch of boot profiles.
   std::string dex2 =
@@ -741,7 +776,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "P" + kMultiMethod + "\n" +
       kUncommonDirtyClass;
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex2, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex2, profiles.back().GetFilename(), core_dex));
 
   // Create a bunch of boot profiles.
   std::string dex3 =
@@ -750,7 +786,8 @@ TEST_F(ProfileAssistantTest, TestBootImageProfile) {
       "P" + kMultiMethod + "\n" +
       kDirtyClass + "\n";
   profiles.emplace_back(ScratchFile());
-  EXPECT_TRUE(CreateProfile(dex3, profiles.back().GetFilename(), core_dex));
+  EXPECT_TRUE(CreateProfile(
+      dex3, profiles.back().GetFilename(), core_dex));
 
   // Generate the boot profile.
   ScratchFile out_profile;
@@ -1050,10 +1087,10 @@ TEST_F(ProfileAssistantTest, TestProfileCreateWithInvalidData) {
   ASSERT_EQ(1u, classes.size());
   ASSERT_TRUE(classes.find(invalid_class_index) != classes.end());
 
-  // Verify that the invalid method is in the profile.
-  ASSERT_EQ(2u, hot_methods.size());
+  // Verify that the invalid method did not get in the profile.
+  ASSERT_EQ(1u, hot_methods.size());
   uint16_t invalid_method_index = std::numeric_limits<uint16_t>::max() - 1;
-  ASSERT_TRUE(hot_methods.find(invalid_method_index) != hot_methods.end());
+  ASSERT_FALSE(hot_methods.find(invalid_method_index) != hot_methods.end());
 }
 
 TEST_F(ProfileAssistantTest, DumpOnly) {
@@ -1100,18 +1137,160 @@ TEST_F(ProfileAssistantTest, DumpOnly) {
   // Check the actual contents of the dump by looking at the offsets of the methods.
   for (uint32_t m : hot_methods) {
     const size_t pos = output.find(std::to_string(m) + "[],", hot_offset);
-    ASSERT_NE(pos, std::string::npos);
-    EXPECT_LT(pos, startup_offset);
+    ASSERT_NE(pos, std::string::npos) << output;
+    EXPECT_LT(pos, startup_offset) << output;
   }
   for (uint32_t m : startup_methods) {
     const size_t pos = output.find(std::to_string(m) + ",", startup_offset);
-    ASSERT_NE(pos, std::string::npos);
-    EXPECT_LT(pos, post_startup_offset);
+    ASSERT_NE(pos, std::string::npos) << output;
+    EXPECT_LT(pos, post_startup_offset) << output;
   }
   for (uint32_t m : post_startup_methods) {
     const size_t pos = output.find(std::to_string(m) + ",", post_startup_offset);
-    ASSERT_NE(pos, std::string::npos);
-    EXPECT_LT(pos, classes_offset);
+    ASSERT_NE(pos, std::string::npos) << output;
+    EXPECT_LT(pos, classes_offset) << output;
+  }
+}
+
+TEST_F(ProfileAssistantTest, MergeProfilesWithFilter) {
+  ScratchFile profile1;
+  ScratchFile profile2;
+  ScratchFile reference_profile;
+
+  std::vector<int> profile_fds({
+      GetFd(profile1),
+      GetFd(profile2)});
+  int reference_profile_fd = GetFd(reference_profile);
+
+  // Use a real dex file to generate profile test data.
+  // The file will be used during merging to filter unwanted data.
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("ProfileTestMultiDex");
+  const DexFile& d1 = *dex_files[0];
+  const DexFile& d2 = *dex_files[1];
+  // The new profile info will contain the methods with indices 0-100.
+  const uint16_t kNumberOfMethodsToEnableCompilation = 100;
+  ProfileCompilationInfo info1;
+  SetupProfile(d1.GetLocation(), d1.GetLocationChecksum(), "p1", 1,
+      kNumberOfMethodsToEnableCompilation, 0, profile1, &info1);
+  ProfileCompilationInfo info2;
+  SetupProfile(d2.GetLocation(), d2.GetLocationChecksum(), "p2", 2,
+      kNumberOfMethodsToEnableCompilation, 0, profile2, &info2);
+
+
+  // The reference profile info will contain the methods with indices 50-150.
+  const uint16_t kNumberOfMethodsAlreadyCompiled = 100;
+  ProfileCompilationInfo reference_info;
+  SetupProfile(d1.GetLocation(), d1.GetLocationChecksum(), "p1", 1,
+      kNumberOfMethodsAlreadyCompiled, 0, reference_profile,
+      &reference_info, kNumberOfMethodsToEnableCompilation / 2);
+
+  // Run profman and pass the dex file with --apk-fd.
+  android::base::unique_fd apk_fd(
+      open(GetTestDexFileName("ProfileTestMultiDex").c_str(), O_RDONLY));
+  ASSERT_GE(apk_fd.get(), 0);
+
+  std::string profman_cmd = GetProfmanCmd();
+  std::vector<std::string> argv_str;
+  argv_str.push_back(profman_cmd);
+  argv_str.push_back("--profile-file-fd=" + std::to_string(profile1.GetFd()));
+  argv_str.push_back("--profile-file-fd=" + std::to_string(profile2.GetFd()));
+  argv_str.push_back("--reference-profile-file-fd=" + std::to_string(reference_profile.GetFd()));
+  argv_str.push_back("--apk-fd=" + std::to_string(apk_fd.get()));
+  std::string error;
+
+  EXPECT_EQ(ExecAndReturnCode(argv_str, &error), 0) << error;
+
+  // Verify that we can load the result.
+
+  ProfileCompilationInfo result;
+  ASSERT_TRUE(reference_profile.GetFile()->ResetOffset());
+  ASSERT_TRUE(result.Load(reference_profile_fd));
+
+
+  ASSERT_TRUE(profile1.GetFile()->ResetOffset());
+  ASSERT_TRUE(profile2.GetFile()->ResetOffset());
+  ASSERT_TRUE(reference_profile.GetFile()->ResetOffset());
+
+  // Verify that the result filtered out data not belonging to the dex file.
+  // This is equivalent to checking that the result is equal to the merging of
+  // all profiles while filtering out data not belonging to the dex file.
+
+  ProfileCompilationInfo::ProfileLoadFilterFn filter_fn =
+      [&d1, &d2](const std::string& dex_location, uint32_t checksum) -> bool {
+          return (dex_location == ProfileCompilationInfo::GetProfileDexFileKey(d1.GetLocation())
+              && checksum == d1.GetLocationChecksum())
+              || (dex_location == ProfileCompilationInfo::GetProfileDexFileKey(d2.GetLocation())
+              && checksum == d2.GetLocationChecksum());
+        };
+
+  ProfileCompilationInfo info1_filter;
+  ProfileCompilationInfo info2_filter;
+  ProfileCompilationInfo expected;
+
+  info2_filter.Load(profile1.GetFd(), /*merge_classes*/ true, filter_fn);
+  info2_filter.Load(profile2.GetFd(), /*merge_classes*/ true, filter_fn);
+  expected.Load(reference_profile.GetFd(), /*merge_classes*/ true, filter_fn);
+
+  ASSERT_TRUE(expected.MergeWith(info1_filter));
+  ASSERT_TRUE(expected.MergeWith(info2_filter));
+
+  ASSERT_TRUE(expected.Equals(result));
+}
+
+TEST_F(ProfileAssistantTest, CopyAndUpdateProfileKey) {
+  ScratchFile profile1;
+  ScratchFile reference_profile;
+
+  // Use a real dex file to generate profile test data. During the copy-and-update the
+  // matching is done based on checksum so we have to match with the real thing.
+  std::vector<std::unique_ptr<const DexFile>> dex_files = OpenTestDexFiles("ProfileTestMultiDex");
+  const DexFile& d1 = *dex_files[0];
+  const DexFile& d2 = *dex_files[1];
+
+  ProfileCompilationInfo info1;
+  uint16_t num_methods_to_add = std::min(d1.NumMethodIds(), d2.NumMethodIds());
+  SetupProfile("fake-location1",
+               d1.GetLocationChecksum(),
+               "fake-location2",
+               d2.GetLocationChecksum(),
+               num_methods_to_add,
+               /*num_classes*/ 0,
+               profile1,
+               &info1,
+               /*start_method_index*/ 0,
+               /*reverse_dex_write_order*/ false,
+               /*number_of_methods1*/ d1.NumMethodIds(),
+               /*number_of_methods2*/ d2.NumMethodIds());
+
+  // Run profman and pass the dex file with --apk-fd.
+  android::base::unique_fd apk_fd(
+      open(GetTestDexFileName("ProfileTestMultiDex").c_str(), O_RDONLY));
+  ASSERT_GE(apk_fd.get(), 0);
+
+  std::string profman_cmd = GetProfmanCmd();
+  std::vector<std::string> argv_str;
+  argv_str.push_back(profman_cmd);
+  argv_str.push_back("--profile-file-fd=" + std::to_string(profile1.GetFd()));
+  argv_str.push_back("--reference-profile-file-fd=" + std::to_string(reference_profile.GetFd()));
+  argv_str.push_back("--apk-fd=" + std::to_string(apk_fd.get()));
+  argv_str.push_back("--copy-and-update-profile-key");
+  std::string error;
+
+  ASSERT_EQ(ExecAndReturnCode(argv_str, &error), 0) << error;
+
+  // Verify that we can load the result.
+  ProfileCompilationInfo result;
+  ASSERT_TRUE(reference_profile.GetFile()->ResetOffset());
+  ASSERT_TRUE(result.Load(reference_profile.GetFd()));
+
+  // Verify that the renaming was done.
+  for (uint16_t i = 0; i < num_methods_to_add; i ++) {
+      std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> pmi;
+      ASSERT_TRUE(result.GetMethod(d1.GetLocation(), d1.GetLocationChecksum(), i) != nullptr) << i;
+      ASSERT_TRUE(result.GetMethod(d2.GetLocation(), d2.GetLocationChecksum(), i) != nullptr) << i;
+
+      ASSERT_TRUE(result.GetMethod("fake-location1", d1.GetLocationChecksum(), i) == nullptr);
+      ASSERT_TRUE(result.GetMethod("fake-location2", d2.GetLocationChecksum(), i) == nullptr);
   }
 }
 

@@ -23,13 +23,14 @@
 #include "art_method-inl.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/mutex.h"
+#include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "class_linker.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
-#include "dex_instruction-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction-inl.h"
 #include "lock_word-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
@@ -58,8 +59,8 @@ static constexpr uint64_t kLongWaitMs = 100 * kDebugThresholdFudgeFactor;
  * though, because we have a full 32 bits to work with.
  *
  * The two states of an Object's lock are referred to as "thin" and "fat".  A lock may transition
- * from the "thin" state to the "fat" state and this transition is referred to as inflation. Once
- * a lock has been inflated it remains in the "fat" state indefinitely.
+ * from the "thin" state to the "fat" state and this transition is referred to as inflation. We
+ * deflate locks from time to time as part of heap trimming.
  *
  * The lock value itself is stored in mirror::Object::monitor_ and the representation is described
  * in the LockWord value type.
@@ -134,12 +135,12 @@ Monitor::Monitor(Thread* self, Thread* owner, mirror::Object* obj, int32_t hash_
 
 int32_t Monitor::GetHashCode() {
   while (!HasHashCode()) {
-    if (hash_code_.CompareExchangeWeakRelaxed(0, mirror::Object::GenerateIdentityHashCode())) {
+    if (hash_code_.CompareAndSetWeakRelaxed(0, mirror::Object::GenerateIdentityHashCode())) {
       break;
     }
   }
   DCHECK(HasHashCode());
-  return hash_code_.LoadRelaxed();
+  return hash_code_.load(std::memory_order_relaxed);
 }
 
 bool Monitor::Install(Thread* self) {
@@ -154,7 +155,7 @@ bool Monitor::Install(Thread* self) {
       break;
     }
     case LockWord::kHashCode: {
-      CHECK_EQ(hash_code_.LoadRelaxed(), static_cast<int32_t>(lw.GetHashCode()));
+      CHECK_EQ(hash_code_.load(std::memory_order_relaxed), static_cast<int32_t>(lw.GetHashCode()));
       break;
     }
     case LockWord::kFatLocked: {
@@ -1100,7 +1101,7 @@ mirror::Object* Monitor::MonitorEnter(Thread* self, mirror::Object* obj, bool tr
       case LockWord::kFatLocked: {
         // We should have done an acquire read of the lockword initially, to ensure
         // visibility of the monitor data structure. Use an explicit fence instead.
-        QuasiAtomic::ThreadFenceAcquire();
+        std::atomic_thread_fence(std::memory_order_acquire);
         Monitor* mon = lock_word.FatLockMonitor();
         if (trylock) {
           return mon->TryLock(self) ? h_obj.Get() : nullptr;
@@ -1289,62 +1290,54 @@ uint32_t Monitor::GetLockOwnerThreadId(mirror::Object* obj) {
   }
 }
 
-void Monitor::DescribeWait(std::ostream& os, const Thread* thread) {
-  // Determine the wait message and object we're waiting or blocked upon.
-  mirror::Object* pretty_object = nullptr;
-  const char* wait_message = nullptr;
-  uint32_t lock_owner = ThreadList::kInvalidThreadId;
+ThreadState Monitor::FetchState(const Thread* thread,
+                                /* out */ mirror::Object** monitor_object,
+                                /* out */ uint32_t* lock_owner_tid) {
+  DCHECK(monitor_object != nullptr);
+  DCHECK(lock_owner_tid != nullptr);
+
+  *monitor_object = nullptr;
+  *lock_owner_tid = ThreadList::kInvalidThreadId;
+
   ThreadState state = thread->GetState();
-  if (state == kWaiting || state == kTimedWaiting || state == kSleeping) {
-    wait_message = (state == kSleeping) ? "  - sleeping on " : "  - waiting on ";
-    Thread* self = Thread::Current();
-    MutexLock mu(self, *thread->GetWaitMutex());
-    Monitor* monitor = thread->GetWaitMonitor();
-    if (monitor != nullptr) {
-      pretty_object = monitor->GetObject();
-    }
-  } else if (state == kBlocked || state == kWaitingForLockInflation) {
-    wait_message = (state == kBlocked) ? "  - waiting to lock "
-                                       : "  - waiting for lock inflation of ";
-    pretty_object = thread->GetMonitorEnterObject();
-    if (pretty_object != nullptr) {
-      if (kUseReadBarrier && Thread::Current()->GetIsGcMarking()) {
-        // We may call Thread::Dump() in the middle of the CC thread flip and this thread's stack
-        // may have not been flipped yet and "pretty_object" may be a from-space (stale) ref, in
-        // which case the GetLockOwnerThreadId() call below will crash. So explicitly mark/forward
-        // it here.
-        pretty_object = ReadBarrier::Mark(pretty_object);
+
+  switch (state) {
+    case kWaiting:
+    case kTimedWaiting:
+    case kSleeping:
+    {
+      Thread* self = Thread::Current();
+      MutexLock mu(self, *thread->GetWaitMutex());
+      Monitor* monitor = thread->GetWaitMonitor();
+      if (monitor != nullptr) {
+        *monitor_object = monitor->GetObject();
       }
-      lock_owner = pretty_object->GetLockOwnerThreadId();
     }
+    break;
+
+    case kBlocked:
+    case kWaitingForLockInflation:
+    {
+      mirror::Object* lock_object = thread->GetMonitorEnterObject();
+      if (lock_object != nullptr) {
+        if (kUseReadBarrier && Thread::Current()->GetIsGcMarking()) {
+          // We may call Thread::Dump() in the middle of the CC thread flip and this thread's stack
+          // may have not been flipped yet and "pretty_object" may be a from-space (stale) ref, in
+          // which case the GetLockOwnerThreadId() call below will crash. So explicitly mark/forward
+          // it here.
+          lock_object = ReadBarrier::Mark(lock_object);
+        }
+        *monitor_object = lock_object;
+        *lock_owner_tid = lock_object->GetLockOwnerThreadId();
+      }
+    }
+    break;
+
+    default:
+      break;
   }
 
-  if (wait_message != nullptr) {
-    if (pretty_object == nullptr) {
-      os << wait_message << "an unknown object";
-    } else {
-      if ((pretty_object->GetLockWord(true).GetState() == LockWord::kThinLocked) &&
-          Locks::mutator_lock_->IsExclusiveHeld(Thread::Current())) {
-        // Getting the identity hashcode here would result in lock inflation and suspension of the
-        // current thread, which isn't safe if this is the only runnable thread.
-        os << wait_message << StringPrintf("<@addr=0x%" PRIxPTR "> (a %s)",
-                                           reinterpret_cast<intptr_t>(pretty_object),
-                                           pretty_object->PrettyTypeOf().c_str());
-      } else {
-        // - waiting on <0x6008c468> (a java.lang.Class<java.lang.ref.ReferenceQueue>)
-        // Call PrettyTypeOf before IdentityHashCode since IdentityHashCode can cause thread
-        // suspension and move pretty_object.
-        const std::string pretty_type(pretty_object->PrettyTypeOf());
-        os << wait_message << StringPrintf("<0x%08x> (a %s)", pretty_object->IdentityHashCode(),
-                                           pretty_type.c_str());
-      }
-    }
-    // - waiting to lock <0x613f83d8> (a java.lang.Object) held by thread 5
-    if (lock_owner != ThreadList::kInvalidThreadId) {
-      os << " held by thread " << lock_owner;
-    }
-    os << "\n";
-  }
+  return state;
 }
 
 mirror::Object* Monitor::GetContendedMonitor(Thread* thread) {
@@ -1385,9 +1378,9 @@ void Monitor::VisitLocks(StackVisitor* stack_visitor, void (*callback)(mirror::O
   }
 
   // Is there any reason to believe there's any synchronization in this method?
-  const DexFile::CodeItem* code_item = m->GetCodeItem();
-  CHECK(code_item != nullptr) << m->PrettyMethod();
-  if (code_item->tries_size_ == 0) {
+  CHECK(m->GetCodeItem() != nullptr) << m->PrettyMethod();
+  CodeItemDataAccessor accessor(m->DexInstructionData());
+  if (accessor.TriesSize() == 0) {
     return;  // No "tries" implies no synchronization, so no held locks to report.
   }
 
@@ -1407,11 +1400,10 @@ void Monitor::VisitLocks(StackVisitor* stack_visitor, void (*callback)(mirror::O
   for (verifier::MethodVerifier::DexLockInfo& dex_lock_info : monitor_enter_dex_pcs) {
     // As a debug check, check that dex PC corresponds to a monitor-enter.
     if (kIsDebugBuild) {
-      const Instruction* monitor_enter_instruction =
-          Instruction::At(&code_item->insns_[dex_lock_info.dex_pc]);
-      CHECK_EQ(monitor_enter_instruction->Opcode(), Instruction::MONITOR_ENTER)
+      const Instruction& monitor_enter_instruction = accessor.InstructionAt(dex_lock_info.dex_pc);
+      CHECK_EQ(monitor_enter_instruction.Opcode(), Instruction::MONITOR_ENTER)
           << "expected monitor-enter @" << dex_lock_info.dex_pc << "; was "
-          << reinterpret_cast<const void*>(monitor_enter_instruction);
+          << reinterpret_cast<const void*>(&monitor_enter_instruction);
     }
 
     // Iterate through the set of dex registers, as the compiler may not have held all of them

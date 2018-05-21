@@ -22,12 +22,14 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/mem_map.h"
+#include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "cha.h"
 #include "debugger_interface.h"
-#include "dex_file_loader.h"
+#include "dex/dex_file_loader.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/bitmap-inl.h"
 #include "gc/scoped_gc_critical_section.h"
@@ -36,11 +38,10 @@
 #include "jit/jit.h"
 #include "jit/profiling_info.h"
 #include "linear_alloc.h"
-#include "mem_map.h"
 #include "oat_file-inl.h"
 #include "oat_quick_method_header.h"
 #include "object_callbacks.h"
-#include "profile_compilation_info.h"
+#include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread-current-inl.h"
@@ -49,7 +50,6 @@
 namespace art {
 namespace jit {
 
-static constexpr int kProtAll = PROT_READ | PROT_WRITE | PROT_EXEC;
 static constexpr int kProtData = PROT_READ | PROT_WRITE;
 static constexpr int kProtCode = PROT_READ | PROT_EXEC;
 
@@ -160,6 +160,7 @@ class JitCodeCache::JniStubData {
 JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
                                    size_t max_capacity,
                                    bool generate_debug_info,
+                                   bool used_only_for_profile_data,
                                    std::string* error_msg) {
   ScopedTrace trace(__PRETTY_FUNCTION__);
   CHECK_GE(max_capacity, initial_capacity);
@@ -182,6 +183,15 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
     *error_msg = oss.str();
     return nullptr;
   }
+
+  // Decide how we should map the code and data sections.
+  // If we use the code cache just for profiling we do not need to map the code section as
+  // executable.
+  // NOTE 1: this is yet another workaround to bypass strict SElinux policies in order to be able
+  //         to profile system server.
+  // NOTE 2: We could just not create the code section at all but we will need to
+  //         special case too many cases.
+  int memmap_flags_prot_code = used_only_for_profile_data ? (kProtCode & ~PROT_EXEC) : kProtCode;
 
   std::string error_str;
   // Map name specific for android_os_Debug.cpp accounting.
@@ -215,8 +225,11 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   DCHECK_EQ(code_size + data_size, max_capacity);
   uint8_t* divider = data_map->Begin() + data_size;
 
-  MemMap* code_map =
-      data_map->RemapAtEnd(divider, "jit-code-cache", kProtAll, &error_str, use_ashmem);
+  MemMap* code_map = data_map->RemapAtEnd(
+      divider,
+      "jit-code-cache",
+      memmap_flags_prot_code | PROT_WRITE,
+      &error_str, use_ashmem);
   if (code_map == nullptr) {
     std::ostringstream oss;
     oss << "Failed to create read write execute cache: " << error_str << " size=" << max_capacity;
@@ -228,7 +241,13 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
   code_size = initial_capacity - data_size;
   DCHECK_EQ(code_size + data_size, initial_capacity);
   return new JitCodeCache(
-      code_map, data_map.release(), code_size, data_size, max_capacity, garbage_collect_code);
+      code_map,
+      data_map.release(),
+      code_size,
+      data_size,
+      max_capacity,
+      garbage_collect_code,
+      memmap_flags_prot_code);
 }
 
 JitCodeCache::JitCodeCache(MemMap* code_map,
@@ -236,7 +255,8 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
                            size_t initial_code_capacity,
                            size_t initial_data_capacity,
                            size_t max_capacity,
-                           bool garbage_collect_code)
+                           bool garbage_collect_code,
+                           int memmap_flags_prot_code)
     : lock_("Jit code cache", kJitCodeCacheLock),
       lock_cond_("Jit code cache condition variable", lock_),
       collection_in_progress_(false),
@@ -247,7 +267,6 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
       code_end_(initial_code_capacity),
       data_end_(initial_data_capacity),
       last_collection_increased_code_cache_(false),
-      last_update_time_ns_(0),
       garbage_collect_code_(garbage_collect_code),
       used_memory_for_data_(0),
       used_memory_for_code_(0),
@@ -258,7 +277,8 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
       histogram_code_memory_use_("Memory used for compiled code", 16),
       histogram_profiling_info_memory_use_("Memory used for profiling info", 16),
       is_weak_access_enabled_(true),
-      inline_cache_cond_("Jit inline cache condition variable", lock_) {
+      inline_cache_cond_("Jit inline cache condition variable", lock_),
+      memmap_flags_prot_code_(memmap_flags_prot_code) {
 
   DCHECK_GE(max_capacity, initial_code_capacity + initial_data_capacity);
   code_mspace_ = create_mspace_with_base(code_map_->Begin(), code_end_, false /*locked*/);
@@ -274,7 +294,7 @@ JitCodeCache::JitCodeCache(MemMap* code_map,
               "mprotect jit code cache",
               code_map_->Begin(),
               code_map_->Size(),
-              kProtCode);
+              memmap_flags_prot_code_);
   CheckedCall(mprotect,
               "mprotect jit data cache",
               data_map_->Begin(),
@@ -327,32 +347,30 @@ const void* JitCodeCache::GetJniStubCode(ArtMethod* method) {
 
 class ScopedCodeCacheWrite : ScopedTrace {
  public:
-  explicit ScopedCodeCacheWrite(MemMap* code_map, bool only_for_tlb_shootdown = false)
+  explicit ScopedCodeCacheWrite(const JitCodeCache* const code_cache)
       : ScopedTrace("ScopedCodeCacheWrite"),
-        code_map_(code_map),
-        only_for_tlb_shootdown_(only_for_tlb_shootdown) {
+        code_cache_(code_cache) {
     ScopedTrace trace("mprotect all");
-    CheckedCall(mprotect,
-                "make code writable",
-                code_map_->Begin(),
-                only_for_tlb_shootdown_ ? kPageSize : code_map_->Size(),
-                kProtAll);
+    CheckedCall(
+        mprotect,
+        "make code writable",
+        code_cache_->code_map_->Begin(),
+        code_cache_->code_map_->Size(),
+        code_cache_->memmap_flags_prot_code_ | PROT_WRITE);
   }
+
   ~ScopedCodeCacheWrite() {
     ScopedTrace trace("mprotect code");
-    CheckedCall(mprotect,
-                "make code protected",
-                code_map_->Begin(),
-                only_for_tlb_shootdown_ ? kPageSize : code_map_->Size(),
-                kProtCode);
+    CheckedCall(
+        mprotect,
+        "make code protected",
+        code_cache_->code_map_->Begin(),
+        code_cache_->code_map_->Size(),
+        code_cache_->memmap_flags_prot_code_);
   }
 
  private:
-  MemMap* const code_map_;
-
-  // If we're using ScopedCacheWrite only for TLB shootdown, we limit the scope of mprotect to
-  // one page.
-  const bool only_for_tlb_shootdown_;
+  const JitCodeCache* const code_cache_;
 
   DISALLOW_COPY_AND_ASSIGN(ScopedCodeCacheWrite);
 };
@@ -545,11 +563,12 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
   }
 }
 
-void JitCodeCache::FreeCode(const void* code_ptr) {
+void JitCodeCache::FreeCodeAndData(const void* code_ptr) {
   uintptr_t allocation = FromCodeToAllocation(code_ptr);
   // Notify native debugger that we are about to remove the code.
   // It does nothing if we are not using native debugger.
-  DeleteJITCodeEntryForAddress(reinterpret_cast<uintptr_t>(code_ptr));
+  MutexLock mu(Thread::Current(), *Locks::native_debug_interface_lock_);
+  RemoveNativeDebugInfoForJit(code_ptr);
   if (OatQuickMethodHeader::FromCodePointer(code_ptr)->IsOptimized()) {
     FreeData(GetRootTable(code_ptr));
   }  // else this is a JNI stub without any data.
@@ -569,9 +588,9 @@ void JitCodeCache::FreeAllMethodHeaders(
   // so it's possible for the same method_header to start representing
   // different compile code.
   MutexLock mu(Thread::Current(), lock_);
-  ScopedCodeCacheWrite scc(code_map_.get());
+  ScopedCodeCacheWrite scc(this);
   for (const OatQuickMethodHeader* method_header : method_headers) {
-    FreeCode(method_header->GetCode());
+    FreeCodeAndData(method_header->GetCode());
   }
 }
 
@@ -588,7 +607,7 @@ void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
     // with the classlinker_classes_lock_ held, and suspending ourselves could
     // lead to a deadlock.
     {
-      ScopedCodeCacheWrite scc(code_map_.get());
+      ScopedCodeCacheWrite scc(this);
       for (auto it = jni_stubs_map_.begin(); it != jni_stubs_map_.end();) {
         it->second.RemoveMethodsIn(alloc);
         if (it->second.GetMethods().empty()) {
@@ -634,7 +653,7 @@ void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
 bool JitCodeCache::IsWeakAccessEnabled(Thread* self) const {
   return kUseReadBarrier
       ? self->GetWeakRefAccessEnabled()
-      : is_weak_access_enabled_.LoadSequentiallyConsistent();
+      : is_weak_access_enabled_.load(std::memory_order_seq_cst);
 }
 
 void JitCodeCache::WaitUntilInlineCacheAccessible(Thread* self) {
@@ -656,13 +675,13 @@ void JitCodeCache::BroadcastForInlineCacheAccess() {
 
 void JitCodeCache::AllowInlineCacheAccess() {
   DCHECK(!kUseReadBarrier);
-  is_weak_access_enabled_.StoreSequentiallyConsistent(true);
+  is_weak_access_enabled_.store(true, std::memory_order_seq_cst);
   BroadcastForInlineCacheAccess();
 }
 
 void JitCodeCache::DisallowInlineCacheAccess() {
   DCHECK(!kUseReadBarrier);
-  is_weak_access_enabled_.StoreSequentiallyConsistent(false);
+  is_weak_access_enabled_.store(false, std::memory_order_seq_cst);
 }
 
 void JitCodeCache::CopyInlineCacheInto(const InlineCache& ic,
@@ -682,7 +701,11 @@ void JitCodeCache::CopyInlineCacheInto(const InlineCache& ic,
 
 static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   if (was_warm) {
-    method->SetPreviouslyWarm();
+    // Don't do any read barrier, as the declaring class of `method` may
+    // be in the process of being GC'ed (reading the declaring class is done
+    // when DCHECKing the declaring class is resolved, which we know it is
+    // at this point).
+    method->SetPreviouslyWarm<kWithoutReadBarrier>();
   }
   // We reset the counter to 1 so that the profile knows that the method was executed at least once.
   // This is required for layout purposes.
@@ -723,7 +746,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
     MutexLock mu(self, lock_);
     WaitForPotentialCollectionToComplete(self);
     {
-      ScopedCodeCacheWrite scc(code_map_.get());
+      ScopedCodeCacheWrite scc(this);
       memory = AllocateCode(total_size);
       if (memory == nullptr) {
         return nullptr;
@@ -810,8 +833,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       FillRootTable(roots_data, roots);
       {
         // Flush data cache, as compiled code references literals in it.
-        // We also need a TLB shootdown to act as memory barrier across cores.
-        ScopedCodeCacheWrite ccw(code_map_.get(), /* only_for_tlb_shootdown */ true);
         FlushDataCache(reinterpret_cast<char*>(roots_data),
                        reinterpret_cast<char*>(roots_data + data_size));
       }
@@ -829,7 +850,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       // code.
       GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
     }
-    last_update_time_ns_.StoreRelease(NanoTime());
     VLOG(jit)
         << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
         << ArtMethod::PrettyMethod(method) << "@" << method
@@ -889,14 +909,14 @@ bool JitCodeCache::RemoveMethodLocked(ArtMethod* method, bool release_memory) {
   }
 
   bool in_cache = false;
-  ScopedCodeCacheWrite ccw(code_map_.get());
+  ScopedCodeCacheWrite ccw(this);
   if (UNLIKELY(method->IsNative())) {
     auto it = jni_stubs_map_.find(JniStubKey(method));
     if (it != jni_stubs_map_.end() && it->second.RemoveMethod(method)) {
       in_cache = true;
       if (it->second.GetMethods().empty()) {
         if (release_memory) {
-          FreeCode(it->second.GetCode());
+          FreeCodeAndData(it->second.GetCode());
         }
         jni_stubs_map_.erase(it);
       } else {
@@ -908,7 +928,7 @@ bool JitCodeCache::RemoveMethodLocked(ArtMethod* method, bool release_memory) {
       if (it->second == method) {
         in_cache = true;
         if (release_memory) {
-          FreeCode(it->first);
+          FreeCodeAndData(it->first);
         }
         it = method_code_map_.erase(it);
       } else {
@@ -1116,7 +1136,7 @@ void JitCodeCache::SetFootprintLimit(size_t new_footprint) {
   DCHECK_EQ(per_space_footprint * 2, new_footprint);
   mspace_set_footprint_limit(data_mspace_, per_space_footprint);
   {
-    ScopedCodeCacheWrite scc(code_map_.get());
+    ScopedCodeCacheWrite scc(this);
     mspace_set_footprint_limit(code_mspace_, per_space_footprint);
   }
 }
@@ -1284,7 +1304,7 @@ void JitCodeCache::RemoveUnmarkedCode(Thread* self) {
   std::unordered_set<OatQuickMethodHeader*> method_headers;
   {
     MutexLock mu(self, lock_);
-    ScopedCodeCacheWrite scc(code_map_.get());
+    ScopedCodeCacheWrite scc(this);
     // Iterate over all compiled code and remove entries that are not marked.
     for (auto it = jni_stubs_map_.begin(); it != jni_stubs_map_.end();) {
       JniStubData* data = &it->second;
@@ -1550,7 +1570,7 @@ ProfilingInfo* JitCodeCache::AddProfilingInfoInternal(Thread* self ATTRIBUTE_UNU
 
   // Make sure other threads see the data in the profiling info object before the
   // store in the ArtMethod's ProfilingInfo pointer.
-  QuasiAtomic::ThreadFenceRelease();
+  std::atomic_thread_fence(std::memory_order_release);
 
   method->SetProfilingInfo(info);
   profiling_infos_.push_back(info);
@@ -1655,10 +1675,6 @@ void JitCodeCache::GetProfiledMethods(const std::set<std::string>& dex_base_loca
   }
 }
 
-uint64_t JitCodeCache::GetLastUpdateTimeNs() const {
-  return last_update_time_ns_.LoadAcquire();
-}
-
 bool JitCodeCache::IsOsrCompiled(ArtMethod* method) {
   MutexLock mu(Thread::Current(), lock_);
   return osr_code_map_.find(method) != osr_code_map_.end();
@@ -1695,7 +1711,9 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method, Thread* self, bool osr
       // can avoid a few expensive GenericJNI calls.
       instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
       for (ArtMethod* m : data->GetMethods()) {
-        instrumentation->UpdateMethodsCode(m, entrypoint);
+        // Call the dedicated method instead of the more generic UpdateMethodsCode, because
+        // `m` might be in the process of being deleted.
+        instrumentation->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
       }
       if (collection_in_progress_) {
         GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(data->GetCode()));
@@ -1819,8 +1837,10 @@ void JitCodeCache::FreeData(uint8_t* data) {
 
 void JitCodeCache::Dump(std::ostream& os) {
   MutexLock mu(Thread::Current(), lock_);
+  MutexLock mu2(Thread::Current(), *Locks::native_debug_interface_lock_);
   os << "Current JIT code cache size: " << PrettySize(used_memory_for_code_) << "\n"
      << "Current JIT data cache size: " << PrettySize(used_memory_for_data_) << "\n"
+     << "Current JIT mini-debug-info size: " << PrettySize(GetJitNativeDebugInfoMemUsage()) << "\n"
      << "Current JIT capacity: " << PrettySize(current_capacity_) << "\n"
      << "Current number of JIT JNI stub entries: " << jni_stubs_map_.size() << "\n"
      << "Current number of JIT code cache entries: " << method_code_map_.size() << "\n"

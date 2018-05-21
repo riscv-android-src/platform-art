@@ -1423,6 +1423,10 @@ END art_quick_unlock_object_no_inline
     .extern artInstanceOfFromCode
     .extern artThrowClassCastExceptionForObject
 ENTRY art_quick_check_instance_of
+    // Type check using the bit string passes null as the target class. In that case just throw.
+    beqz   $a1, .Lthrow_class_cast_exception_for_bitstring_check
+    nop
+
     addiu  $sp, $sp, -32
     .cfi_adjust_cfa_offset 32
     sw     $gp, 16($sp)
@@ -1441,12 +1445,15 @@ ENTRY art_quick_check_instance_of
     jalr   $zero, $ra
     addiu  $sp, $sp, 32
     .cfi_adjust_cfa_offset -32
+
 .Lthrow_class_cast_exception:
     lw     $t9, 8($sp)
     lw     $a1, 4($sp)
     lw     $a0, 0($sp)
     addiu  $sp, $sp, 32
     .cfi_adjust_cfa_offset -32
+
+.Lthrow_class_cast_exception_for_bitstring_check:
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
     la   $t9, artThrowClassCastExceptionForObject
     jalr $zero, $t9                 # artThrowClassCastException (Object*, Class*, Thread*)
@@ -1637,6 +1644,9 @@ END \name
 
     /*
      * Called by managed code to resolve a static/instance field and load/store a value.
+     *
+     * Note: Functions `art{Get,Set}<Kind>{Static,Instance}FromCompiledCode` are
+     * defined with a macro in runtime/entrypoints/quick/quick_field_entrypoints.cc.
      */
 ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_IF_NO_EXCEPTION
 ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_IF_NO_EXCEPTION
@@ -2017,8 +2027,11 @@ GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved16_tlab, artAllocArrayFr
 GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved32_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_32
 GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_tlab, artAllocArrayFromCodeResolvedTLAB, COMPUTE_ARRAY_SIZE_64
 
-// Macro for string and type resolution and initialization.
-// $a0 is both input and output.
+    /*
+     * Macro for resolution and initialization of indexed DEX file
+     * constants such as classes and strings. $a0 is both input and
+     * output.
+     */
 .macro ONE_ARG_SAVE_EVERYTHING_DOWNCALL name, entrypoint, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET
     .extern \entrypoint
 ENTRY_NO_GP \name
@@ -2041,6 +2054,18 @@ END \name
 .macro ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT name, entrypoint
     ONE_ARG_SAVE_EVERYTHING_DOWNCALL \name, \entrypoint, RUNTIME_SAVE_EVERYTHING_FOR_CLINIT_METHOD_OFFSET
 .endm
+
+    /*
+     * Entry from managed code to resolve a method handle. On entry, A0 holds the method handle
+     * index. On success the MethodHandle is returned, otherwise an exception is raised.
+     */
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_handle, artResolveMethodHandleFromCode
+
+    /*
+     * Entry from managed code to resolve a method type. On entry, A0 holds the method type index.
+     * On success the MethodType is returned, otherwise an exception is raised.
+     */
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_type, artResolveMethodTypeFromCode
 
     /*
      * Entry from managed code to resolve a string, this stub will allocate a String and deliver an

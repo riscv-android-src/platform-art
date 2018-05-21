@@ -21,15 +21,15 @@
 
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
+#include "base/mem_map.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
 #include "compiler.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 #include "gtest/gtest.h"
 #include "indirect_reference_table.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
-#include "mem_map.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
@@ -76,7 +76,7 @@ static bool IsCurrentJniNormal() {
   return gCurrentJni == static_cast<uint32_t>(JniKind::kNormal);
 }
 
-// Signifify that a different kind of JNI is about to be tested.
+// Signify that a different kind of JNI is about to be tested.
 static void UpdateCurrentJni(JniKind kind) {
   gCurrentJni = static_cast<uint32_t>(kind);
 }
@@ -299,7 +299,6 @@ class JniCompilerTest : public CommonCompilerTest {
     }
     // JNI operations after runtime start.
     env_ = Thread::Current()->GetJniEnv();
-    library_search_path_ = env_->NewStringUTF("");
     jklass_ = env_->FindClass("MyClassNatives");
     ASSERT_TRUE(jklass_ != nullptr) << method_name << " " << method_sig;
 
@@ -380,7 +379,6 @@ class JniCompilerTest : public CommonCompilerTest {
   void CriticalNativeImpl();
 
   JNIEnv* env_;
-  jstring library_search_path_;
   jmethodID jmethod_;
 
  private:
@@ -525,7 +523,8 @@ struct ScopedDisableCheckNumStackReferences {
 
 bool ScopedDisableCheckNumStackReferences::sCheckNumStackReferences = true;
 
-// Check that the handle scope at the start of this block is the same as the handle scope at the end of the block.
+// Check that the handle scope at the start of this block is the same
+// as the handle scope at the end of the block.
 struct ScopedCheckHandleScope {
   ScopedCheckHandleScope() : handle_scope_(Thread::Current()->GetTopHandleScope()) {
   }
@@ -660,7 +659,7 @@ void JniCompilerTest::CompileAndRunIntMethodThroughStubImpl() {
 
   std::string reason;
   ASSERT_TRUE(Runtime::Current()->GetJavaVM()->
-                  LoadNativeLibrary(env_, "", class_loader_, library_search_path_, &reason))
+                  LoadNativeLibrary(env_, "", class_loader_, &reason))
       << reason;
 
   jint result = env_->CallNonvirtualIntMethod(jobj_, jklass_, jmethod_, 24);
@@ -676,7 +675,7 @@ void JniCompilerTest::CompileAndRunStaticIntMethodThroughStubImpl() {
 
   std::string reason;
   ASSERT_TRUE(Runtime::Current()->GetJavaVM()->
-                  LoadNativeLibrary(env_, "", class_loader_, library_search_path_, &reason))
+                  LoadNativeLibrary(env_, "", class_loader_, &reason))
       << reason;
 
   jint result = env_->CallStaticIntMethod(jklass_, jmethod_, 42);

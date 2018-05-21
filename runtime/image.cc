@@ -18,15 +18,15 @@
 
 #include "base/bit_utils.h"
 #include "base/length_prefixed_array.h"
+#include "base/utils.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/object_array.h"
-#include "utils.h"
 
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '5', '1', '\0' };  // @FastNative access flags.
+const uint8_t ImageHeader::kImageVersion[] = { '0', '5', '9', '\0' };  // ReachabilityFence.
 
 ImageHeader::ImageHeader(uint32_t image_begin,
                          uint32_t image_size,

@@ -19,7 +19,7 @@
 
 #include "object.h"
 
-#include "atomic.h"
+#include "base/atomic.h"
 #include "heap_poisoning.h"
 #include "lock_word-inl.h"
 #include "object_reference-inl.h"
@@ -52,7 +52,7 @@ inline bool Object::CasFieldWeakRelaxed32(MemberOffset field_offset,
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   AtomicInteger* atomic_addr = reinterpret_cast<AtomicInteger*>(raw_addr);
 
-  return atomic_addr->CompareExchangeWeakRelaxed(old_value, new_value);
+  return atomic_addr->CompareAndSetWeakRelaxed(old_value, new_value);
 }
 
 inline bool Object::CasLockWordWeakRelaxed(LockWord old_val, LockWord new_val) {
@@ -187,7 +187,7 @@ inline bool Object::AtomicSetMarkBit(uint32_t expected_mark_bit, uint32_t mark_b
     expected_lw = lw;
     new_lw = lw;
     new_lw.SetMarkBitState(mark_bit);
-    // Since this is only set from the mutator, we can use the non release Cas.
+    // Since this is only set from the mutator, we can use the non-release CAS.
   } while (!CasLockWordWeakRelaxed(expected_lw, new_lw));
   return true;
 }
@@ -217,7 +217,7 @@ inline bool Object::CasFieldStrongRelaxedObjectWithoutWriteBarrier(
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
 
-  bool success = atomic_addr->CompareExchangeStrongRelaxed(old_ref, new_ref);
+  bool success = atomic_addr->CompareAndSetStrongRelaxed(old_ref, new_ref);
   return success;
 }
 
@@ -246,7 +246,7 @@ inline bool Object::CasFieldStrongReleaseObjectWithoutWriteBarrier(
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
   Atomic<uint32_t>* atomic_addr = reinterpret_cast<Atomic<uint32_t>*>(raw_addr);
 
-  bool success = atomic_addr->CompareExchangeStrongRelease(old_ref, new_ref);
+  bool success = atomic_addr->CompareAndSetStrongRelease(old_ref, new_ref);
   return success;
 }
 

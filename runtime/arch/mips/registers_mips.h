@@ -21,8 +21,8 @@
 
 #include <android-base/logging.h>
 
+#include "base/globals.h"
 #include "base/macros.h"
-#include "globals.h"
 
 namespace art {
 namespace mips {
@@ -101,7 +101,8 @@ enum FRegister {
   F29 = 29,
   F30 = 30,
   F31 = 31,
-  FTMP = F6,  // scratch register
+  FTMP = F6,   // scratch register
+  FTMP2 = F7,  // scratch register (in addition to FTMP, reserved for MSA instructions)
   kNumberOfFRegisters = 32,
   kNoFRegister = -1,
 };

@@ -397,6 +397,117 @@ void HGraph::OrderLoopHeaderPredecessors(HBasicBlock* header) {
   }
 }
 
+// Transform control flow of the loop to a single preheader format (don't touch the data flow).
+// New_preheader can be already among the header predecessors - this situation will be correctly
+// processed.
+static void FixControlForNewSinglePreheader(HBasicBlock* header, HBasicBlock* new_preheader) {
+  HLoopInformation* loop_info = header->GetLoopInformation();
+  for (size_t pred = 0; pred < header->GetPredecessors().size(); ++pred) {
+    HBasicBlock* predecessor = header->GetPredecessors()[pred];
+    if (!loop_info->IsBackEdge(*predecessor) && predecessor != new_preheader) {
+      predecessor->ReplaceSuccessor(header, new_preheader);
+      pred--;
+    }
+  }
+}
+
+//             == Before ==                                               == After ==
+//      _________         _________                               _________         _________
+//     | B0      |       | B1      |      (old preheaders)       | B0      |       | B1      |
+//     |=========|       |=========|                             |=========|       |=========|
+//     | i0 = .. |       | i1 = .. |                             | i0 = .. |       | i1 = .. |
+//     |_________|       |_________|                             |_________|       |_________|
+//           \               /                                         \              /
+//            \             /                                        ___v____________v___
+//             \           /               (new preheader)          | B20 <- B0, B1      |
+//              |         |                                         |====================|
+//              |         |                                         | i20 = phi(i0, i1)  |
+//              |         |                                         |____________________|
+//              |         |                                                   |
+//    /\        |         |        /\                           /\            |              /\
+//   /  v_______v_________v_______v  \                         /  v___________v_____________v  \
+//  |  | B10 <- B0, B1, B2, B3     |  |                       |  | B10 <- B20, B2, B3        |  |
+//  |  |===========================|  |       (header)        |  |===========================|  |
+//  |  | i10 = phi(i0, i1, i2, i3) |  |                       |  | i10 = phi(i20, i2, i3)    |  |
+//  |  |___________________________|  |                       |  |___________________________|  |
+//  |        /               \        |                       |        /               \        |
+//  |      ...              ...       |                       |      ...              ...       |
+//  |   _________         _________   |                       |   _________         _________   |
+//  |  | B2      |       | B3      |  |                       |  | B2      |       | B3      |  |
+//  |  |=========|       |=========|  |     (back edges)      |  |=========|       |=========|  |
+//  |  | i2 = .. |       | i3 = .. |  |                       |  | i2 = .. |       | i3 = .. |  |
+//  |  |_________|       |_________|  |                       |  |_________|       |_________|  |
+//   \     /                   \     /                         \     /                   \     /
+//    \___/                     \___/                           \___/                     \___/
+//
+void HGraph::TransformLoopToSinglePreheaderFormat(HBasicBlock* header) {
+  HLoopInformation* loop_info = header->GetLoopInformation();
+
+  HBasicBlock* preheader = new (allocator_) HBasicBlock(this, header->GetDexPc());
+  AddBlock(preheader);
+  preheader->AddInstruction(new (allocator_) HGoto(header->GetDexPc()));
+
+  // If the old header has no Phis then we only need to fix the control flow.
+  if (header->GetPhis().IsEmpty()) {
+    FixControlForNewSinglePreheader(header, preheader);
+    preheader->AddSuccessor(header);
+    return;
+  }
+
+  // Find the first non-back edge block in the header's predecessors list.
+  size_t first_nonbackedge_pred_pos = 0;
+  bool found = false;
+  for (size_t pred = 0; pred < header->GetPredecessors().size(); ++pred) {
+    HBasicBlock* predecessor = header->GetPredecessors()[pred];
+    if (!loop_info->IsBackEdge(*predecessor)) {
+      first_nonbackedge_pred_pos = pred;
+      found = true;
+      break;
+    }
+  }
+
+  DCHECK(found);
+
+  // Fix the data-flow.
+  for (HInstructionIterator it(header->GetPhis()); !it.Done(); it.Advance()) {
+    HPhi* header_phi = it.Current()->AsPhi();
+
+    HPhi* preheader_phi = new (GetAllocator()) HPhi(GetAllocator(),
+                                                    header_phi->GetRegNumber(),
+                                                    0,
+                                                    header_phi->GetType());
+    if (header_phi->GetType() == DataType::Type::kReference) {
+      preheader_phi->SetReferenceTypeInfo(header_phi->GetReferenceTypeInfo());
+    }
+    preheader->AddPhi(preheader_phi);
+
+    HInstruction* orig_input = header_phi->InputAt(first_nonbackedge_pred_pos);
+    header_phi->ReplaceInput(preheader_phi, first_nonbackedge_pred_pos);
+    preheader_phi->AddInput(orig_input);
+
+    for (size_t input_pos = first_nonbackedge_pred_pos + 1;
+         input_pos < header_phi->InputCount();
+         input_pos++) {
+      HInstruction* input = header_phi->InputAt(input_pos);
+      HBasicBlock* pred_block = header->GetPredecessors()[input_pos];
+
+      if (loop_info->Contains(*pred_block)) {
+        DCHECK(loop_info->IsBackEdge(*pred_block));
+      } else {
+        preheader_phi->AddInput(input);
+        header_phi->RemoveInputAt(input_pos);
+        input_pos--;
+      }
+    }
+  }
+
+  // Fix the control-flow.
+  HBasicBlock* first_pred = header->GetPredecessors()[first_nonbackedge_pred_pos];
+  preheader->InsertBetween(first_pred, header);
+
+  FixControlForNewSinglePreheader(header, preheader);
+}
+
 void HGraph::SimplifyLoop(HBasicBlock* header) {
   HLoopInformation* info = header->GetLoopInformation();
 
@@ -406,18 +517,7 @@ void HGraph::SimplifyLoop(HBasicBlock* header) {
   // this graph.
   size_t number_of_incomings = header->GetPredecessors().size() - info->NumberOfBackEdges();
   if (number_of_incomings != 1 || (GetEntryBlock()->GetSingleSuccessor() == header)) {
-    HBasicBlock* pre_header = new (allocator_) HBasicBlock(this, header->GetDexPc());
-    AddBlock(pre_header);
-    pre_header->AddInstruction(new (allocator_) HGoto(header->GetDexPc()));
-
-    for (size_t pred = 0; pred < header->GetPredecessors().size(); ++pred) {
-      HBasicBlock* predecessor = header->GetPredecessors()[pred];
-      if (!info->IsBackEdge(*predecessor)) {
-        predecessor->ReplaceSuccessor(header, pre_header);
-        pred--;
-      }
-    }
-    pre_header->AddSuccessor(header);
+    TransformLoopToSinglePreheaderFormat(header);
   }
 
   OrderLoopHeaderPredecessors(header);
@@ -765,6 +865,15 @@ void HLoopInformation::Populate() {
   graph->SetHasLoops(true);
 }
 
+void HLoopInformation::PopulateInnerLoopUpwards(HLoopInformation* inner_loop) {
+  DCHECK(inner_loop->GetPreHeader()->GetLoopInformation() == this);
+  blocks_.Union(&inner_loop->blocks_);
+  HLoopInformation* outer_loop = GetPreHeader()->GetLoopInformation();
+  if (outer_loop != nullptr) {
+    outer_loop->PopulateInnerLoopUpwards(this);
+  }
+}
+
 HBasicBlock* HLoopInformation::GetPreHeader() const {
   HBasicBlock* block = header_->GetPredecessors()[0];
   DCHECK(irreducible_ || (block == header_->GetDominator()));
@@ -1010,10 +1119,6 @@ void HEnvironment::RemoveAsUserOfInput(size_t index) const {
   auto before_env_use_node = env_use.GetBeforeUseNode();
   user->env_uses_.erase_after(before_env_use_node);
   user->FixUpUserRecordsAfterEnvUseRemoval(before_env_use_node);
-}
-
-HInstruction::InstructionKind HInstruction::GetKind() const {
-  return GetKindInternal();
 }
 
 HInstruction* HInstruction::GetNextDisregardingMoves() const {
@@ -1575,10 +1680,9 @@ bool HCondition::IsBeforeWhenDisregardMoves(HInstruction* instruction) const {
 }
 
 bool HInstruction::Equals(const HInstruction* other) const {
-  if (!InstructionTypeEquals(other)) return false;
-  DCHECK_EQ(GetKind(), other->GetKind());
-  if (!InstructionDataEquals(other)) return false;
+  if (GetKind() != other->GetKind()) return false;
   if (GetType() != other->GetType()) return false;
+  if (!InstructionDataEquals(other)) return false;
   HConstInputsRef inputs = GetInputs();
   HConstInputsRef other_inputs = other->GetInputs();
   if (inputs.size() != other_inputs.size()) return false;
@@ -1593,7 +1697,7 @@ bool HInstruction::Equals(const HInstruction* other) const {
 std::ostream& operator<<(std::ostream& os, const HInstruction::InstructionKind& rhs) {
 #define DECLARE_CASE(type, super) case HInstruction::k##type: os << #type; break;
   switch (rhs) {
-    FOR_EACH_INSTRUCTION(DECLARE_CASE)
+    FOR_EACH_CONCRETE_INSTRUCTION(DECLARE_CASE)
     default:
       os << "Unknown instruction kind " << static_cast<int>(rhs);
       break;
@@ -2786,6 +2890,8 @@ std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind
       return os << "BootImageLinkTimePcRelative";
     case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
       return os << "DirectAddress";
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo:
+      return os << "BootImageRelRo";
     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry:
       return os << "BssEntry";
     case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall:
@@ -2820,7 +2926,7 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
   }
   switch (GetLoadKind()) {
     case LoadKind::kBootImageAddress:
-    case LoadKind::kBootImageClassTable:
+    case LoadKind::kBootImageRelRo:
     case LoadKind::kJitTableAddress: {
       ScopedObjectAccess soa(Thread::Current());
       return GetClass().Get() == other_load_class->GetClass().Get();
@@ -2839,8 +2945,8 @@ std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs) {
       return os << "BootImageLinkTimePcRelative";
     case HLoadClass::LoadKind::kBootImageAddress:
       return os << "BootImageAddress";
-    case HLoadClass::LoadKind::kBootImageClassTable:
-      return os << "BootImageClassTable";
+    case HLoadClass::LoadKind::kBootImageRelRo:
+      return os << "BootImageRelRo";
     case HLoadClass::LoadKind::kBssEntry:
       return os << "BssEntry";
     case HLoadClass::LoadKind::kJitTableAddress:
@@ -2863,7 +2969,7 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
   }
   switch (GetLoadKind()) {
     case LoadKind::kBootImageAddress:
-    case LoadKind::kBootImageInternTable:
+    case LoadKind::kBootImageRelRo:
     case LoadKind::kJitTableAddress: {
       ScopedObjectAccess soa(Thread::Current());
       return GetString().Get() == other_load_string->GetString().Get();
@@ -2879,8 +2985,8 @@ std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs) {
       return os << "BootImageLinkTimePcRelative";
     case HLoadString::LoadKind::kBootImageAddress:
       return os << "BootImageAddress";
-    case HLoadString::LoadKind::kBootImageInternTable:
-      return os << "BootImageInternTable";
+    case HLoadString::LoadKind::kBootImageRelRo:
+      return os << "BootImageRelRo";
     case HLoadString::LoadKind::kBssEntry:
       return os << "BssEntry";
     case HLoadString::LoadKind::kJitTableAddress:
@@ -2996,6 +3102,8 @@ std::ostream& operator<<(std::ostream& os, TypeCheckKind rhs) {
       return os << "array_object_check";
     case TypeCheckKind::kArrayCheck:
       return os << "array_check";
+    case TypeCheckKind::kBitstringCheck:
+      return os << "bitstring_check";
     default:
       LOG(FATAL) << "Unknown TypeCheckKind: " << static_cast<int>(rhs);
       UNREACHABLE();

@@ -24,8 +24,8 @@
 #include "base/enums.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
-#include "dex_file-inl.h"
-#include "jni_internal.h"
+#include "dex/dex_file-inl.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "sigchain.h"

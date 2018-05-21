@@ -16,16 +16,16 @@
 
 #include "indirect_reference_table-inl.h"
 
-#include "base/dumpable-inl.h"
+#include "base/mutator_locked_dumpable.h"
 #include "base/systrace.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "base/utils.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "nth_caller_visitor.h"
 #include "reference_table.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
-#include "utils.h"
 
 #include <cstdlib>
 
@@ -357,7 +357,7 @@ bool IndirectReferenceTable::Remove(IRTSegmentState previous_state, IndirectRef 
     if (self->HandleScopeContains(reinterpret_cast<jobject>(iref))) {
       auto* env = self->GetJniEnv();
       DCHECK(env != nullptr);
-      if (env->check_jni) {
+      if (env->IsCheckJniEnabled()) {
         ScopedObjectAccess soa(self);
         LOG(WARNING) << "Attempt to remove non-JNI local reference, dumping thread";
         if (kDumpStackOnNonLocalReference) {

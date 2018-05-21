@@ -177,7 +177,9 @@ static const MipsInstruction gMipsInstructions[] = {
   { kSpecial3Mask | 0x3f, (31 << kOpcodeShift), "ext", "TSAZ", },
   { kSpecial3Mask | 0x3f, (31 << kOpcodeShift) | 3, "dext", "TSAZ", },
   { kSpecial3Mask | 0x3f, (31 << kOpcodeShift) | 4, "ins", "TSAz", },
+  { kSpecial3Mask | 0x3f, (31 << kOpcodeShift) | 5, "dinsm", "TSAJ", },
   { kSpecial3Mask | 0x3f, (31 << kOpcodeShift) | 6, "dinsu", "TSFz", },
+  { kSpecial3Mask | 0x3f, (31 << kOpcodeShift) | 7, "dins", "TSAz", },
   { kSpecial3Mask | (0x1f << 21) | (0x1f << 6) | 0x3f,
     (31 << kOpcodeShift) | (16 << 6) | 32,
     "seb",
@@ -485,6 +487,7 @@ static const MipsInstruction gMipsInstructions[] = {
   { kMsaMask | (0xf << 22), kMsa | (0x3 << 22) | 0x19, "copy_u", "yX" },
   { kMsaMask | (0xf << 22), kMsa | (0x4 << 22) | 0x19, "insert", "YD" },
   { kMsaMask | (0xff << 18), kMsa | (0xc0 << 18) | 0x1e, "fill", "vkD" },
+  { kMsaMask | (0xff << 18), kMsa | (0xc1 << 18) | 0x1e, "pcnt", "vkm" },
   { kMsaMask | (0x7 << 23), kMsa | (0x6 << 23) | 0x7, "ldi", "kx" },
   { kMsaSpecialMask | (0xf << 2), kMsa | (0x8 << 2), "ld", "kw" },
   { kMsaSpecialMask | (0xf << 2), kMsa | (0x9 << 2), "st", "kw" },
@@ -583,6 +586,9 @@ size_t DisassemblerMips::Dump(std::ostream& os, const uint8_t* instr_ptr) {
             break;
           case 'i':  // Sign-extended lower 16-bit immediate.
             args << static_cast<int16_t>(instruction & 0xffff);
+            break;
+          case 'J':  // sz (dinsm size).
+            args << (rd - sa + 33);
             break;
           case 'j':  // sa value for lsa/dlsa.
             args << (sa + 1);

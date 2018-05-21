@@ -136,6 +136,7 @@
   V(MathAsin, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "asin", "(D)D") \
   V(MathAtan, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "atan", "(D)D") \
   V(MathAtan2, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "atan2", "(DD)D") \
+  V(MathPow, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "pow", "(DD)D") \
   V(MathCbrt, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "cbrt", "(D)D") \
   V(MathCosh, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "cosh", "(D)D") \
   V(MathExp, kStatic, kNeedsEnvironmentOrCache, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "exp", "(D)D") \
@@ -217,6 +218,7 @@
   V(VarHandleReleaseFence, kStatic, kNeedsEnvironmentOrCache, kWriteSideEffects, kNoThrow, "Ljava/lang/invoke/VarHandle;", "releaseFence", "()V") \
   V(VarHandleLoadLoadFence, kStatic, kNeedsEnvironmentOrCache, kWriteSideEffects, kNoThrow, "Ljava/lang/invoke/VarHandle;", "loadLoadFence", "()V") \
   V(VarHandleStoreStoreFence, kStatic, kNeedsEnvironmentOrCache, kReadSideEffects, kNoThrow, "Ljava/lang/invoke/VarHandle;", "storeStoreFence", "()V") \
+  V(ReachabilityFence, kStatic, kNeedsEnvironmentOrCache, kWriteSideEffects, kNoThrow, "Ljava/lang/ref/Reference;", "reachabilityFence", "(Ljava/lang/Object;)V") \
   SIGNATURE_POLYMORPHIC_INTRINSICS_LIST(V)
 
 #endif  // ART_RUNTIME_INTRINSICS_LIST_H_

@@ -68,12 +68,10 @@ class SchedulingLatencyVisitorARM64 : public SchedulingLatencyVisitor {
   M(ArrayGet             , unused)                   \
   M(ArrayLength          , unused)                   \
   M(ArraySet             , unused)                   \
-  M(BinaryOperation      , unused)                   \
   M(BoundsCheck          , unused)                   \
   M(Div                  , unused)                   \
   M(InstanceFieldGet     , unused)                   \
   M(InstanceOf           , unused)                   \
-  M(Invoke               , unused)                   \
   M(LoadString           , unused)                   \
   M(Mul                  , unused)                   \
   M(NewArray             , unused)                   \
@@ -108,6 +106,10 @@ class SchedulingLatencyVisitorARM64 : public SchedulingLatencyVisitor {
   M(VecLoad              , unused)                   \
   M(VecStore             , unused)
 
+#define FOR_EACH_SCHEDULED_ABSTRACT_INSTRUCTION(M)   \
+  M(BinaryOperation      , unused)                   \
+  M(Invoke               , unused)
+
 #define FOR_EACH_SCHEDULED_SHARED_INSTRUCTION(M) \
   M(BitwiseNegatedRight, unused)                 \
   M(MultiplyAccumulate, unused)                  \
@@ -119,6 +121,7 @@ class SchedulingLatencyVisitorARM64 : public SchedulingLatencyVisitor {
   void Visit##type(H##type* instruction) OVERRIDE;
 
   FOR_EACH_SCHEDULED_COMMON_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
+  FOR_EACH_SCHEDULED_ABSTRACT_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
   FOR_EACH_SCHEDULED_SHARED_INSTRUCTION(DECLARE_VISIT_INSTRUCTION)
   FOR_EACH_CONCRETE_INSTRUCTION_ARM64(DECLARE_VISIT_INSTRUCTION)
 
@@ -149,6 +152,20 @@ class HSchedulerARM64 : public HScheduler {
         return HScheduler::IsSchedulable(instruction);
     }
 #undef CASE_INSTRUCTION_KIND
+  }
+
+  // Treat as scheduling barriers those vector instructions whose live ranges exceed the vectorized
+  // loop boundaries. This is a workaround for the lack of notion of SIMD register in the compiler;
+  // around a call we have to save/restore all live SIMD&FP registers (only lower 64 bits of
+  // SIMD&FP registers are callee saved) so don't reorder such vector instructions.
+  //
+  // TODO: remove this when a proper support of SIMD registers is introduced to the compiler.
+  bool IsSchedulingBarrier(const HInstruction* instr) const OVERRIDE {
+    return HScheduler::IsSchedulingBarrier(instr) ||
+           instr->IsVecReduce() ||
+           instr->IsVecExtractScalar() ||
+           instr->IsVecSetScalars() ||
+           instr->IsVecReplicateScalar();
   }
 
  private:

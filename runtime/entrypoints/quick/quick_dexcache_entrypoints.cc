@@ -19,8 +19,8 @@
 #include "callee_save_frame.h"
 #include "class_linker-inl.h"
 #include "class_table-inl.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "gc/heap.h"
 #include "mirror/class-inl.h"
@@ -180,6 +180,27 @@ extern "C" mirror::Class* artInitializeTypeAndVerifyAccessFromCode(uint32_t type
                                                         /* can_run_clinit */ false,
                                                         /* verify_access */ true);
   // Do not StoreTypeInBss(); access check entrypoint is never used together with .bss.
+  return result.Ptr();
+}
+
+extern "C" mirror::MethodHandle* artResolveMethodHandleFromCode(uint32_t method_handle_idx,
+                                                                Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedQuickEntrypointChecks sqec(self);
+  auto caller_and_outer =
+      GetCalleeSaveMethodCallerAndOuterMethod(self, CalleeSaveType::kSaveEverything);
+  ArtMethod* caller = caller_and_outer.caller;
+  ObjPtr<mirror::MethodHandle> result = ResolveMethodHandleFromCode(caller, method_handle_idx);
+  return result.Ptr();
+}
+
+extern "C" mirror::MethodType* artResolveMethodTypeFromCode(uint32_t proto_idx, Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ScopedQuickEntrypointChecks sqec(self);
+  auto caller_and_outer = GetCalleeSaveMethodCallerAndOuterMethod(self,
+                                                                  CalleeSaveType::kSaveEverything);
+  ArtMethod* caller = caller_and_outer.caller;
+  ObjPtr<mirror::MethodType> result = ResolveMethodTypeFromCode(caller, dex::ProtoIndex(proto_idx));
   return result.Ptr();
 }
 

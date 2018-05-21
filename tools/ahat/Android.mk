@@ -37,23 +37,10 @@ LOCAL_COMPATIBILITY_SUITE := general-tests
 
 include $(BUILD_HOST_JAVA_LIBRARY)
 AHAT_JAR := $(LOCAL_BUILT_MODULE)
-AHAT_API := $(intermediates.COMMON)/ahat_api.txt
-AHAT_REMOVED_API := $(intermediates.COMMON)/ahat_removed_api.txt
 
 # --- api check for ahat.jar ----------
-include $(CLEAR_VARS)
-LOCAL_SRC_FILES := $(call all-java-files-under, src/main)
-LOCAL_IS_HOST_MODULE := true
-LOCAL_MODULE_TAGS := optional
-LOCAL_MODULE_CLASS := JAVA_LIBRARIES
-LOCAL_MODULE := ahat
-LOCAL_DROIDDOC_OPTIONS := \
-  -stubpackages com.android.ahat:com.android.ahat.* \
-  -api $(AHAT_API) \
-  -removedApi $(AHAT_REMOVED_API)
-LOCAL_DROIDDOC_CUSTOM_TEMPLATE_DIR := external/doclava/res/assets/templates-sdk
-include $(BUILD_DROIDDOC)
-$(AHAT_API): $(full_target)
+AHAT_API := $(INTERNAL_PLATFORM_AHAT_API_FILE)
+AHAT_REMOVED_API := $(INTERNAL_PLATFORM_AHAT_REMOVED_API_FILE)
 
 $(eval $(call check-api, \
   ahat-check-api, \
@@ -123,7 +110,7 @@ $(AHAT_TEST_DUMP_PROGUARD_MAP): $(proguard_dictionary)
 # Run ahat-test-dump.jar to generate test-dump.hprof and test-dump-base.hprof
 AHAT_TEST_DUMP_DEPENDENCIES := \
   $(HOST_OUT_EXECUTABLES)/dalvikvm64 \
-  $(ART_HOST_SHARED_LIBRARY_DEPENDENCIES) \
+  $(ART_HOST_SHARED_LIBRARY_DEBUG_DEPENDENCIES) \
   $(HOST_OUT_EXECUTABLES)/art \
   $(HOST_CORE_IMG_OUT_BASE)$(CORE_IMG_SUFFIX)
 
@@ -134,7 +121,7 @@ $(AHAT_TEST_DUMP_HPROF): $(AHAT_TEST_DUMP_JAR) $(AHAT_TEST_DUMP_DEPENDENCIES)
 	rm -rf $(PRIVATE_AHAT_TEST_ANDROID_DATA)
 	mkdir -p $(PRIVATE_AHAT_TEST_ANDROID_DATA)
 	ANDROID_DATA=$(PRIVATE_AHAT_TEST_ANDROID_DATA) \
-	  $(PRIVATE_AHAT_TEST_ART) --64 -cp $(PRIVATE_AHAT_TEST_DUMP_JAR) Main $@
+	  $(PRIVATE_AHAT_TEST_ART) -d --64 -cp $(PRIVATE_AHAT_TEST_DUMP_JAR) Main $@
 
 $(AHAT_TEST_DUMP_BASE_HPROF): PRIVATE_AHAT_TEST_ART := $(HOST_OUT_EXECUTABLES)/art
 $(AHAT_TEST_DUMP_BASE_HPROF): PRIVATE_AHAT_TEST_DUMP_JAR := $(AHAT_TEST_DUMP_JAR)
@@ -143,7 +130,7 @@ $(AHAT_TEST_DUMP_BASE_HPROF): $(AHAT_TEST_DUMP_JAR) $(AHAT_TEST_DUMP_DEPENDENCIE
 	rm -rf $(PRIVATE_AHAT_TEST_ANDROID_DATA)
 	mkdir -p $(PRIVATE_AHAT_TEST_ANDROID_DATA)
 	ANDROID_DATA=$(PRIVATE_AHAT_TEST_ANDROID_DATA) \
-	  $(PRIVATE_AHAT_TEST_ART) --64 -cp $(PRIVATE_AHAT_TEST_DUMP_JAR) Main $@ --base
+	  $(PRIVATE_AHAT_TEST_ART) -d --64 -cp $(PRIVATE_AHAT_TEST_DUMP_JAR) Main $@ --base
 
 # --- ahat-tests.jar --------------
 include $(CLEAR_VARS)

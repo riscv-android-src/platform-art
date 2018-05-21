@@ -60,12 +60,12 @@ void ClassTable::VisitRoots(const Visitor& visitor) {
   }
 }
 
-template <typename Visitor>
+template <typename Visitor, ReadBarrierOption kReadBarrierOption>
 bool ClassTable::Visit(Visitor& visitor) {
   ReaderMutexLock mu(Thread::Current(), lock_);
   for (ClassSet& class_set : classes_) {
     for (TableSlot& table_slot : class_set) {
-      if (!visitor(table_slot.Read())) {
+      if (!visitor(table_slot.Read<kReadBarrierOption>())) {
         return false;
       }
     }
@@ -73,12 +73,12 @@ bool ClassTable::Visit(Visitor& visitor) {
   return true;
 }
 
-template <typename Visitor>
+template <typename Visitor, ReadBarrierOption kReadBarrierOption>
 bool ClassTable::Visit(const Visitor& visitor) {
   ReaderMutexLock mu(Thread::Current(), lock_);
   for (ClassSet& class_set : classes_) {
     for (TableSlot& table_slot : class_set) {
-      if (!visitor(table_slot.Read())) {
+      if (!visitor(table_slot.Read<kReadBarrierOption>())) {
         return false;
       }
     }
@@ -88,21 +88,21 @@ bool ClassTable::Visit(const Visitor& visitor) {
 
 template<ReadBarrierOption kReadBarrierOption>
 inline mirror::Class* ClassTable::TableSlot::Read() const {
-  const uint32_t before = data_.LoadRelaxed();
+  const uint32_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> const before_ptr(ExtractPtr(before));
   ObjPtr<mirror::Class> const after_ptr(
       GcRoot<mirror::Class>(before_ptr).Read<kReadBarrierOption>());
   if (kReadBarrierOption != kWithoutReadBarrier && before_ptr != after_ptr) {
     // If another thread raced and updated the reference, do not store the read barrier updated
     // one.
-    data_.CompareExchangeStrongRelease(before, Encode(after_ptr, MaskHash(before)));
+    data_.CompareAndSetStrongRelease(before, Encode(after_ptr, MaskHash(before)));
   }
   return after_ptr.Ptr();
 }
 
 template<typename Visitor>
 inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
-  const uint32_t before = data_.LoadRelaxed();
+  const uint32_t before = data_.load(std::memory_order_relaxed);
   ObjPtr<mirror::Class> before_ptr(ExtractPtr(before));
   GcRoot<mirror::Class> root(before_ptr);
   visitor.VisitRoot(root.AddressWithoutBarrier());
@@ -110,7 +110,7 @@ inline void ClassTable::TableSlot::VisitRoot(const Visitor& visitor) const {
   if (before_ptr != after_ptr) {
     // If another thread raced and updated the reference, do not store the read barrier updated
     // one.
-    data_.CompareExchangeStrongRelease(before, Encode(after_ptr, MaskHash(before)));
+    data_.CompareAndSetStrongRelease(before, Encode(after_ptr, MaskHash(before)));
   }
 }
 

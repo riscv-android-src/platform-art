@@ -90,10 +90,13 @@ namespace art {
  *
  *   Uninitialized <=> StrLen(PathToRoot) == 0
  *                     Next == 0
+ *                     OF == False
  *   Initialized   <=> StrLen(PathToRoot) < Depth
- *                     Next == 0
+ *                     Next == 1
+ *                     OF == False
  *   Assigned      <=> StrLen(PathToRoot) == Depth
- *                     Next > 1
+ *                     Next >= 1
+ *                     OF == False
  *   Overflowed    <=> OF == True
  *
  * Tree Invariants:
@@ -134,6 +137,11 @@ struct SubtypeCheckInfo {
     kNotSubtypeOf,      // Enough data. src is not a subchild of the target.
     kSubtypeOf          // Enough data. src is a subchild of the target.
   };
+
+  // Get the raw depth.
+  size_t GetDepth() const {
+    return depth_;
+  }
 
   // Chop off the depth, returning only the bitstring+of state.
   // (Used to store into memory, since storing the depth would be redundant.)
@@ -219,7 +227,7 @@ struct SubtypeCheckInfo {
     // Next must be non-0 to disambiguate it from Uninitialized.
     child.MaybeInitNext();
 
-    // Always clear the inherited Parent's next Value on the child.
+    // Always clear the inherited Parent's next Value, i.e. the child's last path entry.
     OverwriteNextValueFromParent(/*inout*/&child, BitStringChar{});
 
     // The state is now Initialized | Overflowed.
@@ -235,7 +243,6 @@ struct SubtypeCheckInfo {
 
     // Assign attempt.
     if (HasNext() && !bitstring_and_of_.overflow_) {
-      // Do not bother assigning if parent had overflowed.
       BitStringChar next = GetNext();
       if (next != next.MaximumValue()) {
         // The parent's "next" value is now the child's latest path element.
@@ -260,15 +267,14 @@ struct SubtypeCheckInfo {
   // Get the current state (Uninitialized, Initialized, Assigned, or Overflowed).
   // See the "SubtypeCheckInfo" documentation above which explains how a state is determined.
   State GetState() const {
-    if (GetBitString().IsEmpty()) {
-      // Empty bitstring (all 0s) -> uninitialized.
-      DCHECK(!bitstring_and_of_.overflow_);
-      return kUninitialized;
-    }
-
     if (bitstring_and_of_.overflow_) {
       // Overflowed if and only if the OF bit was set.
       return kOverflowed;
+    }
+
+    if (GetBitString().IsEmpty()) {
+      // Empty bitstring (all 0s) -> uninitialized.
+      return kUninitialized;
     }
 
     // Either Assigned or Initialized.
@@ -290,8 +296,7 @@ struct SubtypeCheckInfo {
   BitString::StorageType GetEncodedPathToRoot() const {
     BitString::StorageType data = static_cast<BitString::StorageType>(GetPathToRoot());
     // Bit strings are logically in the least-significant memory.
-    // Shift it so the bits are all most-significant.
-    return data << (BitSizeOf(data) - BitStructSizeOf<BitString>());
+    return data;
   }
 
   // Retrieve the path to root bitstring mask as a plain uintN_t that is amenable to
@@ -299,17 +304,7 @@ struct SubtypeCheckInfo {
   BitString::StorageType GetEncodedPathToRootMask() const {
     size_t num_bitchars = GetSafeDepth();
     size_t bitlength = BitString::GetBitLengthTotalAtPosition(num_bitchars);
-
-    BitString::StorageType mask_all =
-        std::numeric_limits<BitString::StorageType>::max();
-    BitString::StorageType mask_lsb =
-        MaskLeastSignificant<BitString::StorageType>(
-            BitSizeOf<BitString::StorageType>() - bitlength);
-
-    BitString::StorageType result = mask_all & ~mask_lsb;
-
-    // TODO: refactor above code into MaskMostSignificant?
-    return result;
+    return MaskLeastSignificant<BitString::StorageType>(bitlength);
   }
 
   // Get the "Next" bitchar, assuming that there is one to get.
@@ -387,6 +382,7 @@ struct SubtypeCheckInfo {
     SetBitStringUnchecked(bs);
   }
 
+  // If there is a next field, set it to 1.
   void MaybeInitNext() {
     if (HasNext()) {
       // Clearing out the "Next" value like this

@@ -23,20 +23,20 @@
 #include <android-base/logging.h>
 
 #include "base/casts.h"
+#include "base/globals.h"
+#include "base/leb128.h"
+#include "base/utils.h"
 #include "compiled_method.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
 #include "driver/compiler_options.h"
 #include "elf.h"
 #include "elf_utils.h"
-#include "globals.h"
-#include "leb128.h"
 #include "linker/buffered_output_stream.h"
 #include "linker/elf_builder.h"
 #include "linker/file_output_stream.h"
 #include "thread-current-inl.h"
 #include "thread_pool.h"
-#include "utils.h"
 
 namespace art {
 namespace linker {
@@ -54,22 +54,28 @@ class DebugInfoTask : public Task {
  public:
   DebugInfoTask(InstructionSet isa,
                 const InstructionSetFeatures* features,
-                size_t rodata_section_size,
+                uint64_t text_section_address,
                 size_t text_section_size,
-                const ArrayRef<const debug::MethodDebugInfo>& method_infos)
+                uint64_t dex_section_address,
+                size_t dex_section_size,
+                const debug::DebugInfo& debug_info)
       : isa_(isa),
         instruction_set_features_(features),
-        rodata_section_size_(rodata_section_size),
+        text_section_address_(text_section_address),
         text_section_size_(text_section_size),
-        method_infos_(method_infos) {
+        dex_section_address_(dex_section_address),
+        dex_section_size_(dex_section_size),
+        debug_info_(debug_info) {
   }
 
   void Run(Thread*) {
     result_ = debug::MakeMiniDebugInfo(isa_,
                                        instruction_set_features_,
-                                       rodata_section_size_,
+                                       text_section_address_,
                                        text_section_size_,
-                                       method_infos_);
+                                       dex_section_address_,
+                                       dex_section_size_,
+                                       debug_info_);
   }
 
   std::vector<uint8_t>* GetResult() {
@@ -79,9 +85,11 @@ class DebugInfoTask : public Task {
  private:
   InstructionSet isa_;
   const InstructionSetFeatures* instruction_set_features_;
-  size_t rodata_section_size_;
+  uint64_t text_section_address_;
   size_t text_section_size_;
-  const ArrayRef<const debug::MethodDebugInfo> method_infos_;
+  uint64_t dex_section_address_;
+  size_t dex_section_size_;
+  const debug::DebugInfo& debug_info_;
   std::vector<uint8_t> result_;
 };
 
@@ -97,16 +105,20 @@ class ElfWriterQuick FINAL : public ElfWriter {
   void Start() OVERRIDE;
   void PrepareDynamicSection(size_t rodata_size,
                              size_t text_size,
+                             size_t data_bimg_rel_ro_size,
                              size_t bss_size,
                              size_t bss_methods_offset,
-                             size_t bss_roots_offset) OVERRIDE;
-  void PrepareDebugInfo(const ArrayRef<const debug::MethodDebugInfo>& method_infos) OVERRIDE;
+                             size_t bss_roots_offset,
+                             size_t dex_section_size) OVERRIDE;
+  void PrepareDebugInfo(const debug::DebugInfo& debug_info) OVERRIDE;
   OutputStream* StartRoData() OVERRIDE;
   void EndRoData(OutputStream* rodata) OVERRIDE;
   OutputStream* StartText() OVERRIDE;
   void EndText(OutputStream* text) OVERRIDE;
+  OutputStream* StartDataBimgRelRo() OVERRIDE;
+  void EndDataBimgRelRo(OutputStream* data_bimg_rel_ro) OVERRIDE;
   void WriteDynamicSection() OVERRIDE;
-  void WriteDebugInfo(const ArrayRef<const debug::MethodDebugInfo>& method_infos) OVERRIDE;
+  void WriteDebugInfo(const debug::DebugInfo& debug_info) OVERRIDE;
   bool End() OVERRIDE;
 
   virtual OutputStream* GetStream() OVERRIDE;
@@ -122,7 +134,9 @@ class ElfWriterQuick FINAL : public ElfWriter {
   File* const elf_file_;
   size_t rodata_size_;
   size_t text_size_;
+  size_t data_bimg_rel_ro_size_;
   size_t bss_size_;
+  size_t dex_section_size_;
   std::unique_ptr<BufferedOutputStream> output_stream_;
   std::unique_ptr<ElfBuilder<ElfTypes>> builder_;
   std::unique_ptr<DebugInfoTask> debug_info_task_;
@@ -161,7 +175,9 @@ ElfWriterQuick<ElfTypes>::ElfWriterQuick(InstructionSet instruction_set,
       elf_file_(elf_file),
       rodata_size_(0u),
       text_size_(0u),
+      data_bimg_rel_ro_size_(0u),
       bss_size_(0u),
+      dex_section_size_(0u),
       output_stream_(
           std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(elf_file))),
       builder_(new ElfBuilder<ElfTypes>(instruction_set, features, output_stream_.get())) {}
@@ -173,6 +189,7 @@ template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::Start() {
   builder_->Start();
   if (compiler_options_->GetGenerateBuildId()) {
+    builder_->GetBuildId()->AllocateVirtualMemory(builder_->GetBuildId()->GetSize());
     builder_->WriteBuildIdSection();
   }
 }
@@ -180,21 +197,29 @@ void ElfWriterQuick<ElfTypes>::Start() {
 template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::PrepareDynamicSection(size_t rodata_size,
                                                      size_t text_size,
+                                                     size_t data_bimg_rel_ro_size,
                                                      size_t bss_size,
                                                      size_t bss_methods_offset,
-                                                     size_t bss_roots_offset) {
+                                                     size_t bss_roots_offset,
+                                                     size_t dex_section_size) {
   DCHECK_EQ(rodata_size_, 0u);
   rodata_size_ = rodata_size;
   DCHECK_EQ(text_size_, 0u);
   text_size_ = text_size;
+  DCHECK_EQ(data_bimg_rel_ro_size_, 0u);
+  data_bimg_rel_ro_size_ = data_bimg_rel_ro_size;
   DCHECK_EQ(bss_size_, 0u);
   bss_size_ = bss_size;
+  DCHECK_EQ(dex_section_size_, 0u);
+  dex_section_size_ = dex_section_size;
   builder_->PrepareDynamicSection(elf_file_->GetPath(),
                                   rodata_size_,
                                   text_size_,
+                                  data_bimg_rel_ro_size_,
                                   bss_size_,
                                   bss_methods_offset,
-                                  bss_roots_offset);
+                                  bss_roots_offset,
+                                  dex_section_size);
 }
 
 template <typename ElfTypes>
@@ -224,10 +249,20 @@ void ElfWriterQuick<ElfTypes>::EndText(OutputStream* text) {
 }
 
 template <typename ElfTypes>
+OutputStream* ElfWriterQuick<ElfTypes>::StartDataBimgRelRo() {
+  auto* data_bimg_rel_ro = builder_->GetDataBimgRelRo();
+  data_bimg_rel_ro->Start();
+  return data_bimg_rel_ro;
+}
+
+template <typename ElfTypes>
+void ElfWriterQuick<ElfTypes>::EndDataBimgRelRo(OutputStream* data_bimg_rel_ro) {
+  CHECK_EQ(builder_->GetDataBimgRelRo(), data_bimg_rel_ro);
+  builder_->GetDataBimgRelRo()->End();
+}
+
+template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::WriteDynamicSection() {
-  if (bss_size_ != 0u) {
-    builder_->GetBss()->WriteNoBitsSection(bss_size_);
-  }
   if (builder_->GetIsa() == InstructionSet::kMips ||
       builder_->GetIsa() == InstructionSet::kMips64) {
     builder_->WriteMIPSabiflagsSection();
@@ -236,17 +271,18 @@ void ElfWriterQuick<ElfTypes>::WriteDynamicSection() {
 }
 
 template <typename ElfTypes>
-void ElfWriterQuick<ElfTypes>::PrepareDebugInfo(
-    const ArrayRef<const debug::MethodDebugInfo>& method_infos) {
-  if (!method_infos.empty() && compiler_options_->GetGenerateMiniDebugInfo()) {
+void ElfWriterQuick<ElfTypes>::PrepareDebugInfo(const debug::DebugInfo& debug_info) {
+  if (!debug_info.Empty() && compiler_options_->GetGenerateMiniDebugInfo()) {
     // Prepare the mini-debug-info in background while we do other I/O.
     Thread* self = Thread::Current();
     debug_info_task_ = std::unique_ptr<DebugInfoTask>(
         new DebugInfoTask(builder_->GetIsa(),
                           instruction_set_features_,
-                          rodata_size_,
+                          builder_->GetText()->GetAddress(),
                           text_size_,
-                          method_infos));
+                          builder_->GetDex()->Exists() ? builder_->GetDex()->GetAddress() : 0,
+                          dex_section_size_,
+                          debug_info));
     debug_info_thread_pool_ = std::unique_ptr<ThreadPool>(
         new ThreadPool("Mini-debug-info writer", 1));
     debug_info_thread_pool_->AddTask(self, debug_info_task_.get());
@@ -255,12 +291,11 @@ void ElfWriterQuick<ElfTypes>::PrepareDebugInfo(
 }
 
 template <typename ElfTypes>
-void ElfWriterQuick<ElfTypes>::WriteDebugInfo(
-    const ArrayRef<const debug::MethodDebugInfo>& method_infos) {
-  if (!method_infos.empty()) {
+void ElfWriterQuick<ElfTypes>::WriteDebugInfo(const debug::DebugInfo& debug_info) {
+  if (!debug_info.Empty()) {
     if (compiler_options_->GetGenerateDebugInfo()) {
       // Generate all the debug information we can.
-      debug::WriteDebugInfo(builder_.get(), method_infos, kCFIFormat, true /* write_oat_patches */);
+      debug::WriteDebugInfo(builder_.get(), debug_info, kCFIFormat, true /* write_oat_patches */);
     }
     if (compiler_options_->GetGenerateMiniDebugInfo()) {
       // Wait for the mini-debug-info generation to finish and write it to disk.

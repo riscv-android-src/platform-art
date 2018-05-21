@@ -66,7 +66,7 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_READ_BARRIER_TYPE_IS_"+barrierType+"=1")
 	}
 
-  cdexLevel := envDefault(ctx, "ART_DEFAULT_COMPACT_DEX_LEVEL", "none")
+  cdexLevel := envDefault(ctx, "ART_DEFAULT_COMPACT_DEX_LEVEL", "fast")
   cflags = append(cflags, "-DART_DEFAULT_COMPACT_DEX_LEVEL="+cdexLevel)
 
 	// We need larger stack overflow guards for ASAN, as the compiled code will have
@@ -101,6 +101,10 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 	if envTrue(ctx, "ART_MIPS32_CHECK_ALIGNMENT") {
 		// Enable the use of MIPS32 CHECK_ALIGNMENT macro for debugging purposes
 		asflags = append(asflags, "-DART_MIPS32_CHECK_ALIGNMENT")
+	}
+
+	if envTrueOrDefault(ctx, "USE_D8_DESUGAR") {
+		cflags = append(cflags, "-DUSE_D8_DESUGAR=1")
 	}
 
 	return cflags, asflags
@@ -274,6 +278,7 @@ func init() {
 	android.RegisterModuleType("art_cc_test", artTest)
 	android.RegisterModuleType("art_cc_test_library", artTestLibrary)
 	android.RegisterModuleType("art_cc_defaults", artDefaultsFactory)
+	android.RegisterModuleType("libart_cc_defaults", libartDefaultsFactory)
 	android.RegisterModuleType("art_global_defaults", artGlobalDefaultsFactory)
 	android.RegisterModuleType("art_debug_defaults", artDebugDefaultsFactory)
 }
@@ -296,6 +301,33 @@ func artDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
+
+	return module
+}
+
+func libartDefaultsFactory() android.Module {
+	c := &codegenProperties{}
+	module := cc.DefaultsFactory(c)
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
+		codegen(ctx, c, true)
+
+		type props struct {
+		  Target struct {
+		    Android struct {
+		      Shared_libs []string
+		    }
+		  }
+		}
+
+		p := &props{}
+		// TODO: express this in .bp instead b/79671158
+		if !envTrue(ctx, "ART_TARGET_LINUX") {
+		  p.Target.Android.Shared_libs = []string {
+		    "libmetricslogger",
+		  }
+		}
+		ctx.AppendProperties(p)
+	})
 
 	return module
 }
@@ -365,4 +397,8 @@ func envTrue(ctx android.BaseContext, key string) bool {
 
 func envFalse(ctx android.BaseContext, key string) bool {
 	return ctx.AConfig().Getenv(key) == "false"
+}
+
+func envTrueOrDefault(ctx android.BaseContext, key string) bool {
+	return ctx.AConfig().Getenv(key) != "false"
 }

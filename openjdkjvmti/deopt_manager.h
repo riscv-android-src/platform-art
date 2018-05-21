@@ -32,6 +32,7 @@
 #ifndef ART_OPENJDKJVMTI_DEOPT_MANAGER_H_
 #define ART_OPENJDKJVMTI_DEOPT_MANAGER_H_
 
+#include <atomic>
 #include <unordered_map>
 
 #include "jni.h"
@@ -60,6 +61,9 @@ struct JvmtiMethodInspectionCallback : public art::MethodInspectionCallback {
       OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool IsMethodSafeToJit(art::ArtMethod* method)
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
+
+  bool MethodNeedsDebugVersion(art::ArtMethod* method)
       OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
 
  private:
@@ -101,11 +105,23 @@ class DeoptManager {
   void DeoptimizeThread(art::Thread* target) REQUIRES_SHARED(art::Locks::mutator_lock_);
   void DeoptimizeAllThreads() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+  void FinishSetup()
+      REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+
   static DeoptManager* Get();
+
+  bool HaveLocalsChanged() const {
+    return set_local_variable_called_.load();
+  }
+
+  void SetLocalsUpdated() {
+    set_local_variable_called_.store(true);
+  }
 
  private:
   bool MethodHasBreakpointsLocked(art::ArtMethod* method)
-      REQUIRES(deoptimization_status_lock_);
+      REQUIRES(breakpoint_status_lock_);
 
   // Wait until nothing is currently in the middle of deoptimizing/undeoptimizing something. This is
   // needed to ensure that everything is synchronized since threads need to drop the
@@ -141,9 +157,8 @@ class DeoptManager {
       REQUIRES(!art::Roles::uninterruptible_, !art::Locks::mutator_lock_);
 
   static constexpr const char* kDeoptManagerInstrumentationKey = "JVMTI_DeoptManager";
-  // static constexpr const char* kDeoptManagerThreadName = "JVMTI_DeoptManagerWorkerThread";
 
-  art::Mutex deoptimization_status_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
+  art::Mutex deoptimization_status_lock_ ACQUIRED_BEFORE(art::Locks::classlinker_classes_lock_);
   art::ConditionVariable deoptimization_condition_ GUARDED_BY(deoptimization_status_lock_);
   bool performing_deoptimization_ GUARDED_BY(deoptimization_status_lock_);
 
@@ -153,12 +168,19 @@ class DeoptManager {
   // Number of users of deoptimization there currently are.
   uint32_t deopter_count_ GUARDED_BY(deoptimization_status_lock_);
 
+  // A mutex that just protects the breakpoint-status map. This mutex should always be at the
+  // bottom of the lock hierarchy. Nothing more should be locked if we hold this.
+  art::Mutex breakpoint_status_lock_ ACQUIRED_BEFORE(art::Locks::abort_lock_);
   // A map from methods to the number of breakpoints in them from all envs.
   std::unordered_map<art::ArtMethod*, uint32_t> breakpoint_status_
-      GUARDED_BY(deoptimization_status_lock_);
+      GUARDED_BY(breakpoint_status_lock_);
 
   // The MethodInspectionCallback we use to tell the runtime if we care about particular methods.
   JvmtiMethodInspectionCallback inspection_callback_;
+
+  // Set to true if anything calls SetLocalVariables on any thread since we need to be careful about
+  // OSR after this.
+  std::atomic<bool> set_local_variable_called_;
 
   // Helper for setting up/tearing-down for deoptimization.
   friend class ScopedDeoptimizationContext;

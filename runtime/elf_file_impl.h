@@ -24,13 +24,9 @@
 
 // Explicitly include our own elf.h to avoid Linux and other dependencies.
 #include "./elf.h"
-#include "mem_map.h"
+#include "base/mem_map.h"
 
 namespace art {
-
-extern "C" {
-  struct JITCodeEntry;
-}
 
 template <typename ElfTypes>
 class ElfFileImpl {

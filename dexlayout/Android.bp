@@ -26,14 +26,31 @@ art_cc_defaults {
         "dex_writer.cc",
     ],
     export_include_dirs: ["."],
-    shared_libs: ["libbase"],
+    shared_libs: [
+        "libbase",
+    ],
     static_libs: ["libz"],
 }
 
 art_cc_library {
     name: "libart-dexlayout",
-    defaults: ["libart-dexlayout-defaults"],
-    shared_libs: ["libart"],
+    defaults: [
+        "libart-dexlayout-defaults",
+        "dex2oat-pgo-defaults",
+    ],
+    shared_libs: [
+        "libdexfile",
+        "libartbase",
+        "libprofile",
+    ],
+
+    target: {
+        android: {
+            lto: {
+                 thin: true,
+            },
+        },
+    },
 }
 
 art_cc_library {
@@ -42,14 +59,17 @@ art_cc_library {
       "libart-dexlayout-defaults",
       "art_debug_defaults",
     ],
-    shared_libs: ["libartd"],
+    shared_libs: [
+        "libdexfiled",
+        "libartbased",
+        "libprofiled",
+    ],
 }
 
 cc_defaults {
     name: "dexlayout-defaults",
     defaults: ["art_defaults"],
     host_supported: true,
-    srcs: ["dexlayout_main.cc"],
     shared_libs: [
         "libbase",
     ],
@@ -58,8 +78,11 @@ cc_defaults {
 art_cc_binary {
     name: "dexlayout",
     defaults: ["dexlayout-defaults"],
+    srcs: ["dexlayout_main.cc"],
     shared_libs: [
-        "libart",
+        "libdexfile",
+        "libprofile",
+        "libartbase",
         "libart-dexlayout",
     ],
 }
@@ -70,8 +93,11 @@ art_cc_binary {
         "art_debug_defaults",
         "dexlayout-defaults",
     ],
+    srcs: ["dexlayout_main.cc"],
     shared_libs: [
-        "libartd",
+        "libdexfiled",
+        "libprofiled",
+        "libartbased",
         "libartd-dexlayout",
     ],
 }
@@ -79,6 +105,10 @@ art_cc_binary {
 art_cc_test {
     name: "art_dexlayout_tests",
     defaults: ["art_gtest_defaults"],
+    shared_libs: [
+        "libprofiled",
+        "libartd-dexlayout",
+    ],
     srcs: ["dexlayout_test.cc"],
 }
 
@@ -90,7 +120,10 @@ art_cc_binary {
     cflags: ["-Wall"],
     shared_libs: [
         "libart",
+        "libdexfile",
+        "libartbase",
         "libart-dexlayout",
+        "libbase",
     ],
     target: {
         android: {

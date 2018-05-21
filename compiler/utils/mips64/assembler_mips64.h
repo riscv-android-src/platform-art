@@ -24,10 +24,10 @@
 #include "arch/mips64/instruction_set_features_mips64.h"
 #include "base/arena_containers.h"
 #include "base/enums.h"
+#include "base/globals.h"
 #include "base/macros.h"
 #include "base/stl_util_identity.h"
 #include "constants_mips64.h"
-#include "globals.h"
 #include "heap_poisoning.h"
 #include "managed_register_mips64.h"
 #include "offsets.h"
@@ -478,7 +478,11 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Dsbh(GpuRegister rd, GpuRegister rt);  // MIPS64
   void Dshd(GpuRegister rd, GpuRegister rt);  // MIPS64
   void Dext(GpuRegister rs, GpuRegister rt, int pos, int size);  // MIPS64
+  void Ins(GpuRegister rt, GpuRegister rs, int pos, int size);
+  void Dins(GpuRegister rt, GpuRegister rs, int pos, int size);  // MIPS64
+  void Dinsm(GpuRegister rt, GpuRegister rs, int pos, int size);  // MIPS64
   void Dinsu(GpuRegister rt, GpuRegister rs, int pos, int size);  // MIPS64
+  void DblIns(GpuRegister rt, GpuRegister rs, int pos, int size);  // MIPS64
   void Lsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);
   void Dlsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);  // MIPS64
   void Wsbh(GpuRegister rd, GpuRegister rt);
@@ -858,6 +862,11 @@ class Mips64Assembler FINAL : public Assembler, public JNIMacroAssembler<Pointer
   void Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+
+  void PcntB(VectorRegister wd, VectorRegister ws);
+  void PcntH(VectorRegister wd, VectorRegister ws);
+  void PcntW(VectorRegister wd, VectorRegister ws);
+  void PcntD(VectorRegister wd, VectorRegister ws);
 
   // Helper for replicating floating point value in all destination elements.
   void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);

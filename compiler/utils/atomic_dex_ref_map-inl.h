@@ -21,10 +21,10 @@
 
 #include <type_traits>
 
-#include "dex_file-inl.h"
-#include "class_reference.h"
-#include "method_reference.h"
-#include "type_reference.h"
+#include "dex/class_reference.h"
+#include "dex/dex_file-inl.h"
+#include "dex/method_reference.h"
+#include "dex/type_reference.h"
 
 namespace art {
 
@@ -58,7 +58,7 @@ inline typename AtomicDexRefMap<DexFileReferenceType, Value>::InsertResult
     return kInsertResultInvalidDexFile;
   }
   DCHECK_LT(ref.index, array->size());
-  return (*array)[ref.index].CompareExchangeStrongSequentiallyConsistent(expected, desired)
+  return (*array)[ref.index].CompareAndSetStrongSequentiallyConsistent(expected, desired)
       ? kInsertResultSuccess
       : kInsertResultCASFailure;
 }
@@ -70,7 +70,18 @@ inline bool AtomicDexRefMap<DexFileReferenceType, Value>::Get(const DexFileRefer
   if (array == nullptr) {
     return false;
   }
-  *out = (*array)[ref.index].LoadRelaxed();
+  *out = (*array)[ref.index].load(std::memory_order_relaxed);
+  return true;
+}
+
+template <typename DexFileReferenceType, typename Value>
+inline bool AtomicDexRefMap<DexFileReferenceType, Value>::Remove(const DexFileReferenceType& ref,
+                                                                 Value* out) {
+  ElementArray* const array = GetArray(ref.dex_file);
+  if (array == nullptr) {
+    return false;
+  }
+  *out = (*array)[ref.index].exchange(nullptr, std::memory_order_seq_cst);
   return true;
 }
 
@@ -109,7 +120,7 @@ inline void AtomicDexRefMap<DexFileReferenceType, Value>::Visit(const Visitor& v
     const DexFile* dex_file = pair.first;
     const ElementArray& elements = pair.second;
     for (size_t i = 0; i < elements.size(); ++i) {
-      visitor(DexFileReference(dex_file, i), elements[i].LoadRelaxed());
+      visitor(DexFileReference(dex_file, i), elements[i].load(std::memory_order_relaxed));
     }
   }
 }
@@ -118,7 +129,7 @@ template <typename DexFileReferenceType, typename Value>
 inline void AtomicDexRefMap<DexFileReferenceType, Value>::ClearEntries() {
   for (auto& it : arrays_) {
     for (auto& element : it.second) {
-      element.StoreRelaxed(nullptr);
+      element.store(nullptr, std::memory_order_relaxed);
     }
   }
 }

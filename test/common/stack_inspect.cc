@@ -19,8 +19,8 @@
 #include <android-base/logging.h>
 
 #include "base/mutex.h"
-#include "dex_file-inl.h"
-#include "jni_internal.h"
+#include "dex/dex_file-inl.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "nth_caller_visitor.h"
 #include "oat_file.h"

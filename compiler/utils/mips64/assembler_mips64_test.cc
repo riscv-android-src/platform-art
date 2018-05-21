@@ -48,6 +48,16 @@ class AssemblerMIPS64Test : public AssemblerTest<mips64::Mips64Assembler,
                         uint32_t,
                         mips64::VectorRegister> Base;
 
+  // These tests were taking too long, so we hide the DriverStr() from AssemblerTest<>
+  // and reimplement it without the verification against `assembly_string`. b/73903608
+  void DriverStr(const std::string& assembly_string ATTRIBUTE_UNUSED,
+                 const std::string& test_name ATTRIBUTE_UNUSED) {
+    GetAssembler()->FinalizeCode();
+    std::vector<uint8_t> data(GetAssembler()->CodeSize());
+    MemoryRegion code(data.data(), data.size());
+    GetAssembler()->FinalizeInstructions(code);
+  }
+
   AssemblerMIPS64Test()
       : instruction_set_features_(Mips64InstructionSetFeatures::FromVariant("default", nullptr)) {}
 
@@ -1353,23 +1363,42 @@ TEST_F(AssemblerMIPS64Test, Dext) {
   DriverStr(expected.str(), "Dext");
 }
 
-TEST_F(AssemblerMIPS64Test, Dinsu) {
+TEST_F(AssemblerMIPS64Test, Ins) {
+  std::vector<mips64::GpuRegister*> regs = GetRegisters();
+  WarnOnCombinations(regs.size() * regs.size() * 33 * 16);
+  std::string expected;
+  for (mips64::GpuRegister* reg1 : regs) {
+    for (mips64::GpuRegister* reg2 : regs) {
+      for (int32_t pos = 0; pos < 32; pos++) {
+        for (int32_t size = 1; pos + size <= 32; size++) {
+          __ Ins(*reg1, *reg2, pos, size);
+          std::ostringstream instr;
+          instr << "ins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
+          expected += instr.str();
+        }
+      }
+    }
+  }
+  DriverStr(expected, "Ins");
+}
+
+TEST_F(AssemblerMIPS64Test, DblIns) {
   std::vector<mips64::GpuRegister*> reg1_registers = GetRegisters();
   std::vector<mips64::GpuRegister*> reg2_registers = GetRegisters();
-  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 33 * 16);
+  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 65 * 32);
   std::ostringstream expected;
   for (mips64::GpuRegister* reg1 : reg1_registers) {
     for (mips64::GpuRegister* reg2 : reg2_registers) {
-      for (int32_t pos = 32; pos < 64; pos++) {
+      for (int32_t pos = 0; pos < 64; pos++) {
         for (int32_t size = 1; pos + size <= 64; size++) {
-          __ Dinsu(*reg1, *reg2, pos, size);
-          expected << "dinsu $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
+          __ DblIns(*reg1, *reg2, pos, size);
+          expected << "dins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
         }
       }
     }
   }
 
-  DriverStr(expected.str(), "Dinsu");
+  DriverStr(expected.str(), "DblIns");
 }
 
 TEST_F(AssemblerMIPS64Test, Lsa) {
@@ -3508,6 +3537,22 @@ TEST_F(AssemblerMIPS64Test, FillW) {
 
 TEST_F(AssemblerMIPS64Test, FillD) {
   DriverStr(RepeatVR(&mips64::Mips64Assembler::FillD, "fill.d ${reg1}, ${reg2}"), "fill.d");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntB) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntB, "pcnt.b ${reg1}, ${reg2}"), "pcnt.b");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntH) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntH, "pcnt.h ${reg1}, ${reg2}"), "pcnt.h");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntW) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntW, "pcnt.w ${reg1}, ${reg2}"), "pcnt.w");
+}
+
+TEST_F(AssemblerMIPS64Test, PcntD) {
+  DriverStr(RepeatVV(&mips64::Mips64Assembler::PcntD, "pcnt.d ${reg1}, ${reg2}"), "pcnt.d");
 }
 
 TEST_F(AssemblerMIPS64Test, LdiB) {

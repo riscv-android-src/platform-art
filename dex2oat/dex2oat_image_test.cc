@@ -29,12 +29,13 @@
 #include "base/file_utils.h"
 #include "base/macros.h"
 #include "base/unix_file/fd_file.h"
-#include "dex_file-inl.h"
-#include "dex_file_loader.h"
-#include "jit/profile_compilation_info.h"
-#include "method_reference.h"
+#include "base/utils.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_loader.h"
+#include "dex/method_reference.h"
+#include "profile/profile_compilation_info.h"
 #include "runtime.h"
-#include "utils.h"
 
 namespace art {
 
@@ -65,12 +66,13 @@ class Dex2oatImageTest : public CommonRuntimeTest {
     for (const std::string& dex : GetLibCoreDexFileNames()) {
       std::vector<std::unique_ptr<const DexFile>> dex_files;
       std::string error_msg;
-      CHECK(DexFileLoader::Open(dex.c_str(),
-                                dex,
-                                /*verify*/ true,
-                                /*verify_checksum*/ false,
-                                &error_msg,
-                                &dex_files))
+      const ArtDexFileLoader dex_file_loader;
+      CHECK(dex_file_loader.Open(dex.c_str(),
+                                 dex,
+                                 /*verify*/ true,
+                                 /*verify_checksum*/ false,
+                                 &error_msg,
+                                 &dex_files))
           << error_msg;
       for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
         for (size_t i = 0; i < dex_file->NumMethodIds(); ++i) {
@@ -127,12 +129,15 @@ class Dex2oatImageTest : public CommonRuntimeTest {
     std::string art_file = scratch.GetFilename() + ".art";
     std::string oat_file = scratch.GetFilename() + ".oat";
     std::string vdex_file = scratch.GetFilename() + ".vdex";
-    ret.art_size = GetFileSizeBytes(art_file);
-    ret.oat_size = GetFileSizeBytes(oat_file);
-    ret.vdex_size = GetFileSizeBytes(vdex_file);
-    CHECK_GT(ret.art_size, 0u) << art_file;
-    CHECK_GT(ret.oat_size, 0u) << oat_file;
-    CHECK_GT(ret.vdex_size, 0u) << vdex_file;
+    int64_t art_size = OS::GetFileSizeBytes(art_file.c_str());
+    int64_t oat_size = OS::GetFileSizeBytes(oat_file.c_str());
+    int64_t vdex_size = OS::GetFileSizeBytes(vdex_file.c_str());
+    CHECK_GT(art_size, 0u) << art_file;
+    CHECK_GT(oat_size, 0u) << oat_file;
+    CHECK_GT(vdex_size, 0u) << vdex_file;
+    ret.art_size = art_size;
+    ret.oat_size = oat_size;
+    ret.vdex_size = vdex_size;
     scratch.Close();
     // Clear image files since we compile the image multiple times and don't want to leave any
     // artifacts behind.
@@ -234,9 +239,7 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
   ImageSizes base_sizes = CompileImageAndGetSizes({});
   ImageSizes image_classes_sizes;
   ImageSizes compiled_classes_sizes;
-  ImageSizes compiled_all_classes_sizes;
   ImageSizes compiled_methods_sizes;
-  ImageSizes compiled_all_methods_sizes;
   ImageSizes profile_sizes;
   std::cout << "Base compile sizes " << base_sizes << std::endl;
   // Test image classes
@@ -252,65 +255,28 @@ TEST_F(Dex2oatImageTest, TestModesAndFilters) {
     // Sanity check that dex is the same size.
     EXPECT_EQ(image_classes_sizes.vdex_size, base_sizes.vdex_size);
   }
-  // Test compiled classes with all the classes.
-  {
-    ScratchFile classes;
-    // Only compile every even class.
-    GenerateClasses(classes.GetFile(), /*frequency*/ 1u);
-    compiled_all_classes_sizes = CompileImageAndGetSizes(
-        {"--compiled-classes=" + classes.GetFilename()});
-    classes.Close();
-    std::cout << "Compiled all classes sizes " << compiled_all_classes_sizes << std::endl;
-    // Check that oat size is smaller since we didn't compile everything.
-    EXPECT_EQ(compiled_all_classes_sizes.art_size, base_sizes.art_size);
-    // TODO(mathieuc): Find a reliable way to check compiled code.
-    // EXPECT_EQ(compiled_all_classes_sizes.oat_size, base_sizes.oat_size);
-    EXPECT_EQ(compiled_all_classes_sizes.vdex_size, base_sizes.vdex_size);
-  }
   // Test compiled classes.
   {
     ScratchFile classes;
     // Only compile every even class.
     GenerateClasses(classes.GetFile(), /*frequency*/ 2u);
     compiled_classes_sizes = CompileImageAndGetSizes(
-        {"--image-classes=" + classes.GetFilename(),
-         "--compiled-classes=" + classes.GetFilename()});
+        {"--image-classes=" + classes.GetFilename()});
     classes.Close();
     std::cout << "Compiled classes sizes " << compiled_classes_sizes << std::endl;
-    // Check that oat size is smaller since we didn't compile everything.
-    // TODO(mathieuc): Find a reliable way to check compiled code.
-    // EXPECT_LT(compiled_classes_sizes.oat_size, base_sizes.oat_size);
     // Art file should be smaller than image classes version since we included fewer classes in the
     // list.
     EXPECT_LT(compiled_classes_sizes.art_size, image_classes_sizes.art_size);
-  }
-  // Test compiled methods.
-  {
-    ScratchFile methods;
-    // Only compile every even class.
-    GenerateMethods(methods.GetFile(), /*frequency*/ 1u);
-    compiled_all_methods_sizes = CompileImageAndGetSizes(
-        {"--compiled-methods=" + methods.GetFilename()});
-    methods.Close();
-    std::cout << "Compiled all methods sizes " << compiled_all_methods_sizes << std::endl;
-    EXPECT_EQ(compiled_all_classes_sizes.art_size, base_sizes.art_size);
-    // TODO(mathieuc): Find a reliable way to check compiled code. b/63746626
-    // EXPECT_EQ(compiled_all_classes_sizes.oat_size, base_sizes.oat_size);
-    EXPECT_EQ(compiled_all_classes_sizes.vdex_size, base_sizes.vdex_size);
   }
   static size_t kMethodFrequency = 3;
   static size_t kTypeFrequency = 4;
   // Test compiling fewer methods and classes.
   {
-    ScratchFile methods;
     ScratchFile classes;
     // Only compile every even class.
-    GenerateMethods(methods.GetFile(), kMethodFrequency);
     GenerateClasses(classes.GetFile(), kTypeFrequency);
     compiled_methods_sizes = CompileImageAndGetSizes(
-        {"--image-classes=" + classes.GetFilename(),
-         "--compiled-methods=" + methods.GetFilename()});
-    methods.Close();
+        {"--image-classes=" + classes.GetFilename()});
     classes.Close();
     std::cout << "Compiled fewer methods sizes " << compiled_methods_sizes << std::endl;
   }

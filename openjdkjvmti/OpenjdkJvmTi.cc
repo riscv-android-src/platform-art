@@ -43,7 +43,7 @@
 #include "base/logging.h"  // For gLogVerbosity.
 #include "base/mutex.h"
 #include "events-inl.h"
-#include "jni_env_ext-inl.h"
+#include "jni/jni_env_ext-inl.h"
 #include "obj_ptr-inl.h"
 #include "object_tagging.h"
 #include "runtime.h"
@@ -73,8 +73,10 @@
 
 namespace openjdkjvmti {
 
-EventHandler gEventHandler;
-DeoptManager gDeoptManager;
+// NB These are heap allocated to avoid the static destructors being run if an agent calls exit(3).
+// These should never be null.
+EventHandler* gEventHandler;
+DeoptManager* gDeoptManager;
 
 #define ENSURE_NON_NULL(n)      \
   do {                          \
@@ -82,6 +84,12 @@ DeoptManager gDeoptManager;
       return ERR(NULL_POINTER); \
     }                           \
   } while (false)
+
+// Returns whether we are able to use all jvmti features.
+static bool IsFullJvmtiAvailable() {
+  art::Runtime* runtime = art::Runtime::Current();
+  return runtime->GetInstrumentation()->IsForcedInterpretOnly() || runtime->IsJavaDebuggable();
+}
 
 class JvmtiFunctions {
  private:
@@ -770,7 +778,7 @@ class JvmtiFunctions {
     ENSURE_HAS_CAP(env, can_retransform_classes);
     std::string error_msg;
     jvmtiError res = Transformer::RetransformClasses(ArtJvmTiEnv::AsArtJvmTiEnv(env),
-                                                     &gEventHandler,
+                                                     gEventHandler,
                                                      art::Runtime::Current(),
                                                      art::Thread::Current(),
                                                      class_count,
@@ -789,7 +797,7 @@ class JvmtiFunctions {
     ENSURE_HAS_CAP(env, can_redefine_classes);
     std::string error_msg;
     jvmtiError res = Redefiner::RedefineClasses(ArtJvmTiEnv::AsArtJvmTiEnv(env),
-                                                &gEventHandler,
+                                                gEventHandler,
                                                 art::Runtime::Current(),
                                                 art::Thread::Current(),
                                                 class_count,
@@ -1055,7 +1063,10 @@ class JvmtiFunctions {
     }
 
     ArtJvmTiEnv* art_env = ArtJvmTiEnv::AsArtJvmTiEnv(env);
-    return gEventHandler.SetEvent(art_env, art_thread, GetArtJvmtiEvent(art_env, event_type), mode);
+    return gEventHandler->SetEvent(art_env,
+                                   art_thread,
+                                   GetArtJvmtiEvent(art_env, event_type),
+                                   mode);
   }
 
   static jvmtiError GenerateEvents(jvmtiEnv* env,
@@ -1089,13 +1100,67 @@ class JvmtiFunctions {
     return ExtensionUtil::SetExtensionEventCallback(env,
                                                     extension_event_index,
                                                     callback,
-                                                    &gEventHandler);
+                                                    gEventHandler);
   }
+
+#define FOR_ALL_CAPABILITIES(FUN)                        \
+    FUN(can_tag_objects)                                 \
+    FUN(can_generate_field_modification_events)          \
+    FUN(can_generate_field_access_events)                \
+    FUN(can_get_bytecodes)                               \
+    FUN(can_get_synthetic_attribute)                     \
+    FUN(can_get_owned_monitor_info)                      \
+    FUN(can_get_current_contended_monitor)               \
+    FUN(can_get_monitor_info)                            \
+    FUN(can_pop_frame)                                   \
+    FUN(can_redefine_classes)                            \
+    FUN(can_signal_thread)                               \
+    FUN(can_get_source_file_name)                        \
+    FUN(can_get_line_numbers)                            \
+    FUN(can_get_source_debug_extension)                  \
+    FUN(can_access_local_variables)                      \
+    FUN(can_maintain_original_method_order)              \
+    FUN(can_generate_single_step_events)                 \
+    FUN(can_generate_exception_events)                   \
+    FUN(can_generate_frame_pop_events)                   \
+    FUN(can_generate_breakpoint_events)                  \
+    FUN(can_suspend)                                     \
+    FUN(can_redefine_any_class)                          \
+    FUN(can_get_current_thread_cpu_time)                 \
+    FUN(can_get_thread_cpu_time)                         \
+    FUN(can_generate_method_entry_events)                \
+    FUN(can_generate_method_exit_events)                 \
+    FUN(can_generate_all_class_hook_events)              \
+    FUN(can_generate_compiled_method_load_events)        \
+    FUN(can_generate_monitor_events)                     \
+    FUN(can_generate_vm_object_alloc_events)             \
+    FUN(can_generate_native_method_bind_events)          \
+    FUN(can_generate_garbage_collection_events)          \
+    FUN(can_generate_object_free_events)                 \
+    FUN(can_force_early_return)                          \
+    FUN(can_get_owned_monitor_stack_depth_info)          \
+    FUN(can_get_constant_pool)                           \
+    FUN(can_set_native_method_prefix)                    \
+    FUN(can_retransform_classes)                         \
+    FUN(can_retransform_any_class)                       \
+    FUN(can_generate_resource_exhaustion_heap_events)    \
+    FUN(can_generate_resource_exhaustion_threads_events)
 
   static jvmtiError GetPotentialCapabilities(jvmtiEnv* env, jvmtiCapabilities* capabilities_ptr) {
     ENSURE_VALID_ENV(env);
     ENSURE_NON_NULL(capabilities_ptr);
     *capabilities_ptr = kPotentialCapabilities;
+    if (UNLIKELY(!IsFullJvmtiAvailable())) {
+#define REMOVE_NONDEBUGGABLE_UNSUPPORTED(e)                 \
+      do {                                                  \
+        if (kNonDebuggableUnsupportedCapabilities.e == 1) { \
+          capabilities_ptr->e = 0;                          \
+        }                                                   \
+      } while (false);
+
+      FOR_ALL_CAPABILITIES(REMOVE_NONDEBUGGABLE_UNSUPPORTED);
+#undef REMOVE_NONDEBUGGABLE_UNSUPPORTED
+    }
     return OK;
   }
 
@@ -1122,53 +1187,13 @@ class JvmtiFunctions {
           ret = ERR(NOT_AVAILABLE); \
         } \
       } \
-    } while (false)
+    } while (false);
 
-    ADD_CAPABILITY(can_tag_objects);
-    ADD_CAPABILITY(can_generate_field_modification_events);
-    ADD_CAPABILITY(can_generate_field_access_events);
-    ADD_CAPABILITY(can_get_bytecodes);
-    ADD_CAPABILITY(can_get_synthetic_attribute);
-    ADD_CAPABILITY(can_get_owned_monitor_info);
-    ADD_CAPABILITY(can_get_current_contended_monitor);
-    ADD_CAPABILITY(can_get_monitor_info);
-    ADD_CAPABILITY(can_pop_frame);
-    ADD_CAPABILITY(can_redefine_classes);
-    ADD_CAPABILITY(can_signal_thread);
-    ADD_CAPABILITY(can_get_source_file_name);
-    ADD_CAPABILITY(can_get_line_numbers);
-    ADD_CAPABILITY(can_get_source_debug_extension);
-    ADD_CAPABILITY(can_access_local_variables);
-    ADD_CAPABILITY(can_maintain_original_method_order);
-    ADD_CAPABILITY(can_generate_single_step_events);
-    ADD_CAPABILITY(can_generate_exception_events);
-    ADD_CAPABILITY(can_generate_frame_pop_events);
-    ADD_CAPABILITY(can_generate_breakpoint_events);
-    ADD_CAPABILITY(can_suspend);
-    ADD_CAPABILITY(can_redefine_any_class);
-    ADD_CAPABILITY(can_get_current_thread_cpu_time);
-    ADD_CAPABILITY(can_get_thread_cpu_time);
-    ADD_CAPABILITY(can_generate_method_entry_events);
-    ADD_CAPABILITY(can_generate_method_exit_events);
-    ADD_CAPABILITY(can_generate_all_class_hook_events);
-    ADD_CAPABILITY(can_generate_compiled_method_load_events);
-    ADD_CAPABILITY(can_generate_monitor_events);
-    ADD_CAPABILITY(can_generate_vm_object_alloc_events);
-    ADD_CAPABILITY(can_generate_native_method_bind_events);
-    ADD_CAPABILITY(can_generate_garbage_collection_events);
-    ADD_CAPABILITY(can_generate_object_free_events);
-    ADD_CAPABILITY(can_force_early_return);
-    ADD_CAPABILITY(can_get_owned_monitor_stack_depth_info);
-    ADD_CAPABILITY(can_get_constant_pool);
-    ADD_CAPABILITY(can_set_native_method_prefix);
-    ADD_CAPABILITY(can_retransform_classes);
-    ADD_CAPABILITY(can_retransform_any_class);
-    ADD_CAPABILITY(can_generate_resource_exhaustion_heap_events);
-    ADD_CAPABILITY(can_generate_resource_exhaustion_threads_events);
+    FOR_ALL_CAPABILITIES(ADD_CAPABILITY);
 #undef ADD_CAPABILITY
-    gEventHandler.HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
-                                            changed,
-                                            /*added*/true);
+    gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
+                                             changed,
+                                             /*added*/true);
     return ret;
   }
 
@@ -1186,55 +1211,17 @@ class JvmtiFunctions {
           changed.e = 1; \
         } \
       } \
-    } while (false)
+    } while (false);
 
-    DEL_CAPABILITY(can_tag_objects);
-    DEL_CAPABILITY(can_generate_field_modification_events);
-    DEL_CAPABILITY(can_generate_field_access_events);
-    DEL_CAPABILITY(can_get_bytecodes);
-    DEL_CAPABILITY(can_get_synthetic_attribute);
-    DEL_CAPABILITY(can_get_owned_monitor_info);
-    DEL_CAPABILITY(can_get_current_contended_monitor);
-    DEL_CAPABILITY(can_get_monitor_info);
-    DEL_CAPABILITY(can_pop_frame);
-    DEL_CAPABILITY(can_redefine_classes);
-    DEL_CAPABILITY(can_signal_thread);
-    DEL_CAPABILITY(can_get_source_file_name);
-    DEL_CAPABILITY(can_get_line_numbers);
-    DEL_CAPABILITY(can_get_source_debug_extension);
-    DEL_CAPABILITY(can_access_local_variables);
-    DEL_CAPABILITY(can_maintain_original_method_order);
-    DEL_CAPABILITY(can_generate_single_step_events);
-    DEL_CAPABILITY(can_generate_exception_events);
-    DEL_CAPABILITY(can_generate_frame_pop_events);
-    DEL_CAPABILITY(can_generate_breakpoint_events);
-    DEL_CAPABILITY(can_suspend);
-    DEL_CAPABILITY(can_redefine_any_class);
-    DEL_CAPABILITY(can_get_current_thread_cpu_time);
-    DEL_CAPABILITY(can_get_thread_cpu_time);
-    DEL_CAPABILITY(can_generate_method_entry_events);
-    DEL_CAPABILITY(can_generate_method_exit_events);
-    DEL_CAPABILITY(can_generate_all_class_hook_events);
-    DEL_CAPABILITY(can_generate_compiled_method_load_events);
-    DEL_CAPABILITY(can_generate_monitor_events);
-    DEL_CAPABILITY(can_generate_vm_object_alloc_events);
-    DEL_CAPABILITY(can_generate_native_method_bind_events);
-    DEL_CAPABILITY(can_generate_garbage_collection_events);
-    DEL_CAPABILITY(can_generate_object_free_events);
-    DEL_CAPABILITY(can_force_early_return);
-    DEL_CAPABILITY(can_get_owned_monitor_stack_depth_info);
-    DEL_CAPABILITY(can_get_constant_pool);
-    DEL_CAPABILITY(can_set_native_method_prefix);
-    DEL_CAPABILITY(can_retransform_classes);
-    DEL_CAPABILITY(can_retransform_any_class);
-    DEL_CAPABILITY(can_generate_resource_exhaustion_heap_events);
-    DEL_CAPABILITY(can_generate_resource_exhaustion_threads_events);
+    FOR_ALL_CAPABILITIES(DEL_CAPABILITY);
 #undef DEL_CAPABILITY
-    gEventHandler.HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
-                                            changed,
-                                            /*added*/false);
+    gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
+                                             changed,
+                                             /*added*/false);
     return OK;
   }
+
+#undef FOR_ALL_CAPABILITIES
 
   static jvmtiError GetCapabilities(jvmtiEnv* env, jvmtiCapabilities* capabilities_ptr) {
     ENSURE_VALID_ENV(env);
@@ -1320,7 +1307,7 @@ class JvmtiFunctions {
   static jvmtiError DisposeEnvironment(jvmtiEnv* env) {
     ENSURE_VALID_ENV(env);
     ArtJvmTiEnv* tienv = ArtJvmTiEnv::AsArtJvmTiEnv(env);
-    gEventHandler.RemoveArtJvmTiEnv(tienv);
+    gEventHandler->RemoveArtJvmTiEnv(tienv);
     art::Runtime::Current()->RemoveSystemWeakHolder(tienv->object_tag_table.get());
     ThreadUtil::RemoveEnvironment(tienv);
     delete tienv;
@@ -1341,7 +1328,7 @@ class JvmtiFunctions {
 
   static jvmtiError GetVersionNumber(jvmtiEnv* env, jint* version_ptr) {
     ENSURE_VALID_ENV(env);
-    *version_ptr = JVMTI_VERSION;
+    *version_ptr = ArtJvmTiEnv::AsArtJvmTiEnv(env)->ti_version;
     return OK;
   }
 
@@ -1495,9 +1482,10 @@ static bool IsJvmtiVersion(jint version) {
 
 extern const jvmtiInterface_1 gJvmtiInterface;
 
-ArtJvmTiEnv::ArtJvmTiEnv(art::JavaVMExt* runtime, EventHandler* event_handler)
+ArtJvmTiEnv::ArtJvmTiEnv(art::JavaVMExt* runtime, EventHandler* event_handler, jint version)
     : art_vm(runtime),
       local_data(nullptr),
+      ti_version(version),
       capabilities(),
       event_info_mutex_("jvmtiEnv_EventInfoMutex") {
   object_tag_table = std::unique_ptr<ObjectTagTable>(new ObjectTagTable(event_handler, this));
@@ -1506,11 +1494,11 @@ ArtJvmTiEnv::ArtJvmTiEnv(art::JavaVMExt* runtime, EventHandler* event_handler)
 
 // Creates a jvmtiEnv and returns it with the art::ti::Env that is associated with it. new_art_ti
 // is a pointer to the uninitialized memory for an art::ti::Env.
-static void CreateArtJvmTiEnv(art::JavaVMExt* vm, /*out*/void** new_jvmtiEnv) {
-  struct ArtJvmTiEnv* env = new ArtJvmTiEnv(vm, &gEventHandler);
+static void CreateArtJvmTiEnv(art::JavaVMExt* vm, jint version, /*out*/void** new_jvmtiEnv) {
+  struct ArtJvmTiEnv* env = new ArtJvmTiEnv(vm, gEventHandler, version);
   *new_jvmtiEnv = env;
 
-  gEventHandler.RegisterArtJvmTiEnv(env);
+  gEventHandler->RegisterArtJvmTiEnv(env);
 
   art::Runtime::Current()->AddSystemWeakHolder(
       ArtJvmTiEnv::AsArtJvmTiEnv(env)->object_tag_table.get());
@@ -1520,8 +1508,14 @@ static void CreateArtJvmTiEnv(art::JavaVMExt* vm, /*out*/void** new_jvmtiEnv) {
 // places the return value in 'env' if this library can handle the GetEnv request. Otherwise
 // returns false and does not modify the 'env' pointer.
 static jint GetEnvHandler(art::JavaVMExt* vm, /*out*/void** env, jint version) {
-  if (IsJvmtiVersion(version)) {
-    CreateArtJvmTiEnv(vm, env);
+  // JavaDebuggable will either be set by the runtime as it is starting up or the plugin if it's
+  // loaded early enough. If this is false we cannot guarantee conformance to all JVMTI behaviors
+  // due to optimizations. We will only allow agents to get ArtTiEnvs using the kArtTiVersion.
+  if (IsFullJvmtiAvailable() && IsJvmtiVersion(version)) {
+    CreateArtJvmTiEnv(vm, JVMTI_VERSION, env);
+    return JNI_OK;
+  } else if (version == kArtTiVersion) {
+    CreateArtJvmTiEnv(vm, kArtTiVersion, env);
     return JNI_OK;
   } else {
     printf("version 0x%x is not valid!", version);
@@ -1533,19 +1527,29 @@ static jint GetEnvHandler(art::JavaVMExt* vm, /*out*/void** env, jint version) {
 extern "C" bool ArtPlugin_Initialize() {
   art::Runtime* runtime = art::Runtime::Current();
 
-  gDeoptManager.Setup();
+  gDeoptManager = new DeoptManager;
+  gEventHandler = new EventHandler;
+
+  gDeoptManager->Setup();
   if (runtime->IsStarted()) {
     PhaseUtil::SetToLive();
   } else {
     PhaseUtil::SetToOnLoad();
   }
-  PhaseUtil::Register(&gEventHandler);
-  ThreadUtil::Register(&gEventHandler);
-  ClassUtil::Register(&gEventHandler);
-  DumpUtil::Register(&gEventHandler);
-  MethodUtil::Register(&gEventHandler);
+  PhaseUtil::Register(gEventHandler);
+  ThreadUtil::Register(gEventHandler);
+  ClassUtil::Register(gEventHandler);
+  DumpUtil::Register(gEventHandler);
+  MethodUtil::Register(gEventHandler);
   SearchUtil::Register();
   HeapUtil::Register();
+  Transformer::Setup();
+
+  {
+    // Make sure we can deopt anything we need to.
+    art::ScopedObjectAccess soa(art::Thread::Current());
+    gDeoptManager->FinishSetup();
+  }
 
   runtime->GetJavaVM()->AddEnvironmentHook(GetEnvHandler);
 
@@ -1553,8 +1557,8 @@ extern "C" bool ArtPlugin_Initialize() {
 }
 
 extern "C" bool ArtPlugin_Deinitialize() {
-  gEventHandler.Shutdown();
-  gDeoptManager.Shutdown();
+  gEventHandler->Shutdown();
+  gDeoptManager->Shutdown();
   PhaseUtil::Unregister();
   ThreadUtil::Unregister();
   ClassUtil::Unregister();
@@ -1562,6 +1566,11 @@ extern "C" bool ArtPlugin_Deinitialize() {
   MethodUtil::Unregister();
   SearchUtil::Unregister();
   HeapUtil::Unregister();
+
+  // TODO It would be good to delete the gEventHandler and gDeoptManager here but we cannot since
+  // daemon threads might be suspended and we want to make sure that even if they wake up briefly
+  // they won't hit deallocated memory. By this point none of the functions will do anything since
+  // they have already shutdown.
 
   return true;
 }

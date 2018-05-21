@@ -20,9 +20,9 @@
 #include "common_runtime_test.h"
 
 #include "base/file_utils.h"
+#include "base/os.h"
 #include "exec_utils.h"
 #include "oat_file.h"
-#include "os.h"
 
 namespace art {
 
@@ -68,7 +68,8 @@ class DexDiagTest : public CommonRuntimeTest {
     EXPECT_TRUE(!oat_location.empty());
     std::cout << "==" << oat_location << std::endl;
     std::string error_msg;
-    std::unique_ptr<OatFile> oat(OatFile::Open(oat_location.c_str(),
+    std::unique_ptr<OatFile> oat(OatFile::Open(/* zip_fd */ -1,
+                                               oat_location.c_str(),
                                                oat_location.c_str(),
                                                nullptr,
                                                nullptr,

@@ -17,13 +17,14 @@
 #include "assembler_x86.h"
 
 #include "base/arena_allocator.h"
+#include "base/malloc_arena_pool.h"
 #include "base/stl_util.h"
 #include "utils/assembler_test.h"
 
 namespace art {
 
 TEST(AssemblerX86, CreateBuffer) {
-  ArenaPool pool;
+  MallocArenaPool pool;
   ArenaAllocator allocator(&pool);
   AssemblerBuffer buffer(&allocator);
   AssemblerBuffer::EnsureCapacity ensured(&buffer);
@@ -256,6 +257,10 @@ TEST_F(AssemblerX86Test, Movl) {
 
 TEST_F(AssemblerX86Test, MovlLoad) {
   DriverStr(RepeatRA(&x86::X86Assembler::movl, "movl {mem}, %{reg}"), "movl-load");
+}
+
+TEST_F(AssemblerX86Test, Addw) {
+  DriverStr(RepeatAI(&x86::X86Assembler::addw, /*imm_bytes*/ 2U, "addw ${imm}, {mem}"), "addw");
 }
 
 TEST_F(AssemblerX86Test, MovlStore) {
@@ -596,6 +601,38 @@ TEST_F(AssemblerX86Test, PSubQ) {
   DriverStr(RepeatFF(&x86::X86Assembler::psubq, "psubq %{reg2}, %{reg1}"), "psubq");
 }
 
+TEST_F(AssemblerX86Test, PAddUSB) {
+  DriverStr(RepeatFF(&x86::X86Assembler::paddusb, "paddusb %{reg2}, %{reg1}"), "paddusb");
+}
+
+TEST_F(AssemblerX86Test, PAddSB) {
+  DriverStr(RepeatFF(&x86::X86Assembler::paddsb, "paddsb %{reg2}, %{reg1}"), "paddsb");
+}
+
+TEST_F(AssemblerX86Test, PAddUSW) {
+  DriverStr(RepeatFF(&x86::X86Assembler::paddusw, "paddusw %{reg2}, %{reg1}"), "paddusw");
+}
+
+TEST_F(AssemblerX86Test, PAddSW) {
+  DriverStr(RepeatFF(&x86::X86Assembler::psubsw, "psubsw %{reg2}, %{reg1}"), "psubsw");
+}
+
+TEST_F(AssemblerX86Test, PSubUSB) {
+  DriverStr(RepeatFF(&x86::X86Assembler::psubusb, "psubusb %{reg2}, %{reg1}"), "psubusb");
+}
+
+TEST_F(AssemblerX86Test, PSubSB) {
+  DriverStr(RepeatFF(&x86::X86Assembler::psubsb, "psubsb %{reg2}, %{reg1}"), "psubsb");
+}
+
+TEST_F(AssemblerX86Test, PSubUSW) {
+  DriverStr(RepeatFF(&x86::X86Assembler::psubusw, "psubusw %{reg2}, %{reg1}"), "psubusw");
+}
+
+TEST_F(AssemblerX86Test, PSubSW) {
+  DriverStr(RepeatFF(&x86::X86Assembler::psubsw, "psubsw %{reg2}, %{reg1}"), "psubsw");
+}
+
 TEST_F(AssemblerX86Test, XorPD) {
   DriverStr(RepeatFF(&x86::X86Assembler::xorpd, "xorpd %{reg2}, %{reg1}"), "xorpd");
 }
@@ -917,9 +954,7 @@ TEST_F(AssemblerX86Test, Cmpb) {
 }
 
 TEST_F(AssemblerX86Test, Cmpw) {
-  DriverStr(RepeatAI(&x86::X86Assembler::cmpw,
-                     /*imm_bytes*/ 1U,
-                     "cmpw ${imm}, {mem}"), "cmpw");  // TODO: only imm8?
+  DriverStr(RepeatAI(&x86::X86Assembler::cmpw, /*imm_bytes*/ 2U, "cmpw ${imm}, {mem}"), "cmpw");
 }
 
 }  // namespace art

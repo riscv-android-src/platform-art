@@ -90,6 +90,8 @@ The following registers have fixed assignments:
 /* During bringup, we'll use the shadow frame model instead of rFP */
 /* single-purpose registers, given names for clarity */
 #define rPC      s0
+#define CFI_DEX  16  // DWARF register number of the register holding dex-pc (s0).
+#define CFI_TMP  4   // DWARF register number of the first argument register (a0).
 #define rFP      s1
 #define rSELF    s2
 #define rINST    s3
@@ -102,7 +104,7 @@ The following registers have fixed assignments:
  * to expand the macros into assembler assignment statements.
  */
 #include "asm_support.h"
-#include "interpreter/mterp/cfi_asm_support.h"
+#include "interpreter/cfi_asm_support.h"
 
 /*
  * Instead of holding a pointer to the shadow frame, we keep rFP at the base of the vregs.  So,

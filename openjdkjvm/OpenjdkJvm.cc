@@ -48,8 +48,8 @@
 #include "common_throws.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/string-inl.h"
 #include "monitor.h"
@@ -311,7 +311,7 @@ JNIEXPORT void JVM_GC(void) {
       LOG(INFO) << "Explicit GC skipped.";
       return;
   }
-  art::Runtime::Current()->GetHeap()->CollectGarbage(false);
+  art::Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references */ false);
 }
 
 JNIEXPORT __attribute__((noreturn)) void JVM_Exit(jint status) {
@@ -322,8 +322,7 @@ JNIEXPORT __attribute__((noreturn)) void JVM_Exit(jint status) {
 
 JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env,
                                  jstring javaFilename,
-                                 jobject javaLoader,
-                                 jstring javaLibrarySearchPath) {
+                                 jobject javaLoader) {
   ScopedUtfChars filename(env, javaFilename);
   if (filename.c_str() == NULL) {
     return NULL;
@@ -335,7 +334,6 @@ JNIEXPORT jstring JVM_NativeLoad(JNIEnv* env,
     bool success = vm->LoadNativeLibrary(env,
                                          filename.c_str(),
                                          javaLoader,
-                                         javaLibrarySearchPath,
                                          &error_msg);
     if (success) {
       return nullptr;
@@ -387,7 +385,7 @@ JNIEXPORT void JVM_Interrupt(JNIEnv* env, jobject jthread) {
 
 JNIEXPORT jboolean JVM_IsInterrupted(JNIEnv* env, jobject jthread, jboolean clearInterrupted) {
   if (clearInterrupted) {
-    return static_cast<art::JNIEnvExt*>(env)->self->Interrupted() ? JNI_TRUE : JNI_FALSE;
+    return static_cast<art::JNIEnvExt*>(env)->GetSelf()->Interrupted() ? JNI_TRUE : JNI_FALSE;
   } else {
     art::ScopedFastNativeObjectAccess soa(env);
     art::MutexLock mu(soa.Self(), *art::Locks::thread_list_lock_);

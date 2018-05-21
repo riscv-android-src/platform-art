@@ -19,9 +19,9 @@
 
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_file.h"
-#include "dex_instruction.h"
-#include "method_reference.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction.h"
+#include "dex/method_reference.h"
 
 /*
  * NOTE: This code is part of the quick compiler. It lives in the runtime

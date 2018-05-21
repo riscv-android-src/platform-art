@@ -21,7 +21,7 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "instrumentation.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -30,6 +30,7 @@
 #include "nativehelper/ScopedUtfChars.h"
 #include "oat_file.h"
 #include "oat_quick_method_header.h"
+#include "profile/profile_compilation_info.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
@@ -151,7 +152,14 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_isAotCompiled(JNIEnv* env,
   CHECK(chars.c_str() != nullptr);
   ArtMethod* method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
         chars.c_str(), kRuntimePointerSize);
-  return method->GetOatMethodQuickCode(kRuntimePointerSize) != nullptr;
+  const void* oat_code = method->GetOatMethodQuickCode(kRuntimePointerSize);
+  if (oat_code == nullptr) {
+    return false;
+  }
+  const void* actual_code = method->GetEntryPointFromQuickCompiledCodePtrSize(kRuntimePointerSize);
+  bool interpreter =
+      Runtime::Current()->GetClassLinker()->ShouldUseInterpreterEntrypoint(method, actual_code);
+  return !interpreter;
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasJitCompiledEntrypoint(JNIEnv* env,
@@ -250,24 +258,23 @@ extern "C" JNIEXPORT int JNICALL Java_Main_getHotnessCounter(JNIEnv* env,
                                                              jclass,
                                                              jclass cls,
                                                              jstring method_name) {
-  jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit == nullptr) {
-    // The hotness counter is valid only under JIT.
-    // If we don't JIT return 0 to match test expectations.
-    return 0;
+  ScopedObjectAccess soa(Thread::Current());
+  ScopedUtfChars chars(env, method_name);
+  CHECK(chars.c_str() != nullptr);
+  ArtMethod* method =
+      soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(chars.c_str(),
+                                                                     kRuntimePointerSize);
+  if (method != nullptr) {
+    return method->GetCounter();
   }
 
-  ArtMethod* method = nullptr;
-  {
-    ScopedObjectAccess soa(Thread::Current());
-
-    ScopedUtfChars chars(env, method_name);
-    CHECK(chars.c_str() != nullptr);
-    method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
-        chars.c_str(), kRuntimePointerSize);
+  method = soa.Decode<mirror::Class>(cls)->FindDeclaredVirtualMethodByName(chars.c_str(),
+                                                                           kRuntimePointerSize);
+  if (method != nullptr) {
+    return method->GetCounter();
   }
 
-  return method->GetCounter();
+  return std::numeric_limits<int32_t>::min();
 }
 
 extern "C" JNIEXPORT int JNICALL Java_Main_numberOfDeoptimizations(JNIEnv*, jclass) {
@@ -294,6 +301,27 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_isClassMoveable(JNIEnv*,
   ScopedObjectAccess soa(Thread::Current());
   ObjPtr<mirror::Class> klass = soa.Decode<mirror::Class>(cls);
   return runtime->GetHeap()->IsMovableObject(klass);
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_waitForCompilation(JNIEnv*, jclass) {
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit != nullptr) {
+    jit->WaitForCompilationToFinish(Thread::Current());
+  }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_stopJit(JNIEnv*, jclass) {
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit != nullptr) {
+    jit->Stop();
+  }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_Main_startJit(JNIEnv*, jclass) {
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit != nullptr) {
+    jit->Start();
+  }
 }
 
 }  // namespace art

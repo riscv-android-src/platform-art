@@ -28,15 +28,14 @@ else
   JAVA_LIBRARIES=${ANDROID_PRODUCT_OUT}/../../common/obj/JAVA_LIBRARIES
 fi
 
-using_jack=$(get_build_var ANDROID_COMPILE_WITH_JACK)
+android_root="/system"
+if [ -n "$ART_TEST_ANDROID_ROOT" ]; then
+  android_root="$ART_TEST_ANDROID_ROOT"
+fi
 
 function classes_jar_path {
   local var="$1"
   local suffix="jar"
-
-  if [[ $using_jack == "true" ]]; then
-    suffix="jack"
-  fi
 
   echo "${JAVA_LIBRARIES}/${var}_intermediates/classes.${suffix}"
 }
@@ -78,7 +77,6 @@ working_packages=("libcore.dalvik.system"
                   "libcore.javax.security"
                   "libcore.javax.sql"
                   "libcore.javax.xml"
-                  "libcore.libcore.icu"
                   "libcore.libcore.io"
                   "libcore.libcore.net"
                   "libcore.libcore.reflect"
@@ -106,10 +104,14 @@ vogar_args=$@
 gcstress=false
 debug=false
 
+# Don't use device mode by default.
+device_mode=false
+# Don't use chroot by default.
+use_chroot=false
+
 while true; do
   if [[ "$1" == "--mode=device" ]]; then
-    vogar_args="$vogar_args --device-dir=/data/local/tmp"
-    vogar_args="$vogar_args --vm-command=/data/local/tmp/system/bin/art"
+    device_mode=true
     vogar_args="$vogar_args --vm-arg -Ximage:/data/art-test/core.art"
     shift
   elif [[ "$1" == "--mode=host" ]]; then
@@ -133,6 +135,10 @@ while true; do
   elif [[ "$1" == "-Xgc:gcstress" ]]; then
     gcstress=true
     shift
+  elif [[ "$1" == "--chroot" ]]; then
+    use_chroot=true
+    # Shift the "--chroot" flag and its argument.
+    shift 2
   elif [[ "$1" == "" ]]; then
     break
   else
@@ -140,17 +146,30 @@ while true; do
   fi
 done
 
+if $device_mode; then
+  if $use_chroot; then
+    vogar_args="$vogar_args --device-dir=/tmp"
+    vogar_args="$vogar_args --vm-command=/system/bin/art"
+  else
+    vogar_args="$vogar_args --device-dir=/data/local/tmp"
+    vogar_args="$vogar_args --vm-command=$android_root/bin/art"
+  fi
+else
+  # Host mode.
+  if $use_chroot; then
+    # Chroot-based testing is not supported on host.
+    echo "Cannot use --chroot with --mode=host"
+    exit 1
+  fi
+fi
+
 # Increase the timeout, as vogar cannot set individual test
 # timeout when being asked to run packages, and some tests go above
 # the default timeout.
 vogar_args="$vogar_args --timeout 480"
 
-# Switch between using jack or javac+desugar+dx
-if [[ $using_jack == "true" ]]; then
-  vogar_args="$vogar_args --toolchain jack --language JO"
-else
-  vogar_args="$vogar_args --toolchain dx --language CUR"
-fi
+# set the toolchain to use.
+vogar_args="$vogar_args --toolchain d8 --language CUR"
 
 # JIT settings.
 if $use_jit; then
@@ -159,12 +178,25 @@ fi
 vogar_args="$vogar_args --vm-arg -Xusejit:$use_jit"
 
 # gcstress may lead to timeouts, so we need dedicated expectations files for it.
-if [[ $gcstress ]]; then
+if $gcstress; then
   expectations="$expectations --expectations art/tools/libcore_gcstress_failures.txt"
-  if [[ $debug ]]; then
+  if $debug; then
     expectations="$expectations --expectations art/tools/libcore_gcstress_debug_failures.txt"
   fi
+else
+  # We only run this package when not under gcstress as it can cause timeouts. See b/78228743.
+  working_packages+=("libcore.libcore.icu")
 fi
+
+# Disable network-related libcore tests that are failing on the following
+# devices running Android O, as a workaround for b/74725685:
+# - FA7BN1A04406 (walleye device testing configuration aosp-poison/volantis-armv7-poison-debug)
+# - FA7BN1A04412 (walleye device testing configuration aosp-poison/volantis-armv8-poison-ndebug)
+# - FA7BN1A04433 (walleye device testing configuration aosp-poison/volantis-armv8-poison-debug)
+case "$ANDROID_SERIAL" in
+  (FA7BN1A04406|FA7BN1A04412|FA7BN1A04433)
+    expectations="$expectations --expectations art/tools/libcore_network_failures.txt";;
+esac
 
 # Run the tests using vogar.
 echo "Running tests for the following test packages:"

@@ -37,17 +37,20 @@
 #include <inttypes.h>
 #include <stdio.h>
 
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <vector>
 
+#include "android-base/file.h"
+#include "android-base/logging.h"
 #include "android-base/stringprintf.h"
 
-#include "dex_file-inl.h"
-#include "dex_file_loader.h"
-#include "dex_file_types.h"
-#include "dex_instruction-inl.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_exception_helpers.h"
+#include "dex/dex_file_loader.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction-inl.h"
 #include "dexdump_cfg.h"
 
 namespace art {
@@ -734,7 +737,8 @@ static void dumpInterface(const DexFile* pDexFile, const DexFile::TypeItem& pTyp
  * Dumps the catches table associated with the code.
  */
 static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode) {
-  const u4 triesSize = pCode->tries_size_;
+  CodeItemDataAccessor accessor(*pDexFile, pCode);
+  const u4 triesSize = accessor.TriesSize();
 
   // No catch table.
   if (triesSize == 0) {
@@ -744,12 +748,11 @@ static void dumpCatches(const DexFile* pDexFile, const DexFile::CodeItem* pCode)
 
   // Dump all table entries.
   fprintf(gOutFile, "      catches       : %d\n", triesSize);
-  for (u4 i = 0; i < triesSize; i++) {
-    const DexFile::TryItem* pTry = pDexFile->GetTryItems(*pCode, i);
-    const u4 start = pTry->start_addr_;
-    const u4 end = start + pTry->insn_count_;
+  for (const DexFile::TryItem& try_item : accessor.TryItems()) {
+    const u4 start = try_item.start_addr_;
+    const u4 end = start + try_item.insn_count_;
     fprintf(gOutFile, "        0x%04x - 0x%04x\n", start, end);
-    for (CatchHandlerIterator it(*pCode, *pTry); it.HasNext(); it.Next()) {
+    for (CatchHandlerIterator it(accessor, try_item); it.HasNext(); it.Next()) {
       const dex::TypeIndex tidx = it.GetHandlerTypeIndex();
       const char* descriptor = (!tidx.IsValid()) ? "<any>" : pDexFile->StringByTypeIdx(tidx);
       fprintf(gOutFile, "          %s -> 0x%04x\n", descriptor, it.GetHandlerAddress());
@@ -783,11 +786,10 @@ static void dumpLocalsCb(void* /*context*/, const DexFile::LocalInfo& entry) {
 static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
                                            const Instruction* pDecInsn,
                                            size_t bufSize) {
-  static const u4 kInvalidIndex = std::numeric_limits<u4>::max();
   std::unique_ptr<char[]> buf(new char[bufSize]);
   // Determine index and width of the string.
   u4 index = 0;
-  u4 secondary_index = kInvalidIndex;
+  u2 secondary_index = 0;
   u4 width = 4;
   switch (Instruction::FormatOf(pDecInsn->Opcode())) {
     // SOME NOT SUPPORTED:
@@ -895,7 +897,7 @@ static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
                                              signature.ToString().c_str());
       }
       if (secondary_index < pDexFile->GetHeader().proto_ids_size_) {
-        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(secondary_index);
+        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(dex::ProtoIndex(secondary_index));
         const Signature signature = pDexFile->GetProtoSignature(protoId);
         proto = signature.ToString();
       }
@@ -913,7 +915,7 @@ static std::unique_ptr<char[]> indexString(const DexFile* pDexFile,
       break;
     case Instruction::kIndexProtoRef:
       if (index < pDexFile->GetHeader().proto_ids_size_) {
-        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(index);
+        const DexFile::ProtoId& protoId = pDexFile->GetProtoId(dex::ProtoIndex(index));
         const Signature signature = pDexFile->GetProtoSignature(protoId);
         const std::string& proto = signature.ToString();
         outSize = snprintf(buf.get(), bufSize, "%s // proto@%0*x", proto.c_str(), width, index);
@@ -949,14 +951,14 @@ static void dumpInstruction(const DexFile* pDexFile,
   fprintf(gOutFile, "%06x:", codeOffset + 0x10 + insnIdx * 2);
 
   // Dump (part of) raw bytes.
-  const u2* insns = pCode->insns_;
+  CodeItemInstructionAccessor accessor(*pDexFile, pCode);
   for (u4 i = 0; i < 8; i++) {
     if (i < insnWidth) {
       if (i == 7) {
         fprintf(gOutFile, " ... ");
       } else {
         // Print 16-bit value in little-endian order.
-        const u1* bytePtr = (const u1*) &insns[insnIdx + i];
+        const u1* bytePtr = (const u1*) &accessor.Insns()[insnIdx + i];
         fprintf(gOutFile, " %02x%02x", bytePtr[0], bytePtr[1]);
       }
     } else {
@@ -966,7 +968,7 @@ static void dumpInstruction(const DexFile* pDexFile,
 
   // Dump pseudo-instruction or opcode.
   if (pDecInsn->Opcode() == Instruction::NOP) {
-    const u2 instr = get2LE((const u1*) &insns[insnIdx]);
+    const u2 instr = get2LE((const u1*) &accessor.Insns()[insnIdx]);
     if (instr == Instruction::kPackedSwitchSignature) {
       fprintf(gOutFile, "|%04x: packed-switch-data (%d units)", insnIdx, insnWidth);
     } else if (instr == Instruction::kSparseSwitchSignature) {
@@ -1167,16 +1169,21 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
           codeOffset, codeOffset, dot.get(), name, signature.ToString().c_str());
 
   // Iterate over all instructions.
-  const u2* insns = pCode->insns_;
-  for (u4 insnIdx = 0; insnIdx < pCode->insns_size_in_code_units_;) {
-    const Instruction* instruction = Instruction::At(&insns[insnIdx]);
-    const u4 insnWidth = instruction->SizeInCodeUnits();
-    if (insnWidth == 0) {
-      fprintf(stderr, "GLITCH: zero-width instruction at idx=0x%04x\n", insnIdx);
+  CodeItemDataAccessor accessor(*pDexFile, pCode);
+  const u4 maxPc = accessor.InsnsSizeInCodeUnits();
+  for (const DexInstructionPcPair& pair : accessor) {
+    const u4 dexPc = pair.DexPc();
+    if (dexPc >= maxPc) {
+      LOG(WARNING) << "GLITCH: run-away instruction at idx=0x" << std::hex << dexPc;
       break;
     }
-    dumpInstruction(pDexFile, pCode, codeOffset, insnIdx, insnWidth, instruction);
-    insnIdx += insnWidth;
+    const Instruction* instruction = &pair.Inst();
+    const u4 insnWidth = instruction->SizeInCodeUnits();
+    if (insnWidth == 0) {
+      LOG(WARNING) << "GLITCH: zero-width instruction at idx=0x" << std::hex << dexPc;
+      break;
+    }
+    dumpInstruction(pDexFile, pCode, codeOffset, dexPc, insnWidth, instruction);
   }  // for
 }
 
@@ -1185,11 +1192,13 @@ static void dumpBytecodes(const DexFile* pDexFile, u4 idx,
  */
 static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
                      const DexFile::CodeItem* pCode, u4 codeOffset) {
-  fprintf(gOutFile, "      registers     : %d\n", pCode->registers_size_);
-  fprintf(gOutFile, "      ins           : %d\n", pCode->ins_size_);
-  fprintf(gOutFile, "      outs          : %d\n", pCode->outs_size_);
+  CodeItemDebugInfoAccessor accessor(*pDexFile, pCode, idx);
+
+  fprintf(gOutFile, "      registers     : %d\n", accessor.RegistersSize());
+  fprintf(gOutFile, "      ins           : %d\n", accessor.InsSize());
+  fprintf(gOutFile, "      outs          : %d\n", accessor.OutsSize());
   fprintf(gOutFile, "      insns size    : %d 16-bit code units\n",
-          pCode->insns_size_in_code_units_);
+          accessor.InsnsSizeInCodeUnits());
 
   // Bytecode disassembly, if requested.
   if (gOptions.disassemble) {
@@ -1202,11 +1211,9 @@ static void dumpCode(const DexFile* pDexFile, u4 idx, u4 flags,
   // Positions and locals table in the debug info.
   bool is_static = (flags & kAccStatic) != 0;
   fprintf(gOutFile, "      positions     : \n");
-  uint32_t debug_info_offset = pDexFile->GetDebugInfoOffset(pCode);
-  pDexFile->DecodeDebugPositionInfo(pCode, debug_info_offset, dumpPositionsCb, nullptr);
+  pDexFile->DecodeDebugPositionInfo(accessor.DebugInfoOffset(), dumpPositionsCb, nullptr);
   fprintf(gOutFile, "      locals        : \n");
-  pDexFile->DecodeDebugLocalInfo(
-      pCode, debug_info_offset, is_static, idx, dumpLocalsCb, nullptr);
+  accessor.DecodeDebugLocalInfo(is_static, idx, dumpLocalsCb, nullptr);
 }
 
 /*
@@ -1253,7 +1260,7 @@ static void dumpMethod(const DexFile* pDexFile, u4 idx, u4 flags,
       fprintf(gOutFile, "<method name=\"%s\"\n", name);
       const char* returnType = strrchr(typeDescriptor, ')');
       if (returnType == nullptr) {
-        fprintf(stderr, "bad method type descriptor '%s'\n", typeDescriptor);
+        LOG(ERROR) << "bad method type descriptor '" << typeDescriptor << "'";
         goto bail;
       }
       std::unique_ptr<char[]> dot(descriptorToDot(returnType + 1));
@@ -1272,7 +1279,7 @@ static void dumpMethod(const DexFile* pDexFile, u4 idx, u4 flags,
 
     // Parameters.
     if (typeDescriptor[0] != '(') {
-      fprintf(stderr, "ERROR: bad descriptor '%s'\n", typeDescriptor);
+      LOG(ERROR) << "ERROR: bad descriptor '" << typeDescriptor << "'";
       goto bail;
     }
     char* tmpBuf = reinterpret_cast<char*>(malloc(strlen(typeDescriptor) + 1));
@@ -1291,7 +1298,7 @@ static void dumpMethod(const DexFile* pDexFile, u4 idx, u4 flags,
       } else {
         // Primitive char, copy it.
         if (strchr("ZBCSIFJD", *base) == nullptr) {
-          fprintf(stderr, "ERROR: bad method signature '%s'\n", base);
+          LOG(ERROR) << "ERROR: bad method signature '" << base << "'";
           break;  // while
         }
         *cp++ = *base++;
@@ -1438,7 +1445,7 @@ static void dumpClass(const DexFile* pDexFile, int idx, char** pLastPackage) {
   if (!(classDescriptor[0] == 'L' &&
         classDescriptor[strlen(classDescriptor)-1] == ';')) {
     // Arrays and primitives should not be defined explicitly. Keep going?
-    fprintf(stderr, "Malformed class name '%s'\n", classDescriptor);
+    LOG(WARNING) << "Malformed class name '" << classDescriptor << "'";
   } else if (gOptions.outputFormat == OUTPUT_XML) {
     char* mangle = strdup(classDescriptor + 1);
     mangle[strlen(mangle)-1] = '\0';
@@ -1688,7 +1695,7 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
   const DexFile::CallSiteIdItem& call_site_id = pDexFile->GetCallSiteId(idx);
   CallSiteArrayValueIterator it(*pDexFile, call_site_id);
   if (it.Size() < 3) {
-    fprintf(stderr, "ERROR: Call site %u has too few values.\n", idx);
+    LOG(ERROR) << "ERROR: Call site " << idx << " has too few values.";
     return;
   }
 
@@ -1697,7 +1704,7 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
   dex::StringIndex method_name_idx = static_cast<dex::StringIndex>(it.GetJavaValue().i);
   const char* method_name = pDexFile->StringDataByIdx(method_name_idx);
   it.Next();
-  uint32_t method_type_idx = static_cast<uint32_t>(it.GetJavaValue().i);
+  dex::ProtoIndex method_type_idx = static_cast<dex::ProtoIndex>(it.GetJavaValue().i);
   const DexFile::ProtoId& method_type_id = pDexFile->GetProtoId(method_type_idx);
   std::string method_type = pDexFile->GetProtoSignature(method_type_id).ToString();
   it.Next();
@@ -1755,7 +1762,7 @@ static void dumpCallSite(const DexFile* pDexFile, u4 idx) {
         break;
       case EncodedArrayValueIterator::ValueType::kMethodType: {
         type = "MethodType";
-        uint32_t proto_idx = static_cast<uint32_t>(it.GetJavaValue().i);
+        dex::ProtoIndex proto_idx = static_cast<dex::ProtoIndex>(it.GetJavaValue().i);
         const DexFile::ProtoId& proto_id = pDexFile->GetProtoId(proto_idx);
         value = pDexFile->GetProtoSignature(proto_id).ToString();
         break;
@@ -1874,17 +1881,29 @@ int processFile(const char* fileName) {
     fprintf(gOutFile, "Processing '%s'...\n", fileName);
   }
 
+  const bool kVerifyChecksum = !gOptions.ignoreBadChecksum;
+  const bool kVerify = !gOptions.disableVerifier;
+  std::string content;
   // If the file is not a .dex file, the function tries .zip/.jar/.apk files,
   // all of which are Zip archives with "classes.dex" inside.
-  const bool kVerifyChecksum = !gOptions.ignoreBadChecksum;
+  // TODO: add an api to android::base to read a std::vector<uint8_t>.
+  if (!android::base::ReadFileToString(fileName, &content)) {
+    LOG(ERROR) << "ReadFileToString failed";
+    return -1;
+  }
+  const DexFileLoader dex_file_loader;
   std::string error_msg;
   std::vector<std::unique_ptr<const DexFile>> dex_files;
-  if (!DexFileLoader::Open(
-        fileName, fileName, /* verify */ true, kVerifyChecksum, &error_msg, &dex_files)) {
+  if (!dex_file_loader.OpenAll(reinterpret_cast<const uint8_t*>(content.data()),
+                               content.size(),
+                               fileName,
+                               kVerify,
+                               kVerifyChecksum,
+                               &error_msg,
+                               &dex_files)) {
     // Display returned error message to user. Note that this error behavior
     // differs from the error messages shown by the original Dalvik dexdump.
-    fputs(error_msg.c_str(), stderr);
-    fputc('\n', stderr);
+    LOG(ERROR) << error_msg;
     return -1;
   }
 

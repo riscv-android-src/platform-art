@@ -39,7 +39,6 @@ art_cc_defaults {
         "linker/file_output_stream.cc",
         "linker/output_stream.cc",
         "linker/vector_output_stream.cc",
-        "linker/relative_patcher.cc",
         "jit/jit_compiler.cc",
         "jit/jit_logger.cc",
         "jni/quick/calling_convention.cc",
@@ -70,6 +69,7 @@ art_cc_defaults {
         "optimizing/load_store_analysis.cc",
         "optimizing/load_store_elimination.cc",
         "optimizing/locations.cc",
+        "optimizing/loop_analysis.cc",
         "optimizing/loop_optimization.cc",
         "optimizing/nodes.cc",
         "optimizing/optimization.cc",
@@ -89,6 +89,7 @@ art_cc_defaults {
         "optimizing/ssa_liveness_analysis.cc",
         "optimizing/ssa_phi_elimination.cc",
         "optimizing/stack_map_stream.cc",
+        "optimizing/superblock_cloner.cc",
         "trampolines/trampoline_compiler.cc",
         "utils/assembler.cc",
         "utils/jni_macro_assembler.cc",
@@ -100,8 +101,6 @@ art_cc_defaults {
         arm: {
             srcs: [
                 "jni/quick/arm/calling_convention_arm.cc",
-                "linker/arm/relative_patcher_arm_base.cc",
-                "linker/arm/relative_patcher_thumb2.cc",
                 "optimizing/code_generator_arm_vixl.cc",
                 "optimizing/code_generator_vector_arm_vixl.cc",
                 "optimizing/instruction_simplifier_arm.cc",
@@ -118,7 +117,6 @@ art_cc_defaults {
         arm64: {
             srcs: [
                 "jni/quick/arm64/calling_convention_arm64.cc",
-                "linker/arm64/relative_patcher_arm64.cc",
                 "optimizing/code_generator_arm64.cc",
                 "optimizing/code_generator_vector_arm64.cc",
                 "optimizing/scheduler_arm64.cc",
@@ -132,7 +130,6 @@ art_cc_defaults {
         mips: {
             srcs: [
                 "jni/quick/mips/calling_convention_mips.cc",
-                "linker/mips/relative_patcher_mips.cc",
                 "optimizing/code_generator_mips.cc",
                 "optimizing/code_generator_vector_mips.cc",
                 "optimizing/instruction_simplifier_mips.cc",
@@ -145,7 +142,6 @@ art_cc_defaults {
         mips64: {
             srcs: [
                 "jni/quick/mips64/calling_convention_mips64.cc",
-                "linker/mips64/relative_patcher_mips64.cc",
                 "optimizing/code_generator_mips64.cc",
                 "optimizing/code_generator_vector_mips64.cc",
                 "optimizing/intrinsics_mips64.cc",
@@ -156,8 +152,6 @@ art_cc_defaults {
         x86: {
             srcs: [
                 "jni/quick/x86/calling_convention_x86.cc",
-                "linker/x86/relative_patcher_x86.cc",
-                "linker/x86/relative_patcher_x86_base.cc",
                 "optimizing/code_generator_x86.cc",
                 "optimizing/code_generator_vector_x86.cc",
                 "optimizing/intrinsics_x86.cc",
@@ -171,7 +165,6 @@ art_cc_defaults {
         x86_64: {
             srcs: [
                 "jni/quick/x86_64/calling_convention_x86_64.cc",
-                "linker/x86_64/relative_patcher_x86_64.cc",
                 "optimizing/intrinsics_x86_64.cc",
                 "optimizing/code_generator_x86_64.cc",
                 "optimizing/code_generator_vector_x86_64.cc",
@@ -198,8 +191,8 @@ art_cc_defaults {
 
 gensrcs {
     name: "art_compiler_operator_srcs",
-    cmd: "$(location generate-operator-out.py) art/compiler $(in) > $(out)",
-    tool_files: ["generate-operator-out.py"],
+    cmd: "$(location generate_operator_out) art/compiler $(in) > $(out)",
+    tools: ["generate_operator_out"],
     srcs: [
         "dex/dex_to_dex_compiler.h",
         "driver/compiler_driver.h",
@@ -217,7 +210,10 @@ gensrcs {
 
 art_cc_library {
     name: "libart-compiler",
-    defaults: ["libart-compiler-defaults"],
+    defaults: [
+        "libart-compiler-defaults",
+        "dex2oat-pgo-defaults",
+    ],
     codegen: {
         arm: {
             // VIXL assembly support for ARM targets.
@@ -248,7 +244,18 @@ art_cc_library {
     },
     shared_libs: [
         "libart",
+        "libprofile",
+        "libdexfile",
+        "libartbase",
     ],
+
+    target: {
+        android: {
+            lto: {
+                 thin: true,
+            },
+        },
+    },
 }
 
 art_cc_library {
@@ -287,6 +294,9 @@ art_cc_library {
     },
     shared_libs: [
         "libartd",
+        "libprofiled",
+        "libdexfiled",
+        "libartbased",
     ],
 }
 
@@ -318,7 +328,7 @@ art_cc_test {
         "linker/linker_patch_test.cc",
         "linker/output_stream_test.cc",
         "optimizing/bounds_check_elimination_test.cc",
-        "optimizing/cloner_test.cc",
+        "optimizing/superblock_cloner_test.cc",
         "optimizing/data_type_test.cc",
         "optimizing/dominator_test.cc",
         "optimizing/find_loops_test.cc",
@@ -343,9 +353,7 @@ art_cc_test {
         "utils/atomic_dex_ref_map_test.cc",
         "utils/dedupe_set_test.cc",
         "utils/intrusive_forward_list_test.cc",
-        "utils/string_reference_test.cc",
         "utils/swap_space_test.cc",
-        "utils/test_dex_file_builder_test.cc",
         "verifier_deps_test.cc",
 
         "jni/jni_cfi_test.cc",
@@ -358,31 +366,25 @@ art_cc_test {
     codegen: {
         arm: {
             srcs: [
-                "linker/arm/relative_patcher_thumb2_test.cc",
                 "utils/arm/managed_register_arm_test.cc",
             ],
         },
         arm64: {
             srcs: [
-                "linker/arm64/relative_patcher_arm64_test.cc",
                 "utils/arm64/managed_register_arm64_test.cc",
             ],
         },
         mips: {
             srcs: [
-                "linker/mips/relative_patcher_mips_test.cc",
-                "linker/mips/relative_patcher_mips32r6_test.cc",
             ],
         },
         mips64: {
             srcs: [
-                "linker/mips64/relative_patcher_mips64_test.cc",
                 "utils/mips64/managed_register_mips64_test.cc",
             ],
         },
         x86: {
             srcs: [
-                "linker/x86/relative_patcher_x86_test.cc",
                 "utils/x86/managed_register_x86_test.cc",
 
                 // These tests are testing architecture-independent
@@ -398,7 +400,8 @@ art_cc_test {
         },
         x86_64: {
             srcs: [
-                "linker/x86_64/relative_patcher_x86_64_test.cc",
+                // Is this test a bit-rotten copy of the x86 test? b/77951326
+                // "utils/x86_64/managed_register_x86_64_test.cc",
             ],
         },
     },
@@ -409,6 +412,7 @@ art_cc_test {
     ],
 
     shared_libs: [
+        "libprofiled",
         "libartd-compiler",
         "libartd-simulator-container",
         "libvixld-arm",

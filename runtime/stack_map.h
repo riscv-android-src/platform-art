@@ -20,12 +20,12 @@
 #include <limits>
 
 #include "arch/code_offset.h"
+#include "base/bit_memory_region.h"
 #include "base/bit_utils.h"
 #include "base/bit_vector.h"
-#include "bit_memory_region.h"
-#include "leb128.h"
-#include "dex_file_types.h"
-#include "memory_region.h"
+#include "base/leb128.h"
+#include "base/memory_region.h"
+#include "dex/dex_file_types.h"
 #include "method_info.h"
 
 namespace art {
@@ -36,9 +36,6 @@ class VariableIndentationOutputStream;
 // to please the compiler in arithmetic operations involving int32_t
 // (signed) values.
 static constexpr ssize_t kFrameSlotSize = 4;
-
-// Size of Dex virtual registers.
-static constexpr size_t kVRegSize = 4;
 
 class ArtMethod;
 class CodeInfo;
@@ -452,7 +449,7 @@ class DexRegisterMap {
   explicit DexRegisterMap(MemoryRegion region) : region_(region) {}
   DexRegisterMap() {}
 
-  bool IsValid() const { return region_.pointer() != nullptr; }
+  bool IsValid() const { return region_.IsValid(); }
 
   // Get the surface kind of Dex register `dex_register_number`.
   DexRegisterLocation::Kind GetLocationKind(uint16_t dex_register_number,
@@ -627,7 +624,7 @@ class DexRegisterMap {
 
   // Return the size of the DexRegisterMap object, in bytes.
   size_t Size() const {
-    return region_.size();
+    return BitsToBytesRoundUp(region_.size_in_bits());
   }
 
   void Dump(VariableIndentationOutputStream* vios,
@@ -650,7 +647,7 @@ class DexRegisterMap {
 
   static constexpr int kFixedSize = 0;
 
-  MemoryRegion region_;
+  BitMemoryRegion region_;
 
   friend class CodeInfo;
   friend class StackMapStream;
@@ -678,7 +675,7 @@ struct FieldEncoding {
 
   template <typename Region>
   ALWAYS_INLINE void Store(Region region, int32_t value) const {
-    region.StoreBits(start_offset_, value - min_value_, BitSize());
+    region.StoreBits(start_offset_, static_cast<uint32_t>(value - min_value_), BitSize());
     DCHECK_EQ(Load(region), value);
   }
 
@@ -805,7 +802,7 @@ class StackMap {
   StackMap() {}
   explicit StackMap(BitMemoryRegion region) : region_(region) {}
 
-  ALWAYS_INLINE bool IsValid() const { return region_.pointer() != nullptr; }
+  ALWAYS_INLINE bool IsValid() const { return region_.IsValid(); }
 
   ALWAYS_INLINE uint32_t GetDexPc(const StackMapEncoding& encoding) const {
     return encoding.GetDexPcEncoding().Load(region_);
@@ -868,9 +865,7 @@ class StackMap {
   }
 
   ALWAYS_INLINE bool Equals(const StackMap& other) const {
-    return region_.pointer() == other.region_.pointer() &&
-           region_.size() == other.region_.size() &&
-           region_.BitOffset() == other.region_.BitOffset();
+    return region_.Equals(other.region_);
   }
 
   void Dump(VariableIndentationOutputStream* vios,
@@ -1257,7 +1252,7 @@ class InvokeInfo {
     return method_info.GetMethodIndex(GetMethodIndexIdx(encoding));
   }
 
-  bool IsValid() const { return region_.pointer() != nullptr; }
+  bool IsValid() const { return region_.IsValid(); }
 
  private:
   BitMemoryRegion region_;

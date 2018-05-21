@@ -21,10 +21,11 @@
 #include "base/stl_util.h"
 #include "class_linker.h"
 #include "class_loader_utils.h"
-#include "dex_file.h"
-#include "dex_file_loader.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_loader.h"
 #include "handle_scope-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "oat_file_assistant.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
@@ -203,6 +204,7 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa, const std::string& cla
   // We may get resource-only apks which we cannot load.
   // TODO(calin): Refine the dex opening interface to be able to tell if an archive contains
   // no dex files. So that we can distinguish the real failures...
+  const ArtDexFileLoader dex_file_loader;
   for (ClassLoaderInfo& info : class_loader_chain_) {
     size_t opened_dex_files_index = info.opened_dex_files.size();
     for (const std::string& cp_elem : info.classpath) {
@@ -215,12 +217,12 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa, const std::string& cla
       std::string error_msg;
       // When opening the dex files from the context we expect their checksum to match their
       // contents. So pass true to verify_checksum.
-      if (!DexFileLoader::Open(location.c_str(),
-                               location.c_str(),
-                               Runtime::Current()->IsVerificationEnabled(),
-                               /*verify_checksum*/ true,
-                               &error_msg,
-                               &info.opened_dex_files)) {
+      if (!dex_file_loader.Open(location.c_str(),
+                                location.c_str(),
+                                Runtime::Current()->IsVerificationEnabled(),
+                                /*verify_checksum*/ true,
+                                &error_msg,
+                                &info.opened_dex_files)) {
         // If we fail to open the dex file because it's been stripped, try to open the dex file
         // from its corresponding oat file.
         // This could happen when we need to recompile a pre-build whose dex code has been stripped.
@@ -252,6 +254,7 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa, const std::string& cla
     // This will allow the context to VerifyClassLoaderContextMatch which expects or multidex
     // location in the class paths.
     // Note that this will also remove the paths that could not be opened.
+    info.original_classpath = std::move(info.classpath);
     info.classpath.clear();
     info.checksums.clear();
     for (size_t k = opened_dex_files_index; k < info.opened_dex_files.size(); k++) {
@@ -292,18 +295,24 @@ bool ClassLoaderContext::RemoveLocationsFromClassPaths(
 }
 
 std::string ClassLoaderContext::EncodeContextForDex2oat(const std::string& base_dir) const {
-  return EncodeContext(base_dir, /*for_dex2oat*/ true);
+  return EncodeContext(base_dir, /*for_dex2oat*/ true, /*stored_context*/ nullptr);
 }
 
-std::string ClassLoaderContext::EncodeContextForOatFile(const std::string& base_dir) const {
-  return EncodeContext(base_dir, /*for_dex2oat*/ false);
+std::string ClassLoaderContext::EncodeContextForOatFile(const std::string& base_dir,
+                                                        ClassLoaderContext* stored_context) const {
+  return EncodeContext(base_dir, /*for_dex2oat*/ false, stored_context);
 }
 
 std::string ClassLoaderContext::EncodeContext(const std::string& base_dir,
-                                              bool for_dex2oat) const {
+                                              bool for_dex2oat,
+                                              ClassLoaderContext* stored_context) const {
   CheckDexFilesOpened("EncodeContextForOatFile");
   if (special_shared_library_) {
     return OatFile::kSpecialSharedLibrary;
+  }
+
+  if (stored_context != nullptr) {
+    DCHECK_EQ(class_loader_chain_.size(), stored_context->class_loader_chain_.size());
   }
 
   std::ostringstream out;
@@ -324,6 +333,15 @@ std::string ClassLoaderContext::EncodeContext(const std::string& base_dir,
     out << GetClassLoaderTypeName(info.type);
     out << kClassLoaderOpeningMark;
     std::set<std::string> seen_locations;
+    SafeMap<std::string, std::string> remap;
+    if (stored_context != nullptr) {
+      DCHECK_EQ(info.original_classpath.size(),
+                stored_context->class_loader_chain_[i].classpath.size());
+      for (size_t k = 0; k < info.original_classpath.size(); ++k) {
+        // Note that we don't care if the same name appears twice.
+        remap.Put(info.original_classpath[k], stored_context->class_loader_chain_[i].classpath[k]);
+      }
+    }
     for (size_t k = 0; k < info.opened_dex_files.size(); k++) {
       const std::unique_ptr<const DexFile>& dex_file = info.opened_dex_files[k];
       if (for_dex2oat) {
@@ -335,7 +353,14 @@ std::string ClassLoaderContext::EncodeContext(const std::string& base_dir,
           continue;
         }
       }
-      const std::string& location = dex_file->GetLocation();
+      std::string location = dex_file->GetLocation();
+      // If there is a stored class loader remap, fix up the multidex strings.
+      if (!remap.empty()) {
+        std::string base_dex_location = DexFileLoader::GetBaseLocation(location);
+        auto it = remap.find(base_dex_location);
+        CHECK(it != remap.end()) << base_dex_location;
+        location = it->second + DexFileLoader::GetMultiDexSuffix(location);
+      }
       if (k > 0) {
         out << kClasspathSeparator;
       }
@@ -343,7 +368,7 @@ std::string ClassLoaderContext::EncodeContext(const std::string& base_dir,
       if (!base_dir.empty() && location.substr(0, base_dir.length()) == base_dir) {
         out << location.substr(base_dir.length() + 1).c_str();
       } else {
-        out << dex_file->GetLocation().c_str();
+        out << location.c_str();
       }
       // dex2oat does not need the checksums.
       if (!for_dex2oat) {
@@ -647,22 +672,33 @@ static bool IsAbsoluteLocation(const std::string& location) {
   return !location.empty() && location[0] == '/';
 }
 
-bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& context_spec) const {
-  DCHECK(dex_files_open_attempted_);
-  DCHECK(dex_files_open_result_);
+ClassLoaderContext::VerificationResult ClassLoaderContext::VerifyClassLoaderContextMatch(
+    const std::string& context_spec,
+    bool verify_names,
+    bool verify_checksums) const {
+  if (verify_names || verify_checksums) {
+    DCHECK(dex_files_open_attempted_);
+    DCHECK(dex_files_open_result_);
+  }
 
   ClassLoaderContext expected_context;
-  if (!expected_context.Parse(context_spec, /*parse_checksums*/ true)) {
+  if (!expected_context.Parse(context_spec, verify_checksums)) {
     LOG(WARNING) << "Invalid class loader context: " << context_spec;
-    return false;
+    return VerificationResult::kMismatch;
   }
 
   // Special shared library contexts always match. They essentially instruct the runtime
   // to ignore the class path check because the oat file is known to be loaded in different
   // contexts. OatFileManager will further verify if the oat file can be loaded based on the
   // collision check.
-  if (special_shared_library_ || expected_context.special_shared_library_) {
-    return true;
+  if (expected_context.special_shared_library_) {
+    // Special case where we are the only entry in the class path.
+    if (class_loader_chain_.size() == 1 && class_loader_chain_[0].classpath.size() == 0) {
+      return VerificationResult::kVerifies;
+    }
+    return VerificationResult::kForcedToSkipChecks;
+  } else if (special_shared_library_) {
+    return VerificationResult::kForcedToSkipChecks;
   }
 
   if (expected_context.class_loader_chain_.size() != class_loader_chain_.size()) {
@@ -670,7 +706,7 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
         << expected_context.class_loader_chain_.size()
         << ", actual=" << class_loader_chain_.size()
         << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
-    return false;
+    return VerificationResult::kMismatch;
   }
 
   for (size_t i = 0; i < class_loader_chain_.size(); i++) {
@@ -681,18 +717,24 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
           << ". expected=" << GetClassLoaderTypeName(expected_info.type)
           << ", found=" << GetClassLoaderTypeName(info.type)
           << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
-      return false;
+      return VerificationResult::kMismatch;
     }
     if (info.classpath.size() != expected_info.classpath.size()) {
       LOG(WARNING) << "ClassLoaderContext classpath size mismatch for position " << i
             << ". expected=" << expected_info.classpath.size()
             << ", found=" << info.classpath.size()
             << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
-      return false;
+      return VerificationResult::kMismatch;
     }
 
-    DCHECK_EQ(info.classpath.size(), info.checksums.size());
-    DCHECK_EQ(expected_info.classpath.size(), expected_info.checksums.size());
+    if (verify_checksums) {
+      DCHECK_EQ(info.classpath.size(), info.checksums.size());
+      DCHECK_EQ(expected_info.classpath.size(), expected_info.checksums.size());
+    }
+
+    if (!verify_names) {
+      continue;
+    }
 
     for (size_t k = 0; k < info.classpath.size(); k++) {
       // Compute the dex location that must be compared.
@@ -737,7 +779,7 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
             << ". expected=" << expected_info.classpath[k]
             << ", found=" << info.classpath[k]
             << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
-        return false;
+        return VerificationResult::kMismatch;
       }
 
       // Compare the checksums.
@@ -746,11 +788,11 @@ bool ClassLoaderContext::VerifyClassLoaderContextMatch(const std::string& contex
                      << ". expected=" << expected_info.checksums[k]
                      << ", found=" << info.checksums[k]
                      << " (" << context_spec << " | " << EncodeContextForOatFile("") << ")";
-        return false;
+        return VerificationResult::kMismatch;
       }
     }
   }
-  return true;
+  return VerificationResult::kVerifies;
 }
 
 jclass ClassLoaderContext::GetClassLoaderClass(ClassLoaderType type) {
@@ -764,4 +806,3 @@ jclass ClassLoaderContext::GetClassLoaderClass(ClassLoaderType type) {
 }
 
 }  // namespace art
-

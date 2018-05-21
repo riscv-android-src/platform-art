@@ -17,9 +17,10 @@
 #ifndef ART_COMPILER_UTILS_ATOMIC_DEX_REF_MAP_H_
 #define ART_COMPILER_UTILS_ATOMIC_DEX_REF_MAP_H_
 
+#include "base/atomic.h"
 #include "base/dchecked_vector.h"
-#include "dex_file_reference.h"
-#include "safe_map.h"
+#include "base/safe_map.h"
+#include "dex/dex_file_reference.h"
 
 namespace art {
 
@@ -44,6 +45,9 @@ class AtomicDexRefMap {
 
   // Retreive an item, returns false if the dex file is not added.
   bool Get(const DexFileReferenceType& ref, Value* out) const;
+
+  // Remove an item and return the existing value. Returns false if the dex file is not added.
+  bool Remove(const DexFileReferenceType& ref, Value* out);
 
   // Dex files must be added before method references belonging to them can be used as keys. Not
   // thread safe.

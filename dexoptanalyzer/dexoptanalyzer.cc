@@ -17,19 +17,19 @@
 #include <string>
 
 #include "base/logging.h"  // For InitLogging.
+#include "base/mutex.h"
+#include "base/os.h"
+#include "base/utils.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 #include "base/file_utils.h"
-#include "base/logging.h"  // For InitLogging.
 #include "compiler_filter.h"
 #include "class_loader_context.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 #include "noop_compiler_callbacks.h"
 #include "oat_file_assistant.h"
-#include "os.h"
 #include "runtime.h"
 #include "thread-inl.h"
-#include "utils.h"
 
 namespace art {
 
@@ -142,6 +142,7 @@ class DexoptAnalyzer FINAL {
     original_argc = argc;
     original_argv = argv;
 
+    Locks::Init();
     InitLogging(argv, Runtime::Abort);
     // Skip over the command name.
     argv++;
@@ -246,11 +247,6 @@ class DexoptAnalyzer FINAL {
   }
 
   int GetDexOptNeeded() {
-    // If the file does not exist there's nothing to do.
-    // This is a fast path to avoid creating the runtime (b/34385298).
-    if (!OS::FileExists(dex_file_.c_str())) {
-      return kNoDexOptNeeded;
-    }
     if (!CreateRuntime()) {
       return kErrorCannotCreateRuntime;
     }
@@ -260,6 +256,7 @@ class DexoptAnalyzer FINAL {
     oat_file_assistant = std::make_unique<OatFileAssistant>(dex_file_.c_str(),
                                                             isa_,
                                                             false /*load_executable*/,
+                                                            false /*only_load_system_executable*/,
                                                             vdex_fd_,
                                                             oat_fd_,
                                                             zip_fd_);

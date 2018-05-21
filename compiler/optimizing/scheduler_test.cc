@@ -182,7 +182,9 @@ class SchedulerTest : public OptimizingUnitTest {
     scheduler->Schedule(graph_);
   }
 
-  void CompileWithRandomSchedulerAndRun(const uint16_t* data, bool has_result, int expected) {
+  void CompileWithRandomSchedulerAndRun(const std::vector<uint16_t>& data,
+                                        bool has_result,
+                                        int expected) {
     for (CodegenTargetConfig target_config : GetTargetConfigs()) {
       HGraph* graph = CreateCFG(data);
 
@@ -294,38 +296,38 @@ class SchedulerTest : public OptimizingUnitTest {
     size_t loc2 = HeapLocationCollector::kHeapLocationNotFound;
 
     // Test side effect dependency: array[0] and array[1]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, c0);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, c1);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_0);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_1);
     ASSERT_FALSE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_FALSE(scheduling_graph.HasImmediateOtherDependency(arr_set_1, arr_set_0));
 
     // Test side effect dependency based on LSA analysis: array[i] and array[j]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, i);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, j);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_i);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_j);
     ASSERT_TRUE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_TRUE(scheduling_graph.HasImmediateOtherDependency(arr_set_j, arr_set_i));
 
     // Test side effect dependency based on LSA analysis: array[i] and array[i+0]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, i);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, add0);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_i);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_add0);
     ASSERT_TRUE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_TRUE(scheduling_graph.HasImmediateOtherDependency(arr_set_add0, arr_set_i));
 
     // Test side effect dependency based on LSA analysis: array[i] and array[i-0]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, i);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, sub0);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_i);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_sub0);
     ASSERT_TRUE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_TRUE(scheduling_graph.HasImmediateOtherDependency(arr_set_sub0, arr_set_i));
 
     // Test side effect dependency based on LSA analysis: array[i] and array[i+1]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, i);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, add1);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_i);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_add1);
     ASSERT_FALSE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_FALSE(scheduling_graph.HasImmediateOtherDependency(arr_set_add1, arr_set_i));
 
     // Test side effect dependency based on LSA analysis: array[i+1] and array[i-1]
-    loc1 = heap_location_collector.GetArrayHeapLocation(arr, add1);
-    loc2 = heap_location_collector.GetArrayHeapLocation(arr, sub1);
+    loc1 = heap_location_collector.GetArrayHeapLocation(arr_set_add1);
+    loc2 = heap_location_collector.GetArrayHeapLocation(arr_set_sub1);
     ASSERT_FALSE(heap_location_collector.MayAlias(loc1, loc2));
     ASSERT_FALSE(scheduling_graph.HasImmediateOtherDependency(arr_set_sub1, arr_set_add1));
 
@@ -393,7 +395,7 @@ TEST_F(SchedulerTest, RandomScheduling) {
   //  }
   //  return result;
   //
-  const uint16_t data[] = SIX_REGISTERS_CODE_ITEM(
+  const std::vector<uint16_t> data = SIX_REGISTERS_CODE_ITEM(
     Instruction::CONST_4 | 0 << 12 | 2 << 8,          // const/4 v2, #int 0
     Instruction::CONST_HIGH16 | 0 << 8, 0x4120,       // const/high16 v0, #float 10.0 // #41200000
     Instruction::CONST_4 | 1 << 12 | 1 << 8,          // const/4 v1, #int 1

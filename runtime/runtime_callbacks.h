@@ -22,7 +22,7 @@
 #include "base/array_ref.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 #include "handle.h"
 
 namespace art {
@@ -60,6 +60,19 @@ class DdmCallback {
   virtual ~DdmCallback() {}
   virtual void DdmPublishChunk(uint32_t type, const ArrayRef<const uint8_t>& data)
       REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+};
+
+class DebuggerControlCallback {
+ public:
+  virtual ~DebuggerControlCallback() {}
+
+  // Begin running the debugger.
+  virtual void StartDebugger() = 0;
+  // The debugger should begin shutting down since the runtime is ending. This is just advisory
+  virtual void StopDebugger() = 0;
+
+  // This allows the debugger to tell the runtime if it is configured.
+  virtual bool IsDebuggerConfigured() = 0;
 };
 
 class RuntimeSigQuitCallback {
@@ -117,6 +130,10 @@ class MethodInspectionCallback {
   // Note that '!IsMethodSafeToJit(m) implies IsMethodBeingInspected(m)'. That is that if this
   // method returns false IsMethodBeingInspected must return true.
   virtual bool IsMethodSafeToJit(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+
+  // Returns true if we expect the method to be debuggable but are not doing anything unusual with
+  // it currently.
+  virtual bool MethodNeedsDebugVersion(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
 };
 
 class RuntimeCallbacks {
@@ -185,6 +202,11 @@ class RuntimeCallbacks {
   // entrypoint should not be changed to JITed code.
   bool IsMethodSafeToJit(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Returns true if some MethodInspectionCallback indicates the method needs to use a debug
+  // version. This allows later code to set breakpoints or perform other actions that could be
+  // broken by some optimizations.
+  bool MethodNeedsDebugVersion(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
+
   void AddMethodInspectionCallback(MethodInspectionCallback* cb)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void RemoveMethodInspectionCallback(MethodInspectionCallback* cb)
@@ -196,6 +218,17 @@ class RuntimeCallbacks {
 
   void AddDdmCallback(DdmCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
   void RemoveDdmCallback(DdmCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void StartDebugger() REQUIRES_SHARED(Locks::mutator_lock_);
+  // NO_THREAD_SAFETY_ANALYSIS since this is only called when we are in the middle of shutting down
+  // and the mutator_lock_ is no longer acquirable.
+  void StopDebugger() NO_THREAD_SAFETY_ANALYSIS;
+  bool IsDebuggerConfigured() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void AddDebuggerControlCallback(DebuggerControlCallback* cb)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void RemoveDebuggerControlCallback(DebuggerControlCallback* cb)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   std::vector<ThreadLifecycleCallback*> thread_callbacks_
@@ -213,6 +246,8 @@ class RuntimeCallbacks {
   std::vector<MethodInspectionCallback*> method_inspection_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
   std::vector<DdmCallback*> ddm_callbacks_
+      GUARDED_BY(Locks::mutator_lock_);
+  std::vector<DebuggerControlCallback*> debugger_control_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
 };
 

@@ -17,6 +17,7 @@
 #include "fault_handler.h"
 
 #include <setjmp.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <sys/ucontext.h>
 
@@ -24,7 +25,7 @@
 #include "base/logging.h"  // For VLOG
 #include "base/safe_copy.h"
 #include "base/stl_util.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
 #include "mirror/class.h"
 #include "mirror/object_reference.h"
 #include "oat_quick_method_header.h"
@@ -36,7 +37,9 @@ namespace art {
 // Static fault manger object accessed by signal handler.
 FaultManager fault_manager;
 
-extern "C" __attribute__((visibility("default"))) void art_sigsegv_fault() {
+// This needs to be NO_INLINE since some debuggers do not read the inline-info to set a breakpoint
+// if it isn't.
+extern "C" NO_INLINE __attribute__((visibility("default"))) void art_sigsegv_fault() {
   // Set a breakpoint here to be informed when a SIGSEGV is unhandled by ART.
   VLOG(signals)<< "Caught unknown SIGSEGV in ART fault handler - chaining to next handler.";
 }
@@ -183,8 +186,31 @@ bool FaultManager::HandleFaultByOtherHandlers(int sig, siginfo_t* info, void* co
   return false;
 }
 
+static const char* SignalCodeName(int sig, int code) {
+  if (sig != SIGSEGV) {
+    return "UNKNOWN";
+  } else {
+    switch (code) {
+      case SEGV_MAPERR: return "SEGV_MAPERR";
+      case SEGV_ACCERR: return "SEGV_ACCERR";
+      default:          return "UNKNOWN";
+    }
+  }
+}
+static std::ostream& PrintSignalInfo(std::ostream& os, siginfo_t* info) {
+  os << "  si_signo: " << info->si_signo << " (" << strsignal(info->si_signo) << ")\n"
+     << "  si_code: " << info->si_code
+     << " (" << SignalCodeName(info->si_signo, info->si_code) << ")";
+  if (info->si_signo == SIGSEGV) {
+    os << "\n" << "  si_addr: " << info->si_addr;
+  }
+  return os;
+}
+
 bool FaultManager::HandleFault(int sig, siginfo_t* info, void* context) {
-  VLOG(signals) << "Handling fault";
+  if (VLOG_IS_ON(signals)) {
+    PrintSignalInfo(VLOG_STREAM(signals) << "Handling fault:" << "\n", info);
+  }
 
 #ifdef TEST_NESTED_SIGNAL
   // Simulate a crash in a handler.
@@ -201,13 +227,13 @@ bool FaultManager::HandleFault(int sig, siginfo_t* info, void* context) {
         return true;
       }
     }
+  }
 
-    // We hit a signal we didn't handle.  This might be something for which
-    // we can give more information about so call all registered handlers to
-    // see if it is.
-    if (HandleFaultByOtherHandlers(sig, info, context)) {
-      return true;
-    }
+  // We hit a signal we didn't handle.  This might be something for which
+  // we can give more information about so call all registered handlers to
+  // see if it is.
+  if (HandleFaultByOtherHandlers(sig, info, context)) {
+    return true;
   }
 
   // Set a breakpoint in this function to catch unhandled signals.
@@ -232,7 +258,7 @@ void FaultManager::RemoveHandler(FaultHandler* handler) {
   }
   auto it2 = std::find(other_handlers_.begin(), other_handlers_.end(), handler);
   if (it2 != other_handlers_.end()) {
-    other_handlers_.erase(it);
+    other_handlers_.erase(it2);
     return;
   }
   LOG(FATAL) << "Attempted to remove non existent handler " << handler;

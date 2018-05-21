@@ -59,6 +59,18 @@ ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetClassCla
   return GetRootHandle(handles_, ClassLinker::kJavaLangClass, &class_class_handle_);
 }
 
+ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetMethodHandleClassHandle() {
+  return GetRootHandle(handles_,
+                       ClassLinker::kJavaLangInvokeMethodHandleImpl,
+                       &method_handle_class_handle_);
+}
+
+ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetMethodTypeClassHandle() {
+  return GetRootHandle(handles_,
+                       ClassLinker::kJavaLangInvokeMethodType,
+                       &method_type_class_handle_);
+}
+
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetStringClassHandle() {
   return GetRootHandle(handles_, ClassLinker::kJavaLangString, &string_class_handle_);
 }
@@ -87,7 +99,10 @@ class ReferenceTypePropagation::RTPVisitor : public HGraphDelegateVisitor {
   void VisitDeoptimize(HDeoptimize* deopt) OVERRIDE;
   void VisitNewInstance(HNewInstance* new_instance) OVERRIDE;
   void VisitLoadClass(HLoadClass* load_class) OVERRIDE;
+  void VisitInstanceOf(HInstanceOf* load_class) OVERRIDE;
   void VisitClinitCheck(HClinitCheck* clinit_check) OVERRIDE;
+  void VisitLoadMethodHandle(HLoadMethodHandle* instr) OVERRIDE;
+  void VisitLoadMethodType(HLoadMethodType* instr) OVERRIDE;
   void VisitLoadString(HLoadString* instr) OVERRIDE;
   void VisitLoadException(HLoadException* instr) OVERRIDE;
   void VisitNewArray(HNewArray* instr) OVERRIDE;
@@ -171,6 +186,12 @@ void ReferenceTypePropagation::ValidateTypes() {
                 << "NullCheck " << instr->GetReferenceTypeInfo()
                 << "Input(0) " << instr->InputAt(0)->GetReferenceTypeInfo();
           }
+        } else if (instr->IsInstanceOf()) {
+          HInstanceOf* iof = instr->AsInstanceOf();
+          DCHECK(!iof->GetTargetClassRTI().IsValid() || iof->GetTargetClassRTI().IsExact());
+        } else if (instr->IsCheckCast()) {
+          HCheckCast* check = instr->AsCheckCast();
+          DCHECK(!check->GetTargetClassRTI().IsValid() || check->GetTargetClassRTI().IsExact());
         }
       }
     }
@@ -341,7 +362,7 @@ static void BoundTypeForClassCheck(HInstruction* check) {
   }
 }
 
-void ReferenceTypePropagation::Run() {
+bool ReferenceTypePropagation::Run() {
   RTPVisitor visitor(graph_, class_loader_, hint_dex_cache_, &handle_cache_, is_first_run_);
 
   // To properly propagate type info we need to visit in the dominator-based order.
@@ -353,6 +374,7 @@ void ReferenceTypePropagation::Run() {
 
   visitor.ProcessWorklist();
   ValidateTypes();
+  return true;
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitBasicBlock(HBasicBlock* block) {
@@ -499,8 +521,7 @@ void ReferenceTypePropagation::RTPVisitor::BoundTypeForIfInstanceOf(HBasicBlock*
     return;
   }
 
-  HLoadClass* load_class = instanceOf->InputAt(1)->AsLoadClass();
-  ReferenceTypeInfo class_rti = load_class->GetLoadedClassRTI();
+  ReferenceTypeInfo class_rti = instanceOf->GetTargetClassRTI();
   if (!class_rti.IsValid()) {
     // He have loaded an unresolved class. Don't bother bounding the type.
     return;
@@ -537,14 +558,13 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
       Thread* self = Thread::Current();
       StackHandleScope<2> hs(self);
       const DexFile& dex_file = *invoke->GetTargetMethod().dex_file;
+      uint32_t dex_method_index = invoke->GetTargetMethod().index;
       Handle<mirror::DexCache> dex_cache(
           hs.NewHandle(FindDexCacheWithHint(self, dex_file, hint_dex_cache_)));
-      // Use a null loader. We should probably use the compiling method's class loader,
-      // but then we would need to pass it to RTPVisitor just for this debug check. Since
-      // the method is from the String class, the null loader is good enough.
+      // Use a null loader, the target method is in a boot classpath dex file.
       Handle<mirror::ClassLoader> loader(hs.NewHandle<mirror::ClassLoader>(nullptr));
       ArtMethod* method = cl->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
-          invoke->GetDexMethodIndex(), dex_cache, loader, /* referrer */ nullptr, kDirect);
+          dex_method_index, dex_cache, loader, /* referrer */ nullptr, kDirect);
       DCHECK(method != nullptr);
       mirror::Class* declaring_class = method->GetDeclaringClass();
       DCHECK(declaring_class != nullptr);
@@ -644,17 +664,33 @@ void ReferenceTypePropagation::RTPVisitor::VisitUnresolvedStaticFieldGet(
 
 void ReferenceTypePropagation::RTPVisitor::VisitLoadClass(HLoadClass* instr) {
   ScopedObjectAccess soa(Thread::Current());
-  Handle<mirror::Class> resolved_class = instr->GetClass();
-  if (IsAdmissible(resolved_class.Get())) {
-    instr->SetLoadedClassRTI(ReferenceTypeInfo::Create(
-        resolved_class, /* is_exact */ true));
+  if (IsAdmissible(instr->GetClass().Get())) {
+    instr->SetValidLoadedClassRTI();
   }
   instr->SetReferenceTypeInfo(
       ReferenceTypeInfo::Create(handle_cache_->GetClassClassHandle(), /* is_exact */ true));
 }
 
+void ReferenceTypePropagation::RTPVisitor::VisitInstanceOf(HInstanceOf* instr) {
+  ScopedObjectAccess soa(Thread::Current());
+  if (IsAdmissible(instr->GetClass().Get())) {
+    instr->SetValidTargetClassRTI();
+  }
+}
+
 void ReferenceTypePropagation::RTPVisitor::VisitClinitCheck(HClinitCheck* instr) {
   instr->SetReferenceTypeInfo(instr->InputAt(0)->GetReferenceTypeInfo());
+}
+
+void ReferenceTypePropagation::RTPVisitor::VisitLoadMethodHandle(HLoadMethodHandle* instr) {
+  instr->SetReferenceTypeInfo(ReferenceTypeInfo::Create(
+      handle_cache_->GetMethodHandleClassHandle(),
+      /* is_exact */ true));
+}
+
+void ReferenceTypePropagation::RTPVisitor::VisitLoadMethodType(HLoadMethodType* instr) {
+  instr->SetReferenceTypeInfo(
+      ReferenceTypeInfo::Create(handle_cache_->GetMethodTypeClassHandle(), /* is_exact */ true));
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitLoadString(HLoadString* instr) {
@@ -720,8 +756,6 @@ void ReferenceTypePropagation::RTPVisitor::VisitBoundType(HBoundType* instr) {
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitCheckCast(HCheckCast* check_cast) {
-  HLoadClass* load_class = check_cast->InputAt(1)->AsLoadClass();
-  ReferenceTypeInfo class_rti = load_class->GetLoadedClassRTI();
   HBoundType* bound_type = check_cast->GetNext()->AsBoundType();
   if (bound_type == nullptr || bound_type->GetUpperBound().IsValid()) {
     // The next instruction is not an uninitialized BoundType. This must be
@@ -730,12 +764,14 @@ void ReferenceTypePropagation::RTPVisitor::VisitCheckCast(HCheckCast* check_cast
   }
   DCHECK_EQ(bound_type->InputAt(0), check_cast->InputAt(0));
 
-  if (class_rti.IsValid()) {
+  ScopedObjectAccess soa(Thread::Current());
+  Handle<mirror::Class> klass = check_cast->GetClass();
+  if (IsAdmissible(klass.Get())) {
     DCHECK(is_first_run_);
-    ScopedObjectAccess soa(Thread::Current());
+    check_cast->SetValidTargetClassRTI();
     // This is the first run of RTP and class is resolved.
-    bool is_exact = class_rti.GetTypeHandle()->CannotBeAssignedFromOtherTypes();
-    bound_type->SetUpperBound(ReferenceTypeInfo::Create(class_rti.GetTypeHandle(), is_exact),
+    bool is_exact = klass->CannotBeAssignedFromOtherTypes();
+    bound_type->SetUpperBound(ReferenceTypeInfo::Create(klass, is_exact),
                               /* CheckCast succeeds for nulls. */ true);
   } else {
     // This is the first run of RTP and class is unresolved. Remove the binding.

@@ -183,7 +183,9 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
                          sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pInitializeTypeAndVerifyAccess, pInitializeType,
                          sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pInitializeType, pResolveString, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pInitializeType, pResolveMethodHandle, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pResolveMethodHandle, pResolveMethodType, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pResolveMethodType, pResolveString, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pResolveString, pSet8Instance, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pSet8Instance, pSet8Static, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pSet8Static, pSet16Instance, sizeof(void*));
@@ -238,7 +240,8 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAcos, pAsin, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAsin, pAtan, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAtan, pAtan2, sizeof(void*));
-    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAtan2, pCbrt, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pAtan2, pPow, sizeof(void*));
+    EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pPow, pCbrt, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pCbrt, pCosh, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pCosh, pExp, sizeof(void*));
     EXPECT_OFFSET_DIFFNP(QuickEntryPoints, pExp, pExpm1, sizeof(void*));

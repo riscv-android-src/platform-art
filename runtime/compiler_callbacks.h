@@ -18,12 +18,18 @@
 #define ART_RUNTIME_COMPILER_CALLBACKS_H_
 
 #include "base/mutex.h"
-#include "class_reference.h"
+#include "dex/class_reference.h"
 #include "class_status.h"
 
 namespace art {
 
 class CompilerDriver;
+
+namespace mirror {
+
+class Class;
+
+}  // namespace mirror
 
 namespace verifier {
 
@@ -55,7 +61,7 @@ class CompilerCallbacks {
   // Return the class status of a previous stage of the compilation. This can be used, for example,
   // when class unloading is enabled during multidex compilation.
   virtual ClassStatus GetPreviousClassState(ClassReference ref ATTRIBUTE_UNUSED) {
-    return ClassStatus::kStatusNotReady;
+    return ClassStatus::kNotReady;
   }
 
   virtual void SetDoesClassUnloading(bool does_class_unloading ATTRIBUTE_UNUSED,
@@ -67,6 +73,11 @@ class CompilerCallbacks {
 
   virtual void UpdateClassState(ClassReference ref ATTRIBUTE_UNUSED,
                                 ClassStatus state ATTRIBUTE_UNUSED) {}
+
+  virtual bool CanUseOatStatusForVerification(mirror::Class* klass ATTRIBUTE_UNUSED)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    return false;
+  }
 
  protected:
   explicit CompilerCallbacks(CallbackMode mode) : mode_(mode) { }

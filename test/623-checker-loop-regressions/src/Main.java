@@ -19,6 +19,8 @@
  */
 public class Main {
 
+  private static native void ensureJitCompiled(Class<?> cls, String methodName);
+
   /// CHECK-START: int Main.earlyExitFirst(int) loop_optimization (before)
   /// CHECK-DAG: Phi loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG: Phi loop:<<Loop>>      outer_loop:none
@@ -582,7 +584,21 @@ public class Main {
            s24 + s25 + s26 + s27 + s28 + s29 + s30 + s31;
   }
 
+  public static int reductionIntoReplication() {
+    int[] a = { 1, 2, 3, 4 };
+    int x = 0;
+    for (int i = 0; i < 4; i++) {
+      x += a[i];
+    }
+    for (int i = 0; i < 4; i++) {
+      a[i] = x;
+    }
+    return a[3];
+  }
+
   public static void main(String[] args) {
+    System.loadLibrary(args[0]);
+
     expectEquals(10, earlyExitFirst(-1));
     for (int i = 0; i <= 10; i++) {
       expectEquals(i, earlyExitFirst(i));
@@ -746,6 +762,9 @@ public class Main {
 
     expectEquals(153, doNotMoveSIMD());
 
+    // This test exposed SIMDization issues on x86 and x86_64
+    // so we make sure the test runs with JIT enabled.
+    ensureJitCompiled(Main.class, "reduction32Values");
     {
       int[] a1 = new int[100];
       int[] a2 = new int[100];
@@ -759,6 +778,8 @@ public class Main {
       }
       expectEquals(85800, reduction32Values(a1, a2, a3, a4));
     }
+
+    expectEquals(10, reductionIntoReplication());
 
     System.out.println("passed");
   }

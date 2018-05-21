@@ -16,9 +16,11 @@
 
 #include "java_lang_VMClassLoader.h"
 
+#include "base/zip_archive.h"
 #include "class_linker.h"
-#include "dex_file_loader.h"
-#include "jni_internal.h"
+#include "dex/descriptors_names.h"
+#include "dex/dex_file_loader.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "native_util.h"
@@ -28,7 +30,6 @@
 #include "obj_ptr.h"
 #include "scoped_fast_native_object_access-inl.h"
 #include "well_known_classes.h"
-#include "zip_archive.h"
 
 namespace art {
 
