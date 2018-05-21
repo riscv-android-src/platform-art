@@ -22,10 +22,10 @@
 #include <unistd.h>
 
 #include "arch/instruction_set.h"
+#include "base/os.h"
+#include "base/utils.h"
 #include "common_runtime_test.h"
 #include "exec_utils.h"
-#include "os.h"
-#include "utils.h"
 
 namespace art {
 
@@ -58,7 +58,7 @@ TEST_F(DexDumpTest, NoInputFileGiven) {
 
 TEST_F(DexDumpTest, CantOpenOutput) {
   std::string error_msg;
-  ASSERT_FALSE(Exec({"-o", "/joho", dex_file_}, &error_msg)) << error_msg;
+  ASSERT_FALSE(Exec({"-o", "/non/existent/path", dex_file_}, &error_msg)) << error_msg;
 }
 
 TEST_F(DexDumpTest, BadFlagCombination) {

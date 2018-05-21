@@ -23,13 +23,13 @@
 #include "base/file_utils.h"
 #include "base/macros.h"
 #include "base/stringpiece.h"
+#include "base/utils.h"
 #include "debugger.h"
 #include "gc/heap.h"
 #include "monitor.h"
 #include "runtime.h"
 #include "ti/agent.h"
 #include "trace.h"
-#include "utils.h"
 
 #include "cmdline_parser.h"
 #include "runtime_options.h"
@@ -92,15 +92,18 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::CheckJni)
       .Define("-Xjniopts:forcecopy")
           .IntoKey(M::JniOptsForceCopy)
-      .Define({"-Xrunjdwp:_", "-agentlib:jdwp=_"})
-          .WithType<JDWP::JdwpOptions>()
+      .Define("-XjdwpProvider:_")
+          .WithType<JdwpProvider>()
+          .IntoKey(M::JdwpProvider)
+      .Define({"-Xrunjdwp:_", "-agentlib:jdwp=_", "-XjdwpOptions:_"})
+          .WithType<std::string>()
           .IntoKey(M::JdwpOptions)
       // TODO Re-enable -agentlib: once I have a good way to transform the values.
       // .Define("-agentlib:_")
       //     .WithType<std::vector<ti::Agent>>().AppendValues()
       //     .IntoKey(M::AgentLib)
       .Define("-agentpath:_")
-          .WithType<std::list<ti::Agent>>().AppendValues()
+          .WithType<std::list<ti::AgentSpec>>().AppendValues()
           .IntoKey(M::AgentPath)
       .Define("-Xms_")
           .WithType<MemoryKiB>()
@@ -191,6 +194,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xjittransitionweight:_")
           .WithType<unsigned int>()
           .IntoKey(M::JITInvokeTransitionWeight)
+      .Define("-Xjitpthreadpriority:_")
+          .WithType<int>()
+          .IntoKey(M::JITPoolThreadPthreadPriority)
       .Define("-Xjitsaveprofilinginfo")
           .WithType<ProfileSaverOptions>()
           .AppendValues()
@@ -249,12 +255,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xstackdumplockprofthreshold:_")
           .WithType<unsigned int>()
           .IntoKey(M::StackDumpLockProfThreshold)
-      .Define("-Xusetombstonedtraces")
-          .WithValue(true)
-          .IntoKey(M::UseTombstonedTraces)
-      .Define("-Xstacktracefile:_")
-          .WithType<std::string>()
-          .IntoKey(M::StackTraceFile)
       .Define("-Xmethod-trace")
           .IntoKey(M::MethodTrace)
       .Define("-Xmethod-trace-file:_")
@@ -324,6 +324,15 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::SlowDebug)
+      .Define("-Xtarget-sdk-version:_")
+          .WithType<int>()
+          .IntoKey(M::TargetSdkVersion)
+      .Define("-Xhidden-api-checks")
+          .IntoKey(M::HiddenApiChecks)
+      .Define("-Xuse-stderr-logger")
+          .IntoKey(M::UseStderrLogger)
+      .Define("-Xonly-use-system-oat-files")
+          .IntoKey(M::OnlyUseSystemOatFiles)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -687,7 +696,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "The following Dalvik options are supported:\n");
   UsageMessage(stream, "  -Xzygote\n");
   UsageMessage(stream, "  -Xjnitrace:substring (eg NativeClass or nativeMethod)\n");
-  UsageMessage(stream, "  -Xstacktracefile:<filename>\n");
   UsageMessage(stream, "  -Xgc:[no]preverify\n");
   UsageMessage(stream, "  -Xgc:[no]postverify\n");
   UsageMessage(stream, "  -XX:HeapGrowthLimit=N\n");

@@ -17,8 +17,9 @@
 #include <string.h>
 
 #include "arch/mips/asm_support_mips.h"
-#include "atomic.h"
+#include "base/atomic.h"
 #include "base/logging.h"
+#include "base/quasi_atomic.h"
 #include "entrypoints/entrypoint_utils.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/math_entrypoints.h"
@@ -202,6 +203,10 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   static_assert(!IsDirectEntrypoint(kQuickInitializeType), "Non-direct C stub marked direct.");
   qpoints->pResolveString = art_quick_resolve_string;
   static_assert(!IsDirectEntrypoint(kQuickResolveString), "Non-direct C stub marked direct.");
+  qpoints->pResolveMethodHandle = art_quick_resolve_method_handle;
+  static_assert(!IsDirectEntrypoint(kQuickResolveMethodHandle), "Non-direct C stub marked direct.");
+  qpoints->pResolveMethodType = art_quick_resolve_method_type;
+  static_assert(!IsDirectEntrypoint(kQuickResolveMethodType), "Non-direct C stub marked direct.");
 
   // Field
   qpoints->pSet8Instance = art_quick_set8_instance;
@@ -348,6 +353,8 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   static_assert(IsDirectEntrypoint(kQuickAtan), "Direct C stub marked non-direct.");
   qpoints->pAtan2 = atan2;
   static_assert(IsDirectEntrypoint(kQuickAtan2), "Direct C stub marked non-direct.");
+  qpoints->pPow = pow;
+  static_assert(IsDirectEntrypoint(kQuickPow), "Direct C stub marked non-direct.");
   qpoints->pCbrt = cbrt;
   static_assert(IsDirectEntrypoint(kQuickCbrt), "Direct C stub marked non-direct.");
   qpoints->pCosh = cosh;

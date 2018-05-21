@@ -38,12 +38,12 @@
 #include "base/enums.h"
 #include "base/mutex-inl.h"
 #include "deopt_manager.h"
-#include "dex_file_annotations.h"
+#include "dex/dex_file_annotations.h"
+#include "dex/modifiers.h"
 #include "events-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_array-inl.h"
-#include "modifiers.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
@@ -78,16 +78,11 @@ void BreakpointUtil::RemoveBreakpointsInClass(ArtJvmTiEnv* env, art::mirror::Cla
       env->breakpoints.erase(it);
     }
   }
-  if (!to_remove.empty()) {
-    LOG(WARNING) << "Methods with breakpoints potentially not being un-deoptimized.";
+  DeoptManager* deopt = DeoptManager::Get();
+  for (const Breakpoint& b : to_remove) {
+    // TODO It might be good to send these all at once instead.
+    deopt->RemoveMethodBreakpoint(b.GetMethod());
   }
-  // TODO Figure out how to do this.
-  // DeoptManager* deopt = DeoptManager::Get();
-  // for (const Breakpoint& b : to_remove) {
-  //   // TODO It might be good to send these all at once instead.
-  //   // deopt->RemoveMethodBreakpointSuspended(b.GetMethod());
-  //   LOG(WARNING) << "not un-deopting methods! :-0";
-  // }
 }
 
 jvmtiError BreakpointUtil::SetBreakpoint(jvmtiEnv* jenv, jmethodID method, jlocation location) {
@@ -98,7 +93,7 @@ jvmtiError BreakpointUtil::SetBreakpoint(jvmtiEnv* jenv, jmethodID method, jloca
   art::ScopedObjectAccess soa(art::Thread::Current());
   art::ArtMethod* art_method = art::jni::DecodeArtMethod(method)->GetCanonicalMethod();
   if (location < 0 || static_cast<uint32_t>(location) >=
-      art_method->GetCodeItem()->insns_size_in_code_units_) {
+      art_method->DexInstructions().InsnsSizeInCodeUnits()) {
     return ERR(INVALID_LOCATION);
   }
   DeoptManager::Get()->AddMethodBreakpoint(art_method);

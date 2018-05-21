@@ -41,23 +41,23 @@ static void XzCompress(const std::vector<uint8_t>* src, std::vector<uint8_t>* ds
   Lzma2EncProps_Normalize(&lzma2Props);
   CXzProps props;
   XzProps_Init(&props);
-  props.lzma2Props = &lzma2Props;
+  props.lzma2Props = lzma2Props;
   // Implement the required interface for communication (written in C so no virtual methods).
   struct XzCallbacks : public ISeqInStream, public ISeqOutStream, public ICompressProgress {
-    static SRes ReadImpl(void* p, void* buf, size_t* size) {
-      auto* ctx = static_cast<XzCallbacks*>(reinterpret_cast<ISeqInStream*>(p));
+    static SRes ReadImpl(const ISeqInStream* p, void* buf, size_t* size) {
+      auto* ctx = static_cast<XzCallbacks*>(const_cast<ISeqInStream*>(p));
       *size = std::min(*size, ctx->src_->size() - ctx->src_pos_);
       memcpy(buf, ctx->src_->data() + ctx->src_pos_, *size);
       ctx->src_pos_ += *size;
       return SZ_OK;
     }
-    static size_t WriteImpl(void* p, const void* buf, size_t size) {
-      auto* ctx = static_cast<XzCallbacks*>(reinterpret_cast<ISeqOutStream*>(p));
+    static size_t WriteImpl(const ISeqOutStream* p, const void* buf, size_t size) {
+      auto* ctx = static_cast<const XzCallbacks*>(p);
       const uint8_t* buffer = reinterpret_cast<const uint8_t*>(buf);
       ctx->dst_->insert(ctx->dst_->end(), buffer, buffer + size);
       return size;
     }
-    static SRes ProgressImpl(void* , UInt64, UInt64) {
+    static SRes ProgressImpl(const ICompressProgress* , UInt64, UInt64) {
       return SZ_OK;
     }
     size_t src_pos_;
@@ -80,22 +80,25 @@ template <typename ElfTypes>
 static std::vector<uint8_t> MakeMiniDebugInfoInternal(
     InstructionSet isa,
     const InstructionSetFeatures* features,
-    size_t rodata_section_size,
+    typename ElfTypes::Addr text_section_address,
     size_t text_section_size,
-    const ArrayRef<const MethodDebugInfo>& method_infos) {
+    typename ElfTypes::Addr dex_section_address,
+    size_t dex_section_size,
+    const DebugInfo& debug_info) {
   std::vector<uint8_t> buffer;
   buffer.reserve(KB);
   linker::VectorOutputStream out("Mini-debug-info ELF file", &buffer);
   std::unique_ptr<linker::ElfBuilder<ElfTypes>> builder(
       new linker::ElfBuilder<ElfTypes>(isa, features, &out));
-  builder->Start();
-  // Mirror .rodata and .text as NOBITS sections.
-  // It is needed to detected relocations after compression.
-  builder->GetRoData()->WriteNoBitsSection(rodata_section_size);
-  builder->GetText()->WriteNoBitsSection(text_section_size);
-  WriteDebugSymbols(builder.get(), method_infos, false /* with_signature */);
+  builder->Start(false /* write_program_headers */);
+  // Mirror ELF sections as NOBITS since the added symbols will reference them.
+  builder->GetText()->AllocateVirtualMemory(text_section_address, text_section_size);
+  if (dex_section_size != 0) {
+    builder->GetDex()->AllocateVirtualMemory(dex_section_address, dex_section_size);
+  }
+  WriteDebugSymbols(builder.get(), true /* mini-debug-info */, debug_info);
   WriteCFISection(builder.get(),
-                  method_infos,
+                  debug_info.compiled_methods,
                   dwarf::DW_DEBUG_FRAME_FORMAT,
                   false /* write_oat_paches */);
   builder->End();
@@ -110,4 +113,3 @@ static std::vector<uint8_t> MakeMiniDebugInfoInternal(
 }  // namespace art
 
 #endif  // ART_COMPILER_DEBUG_ELF_GNU_DEBUGDATA_WRITER_H_
-

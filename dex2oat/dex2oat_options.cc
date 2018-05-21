@@ -86,6 +86,12 @@ static void AddGeneratedArtifactMappings(Builder& builder) {
       .Define("--output-vdex=_")
           .WithType<std::string>()
           .IntoKey(M::OutputVdex)
+      .Define("--dm-fd=_")
+          .WithType<int>()
+          .IntoKey(M::DmFd)
+      .Define("--dm-file=_")
+          .WithType<std::string>()
+          .IntoKey(M::DmFile)
       .Define("--oat-file=_")
           .WithType<std::vector<std::string>>().AppendValues()
           .IntoKey(M::OatFiles)
@@ -151,19 +157,7 @@ static void AddSwapMappings(Builder& builder) {
 
 static void AddCompilerMappings(Builder& builder) {
   builder.
-      Define("--compiled-classes=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledClasses)
-      .Define("--compiled-classes-zip=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledClassesZip)
-      .Define("--compiled-methods=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledMethods)
-      .Define("--compiled-methods-zip=_")
-          .WithType<std::string>()
-          .IntoKey(M::CompiledMethodsZip)
-      .Define("--run-passes=_")
+      Define("--run-passes=_")
           .WithType<std::string>()
           .IntoKey(M::Passes)
       .Define("--profile-file=_")
@@ -227,12 +221,21 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::VeryLargeAppThreshold)
       .Define("--force-determinism")
           .IntoKey(M::ForceDeterminism)
+      .Define("--copy-dex-files=_")
+          .WithType<CopyOption>()
+          .WithValueMap({{"true", CopyOption::kOnlyIfCompressed},
+                         {"false", CopyOption::kNever},
+                         {"always", CopyOption::kAlways}})
+          .IntoKey(M::CopyDexFiles)
       .Define("--classpath-dir=_")
           .WithType<std::string>()
           .IntoKey(M::ClasspathDir)
       .Define("--class-loader-context=_")
           .WithType<std::string>()
           .IntoKey(M::ClassLoaderContext)
+      .Define("--stored-class-loader-context=_")
+          .WithType<std::string>()
+          .IntoKey(M::StoredClassLoaderContext)
       .Define("--compact-dex-level=_")
           .WithType<CompactDexLevel>()
           .WithValueMap({{"none", CompactDexLevel::kCompactDexLevelNone},
@@ -240,7 +243,10 @@ static Parser CreateArgumentParser() {
           .IntoKey(M::CompactDexLevel)
       .Define("--runtime-arg _")
           .WithType<std::vector<std::string>>().AppendValues()
-          .IntoKey(M::RuntimeOptions);
+          .IntoKey(M::RuntimeOptions)
+      .Define("--compilation-reason=_")
+          .WithType<std::string>()
+          .IntoKey(M::CompilationReason);
 
   AddCompilerOptionsArgumentParserOptions<Dex2oatArgumentMap>(*parser_builder);
 
@@ -248,8 +254,6 @@ static Parser CreateArgumentParser() {
 
   return parser_builder->Build();
 }
-
-#pragma GCC diagnostic pop
 
 std::unique_ptr<Dex2oatArgumentMap> Dex2oatArgumentMap::Parse(int argc,
                                                               const char** argv,
@@ -264,4 +268,5 @@ std::unique_ptr<Dex2oatArgumentMap> Dex2oatArgumentMap::Parse(int argc,
   return std::unique_ptr<Dex2oatArgumentMap>(new Dex2oatArgumentMap(parser.ReleaseArgumentsMap()));
 }
 
+#pragma GCC diagnostic pop
 }  // namespace art

@@ -20,11 +20,11 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
-#include "code_item_accessors-inl.h"
-#include "dex_file-inl.h"
-#include "dex_instruction-inl.h"
-#include "dex_instruction.h"
-#include "dex_instruction_utils.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_instruction-inl.h"
+#include "dex/dex_instruction.h"
+#include "dex/dex_instruction_utils.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
 
@@ -141,8 +141,11 @@ bool Matcher::DoMatch(const CodeItemDataAccessor* code_item, MatchFn* const* pat
 ArtMethod* GetTargetConstructor(ArtMethod* method, const Instruction* invoke_direct)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK_EQ(invoke_direct->Opcode(), Instruction::INVOKE_DIRECT);
-  DCHECK_EQ(invoke_direct->VRegC_35c(),
-            method->GetCodeItem()->registers_size_ - method->GetCodeItem()->ins_size_);
+  if (kIsDebugBuild) {
+    CodeItemDataAccessor accessor(method->DexInstructionData());
+    DCHECK_EQ(invoke_direct->VRegC_35c(),
+              accessor.RegistersSize() - accessor.InsSize());
+  }
   uint32_t method_index = invoke_direct->VRegB_35c();
   ArtMethod* target_method = Runtime::Current()->GetClassLinker()->LookupResolvedMethod(
       method_index, method->GetDexCache(), method->GetClassLoader());
@@ -321,9 +324,9 @@ bool DoAnalyseConstructor(const CodeItemDataAccessor* code_item,
         return false;
       }
       if (target_method->GetDeclaringClass()->IsObjectClass()) {
-        DCHECK_EQ(CodeItemDataAccessor(target_method).begin()->Opcode(), Instruction::RETURN_VOID);
+        DCHECK_EQ(target_method->DexInstructionData().begin()->Opcode(), Instruction::RETURN_VOID);
       } else {
-        CodeItemDataAccessor target_code_item = CodeItemDataAccessor::CreateNullable(target_method);
+        CodeItemDataAccessor target_code_item(target_method->DexInstructionData());
         if (!target_code_item.HasCodeItem()) {
           return false;  // Native constructor?
         }
@@ -427,7 +430,7 @@ static_assert(InlineMethodAnalyser::IGetVariant(Instruction::IGET_SHORT) ==
     InlineMethodAnalyser::IPutVariant(Instruction::IPUT_SHORT), "iget/iput_short variant");
 
 bool InlineMethodAnalyser::AnalyseMethodCode(ArtMethod* method, InlineMethod* result) {
-  CodeItemDataAccessor code_item = CodeItemDataAccessor::CreateNullable(method);
+  CodeItemDataAccessor code_item(method->DexInstructionData());
   if (!code_item.HasCodeItem()) {
     // Native or abstract.
     return false;

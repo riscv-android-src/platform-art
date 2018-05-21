@@ -37,15 +37,15 @@
 #include "art_jvmti.h"
 #include "art_method-inl.h"
 #include "deopt_manager.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
 #include "gc/allocation_listener.h"
 #include "gc/gc_pause_listener.h"
 #include "gc/heap.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "handle_scope-inl.h"
 #include "instrumentation.h"
-#include "jni_env_ext-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_env_ext-inl.h"
+#include "jni/jni_internal.h"
 #include "mirror/class.h"
 #include "mirror/object-inl.h"
 #include "monitor.h"
@@ -196,12 +196,12 @@ void EventMasks::HandleChangedCapabilities(const jvmtiCapabilities& caps, bool c
 }
 
 void EventHandler::RegisterArtJvmTiEnv(ArtJvmTiEnv* env) {
-  art::MutexLock mu(art::Thread::Current(), envs_lock_);
+  art::WriterMutexLock mu(art::Thread::Current(), envs_lock_);
   envs.push_back(env);
 }
 
 void EventHandler::RemoveArtJvmTiEnv(ArtJvmTiEnv* env) {
-  art::MutexLock mu(art::Thread::Current(), envs_lock_);
+  art::WriterMutexLock mu(art::Thread::Current(), envs_lock_);
   // Since we might be currently iterating over the envs list we cannot actually erase elements.
   // Instead we will simply replace them with 'nullptr' and skip them manually.
   auto it = std::find(envs.begin(), envs.end(), env);
@@ -940,9 +940,6 @@ void EventHandler::SetupTraceListener(JvmtiMethodTraceListener* listener,
   }
   art::ScopedThreadStateChange stsc(art::Thread::Current(), art::ThreadState::kNative);
   art::instrumentation::Instrumentation* instr = art::Runtime::Current()->GetInstrumentation();
-  art::gc::ScopedGCCriticalSection gcs(art::Thread::Current(),
-                                       art::gc::kGcCauseInstrumentation,
-                                       art::gc::kCollectorTypeInstrumentation);
   art::ScopedSuspendAll ssa("jvmti method tracing installation");
   if (enable) {
     instr->AddListener(listener, new_events);
@@ -1004,6 +1001,27 @@ bool EventHandler::OtherMonitorEventsEnabledAnywhere(ArtJvmtiEvent event) {
   return false;
 }
 
+void EventHandler::SetupFramePopTraceListener(bool enable) {
+  if (enable) {
+    frame_pop_enabled = true;
+    SetupTraceListener(method_trace_listener_.get(), ArtJvmtiEvent::kFramePop, enable);
+  } else {
+    // remove the listener if we have no outstanding frames.
+    {
+      art::ReaderMutexLock mu(art::Thread::Current(), envs_lock_);
+      for (ArtJvmTiEnv* env : envs) {
+        art::ReaderMutexLock event_mu(art::Thread::Current(), env->event_info_mutex_);
+        if (!env->notify_frames.empty()) {
+          // Leaving FramePop listener since there are unsent FramePop events.
+          return;
+        }
+      }
+      frame_pop_enabled = false;
+    }
+    SetupTraceListener(method_trace_listener_.get(), ArtJvmtiEvent::kFramePop, enable);
+  }
+}
+
 // Handle special work for the given event type, if necessary.
 void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
   switch (event) {
@@ -1018,14 +1036,14 @@ void EventHandler::HandleEventType(ArtJvmtiEvent event, bool enable) {
     case ArtJvmtiEvent::kGarbageCollectionFinish:
       SetupGcPauseTracking(gc_pause_listener_.get(), event, enable);
       return;
-    // FramePop can never be disabled once it's been turned on since we would either need to deal
-    // with dangling pointers or have missed events.
-    // TODO We really need to make this not the case anymore.
+    // FramePop can never be disabled once it's been turned on if it was turned off with outstanding
+    // pop-events since we would either need to deal with dangling pointers or have missed events.
     case ArtJvmtiEvent::kFramePop:
-      if (!enable || (enable && frame_pop_enabled)) {
+      if (enable && frame_pop_enabled) {
+        // The frame-pop event was held on by pending events so we don't need to do anything.
         break;
       } else {
-        SetupTraceListener(method_trace_listener_.get(), event, enable);
+        SetupFramePopTraceListener(enable);
         break;
       }
     case ArtJvmtiEvent::kMethodEntry:
@@ -1143,7 +1161,7 @@ jvmtiError EventHandler::SetEvent(ArtJvmTiEnv* env,
   {
     // Change the event masks atomically.
     art::Thread* self = art::Thread::Current();
-    art::MutexLock mu(self, envs_lock_);
+    art::WriterMutexLock mu(self, envs_lock_);
     art::WriterMutexLock mu_env_info(self, env->event_info_mutex_);
     old_state = global_mask.Test(event);
     if (mode == JVMTI_ENABLE) {
@@ -1186,8 +1204,9 @@ void EventHandler::Shutdown() {
   art::Runtime::Current()->GetInstrumentation()->RemoveListener(method_trace_listener_.get(), ~0);
 }
 
-EventHandler::EventHandler() : envs_lock_("JVMTI Environment List Lock",
-                                          art::LockLevel::kTopLockLevel) {
+EventHandler::EventHandler()
+  : envs_lock_("JVMTI Environment List Lock", art::LockLevel::kTopLockLevel),
+    frame_pop_enabled(false) {
   alloc_listener_.reset(new JvmtiAllocationListener(this));
   ddm_listener_.reset(new JvmtiDdmChunkListener(this));
   gc_pause_listener_.reset(new JvmtiGcPauseListener(this));

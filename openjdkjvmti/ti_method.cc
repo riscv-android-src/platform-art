@@ -37,16 +37,18 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "base/mutex-inl.h"
-#include "dex_file_annotations.h"
-#include "dex_file_types.h"
+#include "dex/code_item_accessors-inl.h"
+#include "dex/dex_file_annotations.h"
+#include "dex/dex_file_types.h"
+#include "dex/modifiers.h"
 #include "events-inl.h"
+#include "gc_root-inl.h"
 #include "jit/jit.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
-#include "modifiers.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "oat_file.h"
 #include "runtime_callbacks.h"
@@ -122,19 +124,19 @@ jvmtiError MethodUtil::GetBytecodes(jvmtiEnv* env,
   }
 
   art::ScopedObjectAccess soa(art::Thread::Current());
-  const art::DexFile::CodeItem* code_item = art_method->GetCodeItem();
-  if (code_item == nullptr) {
+  art::CodeItemInstructionAccessor accessor(art_method->DexInstructions());
+  if (!accessor.HasCodeItem()) {
     *size_ptr = 0;
     *bytecode_ptr = nullptr;
     return OK;
   }
   // 2 bytes per instruction for dex code.
-  *size_ptr = code_item->insns_size_in_code_units_ * 2;
+  *size_ptr = accessor.InsnsSizeInCodeUnits() * 2;
   jvmtiError err = env->Allocate(*size_ptr, bytecode_ptr);
   if (err != OK) {
     return err;
   }
-  memcpy(*bytecode_ptr, code_item->insns_, *size_ptr);
+  memcpy(*bytecode_ptr, accessor.Insns(), *size_ptr);
   return OK;
 }
 
@@ -167,7 +169,7 @@ jvmtiError MethodUtil::GetArgumentsSize(jvmtiEnv* env ATTRIBUTE_UNUSED,
   }
 
   DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
-  *size_ptr = art_method->GetCodeItem()->ins_size_;
+  *size_ptr = art_method->DexInstructionData().InsSize();
 
   return ERR(NONE);
 }
@@ -190,12 +192,17 @@ jvmtiError MethodUtil::GetLocalVariableTable(jvmtiEnv* env,
   }
 
   art::ScopedObjectAccess soa(art::Thread::Current());
-  const art::DexFile* dex_file = art_method->GetDexFile();
-  const art::DexFile::CodeItem* code_item = art_method->GetCodeItem();
-  // TODO code_item == nullptr means that the method is abstract (or native, but we check that
+
+  const art::DexFile* const dex_file = art_method->GetDexFile();
+  if (dex_file == nullptr) {
+    return ERR(ABSENT_INFORMATION);
+  }
+
+  // TODO HasCodeItem == false means that the method is abstract (or native, but we check that
   // earlier). We should check what is returned by the RI in this situation since it's not clear
   // what the appropriate return value is from the spec.
-  if (dex_file == nullptr || code_item == nullptr) {
+  art::CodeItemDebugInfoAccessor accessor(art_method->DexInstructionDebugInfo());
+  if (!accessor.HasCodeItem()) {
     return ERR(ABSENT_INFORMATION);
   }
 
@@ -260,13 +267,10 @@ jvmtiError MethodUtil::GetLocalVariableTable(jvmtiEnv* env,
   };
 
   LocalVariableContext context(env);
-  uint32_t debug_info_offset = art::OatFile::GetDebugInfoOffset(*dex_file, code_item);
-  if (!dex_file->DecodeDebugLocalInfo(code_item,
-                                      debug_info_offset,
-                                      art_method->IsStatic(),
-                                      art_method->GetDexMethodIndex(),
-                                      LocalVariableContext::Callback,
-                                      &context)) {
+  if (!accessor.DecodeDebugLocalInfo(art_method->IsStatic(),
+                                     art_method->GetDexMethodIndex(),
+                                     LocalVariableContext::Callback,
+                                     &context)) {
     // Something went wrong with decoding the debug information. It might as well not be there.
     return ERR(ABSENT_INFORMATION);
   } else {
@@ -298,7 +302,7 @@ jvmtiError MethodUtil::GetMaxLocals(jvmtiEnv* env ATTRIBUTE_UNUSED,
   }
 
   DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
-  *max_ptr = art_method->GetCodeItem()->registers_size_;
+  *max_ptr = art_method->DexInstructionData().RegistersSize();
 
   return ERR(NONE);
 }
@@ -413,7 +417,7 @@ jvmtiError MethodUtil::GetMethodLocation(jvmtiEnv* env ATTRIBUTE_UNUSED,
 
   DCHECK_NE(art_method->GetCodeItemOffset(), 0u);
   *start_location_ptr = 0;
-  *end_location_ptr = art_method->GetCodeItem()->insns_size_in_code_units_ - 1;
+  *end_location_ptr = art_method->DexInstructions().InsnsSizeInCodeUnits() - 1;
 
   return ERR(NONE);
 }
@@ -462,7 +466,7 @@ jvmtiError MethodUtil::GetLineNumberTable(jvmtiEnv* env,
   art::ArtMethod* art_method = art::jni::DecodeArtMethod(method);
   DCHECK(!art_method->IsRuntimeMethod());
 
-  const art::DexFile::CodeItem* code_item;
+  art::CodeItemDebugInfoAccessor accessor;
   const art::DexFile* dex_file;
   {
     art::ScopedObjectAccess soa(art::Thread::Current());
@@ -477,15 +481,14 @@ jvmtiError MethodUtil::GetLineNumberTable(jvmtiEnv* env,
       return ERR(NULL_POINTER);
     }
 
-    code_item = art_method->GetCodeItem();
+    accessor = art::CodeItemDebugInfoAccessor(art_method->DexInstructionDebugInfo());
     dex_file = art_method->GetDexFile();
-    DCHECK(code_item != nullptr) << art_method->PrettyMethod() << " " << dex_file->GetLocation();
+    DCHECK(accessor.HasCodeItem()) << art_method->PrettyMethod() << " " << dex_file->GetLocation();
   }
 
   LineNumberContext context;
-  uint32_t debug_info_offset = art::OatFile::GetDebugInfoOffset(*dex_file, code_item);
   bool success = dex_file->DecodeDebugPositionInfo(
-      code_item, debug_info_offset, CollectLineNumbers, &context);
+      accessor.DebugInfoOffset(), CollectLineNumbers, &context);
   if (!success) {
     return ERR(ABSENT_INFORMATION);
   }
@@ -544,13 +547,12 @@ jvmtiError MethodUtil::IsMethodSynthetic(jvmtiEnv* env, jmethodID m, jboolean* i
 
 class CommonLocalVariableClosure : public art::Closure {
  public:
-  CommonLocalVariableClosure(art::Thread* caller,
-                             jint depth,
-                             jint slot)
-      : result_(ERR(INTERNAL)), caller_(caller), depth_(depth), slot_(slot) {}
+  CommonLocalVariableClosure(jint depth, jint slot)
+      : result_(ERR(INTERNAL)), depth_(depth), slot_(slot) {}
 
   void Run(art::Thread* self) OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
     art::Locks::mutator_lock_->AssertSharedHeld(art::Thread::Current());
+    art::ScopedAssertNoThreadSuspension sants("CommonLocalVariableClosure::Run");
     std::unique_ptr<art::Context> context(art::Context::Create());
     FindFrameAtDepthVisitor visitor(self, context.get(), depth_);
     visitor.WalkStack();
@@ -565,7 +567,7 @@ class CommonLocalVariableClosure : public art::Closure {
       // TODO It might be useful to fake up support for get at least on proxy frames.
       result_ = ERR(OPAQUE_FRAME);
       return;
-    } else if (method->GetCodeItem()->registers_size_ <= slot_) {
+    } else if (method->DexInstructionData().RegistersSize() <= slot_) {
       result_ = ERR(INVALID_SLOT);
       return;
     }
@@ -595,17 +597,17 @@ class CommonLocalVariableClosure : public art::Closure {
     }
   }
 
-  jvmtiError GetResult() const {
+  virtual jvmtiError GetResult() {
     return result_;
   }
 
  protected:
   virtual jvmtiError Execute(art::ArtMethod* method, art::StackVisitor& visitor)
-      REQUIRES(art::Locks::mutator_lock_) = 0;
+      REQUIRES_SHARED(art::Locks::mutator_lock_) = 0;
   virtual jvmtiError GetTypeError(art::ArtMethod* method,
                                   art::Primitive::Type type,
                                   const std::string& descriptor)
-      REQUIRES(art::Locks::mutator_lock_)  = 0;
+      REQUIRES_SHARED(art::Locks::mutator_lock_)  = 0;
 
   jvmtiError GetSlotType(art::ArtMethod* method,
                          uint32_t dex_pc,
@@ -613,8 +615,11 @@ class CommonLocalVariableClosure : public art::Closure {
                          /*out*/art::Primitive::Type* type)
       REQUIRES(art::Locks::mutator_lock_) {
     const art::DexFile* dex_file = method->GetDexFile();
-    const art::DexFile::CodeItem* code_item = method->GetCodeItem();
-    if (dex_file == nullptr || code_item == nullptr) {
+    if (dex_file == nullptr) {
+      return ERR(OPAQUE_FRAME);
+    }
+    art::CodeItemDebugInfoAccessor accessor(method->DexInstructionDebugInfo());
+    if (!accessor.HasCodeItem()) {
       return ERR(OPAQUE_FRAME);
     }
 
@@ -653,9 +658,10 @@ class CommonLocalVariableClosure : public art::Closure {
     };
 
     GetLocalVariableInfoContext context(slot_, dex_pc, descriptor, type);
-    uint32_t debug_info_offset = art::OatFile::GetDebugInfoOffset(*dex_file, code_item);
-    if (!dex_file->DecodeDebugLocalInfo(code_item,
-                                        debug_info_offset,
+    if (!dex_file->DecodeDebugLocalInfo(accessor.RegistersSize(),
+                                        accessor.InsSize(),
+                                        accessor.InsnsSizeInCodeUnits(),
+                                        accessor.DebugInfoOffset(),
                                         method->IsStatic(),
                                         method->GetDexMethodIndex(),
                                         GetLocalVariableInfoContext::Callback,
@@ -668,25 +674,35 @@ class CommonLocalVariableClosure : public art::Closure {
   }
 
   jvmtiError result_;
-  art::Thread* caller_;
   jint depth_;
   jint slot_;
 };
 
 class GetLocalVariableClosure : public CommonLocalVariableClosure {
  public:
-  GetLocalVariableClosure(art::Thread* caller,
-                          jint depth,
+  GetLocalVariableClosure(jint depth,
                           jint slot,
                           art::Primitive::Type type,
                           jvalue* val)
-      : CommonLocalVariableClosure(caller, depth, slot), type_(type), val_(val) {}
+      : CommonLocalVariableClosure(depth, slot),
+        type_(type),
+        val_(val),
+        obj_val_(nullptr) {}
+
+  virtual jvmtiError GetResult() REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (result_ == OK && type_ == art::Primitive::kPrimNot) {
+      val_->l = obj_val_.IsNull()
+          ? nullptr
+          : art::Thread::Current()->GetJniEnv()->AddLocalReference<jobject>(obj_val_.Read());
+    }
+    return CommonLocalVariableClosure::GetResult();
+  }
 
  protected:
   jvmtiError GetTypeError(art::ArtMethod* method ATTRIBUTE_UNUSED,
                           art::Primitive::Type slot_type,
                           const std::string& descriptor ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
     switch (slot_type) {
       case art::Primitive::kPrimByte:
       case art::Primitive::kPrimChar:
@@ -706,7 +722,7 @@ class GetLocalVariableClosure : public CommonLocalVariableClosure {
   }
 
   jvmtiError Execute(art::ArtMethod* method, art::StackVisitor& visitor)
-      OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
     switch (type_) {
       case art::Primitive::kPrimNot: {
         uint32_t ptr_val;
@@ -716,8 +732,8 @@ class GetLocalVariableClosure : public CommonLocalVariableClosure {
                              &ptr_val)) {
           return ERR(OPAQUE_FRAME);
         }
-        art::ObjPtr<art::mirror::Object> obj(reinterpret_cast<art::mirror::Object*>(ptr_val));
-        val_->l = obj.IsNull() ? nullptr : caller_->GetJniEnv()->AddLocalReference<jobject>(obj);
+        obj_val_ = art::GcRoot<art::mirror::Object>(
+            reinterpret_cast<art::mirror::Object*>(ptr_val));
         break;
       }
       case art::Primitive::kPrimInt:
@@ -754,6 +770,7 @@ class GetLocalVariableClosure : public CommonLocalVariableClosure {
  private:
   art::Primitive::Type type_;
   jvalue* val_;
+  art::GcRoot<art::mirror::Object> obj_val_;
 };
 
 jvmtiError MethodUtil::GetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
@@ -776,9 +793,12 @@ jvmtiError MethodUtil::GetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
     art::Locks::thread_list_lock_->ExclusiveUnlock(self);
     return err;
   }
-  GetLocalVariableClosure c(self, depth, slot, type, val);
-  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution.
-  if (!ThreadUtil::RequestGCSafeSynchronousCheckpoint(target, &c)) {
+  art::ScopedAssertNoThreadSuspension sants("Performing GetLocalVariable");
+  GetLocalVariableClosure c(depth, slot, type, val);
+  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution.  We
+  // need to avoid suspending as we wait for the checkpoint to occur since we are (potentially)
+  // transfering a GcRoot across threads.
+  if (!target->RequestSynchronousCheckpoint(&c, art::ThreadState::kRunnable)) {
     return ERR(THREAD_NOT_ALIVE);
   } else {
     return c.GetResult();
@@ -792,13 +812,13 @@ class SetLocalVariableClosure : public CommonLocalVariableClosure {
                           jint slot,
                           art::Primitive::Type type,
                           jvalue val)
-      : CommonLocalVariableClosure(caller, depth, slot), type_(type), val_(val) {}
+      : CommonLocalVariableClosure(depth, slot), caller_(caller), type_(type), val_(val) {}
 
  protected:
   jvmtiError GetTypeError(art::ArtMethod* method,
                           art::Primitive::Type slot_type,
                           const std::string& descriptor)
-      OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
     switch (slot_type) {
       case art::Primitive::kPrimNot: {
         if (type_ != art::Primitive::kPrimNot) {
@@ -834,7 +854,7 @@ class SetLocalVariableClosure : public CommonLocalVariableClosure {
   }
 
   jvmtiError Execute(art::ArtMethod* method, art::StackVisitor& visitor)
-      OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
     switch (type_) {
       case art::Primitive::kPrimNot: {
         uint32_t ptr_val;
@@ -881,6 +901,7 @@ class SetLocalVariableClosure : public CommonLocalVariableClosure {
   }
 
  private:
+  art::Thread* caller_;
   art::Primitive::Type type_;
   jvalue val_;
 };
@@ -894,6 +915,9 @@ jvmtiError MethodUtil::SetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
   if (depth < 0) {
     return ERR(ILLEGAL_ARGUMENT);
   }
+  // Make sure that we know not to do any OSR anymore.
+  // TODO We should really keep track of this at the Frame granularity.
+  DeoptManager::Get()->SetLocalsUpdated();
   art::Thread* self = art::Thread::Current();
   // Suspend JIT since it can get confused if we deoptimize methods getting jitted.
   art::jit::ScopedJitSuspend suspend_jit;
@@ -907,7 +931,7 @@ jvmtiError MethodUtil::SetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
   }
   SetLocalVariableClosure c(self, depth, slot, type, val);
   // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution.
-  if (!ThreadUtil::RequestGCSafeSynchronousCheckpoint(target, &c)) {
+  if (!target->RequestSynchronousCheckpoint(&c)) {
     return ERR(THREAD_NOT_ALIVE);
   } else {
     return c.GetResult();
@@ -916,13 +940,13 @@ jvmtiError MethodUtil::SetLocalVariableGeneric(jvmtiEnv* env ATTRIBUTE_UNUSED,
 
 class GetLocalInstanceClosure : public art::Closure {
  public:
-  GetLocalInstanceClosure(art::Thread* caller, jint depth, jobject* val)
+  explicit GetLocalInstanceClosure(jint depth)
       : result_(ERR(INTERNAL)),
-        caller_(caller),
         depth_(depth),
-        val_(val) {}
+        val_(nullptr) {}
 
   void Run(art::Thread* self) OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+    art::ScopedAssertNoThreadSuspension sants("GetLocalInstanceClosure::Run");
     art::Locks::mutator_lock_->AssertSharedHeld(art::Thread::Current());
     std::unique_ptr<art::Context> context(art::Context::Create());
     FindFrameAtDepthVisitor visitor(self, context.get(), depth_);
@@ -933,19 +957,22 @@ class GetLocalInstanceClosure : public art::Closure {
       return;
     }
     result_ = OK;
-    art::ObjPtr<art::mirror::Object> obj = visitor.GetThisObject();
-    *val_ = obj.IsNull() ? nullptr : caller_->GetJniEnv()->AddLocalReference<jobject>(obj);
+    val_ = art::GcRoot<art::mirror::Object>(visitor.GetThisObject());
   }
 
-  jvmtiError GetResult() const {
+  jvmtiError GetResult(jobject* data_out) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (result_ == OK) {
+      *data_out = val_.IsNull()
+          ? nullptr
+          : art::Thread::Current()->GetJniEnv()->AddLocalReference<jobject>(val_.Read());
+    }
     return result_;
   }
 
  private:
   jvmtiError result_;
-  art::Thread* caller_;
   jint depth_;
-  jobject* val_;
+  art::GcRoot<art::mirror::Object> val_;
 };
 
 jvmtiError MethodUtil::GetLocalInstance(jvmtiEnv* env ATTRIBUTE_UNUSED,
@@ -964,12 +991,15 @@ jvmtiError MethodUtil::GetLocalInstance(jvmtiEnv* env ATTRIBUTE_UNUSED,
     art::Locks::thread_list_lock_->ExclusiveUnlock(self);
     return err;
   }
-  GetLocalInstanceClosure c(self, depth, data);
-  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution.
-  if (!ThreadUtil::RequestGCSafeSynchronousCheckpoint(target, &c)) {
+  art::ScopedAssertNoThreadSuspension sants("Performing GetLocalInstance");
+  GetLocalInstanceClosure c(depth);
+  // RequestSynchronousCheckpoint releases the thread_list_lock_ as a part of its execution.  We
+  // need to avoid suspending as we wait for the checkpoint to occur since we are (potentially)
+  // transfering a GcRoot across threads.
+  if (!target->RequestSynchronousCheckpoint(&c, art::ThreadState::kRunnable)) {
     return ERR(THREAD_NOT_ALIVE);
   } else {
-    return c.GetResult();
+    return c.GetResult(data);
   }
 }
 

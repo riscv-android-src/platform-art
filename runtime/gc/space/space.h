@@ -20,13 +20,13 @@
 #include <memory>
 #include <string>
 
-#include "atomic.h"
+#include "base/atomic.h"
+#include "base/globals.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
 #include "base/mutex.h"
 #include "gc/accounting/space_bitmap.h"
 #include "gc/collector/object_byte_pair.h"
-#include "globals.h"
-#include "mem_map.h"
 
 namespace art {
 namespace mirror {
@@ -272,7 +272,7 @@ class ContinuousSpace : public Space {
 
   // Current address at which the space ends, which may vary as the space is filled.
   uint8_t* End() const {
-    return end_.LoadRelaxed();
+    return end_.load(std::memory_order_relaxed);
   }
 
   // The end of the address range covered by the space.
@@ -283,7 +283,7 @@ class ContinuousSpace : public Space {
   // Change the end of the space. Be careful with use since changing the end of a space to an
   // invalid value may break the GC.
   void SetEnd(uint8_t* end) {
-    end_.StoreRelaxed(end);
+    end_.store(end, std::memory_order_relaxed);
   }
 
   void SetLimit(uint8_t* limit) {
@@ -389,7 +389,11 @@ class MemMapSpace : public ContinuousSpace {
   }
 
  protected:
-  MemMapSpace(const std::string& name, MemMap* mem_map, uint8_t* begin, uint8_t* end, uint8_t* limit,
+  MemMapSpace(const std::string& name,
+              MemMap* mem_map,
+              uint8_t* begin,
+              uint8_t* end,
+              uint8_t* limit,
               GcRetentionPolicy gc_retention_policy)
       : ContinuousSpace(name, gc_retention_policy, begin, end, limit),
         mem_map_(mem_map) {
@@ -420,7 +424,10 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   }
 
   bool HasBoundBitmaps() const REQUIRES(Locks::heap_bitmap_lock_);
+  // Make the mark bitmap an alias of the live bitmap. Save the current mark bitmap into
+  // `temp_bitmap_`, so that we can restore it later in ContinuousMemMapAllocSpace::UnBindBitmaps.
   void BindLiveToMarkBitmap() REQUIRES(Locks::heap_bitmap_lock_);
+  // Unalias the mark bitmap from the live bitmap and restore the old mark bitmap.
   void UnBindBitmaps() REQUIRES(Locks::heap_bitmap_lock_);
   // Swap the live and mark bitmaps of this space. This is used by the GC for concurrent sweeping.
   void SwapBitmaps();

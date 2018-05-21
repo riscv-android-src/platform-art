@@ -23,8 +23,8 @@
 #include "base/callee_save_type.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "dex_file_types.h"
-#include "dex_instruction.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction.h"
 #include "gc/allocator_type.h"
 #include "handle.h"
 #include "jvalue.h"
@@ -34,6 +34,8 @@ namespace art {
 namespace mirror {
 class Array;
 class Class;
+class MethodHandle;
+class MethodType;
 class Object;
 class String;
 }  // namespace mirror
@@ -148,6 +150,15 @@ inline ObjPtr<mirror::Class> ResolveVerifyAndClinit(dex::TypeIndex type_idx,
                                                     Thread* self,
                                                     bool can_run_clinit,
                                                     bool verify_access)
+    REQUIRES_SHARED(Locks::mutator_lock_)
+    REQUIRES(!Roles::uninterruptible_);
+
+ObjPtr<mirror::MethodHandle> ResolveMethodHandleFromCode(ArtMethod* referrer,
+                                                         uint32_t method_handle_idx)
+    REQUIRES_SHARED(Locks::mutator_lock_)
+    REQUIRES(!Roles::uninterruptible_);
+
+ObjPtr<mirror::MethodType> ResolveMethodTypeFromCode(ArtMethod* referrer, dex::ProtoIndex proto_idx)
     REQUIRES_SHARED(Locks::mutator_lock_)
     REQUIRES(!Roles::uninterruptible_);
 

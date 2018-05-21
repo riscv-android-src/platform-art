@@ -19,9 +19,8 @@
 
 #include <string.h>
 
-#include "base/bit_utils.h"
 #include "base/enums.h"
-#include "globals.h"
+#include "base/globals.h"
 #include "mirror/object.h"
 
 namespace art {
@@ -179,6 +178,10 @@ class PACKED(4) ImageHeader {
     return patch_delta_;
   }
 
+  void SetPatchDelta(off_t patch_delta) {
+    patch_delta_ = patch_delta;
+  }
+
   static std::string GetOatLocationFromImageLocation(const std::string& image) {
     return GetLocationFromImageLocation(image, "oat");
   }
@@ -321,22 +324,6 @@ class PACKED(4) ImageHeader {
     // App images currently require a boot image, if the size is non zero then it is an app image
     // header.
     return boot_image_size_ != 0u;
-  }
-
-  uint32_t GetBootImageConstantTablesOffset() const {
-    // Interned strings table and class table for boot image are mmapped read only.
-    DCHECK(!IsAppImage());
-    const ImageSection& interned_strings = GetInternedStringsSection();
-    DCHECK_ALIGNED(interned_strings.Offset(), kPageSize);
-    return interned_strings.Offset();
-  }
-
-  uint32_t GetBootImageConstantTablesSize() const {
-    uint32_t start_offset = GetBootImageConstantTablesOffset();
-    const ImageSection& class_table = GetClassTableSection();
-    DCHECK_LE(start_offset, class_table.Offset());
-    size_t tables_size = class_table.Offset() + class_table.Size() - start_offset;
-    return RoundUp(tables_size, kPageSize);
   }
 
   // Visit mirror::Objects in the section starting at base.

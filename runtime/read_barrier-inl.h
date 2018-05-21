@@ -19,6 +19,7 @@
 
 #include "read_barrier.h"
 
+#include "base/utils.h"
 #include "gc/accounting/read_barrier_table.h"
 #include "gc/collector/concurrent_copying-inl.h"
 #include "gc/heap.h"
@@ -26,7 +27,6 @@
 #include "mirror/object_reference.h"
 #include "mirror/reference.h"
 #include "runtime.h"
-#include "utils.h"
 
 namespace art {
 
@@ -130,8 +130,8 @@ inline MirrorType* ReadBarrier::BarrierForRoot(MirrorType** root,
         ref = reinterpret_cast<MirrorType*>(Mark(old_ref));
         // Update the field atomically. This may fail if mutator updates before us, but it's ok.
         if (ref != old_ref) {
-          Atomic<mirror::Object*>* atomic_root = reinterpret_cast<Atomic<mirror::Object*>*>(root);
-          atomic_root->CompareExchangeStrongRelaxed(old_ref, ref);
+          Atomic<MirrorType*>* atomic_root = reinterpret_cast<Atomic<MirrorType*>*>(root);
+          atomic_root->CompareAndSetStrongRelaxed(old_ref, ref);
         }
       }
       AssertToSpaceInvariant(gc_root_source, ref);
@@ -174,7 +174,7 @@ inline MirrorType* ReadBarrier::BarrierForRoot(mirror::CompressedReference<Mirro
       if (new_ref.AsMirrorPtr() != old_ref.AsMirrorPtr()) {
         auto* atomic_root =
             reinterpret_cast<Atomic<mirror::CompressedReference<MirrorType>>*>(root);
-        atomic_root->CompareExchangeStrongRelaxed(old_ref, new_ref);
+        atomic_root->CompareAndSetStrongRelaxed(old_ref, new_ref);
       }
     }
     AssertToSpaceInvariant(gc_root_source, ref);

@@ -40,7 +40,7 @@
 #include "gc/heap.h"
 #include "gc/reference_processor.h"
 #include "gc_root.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "lock_word.h"
 #include "monitor.h"
 #include "native_stack_dump.h"
@@ -69,8 +69,7 @@ static constexpr useconds_t kThreadSuspendMaxSleepUs = 5000;
 
 // Whether we should try to dump the native stack of unattached threads. See commit ed8b723 for
 // some history.
-// Turned off again. b/29248079
-static constexpr bool kDumpUnattachedThreadNativeStackForSigQuit = false;
+static constexpr bool kDumpUnattachedThreadNativeStackForSigQuit = true;
 
 ThreadList::ThreadList(uint64_t thread_suspend_timeout_ns)
     : suspend_all_count_(0),
@@ -733,7 +732,7 @@ void ThreadList::SuspendAllInternal(Thread* self,
     if (reason == SuspendReason::kForDebugger) {
       ++debug_suspend_all_count_;
     }
-    pending_threads.StoreRelaxed(list_.size() - num_ignored);
+    pending_threads.store(list_.size() - num_ignored, std::memory_order_relaxed);
     // Increment everybody's suspend count (except those that should be ignored).
     for (const auto& thread : list_) {
       if (thread == ignore1 || thread == ignore2) {
@@ -749,7 +748,7 @@ void ThreadList::SuspendAllInternal(Thread* self,
       if (thread->IsSuspended()) {
         // Only clear the counter for the current thread.
         thread->ClearSuspendBarrier(&pending_threads);
-        pending_threads.FetchAndSubSequentiallyConsistent(1);
+        pending_threads.fetch_sub(1, std::memory_order_seq_cst);
       }
     }
   }
@@ -762,7 +761,7 @@ void ThreadList::SuspendAllInternal(Thread* self,
 #endif
   const uint64_t start_time = NanoTime();
   while (true) {
-    int32_t cur_val = pending_threads.LoadRelaxed();
+    int32_t cur_val = pending_threads.load(std::memory_order_relaxed);
     if (LIKELY(cur_val > 0)) {
 #if ART_USE_FUTEXES
       if (futex(pending_threads.Address(), FUTEX_WAIT, cur_val, &wait_timeout, nullptr, 0) != 0) {

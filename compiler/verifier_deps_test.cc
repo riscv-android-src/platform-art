@@ -18,17 +18,17 @@
 #include "verifier/verifier_deps.h"
 
 #include "art_method-inl.h"
+#include "base/indenter.h"
 #include "class_linker.h"
 #include "common_compiler_test.h"
 #include "compiler_callbacks.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
 #include "driver/compiler_driver-inl.h"
 #include "driver/compiler_options.h"
 #include "handle_scope-inl.h"
-#include "indenter.h"
 #include "mirror/class_loader.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
@@ -237,9 +237,9 @@ class VerifierDepsTest : public CommonCompilerTest {
           CHECK(soa.Self()->IsExceptionPending());
           soa.Self()->ClearException();
         } else if (unverified_classes.find(class_def.class_idx_) == unverified_classes.end()) {
-          ASSERT_EQ(cls->GetStatus(), mirror::Class::kStatusVerified);
+          ASSERT_EQ(cls->GetStatus(), ClassStatus::kVerified);
         } else {
-          ASSERT_LT(cls->GetStatus(), mirror::Class::kStatusVerified);
+          ASSERT_LT(cls->GetStatus(), ClassStatus::kVerified);
         }
       }
     }

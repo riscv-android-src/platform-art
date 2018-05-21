@@ -21,10 +21,11 @@
 #include "base/enums.h"
 #include "class_linker.h"
 #include "common_throws.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "indirect_reference_table-inl.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
+#include "jvalue-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/executable.h"
 #include "mirror/object_array-inl.h"
@@ -35,6 +36,7 @@
 #include "well_known_classes.h"
 
 namespace art {
+namespace {
 
 using android::base::StringPrintf;
 
@@ -157,6 +159,7 @@ class ArgArray {
           Append(args[args_offset].s);
           break;
         case 'I':
+          FALLTHROUGH_INTENDED;
         case 'F':
           Append(args[args_offset].i);
           break;
@@ -164,6 +167,7 @@ class ArgArray {
           Append(soa.Decode<mirror::Object>(args[args_offset].l));
           break;
         case 'D':
+          FALLTHROUGH_INTENDED;
         case 'J':
           AppendWide(args[args_offset].j);
           break;
@@ -361,7 +365,7 @@ class ArgArray {
   std::unique_ptr<uint32_t[]> large_arg_array_;
 };
 
-static void CheckMethodArguments(JavaVMExt* vm, ArtMethod* m, uint32_t* args)
+void CheckMethodArguments(JavaVMExt* vm, ArtMethod* m, uint32_t* args)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile::TypeList* params = m->GetParameterTypeList();
   if (params == nullptr) {
@@ -436,22 +440,24 @@ static void CheckMethodArguments(JavaVMExt* vm, ArtMethod* m, uint32_t* args)
   }
 }
 
-static ArtMethod* FindVirtualMethod(ObjPtr<mirror::Object> receiver, ArtMethod* method)
+ArtMethod* FindVirtualMethod(ObjPtr<mirror::Object> receiver, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   return receiver->GetClass()->FindVirtualMethodForVirtualOrInterface(method, kRuntimePointerSize);
 }
 
 
-static void InvokeWithArgArray(const ScopedObjectAccessAlreadyRunnable& soa,
+void InvokeWithArgArray(const ScopedObjectAccessAlreadyRunnable& soa,
                                ArtMethod* method, ArgArray* arg_array, JValue* result,
                                const char* shorty)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   uint32_t* args = arg_array->GetArray();
-  if (UNLIKELY(soa.Env()->check_jni)) {
+  if (UNLIKELY(soa.Env()->IsCheckJniEnabled())) {
     CheckMethodArguments(soa.Vm(), method->GetInterfaceMethodIfProxy(kRuntimePointerSize), args);
   }
   method->Invoke(soa.Self(), args, arg_array->GetNumBytes(), result, shorty);
 }
+
+}  // anonymous namespace
 
 JValue InvokeWithVarArgs(const ScopedObjectAccessAlreadyRunnable& soa, jobject obj, jmethodID mid,
                          va_list args)
@@ -927,14 +933,14 @@ void UpdateReference(Thread* self, jobject obj, ObjPtr<mirror::Object> result) {
   IndirectRef ref = reinterpret_cast<IndirectRef>(obj);
   IndirectRefKind kind = IndirectReferenceTable::GetIndirectRefKind(ref);
   if (kind == kLocal) {
-    self->GetJniEnv()->locals.Update(obj, result);
+    self->GetJniEnv()->UpdateLocal(obj, result);
   } else if (kind == kHandleScopeOrInvalid) {
     LOG(FATAL) << "Unsupported UpdateReference for kind kHandleScopeOrInvalid";
   } else if (kind == kGlobal) {
-    self->GetJniEnv()->vm->UpdateGlobal(self, ref, result);
+    self->GetJniEnv()->GetVm()->UpdateGlobal(self, ref, result);
   } else {
     DCHECK_EQ(kind, kWeakGlobal);
-    self->GetJniEnv()->vm->UpdateWeakGlobal(self, ref, result);
+    self->GetJniEnv()->GetVm()->UpdateWeakGlobal(self, ref, result);
   }
 }
 

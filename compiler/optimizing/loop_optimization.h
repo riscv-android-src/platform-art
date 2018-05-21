@@ -20,12 +20,15 @@
 #include "base/scoped_arena_allocator.h"
 #include "base/scoped_arena_containers.h"
 #include "induction_var_range.h"
+#include "loop_analysis.h"
 #include "nodes.h"
 #include "optimization.h"
+#include "superblock_cloner.h"
 
 namespace art {
 
 class CompilerDriver;
+class ArchDefaultLoopHelper;
 
 /**
  * Loop optimizations. Builds a loop hierarchy and applies optimizations to
@@ -40,7 +43,7 @@ class HLoopOptimization : public HOptimization {
                     OptimizingCompilerStats* stats,
                     const char* name = kLoopOptimizationPassName);
 
-  void Run() OVERRIDE;
+  bool Run() OVERRIDE;
 
   static constexpr const char* kLoopOptimizationPassName = "loop_optimization";
 
@@ -75,11 +78,10 @@ class HLoopOptimization : public HOptimization {
     kNoSignedHAdd    = 1 << 5,   // no signed halving add
     kNoUnroundedHAdd = 1 << 6,   // no unrounded halving add
     kNoAbs           = 1 << 7,   // no absolute value
-    kNoMinMax        = 1 << 8,   // no min/max
-    kNoStringCharAt  = 1 << 9,   // no StringCharAt
-    kNoReduction     = 1 << 10,  // no reduction
-    kNoSAD           = 1 << 11,  // no sum of absolute differences (SAD)
-    kNoWideSAD       = 1 << 12,  // no sum of absolute differences (SAD) with operand widening
+    kNoStringCharAt  = 1 << 8,   // no StringCharAt
+    kNoReduction     = 1 << 9,   // no reduction
+    kNoSAD           = 1 << 10,  // no sum of absolute differences (SAD)
+    kNoWideSAD       = 1 << 11,  // no sum of absolute differences (SAD) with operand widening
   };
 
   /*
@@ -119,7 +121,7 @@ class HLoopOptimization : public HOptimization {
   // Loop setup and traversal.
   //
 
-  void LocalRun();
+  bool LocalRun();
   void AddLoop(HLoopInformation* loop_info);
   void RemoveLoop(LoopNode* node);
 
@@ -134,9 +136,20 @@ class HLoopOptimization : public HOptimization {
   void SimplifyInduction(LoopNode* node);
   void SimplifyBlocks(LoopNode* node);
 
-  // Performs optimizations specific to inner loop (empty loop removal,
+  // Performs optimizations specific to inner loop with finite header logic (empty loop removal,
   // unrolling, vectorization). Returns true if anything changed.
+  bool TryOptimizeInnerLoopFinite(LoopNode* node);
+
+  // Performs optimizations specific to inner loop. Returns true if anything changed.
   bool OptimizeInnerLoop(LoopNode* node);
+
+  // Tries to apply loop unrolling for branch penalty reduction and better instruction scheduling
+  // opportunities. Returns whether transformation happened.
+  bool TryUnrollingForBranchPenaltyReduction(LoopNode* loop_node);
+
+  // Tries to apply loop peeling for loop invariant exits elimination. Returns whether
+  // transformation happened.
+  bool TryPeelingForLoopInvariantExitsElimination(LoopNode* loop_node);
 
   //
   // Vectorization analysis and synthesis.
@@ -173,10 +186,14 @@ class HLoopOptimization : public HOptimization {
   void GenerateVecOp(HInstruction* org,
                      HInstruction* opa,
                      HInstruction* opb,
-                     DataType::Type type,
-                     bool is_unsigned = false);
+                     DataType::Type type);
 
   // Vectorization idioms.
+  bool VectorizeSaturationIdiom(LoopNode* node,
+                                HInstruction* instruction,
+                                bool generate_code,
+                                DataType::Type type,
+                                uint64_t restrictions);
   bool VectorizeHalvingAddIdiom(LoopNode* node,
                                 HInstruction* instruction,
                                 bool generate_code,
@@ -197,7 +214,6 @@ class HLoopOptimization : public HOptimization {
                             const ArrayReference* peeling_candidate);
   uint32_t MaxNumberPeeled();
   bool IsVectorizationProfitable(int64_t trip_count);
-  uint32_t GetUnrollingFactor(HBasicBlock* block, int64_t trip_count);
 
   //
   // Helpers.
@@ -290,6 +306,9 @@ class HLoopOptimization : public HOptimization {
   HBasicBlock* vector_header_;  // header of the new loop
   HBasicBlock* vector_body_;  // body of the new loop
   HInstruction* vector_index_;  // normalized index of the new loop
+
+  // Helper for target-specific behaviour for loop optimizations.
+  ArchDefaultLoopHelper* arch_loop_helper_;
 
   friend class LoopOptimizationTest;
 

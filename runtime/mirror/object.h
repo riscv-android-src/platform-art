@@ -17,10 +17,10 @@
 #ifndef ART_RUNTIME_MIRROR_OBJECT_H_
 #define ART_RUNTIME_MIRROR_OBJECT_H_
 
-#include "atomic.h"
+#include "base/atomic.h"
 #include "base/casts.h"
 #include "base/enums.h"
-#include "globals.h"
+#include "base/globals.h"
 #include "obj_ptr.h"
 #include "object_reference.h"
 #include "offsets.h"
@@ -347,6 +347,21 @@ class MANAGED LOCKABLE Object {
                                                                      ObjPtr<Object> old_value,
                                                                      ObjPtr<Object> new_value)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<bool kTransactionActive,
+           bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  ObjPtr<Object> CompareAndExchangeFieldObject(MemberOffset field_offset,
+                                               ObjPtr<Object> old_value,
+                                               ObjPtr<Object> new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<bool kTransactionActive,
+           bool kCheckTransaction = true,
+           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  ObjPtr<Object> ExchangeFieldObject(MemberOffset field_offset, ObjPtr<Object> new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   template<bool kTransactionActive,
            bool kCheckTransaction = true,
            VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -592,6 +607,52 @@ class MANAGED LOCKABLE Object {
           field_offset, reinterpret_cast64<int64_t>(new_value));
     }
   }
+
+  // Base class for accessors used to describe accesses performed by VarHandle methods.
+  template <typename T>
+  class Accessor {
+   public:
+    virtual ~Accessor() {
+      static_assert(std::is_arithmetic<T>::value, "unsupported type");
+    }
+    virtual void Access(T* field_address) = 0;
+  };
+
+  // Getter method that exposes the raw address of a primitive value-type field to an Accessor
+  // instance. This are used by VarHandle accessor methods to read fields with a wider range of
+  // memory orderings than usually required.
+  template<typename T, VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void GetPrimitiveFieldViaAccessor(MemberOffset field_offset, Accessor<T>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Update methods that expose the raw address of a primitive value-type to an Accessor instance
+  // that will attempt to update the field. These are used by VarHandle accessor methods to
+  // atomically update fields with a wider range of memory orderings than usually required.
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateFieldBooleanViaAccessor(MemberOffset field_offset, Accessor<uint8_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateFieldByteViaAccessor(MemberOffset field_offset, Accessor<int8_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateFieldCharViaAccessor(MemberOffset field_offset, Accessor<uint16_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateFieldShortViaAccessor(MemberOffset field_offset, Accessor<int16_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateField32ViaAccessor(MemberOffset field_offset, Accessor<int32_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  template<bool kTransactionActive, bool kCheckTransaction = true,
+      VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  void UpdateField64ViaAccessor(MemberOffset field_offset, Accessor<int64_t>* accessor)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // TODO fix thread safety analysis broken by the use of template. This should be
   // REQUIRES_SHARED(Locks::mutator_lock_).
   template <bool kVisitNativeRoots = true,
@@ -669,7 +730,7 @@ class MANAGED LOCKABLE Object {
     uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
     kSize* addr = reinterpret_cast<kSize*>(raw_addr);
     if (kIsVolatile) {
-      reinterpret_cast<Atomic<kSize>*>(addr)->StoreSequentiallyConsistent(new_value);
+      reinterpret_cast<Atomic<kSize>*>(addr)->store(new_value, std::memory_order_seq_cst);
     } else {
       reinterpret_cast<Atomic<kSize>*>(addr)->StoreJavaData(new_value);
     }
@@ -681,7 +742,7 @@ class MANAGED LOCKABLE Object {
     const uint8_t* raw_addr = reinterpret_cast<const uint8_t*>(this) + field_offset.Int32Value();
     const kSize* addr = reinterpret_cast<const kSize*>(raw_addr);
     if (kIsVolatile) {
-      return reinterpret_cast<const Atomic<kSize>*>(addr)->LoadSequentiallyConsistent();
+      return reinterpret_cast<const Atomic<kSize>*>(addr)->load(std::memory_order_seq_cst);
     } else {
       return reinterpret_cast<const Atomic<kSize>*>(addr)->LoadJavaData();
     }

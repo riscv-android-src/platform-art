@@ -19,11 +19,11 @@
 
 #include "accessible_object.h"
 #include "base/enums.h"
+#include "dex/modifiers.h"
+#include "dex/primitive.h"
 #include "gc_root.h"
-#include "modifiers.h"
 #include "obj_ptr.h"
 #include "object.h"
-#include "primitive.h"
 #include "read_barrier_option.h"
 
 namespace art {

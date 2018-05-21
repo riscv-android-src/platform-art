@@ -18,10 +18,10 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_MIPS64_H_
 
 #include "code_generator.h"
+#include "dex/type_reference.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "parallel_move_resolver.h"
-#include "type_reference.h"
 #include "utils/mips64/assembler_mips64.h"
 
 namespace art {
@@ -142,6 +142,7 @@ class ParallelMoveResolverMIPS64 : public ParallelMoveResolverWithSwap {
   void RestoreScratch(int reg) OVERRIDE;
 
   void Exchange(int index1, int index2, bool double_slot);
+  void ExchangeQuadSlots(int index1, int index2);
 
   Mips64Assembler* GetAssembler() const;
 
@@ -232,6 +233,7 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
 
  private:
   void GenerateClassInitializationCheck(SlowPathCodeMIPS64* slow_path, GpuRegister class_reg);
+  void GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check, GpuRegister temp);
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
   void HandleBinaryOp(HBinaryOperation* operation);
   void HandleCondition(HCondition* instruction);
@@ -240,6 +242,10 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
                       const FieldInfo& field_info,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
+
+  void GenerateMinMaxInt(LocationSummary* locations, bool is_min);
+  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMax(HBinaryOperation* minmax, bool is_min);
 
   // Generate a heap reference load using one register `out`:
   //
@@ -554,9 +560,9 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   void GenerateImplicitNullCheck(HNullCheck* instruction) OVERRIDE;
   void GenerateExplicitNullCheck(HNullCheck* instruction) OVERRIDE;
 
-  // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays,
-  // boot image strings and method calls. The only difference is the interpretation of
-  // the offset_or_index.
+  // The PcRelativePatchInfo is used for PC-relative addressing of methods/strings/types,
+  // whether through .data.bimg.rel.ro, .bss, or directly in the boot image.
+  //
   // The 16-bit halves of the 32-bit PC-relative offset are patched separately, necessitating
   // two patches/infos. There can be more than two patches/infos if the instruction supplying
   // the high half is shared with e.g. a slow path, while the low half is supplied by separate
@@ -570,20 +576,13 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   //     ...
   //     sw    r2, low(r1)    // patch
   //     bc    back
-  struct PcRelativePatchInfo {
-    PcRelativePatchInfo(const DexFile& dex_file,
+  struct PcRelativePatchInfo : PatchInfo<Mips64Label> {
+    PcRelativePatchInfo(const DexFile* dex_file,
                         uint32_t off_or_idx,
                         const PcRelativePatchInfo* info_high)
-        : target_dex_file(dex_file),
-          offset_or_index(off_or_idx),
-          label(),
+        : PatchInfo<Mips64Label>(dex_file, off_or_idx),
           patch_info_high(info_high) { }
 
-    const DexFile& target_dex_file;
-    // Either the dex cache array element offset or the string/type/method index.
-    uint32_t offset_or_index;
-    // Label for the instruction to patch.
-    Mips64Label label;
     // Pointer to the info for the high half patch or nullptr if this is the high half patch info.
     const PcRelativePatchInfo* patch_info_high;
 
@@ -592,19 +591,21 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
     DISALLOW_COPY_AND_ASSIGN(PcRelativePatchInfo);
   };
 
-  PcRelativePatchInfo* NewPcRelativeMethodPatch(MethodReference target_method,
-                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageRelRoPatch(uint32_t boot_image_offset,
+                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageMethodPatch(MethodReference target_method,
+                                               const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method,
                                               const PcRelativePatchInfo* info_high = nullptr);
-  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file,
-                                              dex::TypeIndex type_index,
-                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageTypePatch(const DexFile& dex_file,
+                                             dex::TypeIndex type_index,
+                                             const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file,
                                             dex::TypeIndex type_index,
                                             const PcRelativePatchInfo* info_high = nullptr);
-  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                dex::StringIndex string_index,
-                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageStringPatch(const DexFile& dex_file,
+                                               dex::StringIndex string_index,
+                                               const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewStringBssEntryPatch(const DexFile& dex_file,
                                               dex::StringIndex string_index,
                                               const PcRelativePatchInfo* info_high = nullptr);
@@ -638,7 +639,7 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
   Literal* DeduplicateUint64Literal(uint64_t value);
 
-  PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
+  PcRelativePatchInfo* NewPcRelativePatch(const DexFile* dex_file,
                                           uint32_t offset_or_index,
                                           const PcRelativePatchInfo* info_high,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -661,16 +662,17 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   // Deduplication map for 64-bit literals, used for non-patchable method address or method code
   // address.
   Uint64ToLiteralMap uint64_literals_;
-  // PC-relative method patch info for kBootImageLinkTimePcRelative.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
+  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
+  ArenaDeque<PcRelativePatchInfo> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
+  ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // PC-relative String patch info; type depends on configuration (intern table or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // PC-relative String patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
 

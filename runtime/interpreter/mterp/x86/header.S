@@ -88,7 +88,7 @@ unspecified registers or condition codes.
  * to expand the macros into assembler assignment statements.
  */
 #include "asm_support.h"
-#include "interpreter/mterp/cfi_asm_support.h"
+#include "interpreter/cfi_asm_support.h"
 
 /*
  * Handle mac compiler specific
@@ -157,6 +157,8 @@ unspecified registers or condition codes.
 /* single-purpose registers, given names for clarity */
 #define rSELF    IN_ARG0(%esp)
 #define rPC      %esi
+#define CFI_DEX  6  // DWARF register number of the register holding dex-pc (esi).
+#define CFI_TMP  0  // DWARF register number of the first argument register (eax).
 #define rFP      %edi
 #define rINST    %ebx
 #define rINSTw   %bx

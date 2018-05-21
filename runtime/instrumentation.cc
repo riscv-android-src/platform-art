@@ -21,13 +21,13 @@
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
-#include "atomic.h"
+#include "base/atomic.h"
 #include "base/callee_save_type.h"
 #include "class_linker.h"
 #include "debugger.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
-#include "dex_instruction-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
+#include "dex/dex_instruction-inl.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
@@ -139,10 +139,13 @@ static void UpdateEntrypoints(ArtMethod* method, const void* quick_code)
 
 bool Instrumentation::NeedDebugVersionFor(ArtMethod* method) const
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return Runtime::Current()->IsJavaDebuggable() &&
+  art::Runtime* runtime = Runtime::Current();
+  // If anything says we need the debug version or we are debuggable we will need the debug version
+  // of the method.
+  return (runtime->GetRuntimeCallbacks()->MethodNeedsDebugVersion(method) ||
+          runtime->IsJavaDebuggable()) &&
          !method->IsNative() &&
-         !method->IsProxyMethod() &&
-         Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method);
+         !method->IsProxyMethod();
 }
 
 void Instrumentation::InstallStubsForMethod(ArtMethod* method) {
@@ -256,7 +259,7 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
         }
 
         // We've reached a frame which has already been installed with instrumentation exit stub.
-        // We should have already installed instrumentation on previous frames.
+        // We should have already installed instrumentation or be interpreter on previous frames.
         reached_existing_instrumentation_frames_ = true;
 
         const InstrumentationStackFrame& frame =
@@ -269,7 +272,23 @@ static void InstrumentationInstallStack(Thread* thread, void* arg)
         }
       } else {
         CHECK_NE(return_pc, 0U);
-        CHECK(!reached_existing_instrumentation_frames_);
+        if (UNLIKELY(reached_existing_instrumentation_frames_ && !m->IsRuntimeMethod())) {
+          // We already saw an existing instrumentation frame so this should be a runtime-method
+          // inserted by the interpreter or runtime.
+          std::string thread_name;
+          GetThread()->GetThreadName(thread_name);
+          uint32_t dex_pc = dex::kDexNoIndex;
+          if (last_return_pc_ != 0 &&
+              GetCurrentOatQuickMethodHeader() != nullptr) {
+            dex_pc = GetCurrentOatQuickMethodHeader()->ToDexPc(m, last_return_pc_);
+          }
+          LOG(FATAL) << "While walking " << thread_name << " found unexpected non-runtime method"
+                     << " without instrumentation exit return or interpreter frame."
+                     << " method is " << GetMethod()->PrettyMethod()
+                     << " return_pc is " << std::hex << return_pc
+                     << " dex pc: " << dex_pc;
+          UNREACHABLE();
+        }
         InstrumentationStackFrame instrumentation_frame(
             m->IsRuntimeMethod() ? nullptr : GetThisObject(),
             m,
@@ -776,6 +795,17 @@ void Instrumentation::UpdateMethodsCodeImpl(ArtMethod* method, const void* quick
   UpdateEntrypoints(method, new_quick_code);
 }
 
+void Instrumentation::UpdateNativeMethodsCodeToJitCode(ArtMethod* method, const void* quick_code) {
+  // We don't do any read barrier on `method`'s declaring class in this code, as the JIT might
+  // enter here on a soon-to-be deleted ArtMethod. Updating the entrypoint is OK though, as
+  // the ArtMethod is still in memory.
+  const void* new_quick_code = quick_code;
+  if (UNLIKELY(instrumentation_stubs_installed_) && entry_exit_stubs_installed_) {
+    new_quick_code = GetQuickInstrumentationEntryPoint();
+  }
+  UpdateEntrypoints(method, new_quick_code);
+}
+
 void Instrumentation::UpdateMethodsCode(ArtMethod* method, const void* quick_code) {
   DCHECK(method->GetDeclaringClass()->IsResolved());
   UpdateMethodsCodeImpl(method, quick_code);
@@ -1246,18 +1276,17 @@ struct RuntimeMethodShortyVisitor : public StackVisitor {
         shorty = m->GetInterfaceMethodIfProxy(kRuntimePointerSize)->GetShorty()[0];
         return false;
       }
-      const DexFile::CodeItem* code_item = m->GetCodeItem();
-      const Instruction* instr = Instruction::At(&code_item->insns_[GetDexPc()]);
-      if (instr->IsInvoke()) {
+      const Instruction& instr = m->DexInstructions().InstructionAt(GetDexPc());
+      if (instr.IsInvoke()) {
         const DexFile* dex_file = m->GetDexFile();
-        if (interpreter::IsStringInit(dex_file, instr->VRegB())) {
+        if (interpreter::IsStringInit(dex_file, instr.VRegB())) {
           // Invoking string init constructor is turned into invoking
           // StringFactory.newStringFromChars() which returns a string.
           shorty = 'L';
           return false;
         }
         // A regular invoke, use callee's shorty.
-        uint32_t method_idx = instr->VRegB();
+        uint32_t method_idx = instr.VRegB();
         shorty = dex_file->GetMethodShorty(method_idx)[0];
       }
       // Stop stack walking since we've seen a Java frame.
@@ -1374,8 +1403,8 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
                                   reinterpret_cast<uintptr_t>(GetQuickDeoptimizationEntryPoint()));
   } else {
     if (deoptimize && !Runtime::Current()->IsAsyncDeoptimizeable(*return_pc)) {
-      LOG(WARNING) << "Got a deoptimization request on un-deoptimizable " << method->PrettyMethod()
-                   << " at PC " << reinterpret_cast<void*>(*return_pc);
+      VLOG(deopt) << "Got a deoptimization request on un-deoptimizable " << method->PrettyMethod()
+                  << " at PC " << reinterpret_cast<void*>(*return_pc);
     }
     if (kVerboseInstrumentation) {
       LOG(INFO) << "Returning from " << method->PrettyMethod()

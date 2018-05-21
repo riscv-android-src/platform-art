@@ -18,9 +18,10 @@
 #include <set>
 
 #include "boot_image_profile.h"
-#include "dex_file-inl.h"
-#include "method_reference.h"
-#include "type_reference.h"
+#include "dex/dex_file-inl.h"
+#include "dex/method_reference.h"
+#include "dex/type_reference.h"
+#include "profile/profile_compilation_info.h"
 
 namespace art {
 

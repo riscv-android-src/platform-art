@@ -21,11 +21,11 @@
 #include <string>
 #include <vector>
 
+#include "base/globals.h"
 #include "base/macros.h"
+#include "base/utils.h"
 #include "compiler_filter.h"
-#include "globals.h"
 #include "optimizing/register_allocator.h"
-#include "utils.h"
 
 namespace art {
 
@@ -270,8 +270,16 @@ class CompilerOptions FINAL {
     return dump_timings_;
   }
 
+  bool GetDumpPassTimings() const {
+    return dump_pass_timings_;
+  }
+
   bool GetDumpStats() const {
     return dump_stats_;
+  }
+
+  bool CountHotnessInCompiledCode() const {
+    return count_hotness_in_compiled_code_;
   }
 
  private:
@@ -312,6 +320,7 @@ class CompilerOptions FINAL {
   bool implicit_suspend_checks_;
   bool compile_pic_;
   bool dump_timings_;
+  bool dump_pass_timings_;
   bool dump_stats_;
 
   // Vector of methods to have verbose output enabled for.
@@ -335,6 +344,10 @@ class CompilerOptions FINAL {
 
   // Whether code should be deduplicated.
   bool deduplicate_code_;
+
+  // Whether compiled code should increment the hotness count of ArtMethod. Note that the increments
+  // won't be atomic for performance reasons, so we accept races, just like in interpreter.
+  bool count_hotness_in_compiled_code_;
 
   RegisterAllocator::Strategy register_allocation_strategy_;
 

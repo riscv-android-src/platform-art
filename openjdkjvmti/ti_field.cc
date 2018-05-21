@@ -34,10 +34,10 @@
 #include "art_field-inl.h"
 #include "art_jvmti.h"
 #include "base/enums.h"
-#include "dex_file_annotations.h"
-#include "jni_internal.h"
+#include "dex/dex_file_annotations.h"
+#include "dex/modifiers.h"
+#include "jni/jni_internal.h"
 #include "mirror/object_array-inl.h"
-#include "modifiers.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 

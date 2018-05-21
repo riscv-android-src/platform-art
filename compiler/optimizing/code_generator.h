@@ -21,20 +21,21 @@
 #include "arch/instruction_set_features.h"
 #include "base/arena_containers.h"
 #include "base/arena_object.h"
+#include "base/array_ref.h"
 #include "base/bit_field.h"
 #include "base/bit_utils.h"
 #include "base/enums.h"
-#include "globals.h"
+#include "base/globals.h"
+#include "base/memory_region.h"
+#include "dex/string_reference.h"
+#include "dex/type_reference.h"
 #include "graph_visualizer.h"
 #include "locations.h"
-#include "memory_region.h"
 #include "nodes.h"
 #include "optimizing_compiler_stats.h"
 #include "read_barrier_option.h"
 #include "stack.h"
 #include "stack_map.h"
-#include "string_reference.h"
-#include "type_reference.h"
 #include "utils/label.h"
 
 namespace art {
@@ -74,6 +75,7 @@ class CodeAllocator {
   virtual ~CodeAllocator() {}
 
   virtual uint8_t* Allocate(size_t size) = 0;
+  virtual ArrayRef<const uint8_t> GetMemory() const = 0;
 
  private:
   DISALLOW_COPY_AND_ASSIGN(CodeAllocator);
@@ -210,6 +212,10 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   virtual void Initialize() = 0;
   virtual void Finalize(CodeAllocator* allocator);
   virtual void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches);
+  virtual bool NeedsThunkCode(const linker::LinkerPatch& patch) const;
+  virtual void EmitThunkCode(const linker::LinkerPatch& patch,
+                             /*out*/ ArenaVector<uint8_t>* code,
+                             /*out*/ std::string* debug_name);
   virtual void GenerateFrameEntry() = 0;
   virtual void GenerateFrameExit() = 0;
   virtual void Bind(HBasicBlock* block) = 0;
@@ -388,13 +394,6 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   bool IsBlockedCoreRegister(size_t i) { return blocked_core_registers_[i]; }
   bool IsBlockedFloatingPointRegister(size_t i) { return blocked_fpu_registers_[i]; }
 
-  // Helper that returns the pointer offset of an index in an object array.
-  // Note: this method assumes we always have the same pointer size, regardless
-  // of the architecture.
-  static size_t GetCacheOffset(uint32_t index);
-  // Pointer variant for ArtMethod and ArtField arrays.
-  size_t GetCachePointerOffset(uint32_t index);
-
   // Helper that returns the offset of the array's length field.
   // Note: Besides the normal arrays, we also use the HArrayLength for
   // accessing the String's `count` field in String intrinsics.
@@ -411,6 +410,52 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
                          Location from2,
                          Location to2,
                          DataType::Type type2);
+
+  static bool InstanceOfNeedsReadBarrier(HInstanceOf* instance_of) {
+    // Used only for kExactCheck, kAbstractClassCheck, kClassHierarchyCheck and kArrayObjectCheck.
+    DCHECK(instance_of->GetTypeCheckKind() == TypeCheckKind::kExactCheck ||
+           instance_of->GetTypeCheckKind() == TypeCheckKind::kAbstractClassCheck ||
+           instance_of->GetTypeCheckKind() == TypeCheckKind::kClassHierarchyCheck ||
+           instance_of->GetTypeCheckKind() == TypeCheckKind::kArrayObjectCheck)
+        << instance_of->GetTypeCheckKind();
+    // If the target class is in the boot image, it's non-moveable and it doesn't matter
+    // if we compare it with a from-space or to-space reference, the result is the same.
+    // It's OK to traverse a class hierarchy jumping between from-space and to-space.
+    return kEmitCompilerReadBarrier && !instance_of->GetTargetClass()->IsInBootImage();
+  }
+
+  static ReadBarrierOption ReadBarrierOptionForInstanceOf(HInstanceOf* instance_of) {
+    return InstanceOfNeedsReadBarrier(instance_of) ? kWithReadBarrier : kWithoutReadBarrier;
+  }
+
+  static bool IsTypeCheckSlowPathFatal(HCheckCast* check_cast) {
+    switch (check_cast->GetTypeCheckKind()) {
+      case TypeCheckKind::kExactCheck:
+      case TypeCheckKind::kAbstractClassCheck:
+      case TypeCheckKind::kClassHierarchyCheck:
+      case TypeCheckKind::kArrayObjectCheck:
+      case TypeCheckKind::kInterfaceCheck: {
+        bool needs_read_barrier =
+            kEmitCompilerReadBarrier && !check_cast->GetTargetClass()->IsInBootImage();
+        // We do not emit read barriers for HCheckCast, so we can get false negatives
+        // and the slow path shall re-check and simply return if the cast is actually OK.
+        return !needs_read_barrier;
+      }
+      case TypeCheckKind::kArrayCheck:
+      case TypeCheckKind::kUnresolvedCheck:
+        return false;
+      case TypeCheckKind::kBitstringCheck:
+        return true;
+    }
+    LOG(FATAL) << "Unreachable";
+    UNREACHABLE();
+  }
+
+  static LocationSummary::CallKind GetCheckCastCallKind(HCheckCast* check_cast) {
+    return (IsTypeCheckSlowPathFatal(check_cast) && !check_cast->CanThrowIntoCatchBlock())
+        ? LocationSummary::kNoCall  // In fact, call on a fatal (non-returning) slow path.
+        : LocationSummary::kCallOnSlowPath;
+  }
 
   static bool StoreNeedsWriteBarrier(DataType::Type type, HInstruction* value) {
     // Check that null value is not represented as an integer constant.
@@ -519,6 +564,20 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
                                                         Location runtime_return_location);
   void GenerateLoadClassRuntimeCall(HLoadClass* cls);
 
+  static void CreateLoadMethodHandleRuntimeCallLocationSummary(HLoadMethodHandle* method_handle,
+                                                             Location runtime_handle_index_location,
+                                                             Location runtime_return_location);
+  void GenerateLoadMethodHandleRuntimeCall(HLoadMethodHandle* method_handle);
+
+  static void CreateLoadMethodTypeRuntimeCallLocationSummary(HLoadMethodType* method_type,
+                                                             Location runtime_type_index_location,
+                                                             Location runtime_return_location);
+  void GenerateLoadMethodTypeRuntimeCall(HLoadMethodType* method_type);
+
+  uint32_t GetBootImageOffset(HLoadClass* load_class);
+  uint32_t GetBootImageOffset(HLoadString* load_string);
+  uint32_t GetBootImageOffset(HInvokeStaticOrDirect* invoke);
+
   static void CreateSystemArrayCopyLocationSummary(HInvoke* invoke);
 
   void SetDisassemblyInformation(DisassemblyInformation* info) { disasm_info_ = info; }
@@ -581,14 +640,18 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
  protected:
   // Patch info used for recording locations of required linker patches and their targets,
-  // i.e. target method, string, type or code identified by their dex file and index.
+  // i.e. target method, string, type or code identified by their dex file and index,
+  // or .data.bimg.rel.ro entries identified by the boot image offset.
   template <typename LabelType>
   struct PatchInfo {
-    PatchInfo(const DexFile& target_dex_file, uint32_t target_index)
-        : dex_file(target_dex_file), index(target_index) { }
+    PatchInfo(const DexFile* dex_file, uint32_t off_or_idx)
+        : target_dex_file(dex_file), offset_or_index(off_or_idx), label() { }
 
-    const DexFile& dex_file;
-    uint32_t index;
+    // Target dex file or null for .data.bmig.rel.ro patches.
+    const DexFile* target_dex_file;
+    // Either the boot image offset (to write to .data.bmig.rel.ro) or string/type/method index.
+    uint32_t offset_or_index;
+    // Label for the instruction to patch.
     LabelType label;
   };
 

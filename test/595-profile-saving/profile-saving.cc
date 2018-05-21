@@ -14,18 +14,18 @@
  * limitations under the License.
  */
 
-#include "dex_file.h"
+#include "dex/dex_file.h"
 
 #include "art_method-inl.h"
-#include "jit/profile_compilation_info.h"
+#include "dex/method_reference.h"
 #include "jit/profile_saver.h"
 #include "jni.h"
-#include "method_reference.h"
 #include "mirror/class-inl.h"
 #include "mirror/executable.h"
 #include "nativehelper/ScopedUtfChars.h"
 #include "oat_file_assistant.h"
 #include "oat_file_manager.h"
+#include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 

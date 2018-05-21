@@ -33,11 +33,15 @@
 #include "base/casts.h"
 #include "base/enums.h"
 #include "base/macros.h"
+#include "base/quasi_atomic.h"
+#include "base/zip_archive.h"
 #include "class_linker.h"
 #include "common_throws.h"
+#include "dex/descriptors_names.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "gc/reference_processor.h"
 #include "handle_scope-inl.h"
+#include "hidden_api.h"
 #include "interpreter/interpreter_common.h"
 #include "jvalue-inl.h"
 #include "mirror/array-inl.h"
@@ -53,7 +57,6 @@
 #include "thread-inl.h"
 #include "transaction.h"
 #include "well_known_classes.h"
-#include "zip_archive.h"
 
 namespace art {
 namespace interpreter {
@@ -175,6 +178,18 @@ static mirror::String* GetClassName(Thread* self, ShadowFrame* shadow_frame, siz
   return param->AsString();
 }
 
+template<typename T>
+static ALWAYS_INLINE bool ShouldBlockAccessToMember(T* member, ShadowFrame* frame)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // All uses in this file are from reflection
+  constexpr hiddenapi::AccessMethod access_method = hiddenapi::kReflection;
+  return hiddenapi::GetMemberAction(
+      member,
+      frame->GetMethod()->GetDeclaringClass()->GetClassLoader(),
+      frame->GetMethod()->GetDeclaringClass()->GetDexCache(),
+      access_method) == hiddenapi::kDeny;
+}
+
 void UnstartedRuntime::UnstartedClassForNameCommon(Thread* self,
                                                    ShadowFrame* shadow_frame,
                                                    JValue* result,
@@ -227,6 +242,20 @@ void UnstartedRuntime::UnstartedClassForNameLong(
   UnstartedClassForNameCommon(self, shadow_frame, result, arg_offset, true, "Class.forName");
 }
 
+void UnstartedRuntime::UnstartedClassGetPrimitiveClass(
+    Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
+  ObjPtr<mirror::String> class_name = GetClassName(self, shadow_frame, arg_offset);
+  ObjPtr<mirror::Class> klass = mirror::Class::GetPrimitiveClass(class_name);
+  if (UNLIKELY(klass == nullptr)) {
+    DCHECK(self->IsExceptionPending());
+    AbortTransactionOrFail(self,
+                           "Class.getPrimitiveClass() failed: %s",
+                           self->GetException()->GetDetailMessage()->ToModifiedUtf8().c_str());
+    return;
+  }
+  result->SetL(klass);
+}
+
 void UnstartedRuntime::UnstartedClassClassForName(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   UnstartedClassForNameCommon(self, shadow_frame, result, arg_offset, true, "Class.classForName");
@@ -265,7 +294,10 @@ void UnstartedRuntime::UnstartedClassNewInstance(
   bool ok = false;
   auto* cl = Runtime::Current()->GetClassLinker();
   if (cl->EnsureInitialized(self, h_klass, true, true)) {
-    auto* cons = h_klass->FindConstructor("()V", cl->GetImagePointerSize());
+    ArtMethod* cons = h_klass->FindConstructor("()V", cl->GetImagePointerSize());
+    if (cons != nullptr && ShouldBlockAccessToMember(cons, shadow_frame)) {
+      cons = nullptr;
+    }
     if (cons != nullptr) {
       Handle<mirror::Object> h_obj(hs.NewHandle(klass->AllocObject(self)));
       CHECK(h_obj != nullptr);  // We don't expect OOM at compile-time.
@@ -307,6 +339,9 @@ void UnstartedRuntime::UnstartedClassGetDeclaredField(
         break;
       }
     }
+  }
+  if (found != nullptr && ShouldBlockAccessToMember(found, shadow_frame)) {
+    found = nullptr;
   }
   if (found == nullptr) {
     AbortTransactionOrFail(self, "Failed to find field in Class.getDeclaredField in un-started "
@@ -370,6 +405,9 @@ void UnstartedRuntime::UnstartedClassGetDeclaredMethod(
           self, klass, name, args);
     }
   }
+  if (method != nullptr && ShouldBlockAccessToMember(method->GetArtMethod(), shadow_frame)) {
+    method = nullptr;
+  }
   result->SetL(method);
 }
 
@@ -403,6 +441,10 @@ void UnstartedRuntime::UnstartedClassGetDeclaredConstructor(
       constructor = mirror::Class::GetDeclaredConstructorInternal<PointerSize::k32,
                                                                   false>(self, klass, args);
     }
+  }
+  if (constructor != nullptr &&
+      ShouldBlockAccessToMember(constructor->GetArtMethod(), shadow_frame)) {
+    constructor = nullptr;
   }
   result->SetL(constructor);
 }
@@ -715,12 +757,6 @@ void UnstartedRuntime::UnstartedVmClassLoaderFindLoadedClass(
       self->ClearException();
     }
   }
-}
-
-void UnstartedRuntime::UnstartedVoidLookupType(
-    Thread* self ATTRIBUTE_UNUSED, ShadowFrame* shadow_frame ATTRIBUTE_UNUSED, JValue* result,
-    size_t arg_offset ATTRIBUTE_UNUSED) {
-  result->SetL(Runtime::Current()->GetClassLinker()->FindPrimitiveClass('V'));
 }
 
 // Arraycopy emulation.
@@ -1504,7 +1540,7 @@ void UnstartedRuntime::UnstartedUnsafePutOrderedObject(
   }
   int64_t offset = shadow_frame->GetVRegLong(arg_offset + 2);
   mirror::Object* newValue = shadow_frame->GetVRegReference(arg_offset + 4);
-  QuasiAtomic::ThreadFenceRelease();
+  std::atomic_thread_fence(std::memory_order_release);
   if (Runtime::Current()->IsActiveTransaction()) {
     obj->SetFieldObject<true>(MemberOffset(offset), newValue);
   } else {
@@ -1910,7 +1946,7 @@ void UnstartedRuntime::Initialize() {
   tables_initialized_ = true;
 }
 
-void UnstartedRuntime::Invoke(Thread* self, const DexFile::CodeItem* code_item,
+void UnstartedRuntime::Invoke(Thread* self, const CodeItemDataAccessor& accessor,
                               ShadowFrame* shadow_frame, JValue* result, size_t arg_offset) {
   // In a runtime that's not started we intercept certain methods to avoid complicated dependency
   // problems in core libraries.
@@ -1930,7 +1966,7 @@ void UnstartedRuntime::Invoke(Thread* self, const DexFile::CodeItem* code_item,
     self->PopShadowFrame();
   } else {
     // Not special, continue with regular interpreter execution.
-    ArtInterpreterToInterpreterBridge(self, code_item, shadow_frame, result);
+    ArtInterpreterToInterpreterBridge(self, accessor, shadow_frame, result);
   }
 }
 

@@ -39,7 +39,7 @@
 #include "jvmti.h"
 
 #include "base/mutex.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 
 namespace openjdkjvmti {
 
@@ -49,8 +49,8 @@ namespace openjdkjvmti {
 // are running on.
 class FixedUpDexFile {
  public:
-  static std::unique_ptr<FixedUpDexFile> Create(const art::DexFile& original)
-      REQUIRES_SHARED(art::Locks::mutator_lock_);
+  static std::unique_ptr<FixedUpDexFile> Create(const art::DexFile& original,
+                                                const char* descriptor);
 
   const art::DexFile& GetDexFile() {
     return *dex_file_;

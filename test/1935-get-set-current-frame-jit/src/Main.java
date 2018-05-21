@@ -21,6 +21,7 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Executable;
 import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
+import java.time.Instant;
 import java.util.concurrent.Semaphore;
 import java.util.Arrays;
 import java.util.Collection;
@@ -49,24 +50,41 @@ public class Main {
   public static class IntRunner implements Runnable {
     private volatile boolean continueBusyLoop;
     private volatile boolean inBusyLoop;
-    public IntRunner() {
+    private final boolean expectOsr;
+    public IntRunner(boolean expectOsr) {
       this.continueBusyLoop = true;
       this.inBusyLoop = false;
+      this.expectOsr = expectOsr;
     }
     public void run() {
       int TARGET = 42;
+      if (hasJit() && expectOsr && !Main.isInterpreted()) {
+          System.out.println("Unexpectedly in jit code prior to restarting the JIT!");
+      }
+      startJit();
       // We will suspend the thread during this loop.
       while (continueBusyLoop) {
         inBusyLoop = true;
       }
-      int i = 0;
-      while (Main.isInterpreted() && i < 10000) {
-        Main.ensureJitCompiled(IntRunner.class, "run");
-        i++;
+      // Wait up to 300 seconds for OSR to kick in if we expect it. If we don't give up after only
+      // 3 seconds.
+      Instant osrDeadline = Instant.now().plusSeconds(expectOsr ? 600 : 3);
+      do {
+        // Don't actually do anything here.
+        inBusyLoop = true;
+      } while (hasJit() && !Main.isInOsrCode("run") && osrDeadline.compareTo(Instant.now()) > 0);
+      // We shouldn't be doing OSR since we are using JVMTI and the set prevents OSR.
+      // Set local will also push us to interpreter but the get local may remain in compiled code.
+      if (hasJit()) {
+        boolean inOsr = Main.isInOsrCode("run");
+        if (expectOsr && !inOsr) {
+          throw new Error(
+              "Expected to be in OSR but was not. interpreter: " + Main.isInterpreted());
+        } else if (!expectOsr && inOsr) {
+          throw new Error(
+              "Expected not to be in OSR but was. interpreter: " + Main.isInterpreted());
+        }
       }
-      // We shouldn't be doing OSR since we are using JVMTI and the get/set local will push us to
-      // interpreter.
-      System.out.println("isInterpreted? " + Main.isInterpreted());
       reportValue(TARGET);
     }
     public void waitForBusyLoopStart() { while (!inBusyLoop) {} }
@@ -77,8 +95,10 @@ public class Main {
 
   public static void runGet() throws Exception {
     Method target = IntRunner.class.getDeclaredMethod("run");
-    // Get Int
-    IntRunner int_runner = new IntRunner();
+    // Stop jit temporarily. It will be restarted by the test itself.
+    stopJit();
+    // Get Int.
+    IntRunner int_runner = new IntRunner(true);
     Thread target_get = new Thread(int_runner, "GetLocalInt - Target");
     target_get.start();
     int_runner.waitForBusyLoopStart();
@@ -107,8 +127,10 @@ public class Main {
 
   public static void runSet() throws Exception {
     Method target = IntRunner.class.getDeclaredMethod("run");
-    // Set Int
-    IntRunner int_runner = new IntRunner();
+    // Stop jit temporarily. It will be restarted by the test itself.
+    stopJit();
+    // Set Int. Even if we start out in JIT code somehow we should be pushed out of it.
+    IntRunner int_runner = new IntRunner(false);
     Thread target_set = new Thread(int_runner, "SetLocalInt - Target");
     target_set.start();
     int_runner.waitForBusyLoopStart();
@@ -157,6 +179,9 @@ public class Main {
     throw new Error("Unable to find stack frame in method " + target + " on thread " + thr);
   }
 
-  public static native void ensureJitCompiled(Class k, String f);
   public static native boolean isInterpreted();
+  public static native boolean isInOsrCode(String methodName);
+  public static native boolean stopJit();
+  public static native boolean startJit();
+  public static native boolean hasJit();
 }

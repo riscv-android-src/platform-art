@@ -39,14 +39,15 @@
 #include "art_jvmti.h"
 #include "art_method.h"
 #include "base/array_slice.h"
+#include "base/globals.h"
+#include "base/mem_map.h"
 #include "class_linker.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
+#include "dex/utf.h"
 #include "gc_root-inl.h"
-#include "globals.h"
-#include "jni_env_ext-inl.h"
+#include "jni/jni_env_ext-inl.h"
 #include "jvmti.h"
 #include "linear_alloc.h"
-#include "mem_map.h"
 #include "mirror/array-inl.h"
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
@@ -60,7 +61,6 @@
 #include "thread_list.h"
 #include "ti_class_definition.h"
 #include "transform.h"
-#include "utf.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 
 namespace openjdkjvmti {
@@ -82,6 +82,14 @@ class ClassLoaderHelper {
       art::Thread* self, art::Handle<art::mirror::ClassLoader> loader)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
 
+  // Calls visitor on each java.lang.DexFile associated with the given loader. The visitor should
+  // return true to continue on to the next DexFile or false to stop iterating.
+  template<typename Visitor>
+  static inline void VisitDexFileObjects(art::Thread* self,
+                                         art::Handle<art::mirror::ClassLoader> loader,
+                                         const Visitor& visitor)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+
   static art::ObjPtr<art::mirror::LongArray> GetDexFileCookie(
       art::Handle<art::mirror::Object> java_dex_file) REQUIRES_SHARED(art::Locks::mutator_lock_);
 
@@ -93,6 +101,11 @@ class ClassLoaderHelper {
   static void UpdateJavaDexFile(art::ObjPtr<art::mirror::Object> java_dex_file,
                                 art::ObjPtr<art::mirror::LongArray> new_cookie)
       REQUIRES(art::Roles::uninterruptible_) REQUIRES_SHARED(art::Locks::mutator_lock_);
+
+ private:
+  static art::ObjPtr<art::mirror::ObjectArray<art::mirror::Object>> GetDexElementList(
+      art::Thread* self, art::Handle<art::mirror::ClassLoader> loader)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
 };
 
 }  // namespace openjdkjvmti

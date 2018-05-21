@@ -20,7 +20,7 @@
 #include "arch/x86/instruction_set_features_x86.h"
 #include "base/enums.h"
 #include "code_generator.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "parallel_move_resolver.h"
@@ -139,10 +139,10 @@ class ParallelMoveResolverX86 : public ParallelMoveResolverWithSwap {
 
  private:
   void Exchange(Register reg, int mem);
-  void Exchange(int mem1, int mem2);
   void Exchange32(XmmRegister reg, int mem);
-  void MoveMemoryToMemory32(int dst, int src);
-  void MoveMemoryToMemory64(int dst, int src);
+  void Exchange128(XmmRegister reg, int mem);
+  void ExchangeMemory(int mem1, int mem2, int number_of_words);
+  void MoveMemoryToMemory(int dst, int src, int number_of_words);
 
   CodeGeneratorX86* const codegen_;
 
@@ -211,6 +211,7 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
   // the suspend call.
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
   void GenerateClassInitializationCheck(SlowPathCode* slow_path, Register class_reg);
+  void GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check, Register temp);
   void HandleBitwiseOperation(HBinaryOperation* instruction);
   void GenerateDivRemIntegral(HBinaryOperation* instruction);
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
@@ -225,6 +226,9 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
   void GenerateShlLong(const Location& loc, int shift);
   void GenerateShrLong(const Location& loc, int shift);
   void GenerateUShrLong(const Location& loc, int shift);
+  void GenerateMinMaxInt(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, DataType::Type type);
+  void GenerateMinMax(HBinaryOperation* minmax, bool is_min);
 
   void HandleFieldSet(HInstruction* instruction,
                       const FieldInfo& field_info,
@@ -414,12 +418,13 @@ class CodeGeneratorX86 : public CodeGenerator {
   void GenerateVirtualCall(
       HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
-  void RecordBootMethodPatch(HInvokeStaticOrDirect* invoke);
-  Label* NewMethodBssEntryPatch(HX86ComputeBaseMethodAddress* method_address,
-                                MethodReference target_method);
-  void RecordBootTypePatch(HLoadClass* load_class);
+  void RecordBootImageRelRoPatch(HX86ComputeBaseMethodAddress* method_address,
+                                 uint32_t boot_image_offset);
+  void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
+  void RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke);
+  void RecordBootImageTypePatch(HLoadClass* load_class);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
-  void RecordBootStringPatch(HLoadString* load_string);
+  void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
   Label* NewJitRootStringPatch(const DexFile& dex_file,
                                dex::StringIndex string_index,
@@ -610,7 +615,7 @@ class CodeGeneratorX86 : public CodeGenerator {
  private:
   struct X86PcRelativePatchInfo : PatchInfo<Label> {
     X86PcRelativePatchInfo(HX86ComputeBaseMethodAddress* address,
-                           const DexFile& target_dex_file,
+                           const DexFile* target_dex_file,
                            uint32_t target_index)
         : PatchInfo(target_dex_file, target_index),
           method_address(address) {}
@@ -632,17 +637,18 @@ class CodeGeneratorX86 : public CodeGenerator {
   X86Assembler assembler_;
   const X86InstructionSetFeatures& isa_features_;
 
-  // PC-relative method patch info for kBootImageLinkTimePcRelative.
+  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
+  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
   ArenaDeque<X86PcRelativePatchInfo> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<X86PcRelativePatchInfo> boot_image_type_patches_;
-  // Type patch locations for kBssEntry.
+  // PC-relative type patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> type_bss_entry_patches_;
-  // String patch locations; type depends on configuration (intern table or boot image PIC).
-  ArenaDeque<X86PcRelativePatchInfo> string_patches_;
-  // String patch locations for kBssEntry.
+  // PC-relative String patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<X86PcRelativePatchInfo> boot_image_string_patches_;
+  // PC-relative String patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> string_bss_entry_patches_;
 
   // Patches for string root accesses in JIT compiled code.

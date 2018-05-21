@@ -22,8 +22,9 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "common_compiler_test.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "dex/descriptors_names.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "scoped_thread_state_change-inl.h"
 

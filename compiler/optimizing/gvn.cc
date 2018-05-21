@@ -17,11 +17,11 @@
 #include "gvn.h"
 
 #include "base/arena_bit_vector.h"
+#include "base/bit_vector-inl.h"
 #include "base/scoped_arena_allocator.h"
 #include "base/scoped_arena_containers.h"
-#include "base/bit_vector-inl.h"
+#include "base/utils.h"
 #include "side_effects_analysis.h"
-#include "utils.h"
 
 namespace art {
 
@@ -301,8 +301,11 @@ class ValueSet : public ArenaObject<kArenaAllocGvn> {
     // Pure instructions are put into odd buckets to speed up deletion. Note that in the
     // case of irreducible loops, we don't put pure instructions in odd buckets, as we
     // need to delete them when entering the loop.
-    if (instruction->GetSideEffects().HasDependencies() ||
-        instruction->GetBlock()->GetGraph()->HasIrreducibleLoops()) {
+    // ClinitCheck is treated as a pure instruction since it's only executed
+    // once.
+    bool pure = !instruction->GetSideEffects().HasDependencies() ||
+                instruction->IsClinitCheck();
+    if (!pure || instruction->GetBlock()->GetGraph()->HasIrreducibleLoops()) {
       return (hash_code << 1) | 0;
     } else {
       return (hash_code << 1) | 1;
@@ -349,7 +352,7 @@ class GlobalValueNumberer : public ValueObject {
     visited_blocks_.ClearAllBits();
   }
 
-  void Run();
+  bool Run();
 
  private:
   // Per-block GVN. Will also update the ValueSet of the dominated and
@@ -394,7 +397,7 @@ class GlobalValueNumberer : public ValueObject {
   DISALLOW_COPY_AND_ASSIGN(GlobalValueNumberer);
 };
 
-void GlobalValueNumberer::Run() {
+bool GlobalValueNumberer::Run() {
   DCHECK(side_effects_.HasRun());
   sets_[graph_->GetEntryBlock()->GetBlockId()] = new (&allocator_) ValueSet(&allocator_);
 
@@ -403,6 +406,7 @@ void GlobalValueNumberer::Run() {
   for (HBasicBlock* block : graph_->GetReversePostOrder()) {
     VisitBasicBlock(block);
   }
+  return true;
 }
 
 void GlobalValueNumberer::VisitBasicBlock(HBasicBlock* block) {
@@ -554,9 +558,9 @@ HBasicBlock* GlobalValueNumberer::FindVisitedBlockWithRecyclableSet(
   return secondary_match;
 }
 
-void GVNOptimization::Run() {
+bool GVNOptimization::Run() {
   GlobalValueNumberer gvn(graph_, side_effects_);
-  gvn.Run();
+  return gvn.Run();
 }
 
 }  // namespace art

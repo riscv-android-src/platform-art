@@ -39,14 +39,15 @@
 #include "art_jvmti.h"
 #include "art_method.h"
 #include "base/array_ref.h"
+#include "base/globals.h"
+#include "base/mem_map.h"
 #include "class_linker.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
+#include "dex/utf.h"
 #include "gc_root-inl.h"
-#include "globals.h"
-#include "jni_env_ext-inl.h"
+#include "jni/jni_env_ext-inl.h"
 #include "jvmti.h"
 #include "linear_alloc.h"
-#include "mem_map.h"
 #include "mirror/array-inl.h"
 #include "mirror/array.h"
 #include "mirror/class-inl.h"
@@ -60,7 +61,6 @@
 #include "thread_list.h"
 #include "ti_class_definition.h"
 #include "transform.h"
-#include "utf.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
 
 namespace openjdkjvmti {
@@ -97,6 +97,10 @@ class Redefiner {
   static std::unique_ptr<art::MemMap> MoveDataToMemMap(const std::string& original_location,
                                                        art::ArrayRef<const unsigned char> data,
                                                        std::string* error_msg);
+
+  // Helper for checking if redefinition/retransformation is allowed.
+  static jvmtiError GetClassRedefinitionError(jclass klass, /*out*/std::string* error_msg)
+      REQUIRES(!art::Locks::mutator_lock_);
 
  private:
   class ClassRedefinition {
@@ -199,7 +203,7 @@ class Redefiner {
 
     void UnregisterBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
     // This should be done with all threads suspended.
-    void UnregisterJvmtiBreakpoints() REQUIRES(art::Locks::mutator_lock_);
+    void UnregisterJvmtiBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
    private:
     Redefiner* driver_;

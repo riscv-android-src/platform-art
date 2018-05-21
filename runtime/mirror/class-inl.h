@@ -23,14 +23,15 @@
 #include "art_method.h"
 #include "base/array_slice.h"
 #include "base/length_prefixed_array.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "class_loader.h"
 #include "common_throws.h"
+#include "dex/dex_file-inl.h"
+#include "dex/invoke_type.h"
 #include "dex_cache.h"
-#include "dex_file-inl.h"
 #include "gc/heap-inl.h"
 #include "iftable.h"
-#include "invoke_type.h"
 #include "subtype_check.h"
 #include "object-inl.h"
 #include "object_array.h"
@@ -38,7 +39,6 @@
 #include "reference-inl.h"
 #include "runtime.h"
 #include "string.h"
-#include "utils.h"
 
 namespace art {
 namespace mirror {
@@ -303,20 +303,25 @@ inline bool Class::HasVTable() {
   return GetVTable() != nullptr || ShouldHaveEmbeddedVTable();
 }
 
+  template<VerifyObjectFlags kVerifyFlags,
+           ReadBarrierOption kReadBarrierOption>
 inline int32_t Class::GetVTableLength() {
-  if (ShouldHaveEmbeddedVTable()) {
+  if (ShouldHaveEmbeddedVTable<kVerifyFlags, kReadBarrierOption>()) {
     return GetEmbeddedVTableLength();
   }
-  return GetVTable() != nullptr ? GetVTable()->GetLength() : 0;
+  return GetVTable<kVerifyFlags, kReadBarrierOption>() != nullptr ?
+      GetVTable<kVerifyFlags, kReadBarrierOption>()->GetLength() : 0;
 }
 
+  template<VerifyObjectFlags kVerifyFlags,
+           ReadBarrierOption kReadBarrierOption>
 inline ArtMethod* Class::GetVTableEntry(uint32_t i, PointerSize pointer_size) {
-  if (ShouldHaveEmbeddedVTable()) {
+  if (ShouldHaveEmbeddedVTable<kVerifyFlags, kReadBarrierOption>()) {
     return GetEmbeddedVTableEntry(i, pointer_size);
   }
-  auto* vtable = GetVTable();
+  auto* vtable = GetVTable<kVerifyFlags, kReadBarrierOption>();
   DCHECK(vtable != nullptr);
-  return vtable->GetElementPtrSize<ArtMethod*>(i, pointer_size);
+  return vtable->template GetElementPtrSize<ArtMethod*, kVerifyFlags, kReadBarrierOption>(i, pointer_size);
 }
 
 inline int32_t Class::GetEmbeddedVTableLength() {
@@ -549,7 +554,7 @@ inline bool Class::IsSubClass(ObjPtr<Class> klass) {
     current = current->GetSuperClass();
   } while (current != nullptr);
 
-  if (kIsDebugBuild) {
+  if (kIsDebugBuild && kBitstringSubtypeCheckEnabled) {
     ObjPtr<mirror::Class> dis(this);
 
     SubtypeCheckInfo::Result sc_result = SubtypeCheck<ObjPtr<Class>>::IsSubtypeOf(dis, klass);
@@ -626,8 +631,10 @@ inline IfTable* Class::GetIfTable() {
   return ret.Ptr();
 }
 
+template<VerifyObjectFlags kVerifyFlags,
+         ReadBarrierOption kReadBarrierOption>
 inline int32_t Class::GetIfTableCount() {
-  return GetIfTable()->Count();
+  return GetIfTable<kVerifyFlags, kReadBarrierOption>()->Count();
 }
 
 inline void Class::SetIfTable(ObjPtr<IfTable> new_iftable) {

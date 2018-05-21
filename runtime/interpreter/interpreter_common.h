@@ -37,8 +37,8 @@
 #include "class_linker-inl.h"
 #include "common_dex_operations.h"
 #include "common_throws.h"
-#include "dex_file-inl.h"
-#include "dex_instruction-inl.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_instruction-inl.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "handle_scope-inl.h"
 #include "jit/jit.h"
@@ -176,7 +176,8 @@ static inline bool DoInvoke(Thread* self,
   }
   const uint32_t method_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
   const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
-  ObjPtr<mirror::Object> receiver = (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
+  ObjPtr<mirror::Object> receiver =
+      (type == kStatic) ? nullptr : shadow_frame.GetVRegReference(vregC);
   ArtMethod* sf_method = shadow_frame.GetMethod();
   ArtMethod* const called_method = FindMethodFromCode<type, do_access_check>(
       method_idx, &receiver, sf_method, self);
@@ -216,7 +217,7 @@ static inline ObjPtr<mirror::MethodHandle> ResolveMethodHandle(Thread* self,
 }
 
 static inline ObjPtr<mirror::MethodType> ResolveMethodType(Thread* self,
-                                                           uint32_t method_type_index,
+                                                           dex::ProtoIndex method_type_index,
                                                            ArtMethod* referrer)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
@@ -265,13 +266,6 @@ static inline bool DoInvokeVirtualQuick(Thread* self, ShadowFrame& shadow_frame,
     return false;
   }
   const uint32_t vtable_idx = (is_range) ? inst->VRegB_3rc() : inst->VRegB_35c();
-  // Debug code for b/31357497. To be removed.
-  if (kUseReadBarrier) {
-    CHECK(receiver->GetClass() != nullptr)
-        << "Null class found in object " << receiver << " in region type "
-        << Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->
-            RegionSpace()->GetRegionType(receiver.Ptr());
-  }
   CHECK(receiver->GetClass()->ShouldHaveEmbeddedVTable());
   ArtMethod* const called_method = receiver->GetClass()->GetEmbeddedVTableEntry(
       vtable_idx, Runtime::Current()->GetClassLinker()->GetImagePointerSize());
@@ -645,7 +639,7 @@ EXPLICIT_DO_FAST_INVOKE_TEMPLATE_DECL(kVirtual);    // invoke-virtual
 
 // Explicitly instantiate all DoInvokeVirtualQuick functions.
 #define EXPLICIT_DO_INVOKE_VIRTUAL_QUICK_TEMPLATE_DECL(_is_range)                    \
-  template REQUIRES_SHARED(Locks::mutator_lock_)                               \
+  template REQUIRES_SHARED(Locks::mutator_lock_)                                     \
   bool DoInvokeVirtualQuick<_is_range>(Thread* self, ShadowFrame& shadow_frame,      \
                                        const Instruction* inst, uint16_t inst_data,  \
                                        JValue* result)

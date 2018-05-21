@@ -42,7 +42,7 @@ class IntrinsicsRecognizer : public HOptimization {
                        const char* name = kIntrinsicsRecognizerPassName)
       : HOptimization(graph, name, stats) {}
 
-  void Run() OVERRIDE;
+  bool Run() OVERRIDE;
 
   // Static helper that recognizes intrinsic call. Returns true on success.
   // If it fails due to invoke type mismatch, wrong_invoke_type is set.
@@ -266,6 +266,18 @@ void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke) {    \
              << " should have been converted to HIR";                    \
 }
 #define UNREACHABLE_INTRINSICS(Arch)                            \
+UNREACHABLE_INTRINSIC(Arch, MathMinIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMinLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMinFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMinDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathMaxIntInt)                      \
+UNREACHABLE_INTRINSIC(Arch, MathMaxLongLong)                    \
+UNREACHABLE_INTRINSIC(Arch, MathMaxFloatFloat)                  \
+UNREACHABLE_INTRINSIC(Arch, MathMaxDoubleDouble)                \
+UNREACHABLE_INTRINSIC(Arch, MathAbsInt)                         \
+UNREACHABLE_INTRINSIC(Arch, MathAbsLong)                        \
+UNREACHABLE_INTRINSIC(Arch, MathAbsFloat)                       \
+UNREACHABLE_INTRINSIC(Arch, MathAbsDouble)                      \
 UNREACHABLE_INTRINSIC(Arch, FloatFloatToIntBits)                \
 UNREACHABLE_INTRINSIC(Arch, DoubleDoubleToLongBits)             \
 UNREACHABLE_INTRINSIC(Arch, FloatIsNaN)                         \

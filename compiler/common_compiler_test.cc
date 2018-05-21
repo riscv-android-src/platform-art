@@ -21,8 +21,10 @@
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
 #include "base/enums.h"
+#include "base/utils.h"
 #include "class_linker.h"
 #include "compiled_method-inl.h"
+#include "dex/descriptors_names.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "driver/compiler_driver.h"
@@ -35,7 +37,6 @@
 #include "oat_quick_method_header.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
-#include "utils.h"
 
 namespace art {
 
@@ -137,20 +138,6 @@ std::unordered_set<std::string>* CommonCompilerTest::GetImageClasses() {
   return new std::unordered_set<std::string>();
 }
 
-// Get the set of compiled classes given to the compiler-driver in SetUp. Note: the compiler
-// driver assumes ownership of the set, so the test should properly release the set.
-std::unordered_set<std::string>* CommonCompilerTest::GetCompiledClasses() {
-  // Null, no selection of compiled-classes.
-  return nullptr;
-}
-
-// Get the set of compiled methods given to the compiler-driver in SetUp. Note: the compiler
-// driver assumes ownership of the set, so the test should properly release the set.
-std::unordered_set<std::string>* CommonCompilerTest::GetCompiledMethods() {
-  // Null, no selection of compiled-methods.
-  return nullptr;
-}
-
 // Get ProfileCompilationInfo that should be passed to the driver.
 ProfileCompilationInfo* CommonCompilerTest::GetProfileCompilationInfo() {
   // Null, profile information will not be taken into account.
@@ -189,8 +176,6 @@ void CommonCompilerTest::CreateCompilerDriver(Compiler::Kind kind,
                                             isa,
                                             instruction_set_features_.get(),
                                             GetImageClasses(),
-                                            GetCompiledClasses(),
-                                            GetCompiledMethods(),
                                             number_of_threads,
                                             /* swap_fd */ -1,
                                             GetProfileCompilationInfo()));

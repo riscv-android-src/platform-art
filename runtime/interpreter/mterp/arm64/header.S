@@ -87,7 +87,7 @@ codes.
  * to expand the macros into assembler assignment statements.
  */
 #include "asm_support.h"
-#include "interpreter/mterp/cfi_asm_support.h"
+#include "interpreter/cfi_asm_support.h"
 
 #define MTERP_PROFILE_BRANCHES 1
 #define MTERP_LOGGING 0
@@ -95,6 +95,8 @@ codes.
 /* During bringup, we'll use the shadow frame model instead of xFP */
 /* single-purpose registers, given names for clarity */
 #define xPC      x20
+#define CFI_DEX  20 // DWARF register number of the register holding dex-pc (xPC).
+#define CFI_TMP  0  // DWARF register number of the first argument register (r0).
 #define xFP      x21
 #define xSELF    x22
 #define xINST    x23

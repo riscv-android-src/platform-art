@@ -18,15 +18,15 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/utils.h"
 #include "class_linker.h"
+#include "dex/invoke_type.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
-#include "invoke_type.h"
 #include "mirror/dex_cache-inl.h"
 #include "nodes.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
-#include "utils.h"
 
 namespace art {
 
@@ -178,7 +178,8 @@ bool IntrinsicsRecognizer::Recognize(HInvoke* invoke,
   return true;
 }
 
-void IntrinsicsRecognizer::Run() {
+bool IntrinsicsRecognizer::Run() {
+  bool didRecognize = false;
   ScopedObjectAccess soa(Thread::Current());
   for (HBasicBlock* block : graph_->GetReversePostOrder()) {
     for (HInstructionIterator inst_it(block->GetInstructions()); !inst_it.Done();
@@ -187,6 +188,7 @@ void IntrinsicsRecognizer::Run() {
       if (inst->IsInvoke()) {
         bool wrong_invoke_type = false;
         if (Recognize(inst->AsInvoke(), /* art_method */ nullptr, &wrong_invoke_type)) {
+          didRecognize = true;
           MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
         } else if (wrong_invoke_type) {
           LOG(WARNING)
@@ -197,6 +199,7 @@ void IntrinsicsRecognizer::Run() {
       }
     }
   }
+  return didRecognize;
 }
 
 std::ostream& operator<<(std::ostream& os, const Intrinsics& intrinsic) {

@@ -27,6 +27,7 @@
 #include "code_generator.h"
 #include "data_type-inl.h"
 #include "dead_code_elimination.h"
+#include "dex/descriptors_names.h"
 #include "disassembler.h"
 #include "inliner.h"
 #include "licm.h"
@@ -385,20 +386,39 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         << load_class->NeedsAccessCheck() << std::noboolalpha;
   }
 
+  void VisitLoadMethodHandle(HLoadMethodHandle* load_method_handle) OVERRIDE {
+    StartAttributeStream("load_kind") << "RuntimeCall";
+    StartAttributeStream("method_handle_index") << load_method_handle->GetMethodHandleIndex();
+  }
+
+  void VisitLoadMethodType(HLoadMethodType* load_method_type) OVERRIDE {
+    StartAttributeStream("load_kind") << "RuntimeCall";
+    const DexFile& dex_file = load_method_type->GetDexFile();
+    const DexFile::ProtoId& proto_id = dex_file.GetProtoId(load_method_type->GetProtoIndex());
+    StartAttributeStream("method_type") << dex_file.GetProtoSignature(proto_id);
+  }
+
   void VisitLoadString(HLoadString* load_string) OVERRIDE {
     StartAttributeStream("load_kind") << load_string->GetLoadKind();
   }
 
-  void VisitCheckCast(HCheckCast* check_cast) OVERRIDE {
-    StartAttributeStream("check_kind") << check_cast->GetTypeCheckKind();
+  void HandleTypeCheckInstruction(HTypeCheckInstruction* check) {
+    StartAttributeStream("check_kind") << check->GetTypeCheckKind();
     StartAttributeStream("must_do_null_check") << std::boolalpha
-        << check_cast->MustDoNullCheck() << std::noboolalpha;
+        << check->MustDoNullCheck() << std::noboolalpha;
+    if (check->GetTypeCheckKind() == TypeCheckKind::kBitstringCheck) {
+      StartAttributeStream("path_to_root") << std::hex
+          << "0x" << check->GetBitstringPathToRoot() << std::dec;
+      StartAttributeStream("mask") << std::hex << "0x" << check->GetBitstringMask() << std::dec;
+    }
+  }
+
+  void VisitCheckCast(HCheckCast* check_cast) OVERRIDE {
+    HandleTypeCheckInstruction(check_cast);
   }
 
   void VisitInstanceOf(HInstanceOf* instance_of) OVERRIDE {
-    StartAttributeStream("check_kind") << instance_of->GetTypeCheckKind();
-    StartAttributeStream("must_do_null_check") << std::boolalpha
-        << instance_of->MustDoNullCheck() << std::noboolalpha;
+    HandleTypeCheckInstruction(instance_of);
   }
 
   void VisitArrayLength(HArrayLength* array_length) OVERRIDE {
@@ -445,6 +465,9 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         ? GetGraph()->GetDexFile().PrettyMethod(invoke->GetDexMethodIndex(), kWithSignature)
         : method->PrettyMethod(kWithSignature);
     StartAttributeStream("method_name") << method_name;
+    StartAttributeStream("always_throws") << std::boolalpha
+                                          << invoke->AlwaysThrows()
+                                          << std::noboolalpha;
   }
 
   void VisitInvokeUnresolved(HInvokeUnresolved* invoke) OVERRIDE {
@@ -533,18 +556,7 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
 
   void VisitVecHalvingAdd(HVecHalvingAdd* hadd) OVERRIDE {
     VisitVecBinaryOperation(hadd);
-    StartAttributeStream("unsigned") << std::boolalpha << hadd->IsUnsigned() << std::noboolalpha;
     StartAttributeStream("rounded") << std::boolalpha << hadd->IsRounded() << std::noboolalpha;
-  }
-
-  void VisitVecMin(HVecMin* min) OVERRIDE {
-    VisitVecBinaryOperation(min);
-    StartAttributeStream("unsigned") << std::boolalpha << min->IsUnsigned() << std::noboolalpha;
-  }
-
-  void VisitVecMax(HVecMax* max) OVERRIDE {
-    VisitVecBinaryOperation(max);
-    StartAttributeStream("unsigned") << std::boolalpha << max->IsUnsigned() << std::noboolalpha;
   }
 
   void VisitVecMultiplyAccumulate(HVecMultiplyAccumulate* instruction) OVERRIDE {
@@ -582,6 +594,11 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
         input_list.NewEntryStream() << DataType::TypeId(input->GetType()) << input->GetId();
       }
       StartAttributeStream() << input_list;
+    }
+    if (instruction->GetDexPc() != kNoDexPc) {
+      StartAttributeStream("dex_pc") << instruction->GetDexPc();
+    } else {
+      StartAttributeStream("dex_pc") << "n/a";
     }
     instruction->Accept(this);
     if (instruction->HasEnvironment()) {
@@ -648,20 +665,32 @@ class HGraphVisualizerPrinter : public HGraphDelegateVisitor {
           << std::boolalpha << loop_info->IsIrreducible() << std::noboolalpha;
     }
 
+    // For the builder and the inliner, we want to add extra information on HInstructions
+    // that have reference types, and also HInstanceOf/HCheckcast.
     if ((IsPass(HGraphBuilder::kBuilderPassName)
         || IsPass(HInliner::kInlinerPassName))
-        && (instruction->GetType() == DataType::Type::kReference)) {
-      ReferenceTypeInfo info = instruction->IsLoadClass()
-        ? instruction->AsLoadClass()->GetLoadedClassRTI()
-        : instruction->GetReferenceTypeInfo();
+        && (instruction->GetType() == DataType::Type::kReference ||
+            instruction->IsInstanceOf() ||
+            instruction->IsCheckCast())) {
+      ReferenceTypeInfo info = (instruction->GetType() == DataType::Type::kReference)
+          ? instruction->IsLoadClass()
+              ? instruction->AsLoadClass()->GetLoadedClassRTI()
+              : instruction->GetReferenceTypeInfo()
+          : instruction->IsInstanceOf()
+              ? instruction->AsInstanceOf()->GetTargetClassRTI()
+              : instruction->AsCheckCast()->GetTargetClassRTI();
       ScopedObjectAccess soa(Thread::Current());
       if (info.IsValid()) {
         StartAttributeStream("klass")
             << mirror::Class::PrettyDescriptor(info.GetTypeHandle().Get());
-        StartAttributeStream("can_be_null")
-            << std::boolalpha << instruction->CanBeNull() << std::noboolalpha;
+        if (instruction->GetType() == DataType::Type::kReference) {
+          StartAttributeStream("can_be_null")
+              << std::boolalpha << instruction->CanBeNull() << std::noboolalpha;
+        }
         StartAttributeStream("exact") << std::boolalpha << info.IsExact() << std::noboolalpha;
-      } else if (instruction->IsLoadClass()) {
+      } else if (instruction->IsLoadClass() ||
+                 instruction->IsInstanceOf() ||
+                 instruction->IsCheckCast()) {
         StartAttributeStream("klass") << "unresolved";
       } else {
         // The NullConstant may be added to the graph during other passes that happen between

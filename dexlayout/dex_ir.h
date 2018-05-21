@@ -24,11 +24,11 @@
 #include <map>
 #include <vector>
 
+#include "base/leb128.h"
 #include "base/stl_util.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
-#include "leb128.h"
-#include "utf.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
+#include "dex/utf.h"
 
 namespace art {
 namespace dex_ir {
@@ -133,6 +133,21 @@ template<class T> class CollectionVector : public CollectionBase<T> {
 
   uint32_t Size() const { return collection_.size(); }
   Vector& Collection() { return collection_; }
+  const Vector& Collection() const { return collection_; }
+
+  // Sort the vector by copying pointers over.
+  template <typename MapType>
+  void SortByMapOrder(const MapType& map) {
+    auto it = map.begin();
+    CHECK_EQ(map.size(), Size());
+    for (size_t i = 0; i < Size(); ++i) {
+      // There are times when the array will temporarily contain the same pointer twice, doing the
+      // release here sure there is no double free errors.
+      Collection()[i].release();
+      Collection()[i].reset(it->second);
+      ++it;
+    }
+  }
 
  protected:
   Vector collection_;
@@ -171,21 +186,9 @@ template<class T> class CollectionMap : public CollectionBase<T> {
     return it != collection_.end() ? it->second : nullptr;
   }
 
-  uint32_t Size() const { return collection_.size(); }
+  // Lower case for template interop with std::map.
+  uint32_t size() const { return collection_.size(); }
   std::map<uint32_t, T*>& Collection() { return collection_; }
-
-  // Sort the vector by copying pointers over.
-  void SortVectorByMapOrder(CollectionVector<T>& vector) {
-    auto it = collection_.begin();
-    CHECK_EQ(vector.Size(), Size());
-    for (size_t i = 0; i < Size(); ++i) {
-      // There are times when the array will temporarily contain the same pointer twice, doing the
-      // release here sure there is no double free errors.
-      vector.Collection()[i].release();
-      vector.Collection()[i].reset(it->second);
-      ++it;
-    }
-  }
 
  private:
   std::map<uint32_t, T*> collection_;
@@ -230,6 +233,8 @@ class Collections {
   CollectionVector<CodeItem>::Vector& CodeItems() { return code_items_.Collection(); }
   CollectionVector<ClassData>::Vector& ClassDatas() { return class_datas_.Collection(); }
 
+  const CollectionVector<ClassDef>::Vector& ClassDefs() const { return class_defs_.Collection(); }
+
   void CreateStringId(const DexFile& dex_file, uint32_t i);
   void CreateTypeId(const DexFile& dex_file, uint32_t i);
   void CreateProtoId(const DexFile& dex_file, uint32_t i);
@@ -251,8 +256,10 @@ class Collections {
       const DexFile::AnnotationSetItem* disk_annotations_item, uint32_t offset);
   AnnotationsDirectoryItem* CreateAnnotationsDirectoryItem(const DexFile& dex_file,
       const DexFile::AnnotationsDirectoryItem* disk_annotations_item, uint32_t offset);
-  CodeItem* CreateCodeItem(
-      const DexFile& dex_file, const DexFile::CodeItem& disk_code_item, uint32_t offset);
+  CodeItem* DedupeOrCreateCodeItem(const DexFile& dex_file,
+                                   const DexFile::CodeItem* disk_code_item,
+                                   uint32_t offset,
+                                   uint32_t dex_method_index);
   ClassData* CreateClassData(const DexFile& dex_file, const uint8_t* encoded_data, uint32_t offset);
   void AddAnnotationsFromMapListSection(const DexFile& dex_file,
                                         uint32_t start_offset,
@@ -455,7 +462,10 @@ class Collections {
   CollectionMap<AnnotationSetRefList> annotation_set_ref_lists_map_;
   CollectionMap<AnnotationsDirectoryItem> annotations_directory_items_map_;
   CollectionMap<DebugInfoItem> debug_info_items_map_;
-  CollectionMap<CodeItem> code_items_map_;
+  // Code item maps need to check both the debug info offset and debug info offset, do not use
+  // CollectionMap.
+  // First offset is the code item offset, second is the debug info offset.
+  std::map<std::pair<uint32_t, uint32_t>, CodeItem*> code_items_map_;
   CollectionMap<ClassData> class_datas_map_;
 
   uint32_t map_list_offset_ = 0;
@@ -476,11 +486,11 @@ class Item {
   virtual ~Item() { }
 
   // Return the assigned offset.
-  uint32_t GetOffset() const {
+  uint32_t GetOffset() const WARN_UNUSED {
     CHECK(OffsetAssigned());
     return offset_;
   }
-  uint32_t GetSize() const { return size_; }
+  uint32_t GetSize() const WARN_UNUSED { return size_; }
   void SetOffset(uint32_t offset) { offset_ = offset; }
   void SetSize(uint32_t size) { size_ = size; }
   bool OffsetAssigned() const {
@@ -524,7 +534,8 @@ class Header : public Item {
          uint32_t link_size,
          uint32_t link_offset,
          uint32_t data_size,
-         uint32_t data_offset)
+         uint32_t data_offset,
+         bool support_default_methods)
       : Item(0, kHeaderItemSize),
         checksum_(checksum),
         endian_tag_(endian_tag),
@@ -533,7 +544,8 @@ class Header : public Item {
         link_size_(link_size),
         link_offset_(link_offset),
         data_size_(data_size),
-        data_offset_(data_offset) {
+        data_offset_(data_offset),
+        support_default_methods_(support_default_methods) {
     memcpy(magic_, magic, sizeof(magic_));
     memcpy(signature_, signature, sizeof(signature_));
   }
@@ -567,6 +579,10 @@ class Header : public Item {
 
   void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
 
+  bool SupportDefaultMethods() const {
+    return support_default_methods_;
+  }
+
  private:
   uint8_t magic_[8];
   uint32_t checksum_;
@@ -578,6 +594,7 @@ class Header : public Item {
   uint32_t link_offset_;
   uint32_t data_size_;
   uint32_t data_offset_;
+  const bool support_default_methods_;
 
   Collections collections_;
 

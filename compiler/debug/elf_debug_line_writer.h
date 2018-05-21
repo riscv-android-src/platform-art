@@ -24,7 +24,7 @@
 #include "debug/dwarf/headers.h"
 #include "debug/elf_compilation_unit.h"
 #include "debug/src_map_elem.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "linker/elf_builder.h"
 #include "oat_file.h"
 #include "stack_map.h"
@@ -60,7 +60,7 @@ class ElfDebugLineWriter {
         ? builder_->GetText()->GetAddress()
         : 0;
 
-    compilation_unit.debug_line_offset = builder_->GetDebugLine()->GetSize();
+    compilation_unit.debug_line_offset = builder_->GetDebugLine()->GetPosition();
 
     std::vector<dwarf::FileEntry> files;
     std::unordered_map<std::string, size_t> files_map;
@@ -159,9 +159,9 @@ class ElfDebugLineWriter {
       PositionInfos dex2line_map;
       DCHECK(mi->dex_file != nullptr);
       const DexFile* dex = mi->dex_file;
-      uint32_t debug_info_offset = OatFile::GetDebugInfoOffset(*dex, mi->code_item);
-      if (!dex->DecodeDebugPositionInfo(
-              mi->code_item, debug_info_offset, PositionInfoCallback, &dex2line_map)) {
+      CodeItemDebugInfoAccessor accessor(*dex, mi->code_item, mi->dex_method_index);
+      const uint32_t debug_info_offset = accessor.DebugInfoOffset();
+      if (!dex->DecodeDebugPositionInfo(debug_info_offset, PositionInfoCallback, &dex2line_map)) {
         continue;
       }
 
@@ -268,7 +268,7 @@ class ElfDebugLineWriter {
     }
     std::vector<uint8_t> buffer;
     buffer.reserve(opcodes.data()->size() + KB);
-    size_t offset = builder_->GetDebugLine()->GetSize();
+    size_t offset = builder_->GetDebugLine()->GetPosition();
     WriteDebugLineTable(directories, files, opcodes, offset, &buffer, &debug_line_patches_);
     builder_->GetDebugLine()->WriteFully(buffer.data(), buffer.size());
     return buffer.size();

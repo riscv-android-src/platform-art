@@ -20,20 +20,12 @@ include art/build/Android.common_test.mk
 # Dependencies for actually running a run-test.
 TEST_ART_RUN_TEST_DEPENDENCIES := \
   $(HOST_OUT_EXECUTABLES)/dx \
+  $(HOST_OUT_EXECUTABLES)/d8 \
+  $(HOST_OUT_EXECUTABLES)/d8-compat-dx \
+  $(HOST_OUT_EXECUTABLES)/hiddenapi \
   $(HOST_OUT_EXECUTABLES)/jasmin \
   $(HOST_OUT_EXECUTABLES)/smali \
-  $(HOST_OUT_EXECUTABLES)/dexmerger
-
-# Add d8 dependency, if enabled.
-ifeq ($(USE_D8),true)
-TEST_ART_RUN_TEST_DEPENDENCIES += \
-  $(HOST_OUT_EXECUTABLES)/d8-compat-dx
-endif
-
-# Convert's a rule name to the form used in variables, e.g. no-relocate to NO_RELOCATE
-define name-to-var
-$(shell echo $(1) | tr '[:lower:]' '[:upper:]' | tr '-' '_')
-endef  # name-to-var
+  $(HOST_OUT_JAVA_LIBRARIES)/desugar.jar
 
 # We need dex2oat and dalvikvm on the target as well as the core images (all images as we sync
 # only once).
@@ -105,7 +97,7 @@ endif
 # Host executables.
 host_prereq_rules := $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES)
 
-# Required for dx, jasmin, smali, dexmerger.
+# Required for dx, jasmin, smali.
 host_prereq_rules += $(TEST_ART_RUN_TEST_DEPENDENCIES)
 
 # Sync test files to the target, depends upon all things that must be pushed
@@ -122,13 +114,13 @@ define core-image-dependencies
     endif
   endif
   ifeq ($(2),no-image)
-    $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
+    $(1)_prereq_rules += $$($(call to-upper,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
   else
     ifeq ($(2),picimage)
-      $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
+      $(1)_prereq_rules += $$($(call to-upper,$(1))_CORE_IMAGE_$$(image_suffix)_$(4))
     else
       ifeq ($(2),multipicimage)
-        $(1)_prereq_rules += $$($(call name-to-var,$(1))_CORE_IMAGE_$$(image_suffix)_multi_$(4))
+        $(1)_prereq_rules += $$($(call to-upper,$(1))_CORE_IMAGE_$$(image_suffix)_multi_$(4))
       endif
     endif
   endif
@@ -172,7 +164,6 @@ test-art-run-test : test-art-host-run-test test-art-target-run-test
 host_prereq_rules :=
 target_prereq_rules :=
 core-image-dependencies :=
-name-to-var :=
 define-test-art-host-or-target-run-test-group :=
 TARGET_TYPES :=
 COMPILER_TYPES :=

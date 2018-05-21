@@ -728,8 +728,9 @@ public class Main {
   /// CHECK:                            UShr
   /// CHECK-NOT:                        UShr
   //
-  // Note: simplification followed by GVN exposes the common subexpressions between shifts with larger distance
-  //       `b << 62`, `b << 63` etc. and the equivalent smaller distances.
+  // Note: running extra simplification after inlining and before GVN exposes the common
+  // subexpressions between shifts with larger distance `b << 62`, `b << 63` etc.
+  // and the equivalent smaller distances.
   //
   /// CHECK-START: void Main.$opt$validateShiftInt(int, int) GVN (after)
   /// CHECK:                            Shl

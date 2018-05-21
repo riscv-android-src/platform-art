@@ -76,7 +76,10 @@ extern "C" void jit_types_loaded(void* handle, mirror::Class** types, size_t cou
     const ArrayRef<mirror::Class*> types_array(types, count);
     std::vector<uint8_t> elf_file = debug::WriteDebugElfFileForClasses(
         kRuntimeISA, jit_compiler->GetCompilerDriver()->GetInstructionSetFeatures(), types_array);
-    CreateJITCodeEntry(std::move(elf_file));
+    MutexLock mu(Thread::Current(), *Locks::native_debug_interface_lock_);
+    // We never free debug info for types, so we don't need to provide a handle
+    // (which would have been otherwise used as identifier to remove it later).
+    AddNativeDebugInfoForJit(nullptr /* handle */, elf_file);
   }
 }
 
@@ -139,8 +142,6 @@ JitCompiler::JitCompiler() {
       instruction_set,
       instruction_set_features_.get(),
       /* image_classes */ nullptr,
-      /* compiled_classes */ nullptr,
-      /* compiled_methods */ nullptr,
       /* thread_count */ 1,
       /* swap_fd */ -1,
       /* profile_compilation_info */ nullptr));

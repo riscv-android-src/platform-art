@@ -20,7 +20,9 @@
 #include "heap.h"
 
 #include "allocation_listener.h"
+#include "base/quasi_atomic.h"
 #include "base/time_utils.h"
+#include "base/utils.h"
 #include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/allocation_record.h"
@@ -34,7 +36,6 @@
 #include "obj_ptr-inl.h"
 #include "runtime.h"
 #include "thread-inl.h"
-#include "utils.h"
 #include "verify_object.h"
 
 namespace art {
@@ -106,8 +107,8 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
   } else {
-    // bytes allocated that takes bulk thread-local buffer allocations into account.
-    size_t bytes_tl_bulk_allocated = 0;
+    // Bytes allocated that takes bulk thread-local buffer allocations into account.
+    size_t bytes_tl_bulk_allocated = 0u;
     obj = TryToAllocate<kInstrumented, false>(self, allocator, byte_count, &bytes_allocated,
                                               &usable_size, &bytes_tl_bulk_allocated);
     if (UNLIKELY(obj == nullptr)) {
@@ -154,12 +155,13 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     }
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
-    new_num_bytes_allocated = num_bytes_allocated_.FetchAndAddRelaxed(bytes_tl_bulk_allocated) +
-        bytes_tl_bulk_allocated;
+    size_t num_bytes_allocated_before =
+        num_bytes_allocated_.fetch_add(bytes_tl_bulk_allocated, std::memory_order_relaxed);
+    new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
     if (bytes_tl_bulk_allocated > 0) {
       // Only trace when we get an increase in the number of bytes allocated. This happens when
       // obtaining a new TLAB and isn't often enough to hurt performance according to golem.
-      TraceHeapSize(new_num_bytes_allocated + bytes_tl_bulk_allocated);
+      TraceHeapSize(new_num_bytes_allocated);
     }
   }
   if (kIsDebugBuild && Runtime::Current()->IsStarted()) {
@@ -185,7 +187,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       DCHECK(allocation_records_ != nullptr);
       allocation_records_->RecordAllocation(self, &obj, bytes_allocated);
     }
-    AllocationListener* l = alloc_listener_.LoadSequentiallyConsistent();
+    AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
     if (l != nullptr) {
       // Same as above. We assume that a listener that was once stored will never be deleted.
       // Otherwise we'd have to perform this under a lock.
@@ -391,7 +393,7 @@ inline bool Heap::ShouldAllocLargeObject(ObjPtr<mirror::Class> c, size_t byte_co
 inline bool Heap::IsOutOfMemoryOnAllocation(AllocatorType allocator_type,
                                             size_t alloc_size,
                                             bool grow) {
-  size_t new_footprint = num_bytes_allocated_.LoadSequentiallyConsistent() + alloc_size;
+  size_t new_footprint = num_bytes_allocated_.load(std::memory_order_seq_cst) + alloc_size;
   if (UNLIKELY(new_footprint > max_allowed_footprint_)) {
     if (UNLIKELY(new_footprint > growth_limit_)) {
       return true;

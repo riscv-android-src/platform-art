@@ -21,19 +21,21 @@
 
 #include <android-base/logging.h>
 
+#include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/enums.h"
 #include "base/iteration_range.h"
 #include "base/macros.h"
 #include "base/runtime_debug.h"
-#include "dex_file.h"
-#include "dex_instruction_iterator.h"
+#include "dex/code_item_accessors.h"
+#include "dex/dex_file.h"
+#include "dex/dex_instruction_iterator.h"
+#include "dex/modifiers.h"
+#include "dex/primitive.h"
 #include "gc_root.h"
-#include "modifiers.h"
 #include "obj_ptr.h"
 #include "offsets.h"
-#include "primitive.h"
 #include "read_barrier_option.h"
 
 namespace art {
@@ -170,12 +172,14 @@ class ArtMethod FINAL {
     return (GetAccessFlags() & synchonized) != 0;
   }
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsFinal() {
-    return (GetAccessFlags() & kAccFinal) != 0;
+    return (GetAccessFlags<kReadBarrierOption>() & kAccFinal) != 0;
   }
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsIntrinsic() {
-    return (GetAccessFlags() & kAccIntrinsic) != 0;
+    return (GetAccessFlags<kReadBarrierOption>() & kAccIntrinsic) != 0;
   }
 
   ALWAYS_INLINE void SetIntrinsic(uint32_t intrinsic) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -190,9 +194,7 @@ class ArtMethod FINAL {
     return (GetAccessFlags() & kAccIntrinsicBits) >> kAccFlagsShift;
   }
 
-  void SetNotIntrinsic() REQUIRES_SHARED(Locks::mutator_lock_) {
-    ClearAccessFlags(kAccIntrinsic | kAccIntrinsicBits);
-  }
+  void SetNotIntrinsic() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsCopied() {
     static_assert((kAccCopied & (kAccIntrinsic | kAccIntrinsicBits)) == 0,
@@ -239,10 +241,11 @@ class ArtMethod FINAL {
   }
 
   // This is set by the class linker.
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsDefault() {
     static_assert((kAccDefault & (kAccIntrinsic | kAccIntrinsicBits)) == 0,
                   "kAccDefault conflicts with intrinsic modifier");
-    return (GetAccessFlags() & kAccDefault) != 0;
+    return (GetAccessFlags<kReadBarrierOption>() & kAccDefault) != 0;
   }
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
@@ -277,8 +280,9 @@ class ArtMethod FINAL {
     return (GetAccessFlags() & mask) == mask;
   }
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   bool IsAbstract() {
-    return (GetAccessFlags() & kAccAbstract) != 0;
+    return (GetAccessFlags<kReadBarrierOption>() & kAccAbstract) != 0;
   }
 
   bool IsSynthetic() {
@@ -313,12 +317,13 @@ class ArtMethod FINAL {
     return (GetAccessFlags() & kAccPreviouslyWarm) != 0;
   }
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   void SetPreviouslyWarm() {
-    if (IsIntrinsic()) {
+    if (IsIntrinsic<kReadBarrierOption>()) {
       // kAccPreviouslyWarm overlaps with kAccIntrinsicBits.
       return;
     }
-    AddAccessFlags(kAccPreviouslyWarm);
+    AddAccessFlags<kReadBarrierOption>(kAccPreviouslyWarm);
   }
 
   // Should this method be run in the interpreter and count locks (e.g., failed structured-
@@ -333,6 +338,8 @@ class ArtMethod FINAL {
   void SetMustCountLocks() {
     AddAccessFlags(kAccMustCountLocks);
   }
+
+  HiddenApiAccessFlags::ApiList GetHiddenApiAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns true if this method could be overridden by a default method.
   bool IsOverridableByDefaultMethod() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -488,6 +495,7 @@ class ArtMethod FINAL {
     return DataOffset(kRuntimePointerSize);
   }
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ALWAYS_INLINE bool HasSingleImplementation() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void SetHasSingleImplementation(bool single_impl) {
@@ -505,12 +513,15 @@ class ArtMethod FINAL {
   ArtMethod* GetCanonicalMethod(PointerSize pointer_size = kRuntimePointerSize)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ArtMethod* GetSingleImplementation(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ALWAYS_INLINE void SetSingleImplementation(ArtMethod* method, PointerSize pointer_size) {
-    DCHECK(!IsNative());
-    DCHECK(IsAbstract());  // Non-abstract method's single implementation is just itself.
+    DCHECK(!IsNative<kReadBarrierOption>());
+    // Non-abstract method's single implementation is just itself.
+    DCHECK(IsAbstract<kReadBarrierOption>());
     SetDataPtrSize(method, pointer_size);
   }
 
@@ -545,7 +556,7 @@ class ArtMethod FINAL {
   // Is this a CalleSaveMethod or ResolutionMethod and therefore doesn't adhere to normal
   // conventions for a method of managed code. Returns false for Proxy methods.
   ALWAYS_INLINE bool IsRuntimeMethod() {
-    return dex_method_index_ == kRuntimeMethodDexMethodIndex;;
+    return dex_method_index_ == kRuntimeMethodDexMethodIndex;
   }
 
   // Is this a hand crafted method used for something like describing callee saves?
@@ -595,6 +606,8 @@ class ArtMethod FINAL {
   uint16_t GetClassDefIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const DexFile::ClassDef& GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE size_t GetNumberOfParameters() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetReturnTypeDescriptor() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -661,7 +674,12 @@ class ArtMethod FINAL {
     return hotness_count_;
   }
 
-  const uint8_t* GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
+  static MemberOffset HotnessCountOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(ArtMethod, hotness_count_));
+  }
+
+  ArrayRef<const uint8_t> GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
+  uint16_t GetIndexFromQuickening(uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the method header for the compiled code containing 'pc'. Note that runtime
   // methods will return null for this method, as they are not oat based.
@@ -716,13 +734,17 @@ class ArtMethod FINAL {
             "ptr_sized_fields_.entry_point_from_quick_compiled_code_");
   }
 
-  // Returns the dex instructions of the code item for the art method. Must not be called on null
-  // code items.
-  ALWAYS_INLINE IterationRange<DexInstructionIterator> DexInstructions()
+  // Returns the dex instructions of the code item for the art method. Returns an empty array for
+  // the null code item case.
+  ALWAYS_INLINE CodeItemInstructionAccessor DexInstructions()
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Handles a null code item by returning iterators that have a null address.
-  ALWAYS_INLINE IterationRange<DexInstructionIterator> NullableDexInstructions()
+  // Returns the dex code item data section of the DexFile for the art method.
+  ALWAYS_INLINE CodeItemDataAccessor DexInstructionData()
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Returns the dex code item debug info section of the DexFile for the art method.
+  ALWAYS_INLINE CodeItemDebugInfoAccessor DexInstructionDebugInfo()
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:
@@ -751,7 +773,7 @@ class ArtMethod FINAL {
   // ifTable.
   uint16_t method_index_;
 
-  // The hotness we measure for this method. Managed by the interpreter. Not atomic, as we allow
+  // The hotness we measure for this method. Not atomic, as we allow
   // missing increments: if the method is hot, we will see it eventually.
   uint16_t hotness_count_;
 
@@ -823,8 +845,11 @@ class ArtMethod FINAL {
   }
 
   // This setter guarantees atomicity.
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   void AddAccessFlags(uint32_t flag) {
-    DCHECK(!IsIntrinsic() || !OverlapsIntrinsicBits(flag) || IsValidIntrinsicUpdate(flag));
+    DCHECK(!IsIntrinsic<kReadBarrierOption>() ||
+           !OverlapsIntrinsicBits(flag) ||
+           IsValidIntrinsicUpdate(flag));
     uint32_t old_access_flags;
     uint32_t new_access_flags;
     do {

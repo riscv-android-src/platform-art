@@ -21,19 +21,19 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "class_linker.h"
+#include "dex/primitive.h"
 #include "gc/heap-visit-objects-inl.h"
 #include "gc/heap.h"
 #include "gc_root-inl.h"
 #include "java_frame_root_info.h"
-#include "jni_env_ext.h"
-#include "jni_internal.h"
+#include "jni/jni_env_ext.h"
+#include "jni/jni_internal.h"
 #include "jvmti_weak_table-inl.h"
 #include "mirror/class.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "obj_ptr-inl.h"
 #include "object_tagging.h"
-#include "primitive.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
@@ -1383,7 +1383,7 @@ jvmtiError HeapUtil::GetLoadedClasses(jvmtiEnv* env,
 }
 
 jvmtiError HeapUtil::ForceGarbageCollection(jvmtiEnv* env ATTRIBUTE_UNUSED) {
-  art::Runtime::Current()->GetHeap()->CollectGarbage(false);
+  art::Runtime::Current()->GetHeap()->CollectGarbage(/* clear_soft_references */ false);
 
   return ERR(NONE);
 }

@@ -27,17 +27,18 @@
 #include "base/enums.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/macros.h"
+#include "base/malloc_arena_pool.h"
+#include "base/memory_region.h"
+#include "base/utils.h"
 #include "calling_convention.h"
 #include "class_linker.h"
 #include "debug/dwarf/debug_frame_opcode_writer.h"
-#include "dex_file-inl.h"
+#include "dex/dex_file-inl.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "jni_env_ext.h"
-#include "memory_region.h"
+#include "jni/jni_env_ext.h"
 #include "thread.h"
-#include "utils.h"
 #include "utils/arm/managed_register_arm.h"
 #include "utils/arm64/managed_register_arm64.h"
 #include "utils/assembler.h"
@@ -174,7 +175,7 @@ static JniCompiledMethod ArtJniCompileMethodInternal(CompilerDriver* driver,
     }
   }
 
-  ArenaPool pool;
+  MallocArenaPool pool;
   ArenaAllocator allocator(&pool);
 
   // Calling conventions used to iterate over parameters to method

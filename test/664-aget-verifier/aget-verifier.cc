@@ -14,11 +14,11 @@
  * limitations under the License.
  */
 
-#include "dex_file.h"
+#include "dex/dex_file.h"
 
 #include "art_method-inl.h"
+#include "dex/method_reference.h"
 #include "jni.h"
-#include "method_reference.h"
 #include "mirror/class-inl.h"
 #include "mirror/executable.h"
 #include "scoped_thread_state_change-inl.h"

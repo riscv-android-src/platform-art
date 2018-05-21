@@ -35,8 +35,8 @@
 #include "gc/space/zygote_space.h"
 #include "handle_scope-inl.h"
 #include "hprof/hprof.h"
-#include "java_vm_ext.h"
-#include "jni_internal.h"
+#include "jni/java_vm_ext.h"
+#include "jni/jni_internal.h"
 #include "mirror/class.h"
 #include "mirror/object_array-inl.h"
 #include "native_util.h"
@@ -89,17 +89,27 @@ static void VMDebug_resetAllocCount(JNIEnv*, jclass, jint kinds) {
 
 static void VMDebug_startMethodTracingDdmsImpl(JNIEnv*, jclass, jint bufferSize, jint flags,
                                                jboolean samplingEnabled, jint intervalUs) {
-  Trace::Start("[DDMS]", -1, bufferSize, flags, Trace::TraceOutputMode::kDDMS,
-               samplingEnabled ? Trace::TraceMode::kSampling : Trace::TraceMode::kMethodTracing,
-               intervalUs);
+  Trace::StartDDMS(bufferSize,
+                   flags,
+                   samplingEnabled ? Trace::TraceMode::kSampling : Trace::TraceMode::kMethodTracing,
+                   intervalUs);
 }
 
-static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceFilename,
-                                         jint javaFd, jint bufferSize, jint flags,
-                                         jboolean samplingEnabled, jint intervalUs,
+static void VMDebug_startMethodTracingFd(JNIEnv* env,
+                                         jclass,
+                                         jstring javaTraceFilename ATTRIBUTE_UNUSED,
+                                         jint javaFd,
+                                         jint bufferSize,
+                                         jint flags,
+                                         jboolean samplingEnabled,
+                                         jint intervalUs,
                                          jboolean streamingOutput) {
   int originalFd = javaFd;
   if (originalFd < 0) {
+    ScopedObjectAccess soa(env);
+    soa.Self()->ThrowNewExceptionF("Ljava/lang/RuntimeException;",
+                                   "Trace fd is invalid: %d",
+                                   originalFd);
     return;
   }
 
@@ -107,18 +117,20 @@ static void VMDebug_startMethodTracingFd(JNIEnv* env, jclass, jstring javaTraceF
   if (fd < 0) {
     ScopedObjectAccess soa(env);
     soa.Self()->ThrowNewExceptionF("Ljava/lang/RuntimeException;",
-                                   "dup(%d) failed: %s", originalFd, strerror(errno));
+                                   "dup(%d) failed: %s",
+                                   originalFd,
+                                   strerror(errno));
     return;
   }
 
-  ScopedUtfChars traceFilename(env, javaTraceFilename);
-  if (traceFilename.c_str() == nullptr) {
-    return;
-  }
+  // Ignore the traceFilename.
   Trace::TraceOutputMode outputMode = streamingOutput
                                           ? Trace::TraceOutputMode::kStreaming
                                           : Trace::TraceOutputMode::kFile;
-  Trace::Start(traceFilename.c_str(), fd, bufferSize, flags, outputMode,
+  Trace::Start(fd,
+               bufferSize,
+               flags,
+               outputMode,
                samplingEnabled ? Trace::TraceMode::kSampling : Trace::TraceMode::kMethodTracing,
                intervalUs);
 }
@@ -130,7 +142,10 @@ static void VMDebug_startMethodTracingFilename(JNIEnv* env, jclass, jstring java
   if (traceFilename.c_str() == nullptr) {
     return;
   }
-  Trace::Start(traceFilename.c_str(), -1, bufferSize, flags, Trace::TraceOutputMode::kFile,
+  Trace::Start(traceFilename.c_str(),
+               bufferSize,
+               flags,
+               Trace::TraceOutputMode::kFile,
                samplingEnabled ? Trace::TraceMode::kSampling : Trace::TraceMode::kMethodTracing,
                intervalUs);
 }
@@ -157,8 +172,9 @@ static jboolean VMDebug_isDebuggerConnected(JNIEnv*, jclass) {
   return Dbg::IsDebuggerActive();
 }
 
-static jboolean VMDebug_isDebuggingEnabled(JNIEnv*, jclass) {
-  return Dbg::IsJdwpConfigured();
+static jboolean VMDebug_isDebuggingEnabled(JNIEnv* env, jclass) {
+  ScopedObjectAccess soa(env);
+  return Runtime::Current()->GetRuntimeCallbacks()->IsDebuggerConfigured();
 }
 
 static jlong VMDebug_lastDebuggerActivity(JNIEnv*, jclass) {
@@ -441,7 +457,7 @@ enum class VMDebugRuntimeStatId {
   kNumRuntimeStats,
 };
 
-static jobject VMDebug_getRuntimeStatInternal(JNIEnv* env, jclass, jint statId) {
+static jstring VMDebug_getRuntimeStatInternal(JNIEnv* env, jclass, jint statId) {
   gc::Heap* heap = Runtime::Current()->GetHeap();
   switch (static_cast<VMDebugRuntimeStatId>(statId)) {
     case VMDebugRuntimeStatId::kArtGcGcCount: {
@@ -547,7 +563,7 @@ static jobjectArray VMDebug_getRuntimeStatsInternal(JNIEnv* env, jclass) {
   return result;
 }
 
-static void VMDebug_attachAgent(JNIEnv* env, jclass, jstring agent) {
+static void VMDebug_nativeAttachAgent(JNIEnv* env, jclass, jstring agent, jobject classloader) {
   if (agent == nullptr) {
     ScopedObjectAccess soa(env);
     ThrowNullPointerException("agent is null");
@@ -569,7 +585,26 @@ static void VMDebug_attachAgent(JNIEnv* env, jclass, jstring agent) {
     filename = chars.c_str();
   }
 
-  Runtime::Current()->AttachAgent(filename);
+  Runtime::Current()->AttachAgent(env, filename, classloader);
+}
+
+static void VMDebug_allowHiddenApiReflectionFrom(JNIEnv* env, jclass, jclass j_caller) {
+  Runtime* runtime = Runtime::Current();
+  ScopedObjectAccess soa(env);
+
+  if (!runtime->IsJavaDebuggable()) {
+    ThrowSecurityException("Can't exempt class, process is not debuggable.");
+    return;
+  }
+
+  StackHandleScope<1> hs(soa.Self());
+  Handle<mirror::Class> h_caller(hs.NewHandle(soa.Decode<mirror::Class>(j_caller)));
+  if (h_caller.IsNull()) {
+    ThrowNullPointerException("argument is null");
+    return;
+  }
+
+  h_caller->SetSkipHiddenApiChecks();
 }
 
 static JNINativeMethod gMethods[] = {
@@ -606,7 +641,8 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMDebug, threadCpuTimeNanos, "()J"),
   NATIVE_METHOD(VMDebug, getRuntimeStatInternal, "(I)Ljava/lang/String;"),
   NATIVE_METHOD(VMDebug, getRuntimeStatsInternal, "()[Ljava/lang/String;"),
-  NATIVE_METHOD(VMDebug, attachAgent, "(Ljava/lang/String;)V"),
+  NATIVE_METHOD(VMDebug, nativeAttachAgent, "(Ljava/lang/String;Ljava/lang/ClassLoader;)V"),
+  NATIVE_METHOD(VMDebug, allowHiddenApiReflectionFrom, "(Ljava/lang/Class;)V"),
 };
 
 void register_dalvik_system_VMDebug(JNIEnv* env) {

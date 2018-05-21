@@ -23,7 +23,7 @@
 #include "base/casts.h"
 #include "base/mutex-inl.h"
 #include "base/time_utils.h"
-#include "jni_env_ext.h"
+#include "jni/jni_env_ext.h"
 #include "managed_stack-inl.h"
 #include "obj_ptr.h"
 #include "thread-current-inl.h"
@@ -34,7 +34,7 @@ namespace art {
 // Quickly access the current thread from a JNIEnv.
 static inline Thread* ThreadForEnv(JNIEnv* env) {
   JNIEnvExt* full_env(down_cast<JNIEnvExt*>(env));
-  return full_env->self;
+  return full_env->GetSelf();
 }
 
 inline void Thread::AllowThreadSuspension() {
@@ -201,7 +201,7 @@ inline void Thread::TransitionToSuspendedAndRunCheckpoints(ThreadState new_state
 
     // CAS the value with a memory ordering.
     bool done =
-        tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakRelease(old_state_and_flags.as_int,
+        tls32_.state_and_flags.as_atomic_int.CompareAndSetWeakRelease(old_state_and_flags.as_int,
                                                                         new_state_and_flags.as_int);
     if (LIKELY(done)) {
       break;
@@ -251,8 +251,9 @@ inline ThreadState Thread::TransitionFromSuspendedToRunnable() {
       union StateAndFlags new_state_and_flags;
       new_state_and_flags.as_int = old_state_and_flags.as_int;
       new_state_and_flags.as_struct.state = kRunnable;
+
       // CAS the value with a memory barrier.
-      if (LIKELY(tls32_.state_and_flags.as_atomic_int.CompareExchangeWeakAcquire(
+      if (LIKELY(tls32_.state_and_flags.as_atomic_int.CompareAndSetWeakAcquire(
                                                  old_state_and_flags.as_int,
                                                  new_state_and_flags.as_int))) {
         // Mark the acquisition of a share of the mutator_lock_.

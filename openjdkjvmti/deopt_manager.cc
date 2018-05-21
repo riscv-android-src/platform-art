@@ -37,12 +37,13 @@
 #include "art_method-inl.h"
 #include "base/enums.h"
 #include "base/mutex-inl.h"
-#include "dex_file_annotations.h"
+#include "dex/dex_file_annotations.h"
+#include "dex/modifiers.h"
 #include "events-inl.h"
-#include "jni_internal.h"
+#include "jit/jit.h"
+#include "jni/jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_array-inl.h"
-#include "modifiers.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
@@ -53,27 +54,41 @@
 namespace openjdkjvmti {
 
 // TODO We should make this much more selective in the future so we only return true when we
-// actually care about the method (i.e. had locals changed, have breakpoints, etc.). For now though
-// we can just assume that we care we are loaded at all.
-//
-// Even if we don't keep track of this at the method level we might want to keep track of it at the
-// level of enabled capabilities.
-bool JvmtiMethodInspectionCallback::IsMethodBeingInspected(
-    art::ArtMethod* method ATTRIBUTE_UNUSED) {
-  return true;
+// actually care about the method at this time (ie active frames had locals changed). For now we
+// just assume that if anything has changed any frame's locals we care about all methods. If nothing
+// has we only care about methods with active breakpoints on them. In the future we should probably
+// rewrite all of this to instead do this at the ShadowFrame or thread granularity.
+bool JvmtiMethodInspectionCallback::IsMethodBeingInspected(art::ArtMethod* method) {
+  // Non-java-debuggable runtimes we need to assume that any method might not be debuggable and
+  // therefore potentially being inspected (due to inlines). If we are debuggable we rely hard on
+  // inlining not being done since we don't keep track of which methods get inlined where and simply
+  // look to see if the method is breakpointed.
+  return !art::Runtime::Current()->IsJavaDebuggable() ||
+      manager_->HaveLocalsChanged() ||
+      manager_->MethodHasBreakpoints(method);
 }
 
 bool JvmtiMethodInspectionCallback::IsMethodSafeToJit(art::ArtMethod* method) {
   return !manager_->MethodHasBreakpoints(method);
 }
 
+bool JvmtiMethodInspectionCallback::MethodNeedsDebugVersion(
+    art::ArtMethod* method ATTRIBUTE_UNUSED) {
+  return true;
+}
+
 DeoptManager::DeoptManager()
-  : deoptimization_status_lock_("JVMTI_DeoptimizationStatusLock"),
+  : deoptimization_status_lock_("JVMTI_DeoptimizationStatusLock",
+                                static_cast<art::LockLevel>(
+                                    art::LockLevel::kClassLinkerClassesLock + 1)),
     deoptimization_condition_("JVMTI_DeoptimizationCondition", deoptimization_status_lock_),
     performing_deoptimization_(false),
     global_deopt_count_(0),
     deopter_count_(0),
-    inspection_callback_(this) { }
+    breakpoint_status_lock_("JVMTI_BreakpointStatusLock",
+                            static_cast<art::LockLevel>(art::LockLevel::kAbortLock + 1)),
+    inspection_callback_(this),
+    set_local_variable_called_(false) { }
 
 void DeoptManager::Setup() {
   art::ScopedThreadStateChange stsc(art::Thread::Current(),
@@ -91,15 +106,55 @@ void DeoptManager::Shutdown() {
   callbacks->RemoveMethodInspectionCallback(&inspection_callback_);
 }
 
+void DeoptManager::FinishSetup() {
+  art::Thread* self = art::Thread::Current();
+  art::MutexLock mu(self, deoptimization_status_lock_);
+
+  art::Runtime* runtime = art::Runtime::Current();
+  // See if we need to do anything.
+  if (!runtime->IsJavaDebuggable()) {
+    // See if we can enable all JVMTI functions. If this is false, only kArtTiVersion agents can be
+    // retrieved and they will all be best-effort.
+    if (PhaseUtil::GetPhaseUnchecked() == JVMTI_PHASE_ONLOAD) {
+      // We are still early enough to change the compiler options and get full JVMTI support.
+      LOG(INFO) << "Openjdkjvmti plugin loaded on a non-debuggable runtime. Changing runtime to "
+                << "debuggable state. Please pass '--debuggable' to dex2oat and "
+                << "'-Xcompiler-option --debuggable' to dalvikvm in the future.";
+      DCHECK(runtime->GetJit() == nullptr) << "Jit should not be running yet!";
+      runtime->AddCompilerOption("--debuggable");
+      runtime->SetJavaDebuggable(true);
+    } else {
+      LOG(WARNING) << "Openjdkjvmti plugin was loaded on a non-debuggable Runtime. Plugin was "
+                   << "loaded too late to change runtime state to DEBUGGABLE. Only kArtTiVersion "
+                   << "(0x" << std::hex << kArtTiVersion << ") environments are available. Some "
+                   << "functionality might not work properly.";
+      if (runtime->GetJit() == nullptr &&
+          runtime->GetJITOptions()->UseJitCompilation() &&
+          !runtime->GetInstrumentation()->IsForcedInterpretOnly()) {
+        // If we don't have a jit we should try to start the jit for performance reasons. We only
+        // need to do this for late attach on non-debuggable processes because for debuggable
+        // processes we already rely on jit and we cannot force this jit to start if we are still in
+        // OnLoad since the runtime hasn't started up sufficiently. This is only expected to happen
+        // on userdebug/eng builds.
+        LOG(INFO) << "Attempting to start jit for openjdkjvmti plugin.";
+        runtime->CreateJit();
+        if (runtime->GetJit() == nullptr) {
+          LOG(WARNING) << "Could not start jit for openjdkjvmti plugin. This process might be "
+                       << "quite slow as it is running entirely in the interpreter. Try running "
+                       << "'setenforce 0' and restarting this process.";
+        }
+      }
+    }
+    runtime->DeoptimizeBootImage();
+  }
+}
+
 bool DeoptManager::MethodHasBreakpoints(art::ArtMethod* method) {
-  art::MutexLock lk(art::Thread::Current(), deoptimization_status_lock_);
+  art::MutexLock lk(art::Thread::Current(), breakpoint_status_lock_);
   return MethodHasBreakpointsLocked(method);
 }
 
 bool DeoptManager::MethodHasBreakpointsLocked(art::ArtMethod* method) {
-  if (deopter_count_ == 0) {
-    return false;
-  }
   auto elem = breakpoint_status_.find(method);
   return elem != breakpoint_status_.end() && elem->second != 0;
 }
@@ -129,18 +184,23 @@ void DeoptManager::AddMethodBreakpoint(art::ArtMethod* method) {
 
   art::ScopedThreadSuspension sts(self, art::kSuspended);
   deoptimization_status_lock_.ExclusiveLock(self);
+  {
+    breakpoint_status_lock_.ExclusiveLock(self);
 
-  DCHECK_GT(deopter_count_, 0u) << "unexpected deotpimization request";
+    DCHECK_GT(deopter_count_, 0u) << "unexpected deotpimization request";
 
-  if (MethodHasBreakpointsLocked(method)) {
-    // Don't need to do anything extra.
-    breakpoint_status_[method]++;
-    // Another thread might be deoptimizing the very method we just added new breakpoints for. Wait
-    // for any deopts to finish before moving on.
-    WaitForDeoptimizationToFinish(self);
-    return;
+    if (MethodHasBreakpointsLocked(method)) {
+      // Don't need to do anything extra.
+      breakpoint_status_[method]++;
+      // Another thread might be deoptimizing the very method we just added new breakpoints for.
+      // Wait for any deopts to finish before moving on.
+      breakpoint_status_lock_.ExclusiveUnlock(self);
+      WaitForDeoptimizationToFinish(self);
+      return;
+    }
+    breakpoint_status_[method] = 1;
+    breakpoint_status_lock_.ExclusiveUnlock(self);
   }
-  breakpoint_status_[method] = 1;
   auto instrumentation = art::Runtime::Current()->GetInstrumentation();
   if (instrumentation->IsForcedInterpretOnly()) {
     // We are already interpreting everything so no need to do anything.
@@ -167,17 +227,22 @@ void DeoptManager::RemoveMethodBreakpoint(art::ArtMethod* method) {
   // need but since that is very heavy we will instead just use a condition variable to make sure we
   // don't race with ourselves.
   deoptimization_status_lock_.ExclusiveLock(self);
+  bool is_last_breakpoint;
+  {
+    art::MutexLock mu(self, breakpoint_status_lock_);
 
-  DCHECK_GT(deopter_count_, 0u) << "unexpected deotpimization request";
-  DCHECK(MethodHasBreakpointsLocked(method)) << "Breakpoint on a method was removed without "
-                                             << "breakpoints present!";
+    DCHECK_GT(deopter_count_, 0u) << "unexpected deotpimization request";
+    DCHECK(MethodHasBreakpointsLocked(method)) << "Breakpoint on a method was removed without "
+                                              << "breakpoints present!";
+    breakpoint_status_[method] -= 1;
+    is_last_breakpoint = (breakpoint_status_[method] == 0);
+  }
   auto instrumentation = art::Runtime::Current()->GetInstrumentation();
-  breakpoint_status_[method] -= 1;
   if (UNLIKELY(instrumentation->IsForcedInterpretOnly())) {
     // We don't need to do anything since we are interpreting everything anyway.
     deoptimization_status_lock_.ExclusiveUnlock(self);
     return;
-  } else if (breakpoint_status_[method] == 0) {
+  } else if (is_last_breakpoint) {
     if (UNLIKELY(is_default)) {
       RemoveDeoptimizeAllMethodsLocked(self);
     } else {
@@ -248,7 +313,7 @@ void DeoptManager::AddDeoptimizeAllMethodsLocked(art::Thread* self) {
 }
 
 void DeoptManager::RemoveDeoptimizeAllMethodsLocked(art::Thread* self) {
-  DCHECK_GT(global_deopt_count_, 0u) << "Request to remove non-existant global deoptimization!";
+  DCHECK_GT(global_deopt_count_, 0u) << "Request to remove non-existent global deoptimization!";
   global_deopt_count_--;
   if (global_deopt_count_ == 0) {
     PerformGlobalUndeoptimization(self);
@@ -314,9 +379,9 @@ void DeoptManager::DeoptimizeThread(art::Thread* target) {
   art::Runtime::Current()->GetInstrumentation()->InstrumentThreadStack(target);
 }
 
-extern DeoptManager gDeoptManager;
+extern DeoptManager* gDeoptManager;
 DeoptManager* DeoptManager::Get() {
-  return &gDeoptManager;
+  return gDeoptManager;
 }
 
 }  // namespace openjdkjvmti

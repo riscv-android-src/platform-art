@@ -36,7 +36,7 @@
 
 namespace art {
 
-void HSharpening::Run() {
+bool HSharpening::Run() {
   // We don't care about the order of the blocks here.
   for (HBasicBlock* block : graph_->GetReversePostOrder()) {
     for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
@@ -51,6 +51,7 @@ void HSharpening::Run() {
       //       because we know the type better when inlining.
     }
   }
+  return true;
 }
 
 static bool IsInBootImage(ArtMethod* method) {
@@ -125,8 +126,12 @@ void HSharpening::SharpenInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke,
              BootImageAOTCanEmbedMethod(callee, compiler_driver)) {
     method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative;
     code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
+  } else if (IsInBootImage(callee)) {
+    // Use PC-relative access to the .data.bimg.rel.ro methods array.
+    method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo;
+    code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
   } else {
-    // Use PC-relative access to the .bss methods arrays.
+    // Use PC-relative access to the .bss methods array.
     method_load_kind = HInvokeStaticOrDirect::MethodLoadKind::kBssEntry;
     code_ptr_location = HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod;
   }
@@ -207,7 +212,7 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
       } else if (is_in_boot_image) {
         // AOT app compilation, boot image class.
         if (codegen->GetCompilerOptions().GetCompilePic()) {
-          desired_load_kind = HLoadClass::LoadKind::kBootImageClassTable;
+          desired_load_kind = HLoadClass::LoadKind::kBootImageRelRo;
         } else {
           desired_load_kind = HLoadClass::LoadKind::kBootImageAddress;
         }
@@ -234,6 +239,75 @@ HLoadClass::LoadKind HSharpening::ComputeLoadClassKind(
     }
   }
   return load_kind;
+}
+
+static inline bool CanUseTypeCheckBitstring(ObjPtr<mirror::Class> klass,
+                                            CodeGenerator* codegen,
+                                            CompilerDriver* compiler_driver)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(!klass->IsProxyClass());
+  DCHECK(!klass->IsArrayClass());
+
+  if (Runtime::Current()->UseJitCompilation()) {
+    // If we're JITting, try to assign a type check bitstring (fall through).
+  } else if (codegen->GetCompilerOptions().IsBootImage()) {
+    const char* descriptor = klass->GetDexFile().StringByTypeIdx(klass->GetDexTypeIndex());
+    if (!compiler_driver->IsImageClass(descriptor)) {
+      return false;
+    }
+    // If the target is a boot image class, try to assign a type check bitstring (fall through).
+    // (If --force-determinism, this was already done; repeating is OK and yields the same result.)
+  } else {
+    // TODO: Use the bitstring also for AOT app compilation if the target class has a bitstring
+    // already assigned in the boot image.
+    return false;
+  }
+
+  // Try to assign a type check bitstring.
+  MutexLock subtype_check_lock(Thread::Current(), *Locks::subtype_check_lock_);
+  if ((false) &&  // FIXME: Inliner does not respect compiler_driver->IsClassToCompile()
+                  // and we're hitting an unassigned bitstring in dex2oat_image_test. b/26687569
+      kIsDebugBuild &&
+      codegen->GetCompilerOptions().IsBootImage() &&
+      codegen->GetCompilerOptions().IsForceDeterminism()) {
+    SubtypeCheckInfo::State old_state = SubtypeCheck<ObjPtr<mirror::Class>>::GetState(klass);
+    CHECK(old_state == SubtypeCheckInfo::kAssigned || old_state == SubtypeCheckInfo::kOverflowed)
+        << klass->PrettyDescriptor() << "/" << old_state
+        << " in " << codegen->GetGraph()->PrettyMethod();
+  }
+  SubtypeCheckInfo::State state = SubtypeCheck<ObjPtr<mirror::Class>>::EnsureAssigned(klass);
+  return state == SubtypeCheckInfo::kAssigned;
+}
+
+TypeCheckKind HSharpening::ComputeTypeCheckKind(ObjPtr<mirror::Class> klass,
+                                                CodeGenerator* codegen,
+                                                CompilerDriver* compiler_driver,
+                                                bool needs_access_check) {
+  if (klass == nullptr) {
+    return TypeCheckKind::kUnresolvedCheck;
+  } else if (klass->IsInterface()) {
+    return TypeCheckKind::kInterfaceCheck;
+  } else if (klass->IsArrayClass()) {
+    if (klass->GetComponentType()->IsObjectClass()) {
+      return TypeCheckKind::kArrayObjectCheck;
+    } else if (klass->CannotBeAssignedFromOtherTypes()) {
+      return TypeCheckKind::kExactCheck;
+    } else {
+      return TypeCheckKind::kArrayCheck;
+    }
+  } else if (klass->IsFinal()) {  // TODO: Consider using bitstring for final classes.
+    return TypeCheckKind::kExactCheck;
+  } else if (kBitstringSubtypeCheckEnabled &&
+             !needs_access_check &&
+             CanUseTypeCheckBitstring(klass, codegen, compiler_driver)) {
+    // TODO: We should not need the `!needs_access_check` check but getting rid of that
+    // requires rewriting some optimizations in instruction simplifier.
+    return TypeCheckKind::kBitstringCheck;
+  } else if (klass->IsAbstract()) {
+    return TypeCheckKind::kAbstractClassCheck;
+  } else {
+    return TypeCheckKind::kClassHierarchyCheck;
+  }
 }
 
 void HSharpening::ProcessLoadString(
@@ -288,7 +362,7 @@ void HSharpening::ProcessLoadString(
       string = class_linker->LookupString(string_index, dex_cache.Get());
       if (string != nullptr && runtime->GetHeap()->ObjectIsInBootImageSpace(string)) {
         if (codegen->GetCompilerOptions().GetCompilePic()) {
-          desired_load_kind = HLoadString::LoadKind::kBootImageInternTable;
+          desired_load_kind = HLoadString::LoadKind::kBootImageRelRo;
         } else {
           desired_load_kind = HLoadString::LoadKind::kBootImageAddress;
         }

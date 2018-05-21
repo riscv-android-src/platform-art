@@ -18,12 +18,12 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_MIPS_H_
 
 #include "code_generator.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
+#include "dex/string_reference.h"
+#include "dex/type_reference.h"
 #include "driver/compiler_options.h"
 #include "nodes.h"
 #include "parallel_move_resolver.h"
-#include "string_reference.h"
-#include "type_reference.h"
 #include "utils/mips/assembler_mips.h"
 
 namespace art {
@@ -145,6 +145,7 @@ class ParallelMoveResolverMIPS : public ParallelMoveResolverWithSwap {
   void RestoreScratch(int reg) OVERRIDE;
 
   void Exchange(int index1, int index2, bool double_slot);
+  void ExchangeQuadSlots(int index1, int index2);
 
   MipsAssembler* GetAssembler() const;
 
@@ -236,6 +237,7 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
  private:
   void GenerateClassInitializationCheck(SlowPathCodeMIPS* slow_path, Register class_reg);
   void GenerateSuspendCheck(HSuspendCheck* check, HBasicBlock* successor);
+  void GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check, Register temp);
   void HandleBinaryOp(HBinaryOperation* operation);
   void HandleCondition(HCondition* instruction);
   void HandleShift(HBinaryOperation* operation);
@@ -244,6 +246,11 @@ class InstructionCodeGeneratorMIPS : public InstructionCodeGenerator {
                       uint32_t dex_pc,
                       bool value_can_be_null);
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info, uint32_t dex_pc);
+
+  void GenerateMinMaxInt(LocationSummary* locations, bool is_min, bool isR6, DataType::Type type);
+  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, bool isR6, DataType::Type type);
+  void GenerateMinMax(HBinaryOperation*, bool is_min);
+  void GenerateAbsFP(LocationSummary* locations, DataType::Type type, bool isR2OrNewer, bool isR6);
 
   // Generate a heap reference load using one register `out`:
   //
@@ -575,8 +582,9 @@ class CodeGeneratorMIPS : public CodeGenerator {
   void GenerateImplicitNullCheck(HNullCheck* instruction) OVERRIDE;
   void GenerateExplicitNullCheck(HNullCheck* instruction) OVERRIDE;
 
-  // The PcRelativePatchInfo is used for PC-relative addressing of dex cache arrays
-  // and boot image strings. The only difference is the interpretation of the offset_or_index.
+  // The PcRelativePatchInfo is used for PC-relative addressing of methods/strings/types,
+  // whether through .data.bimg.rel.ro, .bss, or directly in the boot image.
+  //
   // The 16-bit halves of the 32-bit PC-relative offset are patched separately, necessitating
   // two patches/infos. There can be more than two patches/infos if the instruction supplying
   // the high half is shared with e.g. a slow path, while the low half is supplied by separate
@@ -591,21 +599,14 @@ class CodeGeneratorMIPS : public CodeGenerator {
   //     ...
   //     sw    r2, low(r1)    // patch
   //     b     back
-  struct PcRelativePatchInfo {
-    PcRelativePatchInfo(const DexFile& dex_file,
+  struct PcRelativePatchInfo : PatchInfo<MipsLabel> {
+    PcRelativePatchInfo(const DexFile* dex_file,
                         uint32_t off_or_idx,
                         const PcRelativePatchInfo* info_high)
-        : target_dex_file(dex_file),
-          offset_or_index(off_or_idx),
-          label(),
+        : PatchInfo<MipsLabel>(dex_file, off_or_idx),
           pc_rel_label(),
           patch_info_high(info_high) { }
 
-    const DexFile& target_dex_file;
-    // Either the dex cache array element offset or the string/type index.
-    uint32_t offset_or_index;
-    // Label for the instruction to patch.
-    MipsLabel label;
     // Label for the instruction corresponding to PC+0. Not bound or used in low half patches.
     // Not bound in high half patches on R2 when using HMipsComputeBaseMethodAddress.
     // Bound in high half patches on R2 when using the NAL instruction instead of
@@ -620,19 +621,21 @@ class CodeGeneratorMIPS : public CodeGenerator {
     DISALLOW_COPY_AND_ASSIGN(PcRelativePatchInfo);
   };
 
-  PcRelativePatchInfo* NewPcRelativeMethodPatch(MethodReference target_method,
-                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageRelRoPatch(uint32_t boot_image_offset,
+                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageMethodPatch(MethodReference target_method,
+                                               const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method,
                                               const PcRelativePatchInfo* info_high = nullptr);
-  PcRelativePatchInfo* NewPcRelativeTypePatch(const DexFile& dex_file,
-                                              dex::TypeIndex type_index,
-                                              const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageTypePatch(const DexFile& dex_file,
+                                             dex::TypeIndex type_index,
+                                             const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file,
                                             dex::TypeIndex type_index,
                                             const PcRelativePatchInfo* info_high = nullptr);
-  PcRelativePatchInfo* NewPcRelativeStringPatch(const DexFile& dex_file,
-                                                dex::StringIndex string_index,
-                                                const PcRelativePatchInfo* info_high = nullptr);
+  PcRelativePatchInfo* NewBootImageStringPatch(const DexFile& dex_file,
+                                               dex::StringIndex string_index,
+                                               const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewStringBssEntryPatch(const DexFile& dex_file,
                                               dex::StringIndex string_index,
                                               const PcRelativePatchInfo* info_high = nullptr);
@@ -674,7 +677,7 @@ class CodeGeneratorMIPS : public CodeGenerator {
   using Uint32ToLiteralMap = ArenaSafeMap<uint32_t, Literal*>;
 
   Literal* DeduplicateUint32Literal(uint32_t value, Uint32ToLiteralMap* map);
-  PcRelativePatchInfo* NewPcRelativePatch(const DexFile& dex_file,
+  PcRelativePatchInfo* NewPcRelativePatch(const DexFile* dex_file,
                                           uint32_t offset_or_index,
                                           const PcRelativePatchInfo* info_high,
                                           ArenaDeque<PcRelativePatchInfo>* patches);
@@ -694,16 +697,17 @@ class CodeGeneratorMIPS : public CodeGenerator {
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
-  // PC-relative method patch info for kBootImageLinkTimePcRelative.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_method_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
+  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
+  ArenaDeque<PcRelativePatchInfo> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> method_bss_entry_patches_;
   // PC-relative type patch info for kBootImageLinkTimePcRelative.
-  ArenaDeque<PcRelativePatchInfo> pc_relative_type_patches_;
+  ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
-  // PC-relative String patch info; type depends on configuration (intern table or boot image PIC).
-  ArenaDeque<PcRelativePatchInfo> pc_relative_string_patches_;
+  // PC-relative String patch info for kBootImageLinkTimePcRelative.
+  ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
 

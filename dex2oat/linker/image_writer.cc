@@ -29,12 +29,13 @@
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
 #include "base/enums.h"
+#include "base/globals.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
 #include "compiled_method.h"
-#include "dex_file-inl.h"
-#include "dex_file_types.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_types.h"
 #include "driver/compiler_driver.h"
 #include "elf_file.h"
 #include "elf_utils.h"
@@ -47,12 +48,11 @@
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
 #include "gc/verification.h"
-#include "globals.h"
 #include "handle_scope-inl.h"
 #include "image.h"
 #include "imt_conflict_table.h"
 #include "subtype_check.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "linear_alloc.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
@@ -133,23 +133,31 @@ static void ClearDexFileCookies() REQUIRES_SHARED(Locks::mutator_lock_) {
   Runtime::Current()->GetHeap()->VisitObjects(visitor);
 }
 
-bool ImageWriter::PrepareImageAddressSpace() {
+bool ImageWriter::PrepareImageAddressSpace(TimingLogger* timings) {
   target_ptr_size_ = InstructionSetPointerSize(compiler_driver_.GetInstructionSet());
   gc::Heap* const heap = Runtime::Current()->GetHeap();
   {
     ScopedObjectAccess soa(Thread::Current());
-    PruneNonImageClasses();  // Remove junk
+    {
+      TimingLogger::ScopedTiming t("PruneNonImageClasses", timings);
+      PruneNonImageClasses();  // Remove junk
+    }
     if (compile_app_image_) {
+      TimingLogger::ScopedTiming t("ClearDexFileCookies", timings);
       // Clear dex file cookies for app images to enable app image determinism. This is required
       // since the cookie field contains long pointers to DexFiles which are not deterministic.
       // b/34090128
       ClearDexFileCookies();
     } else {
+      TimingLogger::ScopedTiming t("ComputeLazyFieldsForImageClasses", timings);
       // Avoid for app image since this may increase RAM and image size.
       ComputeLazyFieldsForImageClasses();  // Add useful information
     }
   }
-  heap->CollectGarbage(false);  // Remove garbage.
+  {
+    TimingLogger::ScopedTiming t("CollectGarbage", timings);
+    heap->CollectGarbage(/* clear_soft_references */ false);  // Remove garbage.
+  }
 
   if (kIsDebugBuild) {
     ScopedObjectAccess soa(Thread::Current());
@@ -157,12 +165,14 @@ bool ImageWriter::PrepareImageAddressSpace() {
   }
 
   {
+    TimingLogger::ScopedTiming t("CalculateNewObjectOffsets", timings);
     ScopedObjectAccess soa(Thread::Current());
     CalculateNewObjectOffsets();
   }
 
   // This needs to happen after CalculateNewObjectOffsets since it relies on intern_table_bytes_ and
   // bin size sums being calculated.
+  TimingLogger::ScopedTiming t("AllocMemory", timings);
   if (!AllocMemory()) {
     return false;
   }
@@ -238,7 +248,6 @@ bool ImageWriter::Write(int image_fd,
 
     CHECK_EQ(image_header->storage_mode_, image_storage_mode_);
     switch (image_storage_mode_) {
-      case ImageHeader::kStorageModeLZ4HC:  // Fall-through.
       case ImageHeader::kStorageModeLZ4: {
         const size_t compressed_max_size = LZ4_compressBound(image_data_size);
         compressed_data.reset(new char[compressed_max_size]);
@@ -247,22 +256,20 @@ bool ImageWriter::Write(int image_fd,
             &compressed_data[0],
             image_data_size,
             compressed_max_size);
-
         break;
       }
-      /*
-       * Disabled due to image_test64 flakyness. Both use same decompression. b/27560444
       case ImageHeader::kStorageModeLZ4HC: {
         // Bound is same as non HC.
         const size_t compressed_max_size = LZ4_compressBound(image_data_size);
         compressed_data.reset(new char[compressed_max_size]);
-        data_size = LZ4_compressHC(
+        data_size = LZ4_compress_HC(
             reinterpret_cast<char*>(image_info.image_->Begin()) + sizeof(ImageHeader),
             &compressed_data[0],
-            image_data_size);
+            image_data_size,
+            compressed_max_size,
+            LZ4HC_CLEVEL_MAX);
         break;
       }
-      */
       case ImageHeader::kStorageModeUncompressed: {
         data_size = image_data_size;
         image_data_to_write = image_data;
@@ -585,7 +592,7 @@ void ImageWriter::AssignImageBinSlot(mirror::Object* object, size_t oat_index) {
       if (dirty_image_objects_ != nullptr &&
           dirty_image_objects_->find(klass->PrettyDescriptor()) != dirty_image_objects_->end()) {
         bin = Bin::kKnownDirty;
-      } else if (klass->GetStatus() == Class::kStatusInitialized) {
+      } else if (klass->GetStatus() == ClassStatus::kInitialized) {
         bin = Bin::kClassInitialized;
 
         // If the class's static fields are all final, put it into a separate bin
@@ -650,7 +657,7 @@ bool ImageWriter::WillMethodBeDirty(ArtMethod* m) const {
   }
   mirror::Class* declaring_class = m->GetDeclaringClass();
   // Initialized is highly unlikely to dirty since there's no entry points to mutate.
-  return declaring_class == nullptr || declaring_class->GetStatus() != Class::kStatusInitialized;
+  return declaring_class == nullptr || declaring_class->GetStatus() != ClassStatus::kInitialized;
 }
 
 bool ImageWriter::IsImageBinSlotAssigned(mirror::Object* object) const {
@@ -692,7 +699,7 @@ bool ImageWriter::AllocMemory() {
   for (ImageInfo& image_info : image_infos_) {
     ImageSection unused_sections[ImageHeader::kSectionCount];
     const size_t length = RoundUp(
-        image_info.CreateImageSections(unused_sections, compile_app_image_), kPageSize);
+        image_info.CreateImageSections(unused_sections), kPageSize);
 
     std::string error_msg;
     image_info.image_.reset(MemMap::MapAnonymous("image writer image",
@@ -1057,18 +1064,12 @@ void ImageWriter::PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     }
     if (method == nullptr || i < stored_index) {
       if (last_class != nullptr) {
-        const char* name = dex_file.StringDataByIdx(method_id.name_idx_);
-        Signature signature = dex_file.GetMethodSignature(method_id);
-        if (last_class->IsInterface()) {
-          method = last_class->FindInterfaceMethod(name, signature, target_ptr_size_);
-        } else {
-          method = last_class->FindClassMethod(name, signature, target_ptr_size_);
-        }
-        if (method != nullptr) {
-          // If the referenced class is in the image, the defining class must also be there.
-          DCHECK(KeepClass(method->GetDeclaringClass()));
-          dex_cache->SetResolvedMethod(i, method, target_ptr_size_);
-        }
+        // Try to resolve the method with the class linker, which will insert
+        // it into the dex cache if successful.
+        method = class_linker->FindResolvedMethod(last_class, dex_cache, class_loader, i);
+        // If the referenced class is in the image, the defining class must also be there.
+        DCHECK(method == nullptr || KeepClass(method->GetDeclaringClass()));
+        DCHECK(method == nullptr || dex_cache->GetResolvedMethod(i, target_ptr_size_) == method);
       }
     } else {
       DCHECK_EQ(i, stored_index);
@@ -1102,14 +1103,10 @@ void ImageWriter::PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
     }
     if (field == nullptr || i < stored_index) {
       if (last_class != nullptr) {
-        const char* name = dex_file.StringDataByIdx(field_id.name_idx_);
-        const char* type = dex_file.StringByTypeIdx(field_id.type_idx_);
-        field = mirror::Class::FindField(Thread::Current(), last_class, name, type);
-        if (field != nullptr) {
-          // If the referenced class is in the image, the defining class must also be there.
-          DCHECK(KeepClass(field->GetDeclaringClass()));
-          dex_cache->SetResolvedField(i, field, target_ptr_size_);
-        }
+        field = class_linker->FindResolvedFieldJLS(last_class, dex_cache, class_loader, i);
+        // If the referenced class is in the image, the defining class must also be there.
+        DCHECK(field == nullptr || KeepClass(field->GetDeclaringClass()));
+        DCHECK(field == nullptr || dex_cache->GetResolvedField(i, target_ptr_size_) == field);
       }
     } else {
       DCHECK_EQ(i, stored_index);
@@ -1198,7 +1195,9 @@ void ImageWriter::PruneNonImageClasses() {
     }
   }
   for (ObjPtr<mirror::DexCache> dex_cache : dex_caches) {
-    PruneAndPreloadDexCache(dex_cache, class_loader);
+    // Pass the class loader associated with the DexCache. This can either be
+    // the app's `class_loader` or `nullptr` if boot class loader.
+    PruneAndPreloadDexCache(dex_cache, IsInBootImage(dex_cache.Ptr()) ? nullptr : class_loader);
   }
 
   // Drop the array class cache in the ClassLinker, as these are roots holding those classes live.
@@ -1842,7 +1841,7 @@ void ImageWriter::CalculateNewObjectOffsets() {
     image_info.image_offset_ = image_offset;
     ImageSection unused_sections[ImageHeader::kSectionCount];
     image_info.image_size_ =
-        RoundUp(image_info.CreateImageSections(unused_sections, compile_app_image_), kPageSize);
+        RoundUp(image_info.CreateImageSections(unused_sections), kPageSize);
     // There should be no gaps until the next image.
     image_offset += image_info.image_size_;
   }
@@ -1873,8 +1872,7 @@ void ImageWriter::CalculateNewObjectOffsets() {
   }
 }
 
-size_t ImageWriter::ImageInfo::CreateImageSections(ImageSection* out_sections,
-                                                   bool app_image) const {
+size_t ImageWriter::ImageInfo::CreateImageSections(ImageSection* out_sections) const {
   DCHECK(out_sections != nullptr);
 
   // Do not round up any sections here that are represented by the bins since it will break
@@ -1912,13 +1910,8 @@ size_t ImageWriter::ImageInfo::CreateImageSections(ImageSection* out_sections,
   ImageSection* dex_cache_arrays_section = &out_sections[ImageHeader::kSectionDexCacheArrays];
   *dex_cache_arrays_section = ImageSection(GetBinSlotOffset(Bin::kDexCacheArray),
                                            GetBinSlotSize(Bin::kDexCacheArray));
-  // For boot image, round up to the page boundary to separate the interned strings and
-  // class table from the modifiable data. We shall mprotect() these pages read-only when
-  // we load the boot image. This is more than sufficient for the string table alignment,
-  // namely sizeof(uint64_t). See HashSet::WriteToMemory.
-  static_assert(IsAligned<sizeof(uint64_t)>(kPageSize), "String table alignment check.");
-  size_t cur_pos =
-      RoundUp(dex_cache_arrays_section->End(), app_image ? sizeof(uint64_t) : kPageSize);
+  // Round up to the alignment the string table expects. See HashSet::WriteToMemory.
+  size_t cur_pos = RoundUp(dex_cache_arrays_section->End(), sizeof(uint64_t));
   // Calculate the size of the interned strings.
   ImageSection* interned_strings_section = &out_sections[ImageHeader::kSectionInternedStrings];
   *interned_strings_section = ImageSection(cur_pos, intern_table_bytes_);
@@ -1941,7 +1934,7 @@ void ImageWriter::CreateHeader(size_t oat_index) {
 
   // Create the image sections.
   ImageSection sections[ImageHeader::kSectionCount];
-  const size_t image_end = image_info.CreateImageSections(sections, compile_app_image_);
+  const size_t image_end = image_info.CreateImageSections(sections);
 
   // Finally bitmap section.
   const size_t bitmap_bytes = image_info.image_bitmap_->Size();
@@ -2364,7 +2357,7 @@ void ImageWriter::FixupClass(mirror::Class* orig, mirror::Class* copy) {
   FixupClassVisitor visitor(this, copy);
   ObjPtr<mirror::Object>(orig)->VisitReferences(visitor, visitor);
 
-  if (compile_app_image_) {
+  if (kBitstringSubtypeCheckEnabled && compile_app_image_) {
     // When we call SubtypeCheck::EnsureInitialize, it Assigns new bitstring
     // values to the parent of that class.
     //

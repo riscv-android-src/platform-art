@@ -15,6 +15,7 @@
  */
 
 #include "asm_support_x86.S"
+#include "interpreter/cfi_asm_support.h"
 
 #include "arch/quick_alloc_entrypoints.S"
 
@@ -922,7 +923,10 @@ MACRO3(THREE_ARG_REF_DOWNCALL, c_name, cxx_name, return_macro)
     END_FUNCTION VAR(c_name)
 END_MACRO
 
-// Macro for string and type resolution and initialization.
+    /*
+     * Macro for resolution and initialization of indexed DEX file
+     * constants such as classes and strings.
+     */
 MACRO3(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name, runtime_method_offset = RUNTIME_SAVE_EVERYTHING_METHOD_OFFSET)
     DEFINE_FUNCTION VAR(c_name)
     SETUP_SAVE_EVERYTHING_FRAME ebx, ebx, \runtime_method_offset  // save ref containing registers for GC
@@ -931,7 +935,7 @@ MACRO3(ONE_ARG_SAVE_EVERYTHING_DOWNCALL, c_name, cxx_name, runtime_method_offset
     CFI_ADJUST_CFA_OFFSET(8)
     pushl %fs:THREAD_SELF_OFFSET                      // pass Thread::Current()
     CFI_ADJUST_CFA_OFFSET(4)
-    PUSH eax                                          // pass arg1
+    PUSH eax                                          // pass the index of the constant as arg1
     call CALLVAR(cxx_name)                            // cxx_name(arg1, Thread*)
     addl MACRO_LITERAL(16), %esp                      // pop arguments
     CFI_ADJUST_CFA_OFFSET(-16)
@@ -1277,6 +1281,8 @@ GENERATE_ALLOC_ARRAY_TLAB art_quick_alloc_array_resolved64_tlab, artAllocArrayFr
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_static_storage, artInitializeStaticStorageFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL_FOR_CLINIT art_quick_initialize_type, artInitializeTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_initialize_type_and_verify_access, artInitializeTypeAndVerifyAccessFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_handle, artResolveMethodHandleFromCode
+ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_method_type, artResolveMethodTypeFromCode
 ONE_ARG_SAVE_EVERYTHING_DOWNCALL art_quick_resolve_string, artResolveStringFromCode
 
 TWO_ARG_REF_DOWNCALL art_quick_handle_fill_data, artHandleFillArrayDataFromCode, RETURN_IF_EAX_ZERO
@@ -1286,7 +1292,7 @@ DEFINE_FUNCTION art_quick_lock_object
     jz   .Lslow_lock
 .Lretry_lock:
     movl MIRROR_OBJECT_LOCK_WORD_OFFSET(%eax), %ecx  // ecx := lock word
-    test LITERAL(LOCK_WORD_STATE_MASK), %ecx         // test the 2 high bits.
+    test LITERAL(LOCK_WORD_STATE_MASK_SHIFTED), %ecx  // test the 2 high bits.
     jne  .Lslow_lock                      // slow path if either of the two high bits are set.
     movl %ecx, %edx                       // save lock word (edx) to keep read barrier bits.
     andl LITERAL(LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED), %ecx  // zero the gc bits.
@@ -1356,7 +1362,7 @@ DEFINE_FUNCTION art_quick_unlock_object
 .Lretry_unlock:
     movl MIRROR_OBJECT_LOCK_WORD_OFFSET(%eax), %ecx  // ecx := lock word
     movl %fs:THREAD_ID_OFFSET, %edx       // edx := thread id
-    test LITERAL(LOCK_WORD_STATE_MASK), %ecx
+    test LITERAL(LOCK_WORD_STATE_MASK_SHIFTED), %ecx
     jnz  .Lslow_unlock                    // lock word contains a monitor
     cmpw %cx, %dx                         // does the thread id match?
     jne  .Lslow_unlock
@@ -1431,22 +1437,28 @@ DEFINE_FUNCTION art_quick_instance_of
 END_FUNCTION art_quick_instance_of
 
 DEFINE_FUNCTION art_quick_check_instance_of
+    // Type check using the bit string passes null as the target class. In that case just throw.
+    testl %ecx, %ecx
+    jz .Lthrow_class_cast_exception_for_bitstring_check
+
     PUSH eax                              // alignment padding
     PUSH ecx                              // pass arg2 - checked class
     PUSH eax                              // pass arg1 - obj
     call SYMBOL(artInstanceOfFromCode)    // (Object* obj, Class* ref_klass)
     testl %eax, %eax
-    jz 1f                                 // jump forward if not assignable
+    jz .Lthrow_class_cast_exception       // jump forward if not assignable
     addl LITERAL(12), %esp                // pop arguments
     CFI_ADJUST_CFA_OFFSET(-12)
     ret
-
     CFI_ADJUST_CFA_OFFSET(12)             // Reset unwind info so following code unwinds.
-1:
+
+.Lthrow_class_cast_exception:
     POP eax                               // pop arguments
     POP ecx
     addl LITERAL(4), %esp
     CFI_ADJUST_CFA_OFFSET(-4)
+
+.Lthrow_class_cast_exception_for_bitstring_check:
     SETUP_SAVE_ALL_CALLEE_SAVES_FRAME ebx, ebx // save all registers as basis for long jump context
     // Outgoing argument set up
     PUSH eax                              // alignment padding
@@ -1708,6 +1720,9 @@ DEFINE_FUNCTION art_quick_lushr
 1:
     ret
 END_FUNCTION art_quick_lushr
+
+// Note: Functions `art{Get,Set}<Kind>{Static,Instance}FromCompiledCode` are
+// defined with a macro in runtime/entrypoints/quick/quick_field_entrypoints.cc.
 
 ONE_ARG_REF_DOWNCALL art_quick_get_boolean_static, artGetBooleanStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
 ONE_ARG_REF_DOWNCALL art_quick_get_byte_static, artGetByteStaticFromCompiledCode, RETURN_OR_DELIVER_PENDING_EXCEPTION
@@ -2365,20 +2380,28 @@ DEFINE_FUNCTION art_quick_osr_stub
     PUSH ebx
     PUSH esi
     PUSH edi
+    SAVE_SIZE=20                   // 4 registers and the return address
     mov 4+16(%esp), %esi           // ESI = argument array
     mov 8+16(%esp), %ecx           // ECX = size of args
     mov 12+16(%esp), %ebx          // EBX = pc to call
     mov %esp, %ebp                 // Save stack pointer
+    CFI_DEF_CFA(ebp, SAVE_SIZE)    // CFA = ebp + SAVE_SIZE
+    CFI_REMEMBER_STATE
     andl LITERAL(0xFFFFFFF0), %esp // Align stack
-    PUSH ebp                       // Save old stack pointer
+    pushl %ebp                     // Save old stack pointer
     subl LITERAL(12), %esp         // Align stack
     movl LITERAL(0), (%esp)        // Store null for ArtMethod* slot
+    // ebp isn't properly spilled in the osr method, so we need use DWARF expression.
+    // NB: the CFI must be before the call since this is the address gdb will lookup.
+    // NB: gdb expects that cfa_expression returns the CFA value (not address to it).
+    CFI_ESCAPE(                    /* cfa = [sp + 12] + SAVE_SIZE */ \
+      0x0f, 6,                     /* DW_CFA_def_cfa_expression(len) */ \
+      0x92, 4, 12,                 /* DW_OP_bregx(reg,offset) */ \
+      0x06,                        /* DW_OP_deref */ \
+      0x23, SAVE_SIZE)             /* DW_OP_plus_uconst(val) */
     call .Losr_entry
-
-    // Restore stack pointer.
-    addl LITERAL(12), %esp
-    POP ebp
-    mov %ebp, %esp
+    mov 12(%esp), %esp             // Restore stack pointer.
+    CFI_DEF_CFA(esp, SAVE_SIZE)    // CFA = esp + SAVE_SIZE
 
     // Restore callee saves.
     POP edi
@@ -2401,6 +2424,8 @@ DEFINE_FUNCTION art_quick_osr_stub
     movss %xmm0, (%ecx)           // Store the floating point result
     ret
 .Losr_entry:
+    CFI_RESTORE_STATE
+    CFI_DEF_CFA(ebp, SAVE_SIZE)   // CFA = ebp + SAVE_SIZE
     subl LITERAL(4), %ecx         // Given stack size contains pushed frame pointer, substract it.
     subl %ecx, %esp
     mov %esp, %edi                // EDI = beginning of stack
@@ -2501,6 +2526,29 @@ END_MACRO
     HANDLER_TABLE_ENTRY(.Lstore_boolean_result)    // Z (boolean)
 
 END_FUNCTION art_quick_invoke_polymorphic
+
+// Wrap ExecuteSwitchImpl in assembly method which specifies DEX PC for unwinding.
+//  Argument 0: ESP+4: The context pointer for ExecuteSwitchImpl.
+//  Argument 1: ESP+8: Pointer to the templated ExecuteSwitchImpl to call.
+//  Argument 2: ESP+12: The value of DEX PC (memory address of the methods bytecode).
+DEFINE_FUNCTION ExecuteSwitchImplAsm
+    PUSH ebx                 // Spill EBX; Increments ESP, so arg0 is at ESP+8 now.
+    mov 12(%esp), %eax       // EAX = C++ templated interpreter function
+    mov 16(%esp), %ebx       // EBX = DEX PC (callee save register)
+    mov 8(%esp), %ecx        // ECX = Context argument for the function
+    CFI_DEFINE_DEX_PC_WITH_OFFSET(0 /* EAX */, 3 /* EBX */, 0)
+
+    sub LITERAL(4), %esp     // Alignment padding
+    CFI_ADJUST_CFA_OFFSET(4)
+    push %ecx                // Push argument
+    CFI_ADJUST_CFA_OFFSET(4)
+    call *%eax               // Call the wrapped function
+    addl LITERAL(8), %esp
+    CFI_ADJUST_CFA_OFFSET(-8)
+
+    POP ebx                  // Restore EBX
+    ret
+END_FUNCTION ExecuteSwitchImplAsm
 
     // TODO: implement these!
 UNIMPLEMENTED art_quick_memcmp16

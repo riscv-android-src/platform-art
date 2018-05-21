@@ -22,14 +22,20 @@
 
 #include "base/file_utils.h"
 #include "base/logging.h"
+#include "base/os.h"
 #include "base/stl_util.h"
+#include "base/utils.h"
+#include "base/zip_archive.h"
 #include "class_linker.h"
 #include <class_loader_context.h>
 #include "common_throws.h"
 #include "compiler_filter.h"
-#include "dex_file-inl.h"
-#include "dex_file_loader.h"
-#include "jni_internal.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/descriptors_names.h"
+#include "dex/dex_file-inl.h"
+#include "dex/dex_file_loader.h"
+#include "jit/debugger_interface.h"
+#include "jni/jni_internal.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/string.h"
@@ -40,12 +46,9 @@
 #include "oat_file.h"
 #include "oat_file_assistant.h"
 #include "oat_file_manager.h"
-#include "os.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
-#include "utils.h"
 #include "well_known_classes.h"
-#include "zip_archive.h"
 
 namespace art {
 
@@ -188,12 +191,13 @@ static const DexFile* CreateDexFile(JNIEnv* env, std::unique_ptr<MemMap> dex_mem
                                       dex_mem_map->Begin(),
                                       dex_mem_map->End());
   std::string error_message;
-  std::unique_ptr<const DexFile> dex_file(DexFileLoader::Open(location,
-                                                              0,
-                                                              std::move(dex_mem_map),
-                                                              /* verify */ true,
-                                                              /* verify_location */ true,
-                                                              &error_message));
+  const ArtDexFileLoader dex_file_loader;
+  std::unique_ptr<const DexFile> dex_file(dex_file_loader.Open(location,
+                                                               0,
+                                                               std::move(dex_mem_map),
+                                                               /* verify */ true,
+                                                               /* verify_location */ true,
+                                                               &error_message));
   if (dex_file == nullptr) {
     ScopedObjectAccess soa(env);
     ThrowWrappedIOException("%s", error_message.c_str());
@@ -329,6 +333,8 @@ static jboolean DexFile_closeDexFile(JNIEnv* env, jclass, jobject cookie) {
     int32_t i = kDexFileIndexStart;  // Oat file is at index 0.
     for (const DexFile* dex_file : dex_files) {
       if (dex_file != nullptr) {
+        RemoveNativeDebugInfoForDex(soa.Self(), ArrayRef<const uint8_t>(dex_file->Begin(),
+                                                                        dex_file->Size()));
         // Only delete the dex file if the dex cache is not found to prevent runtime crashes if there
         // are calls to DexFile.close while the ART DexFile is still in use.
         if (!class_linker->IsDexFileRegistered(soa.Self(), *dex_file)) {
@@ -543,6 +549,55 @@ static jstring DexFile_getDexFileStatus(JNIEnv* env,
   OatFileAssistant oat_file_assistant(filename.c_str(), target_instruction_set,
                                       false /* load_executable */);
   return env->NewStringUTF(oat_file_assistant.GetStatusDump().c_str());
+}
+
+// Return an array specifying the optimization status of the given file.
+// The array specification is [compiler_filter, compiler_reason].
+static jobjectArray DexFile_getDexFileOptimizationStatus(JNIEnv* env,
+                                                         jclass,
+                                                         jstring javaFilename,
+                                                         jstring javaInstructionSet) {
+  ScopedUtfChars filename(env, javaFilename);
+  if (env->ExceptionCheck()) {
+    return nullptr;
+  }
+
+  ScopedUtfChars instruction_set(env, javaInstructionSet);
+  if (env->ExceptionCheck()) {
+    return nullptr;
+  }
+
+  const InstructionSet target_instruction_set = GetInstructionSetFromString(
+      instruction_set.c_str());
+  if (target_instruction_set == InstructionSet::kNone) {
+    ScopedLocalRef<jclass> iae(env, env->FindClass("java/lang/IllegalArgumentException"));
+    std::string message(StringPrintf("Instruction set %s is invalid.", instruction_set.c_str()));
+    env->ThrowNew(iae.get(), message.c_str());
+    return nullptr;
+  }
+
+  std::string compilation_filter;
+  std::string compilation_reason;
+  OatFileAssistant::GetOptimizationStatus(
+      filename.c_str(), target_instruction_set, &compilation_filter, &compilation_reason);
+
+  ScopedLocalRef<jstring> j_compilation_filter(env, env->NewStringUTF(compilation_filter.c_str()));
+  if (j_compilation_filter.get() == nullptr) {
+    return nullptr;
+  }
+  ScopedLocalRef<jstring> j_compilation_reason(env, env->NewStringUTF(compilation_reason.c_str()));
+  if (j_compilation_reason.get() == nullptr) {
+    return nullptr;
+  }
+
+  // Now create output array and copy the set into it.
+  jobjectArray result = env->NewObjectArray(2,
+                                            WellKnownClasses::java_lang_String,
+                                            nullptr);
+  env->SetObjectArrayElement(result, 0, j_compilation_filter.get());
+  env->SetObjectArrayElement(result, 1, j_compilation_reason.get());
+
+  return result;
 }
 
 static jint DexFile_getDexOptNeeded(JNIEnv* env,
@@ -761,6 +816,28 @@ static jlong DexFile_getStaticSizeOfDexFile(JNIEnv* env, jclass, jobject cookie)
   return static_cast<jlong>(file_size);
 }
 
+static void DexFile_setTrusted(JNIEnv* env, jclass, jobject j_cookie) {
+  Runtime* runtime = Runtime::Current();
+  ScopedObjectAccess soa(env);
+
+  // Currently only allow this for debuggable apps.
+  if (!runtime->IsJavaDebuggable()) {
+    ThrowSecurityException("Can't exempt class, process is not debuggable.");
+    return;
+  }
+
+  std::vector<const DexFile*> dex_files;
+  const OatFile* oat_file;
+  if (!ConvertJavaArrayToDexFiles(env, j_cookie, dex_files, oat_file)) {
+    Thread::Current()->AssertPendingException();
+    return;
+  }
+
+  for (const DexFile* dex_file : dex_files) {
+    const_cast<DexFile*>(dex_file)->SetIsPlatformDexFile();
+  }
+}
+
 static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(DexFile, closeDexFile, "(Ljava/lang/Object;)Z"),
   NATIVE_METHOD(DexFile,
@@ -797,7 +874,10 @@ static JNINativeMethod gMethods[] = {
                 "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;"),
   NATIVE_METHOD(DexFile, getDexFileOutputPaths,
                 "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
-  NATIVE_METHOD(DexFile, getStaticSizeOfDexFile, "(Ljava/lang/Object;)J")
+  NATIVE_METHOD(DexFile, getStaticSizeOfDexFile, "(Ljava/lang/Object;)J"),
+  NATIVE_METHOD(DexFile, getDexFileOptimizationStatus,
+                "(Ljava/lang/String;Ljava/lang/String;)[Ljava/lang/String;"),
+  NATIVE_METHOD(DexFile, setTrusted, "(Ljava/lang/Object;)V")
 };
 
 void register_dalvik_system_DexFile(JNIEnv* env) {

@@ -18,7 +18,8 @@
 #include <string.h>
 
 #include "arch/mips64/asm_support_mips64.h"
-#include "atomic.h"
+#include "base/atomic.h"
+#include "base/quasi_atomic.h"
 #include "entrypoints/entrypoint_utils.h"
 #include "entrypoints/jni/jni_entrypoints.h"
 #include "entrypoints/math_entrypoints.h"
@@ -165,6 +166,7 @@ void InitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qpoints) {
   qpoints->pAsin = asin;
   qpoints->pAtan = atan;
   qpoints->pAtan2 = atan2;
+  qpoints->pPow = pow;
   qpoints->pCbrt = cbrt;
   qpoints->pCosh = cosh;
   qpoints->pExp = exp;

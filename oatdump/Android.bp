@@ -24,6 +24,8 @@ cc_defaults {
             shared_libs: ["libcutils"],
         },
     },
+    // b/79417743, oatdump 32-bit tests failed with clang lld
+    use_clang_lld: false,
     header_libs: [
         "art_cmdlineparser_headers",
     ],
@@ -36,6 +38,9 @@ art_cc_binary {
         "libart",
         "libart-compiler",
         "libart-disassembler",
+        "libdexfile",
+        "libartbase",
+        "libprofile",
         "libbase",
     ],
 }
@@ -50,6 +55,9 @@ art_cc_binary {
         "libartd",
         "libartd-compiler",
         "libartd-disassembler",
+        "libdexfiled",
+        "libartbased",
+        "libprofiled",
         "libbase",
     ],
 }
@@ -74,6 +82,9 @@ art_cc_binary {
     ],
     static_libs: [
         "libart",
+        "libdexfile",
+        "libprofile",
+        "libartbase",
         "libart-compiler",
         "libart-disassembler",
         "libvixl-arm",
@@ -93,6 +104,9 @@ art_cc_binary {
         darwin: {
             enabled: false,
         },
+        linux_glibc_x86_64: {
+            use_clang_lld: true,
+        },
     },
     ldflags: [
         // We need this because GC stress mode makes use of
@@ -104,6 +118,9 @@ art_cc_binary {
     ],
     static_libs: [
         "libartd",
+        "libdexfiled",
+        "libprofiled",
+        "libartbased",
         "libartd-compiler",
         "libartd-disassembler",
         "libvixld-arm",
@@ -117,6 +134,7 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: [
+        "oatdump_app_test.cc",
         "oatdump_test.cc",
         "oatdump_image_test.cc",
     ],

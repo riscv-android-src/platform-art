@@ -29,13 +29,13 @@
 #include "base/logging.h"  // For InitLogging.
 #include "base/stringpiece.h"
 
-#include "dex_file.h"
+#include "dexlayout.h"
+#include "dex/dex_file.h"
 #include "dex_ir.h"
 #include "dex_ir_builder.h"
 #ifdef ART_TARGET_ANDROID
 #include "pagemap/pagemap.h"
 #endif
-#include "runtime.h"
 #include "vdex_file.h"
 
 namespace art {
@@ -290,8 +290,10 @@ static void ProcessOneDexMapping(uint64_t* pagemap,
   // Build a list of the dex file section types, sorted from highest offset to lowest.
   std::vector<dex_ir::DexFileSection> sections;
   {
+    Options options;
     std::unique_ptr<dex_ir::Header> header(dex_ir::DexIrBuilder(*dex_file,
-                                                                /*eagerly_assign_offsets*/ true));
+                                                                /*eagerly_assign_offsets*/ true,
+                                                                options));
     sections = dex_ir::GetSortedDexFileSections(header.get(),
                                                 dex_ir::SortDirection::kSortDescending);
   }
@@ -442,6 +444,11 @@ static void Usage(const char* cmd) {
   PrintLetterKey();
 }
 
+NO_RETURN static void Abort(const char* msg) {
+  std::cerr << msg;
+  exit(1);
+}
+
 static int DexDiagMain(int argc, char* argv[]) {
   if (argc < 2) {
     Usage(argv[0]);
@@ -467,7 +474,7 @@ static int DexDiagMain(int argc, char* argv[]) {
   }
 
   // Art specific set up.
-  InitLogging(argv, Runtime::Abort);
+  InitLogging(argv, Abort);
   MemMap::Init();
 
 #ifdef ART_TARGET_ANDROID

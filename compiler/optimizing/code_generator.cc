@@ -43,15 +43,18 @@
 #include "base/bit_utils.h"
 #include "base/bit_utils_iterator.h"
 #include "base/casts.h"
-#include "bytecode_utils.h"
+#include "base/leb128.h"
 #include "class_linker.h"
 #include "compiled_method.h"
+#include "dex/bytecode_utils.h"
+#include "dex/code_item_accessors-inl.h"
 #include "dex/verified_method.h"
 #include "driver/compiler_driver.h"
 #include "graph_visualizer.h"
+#include "image.h"
+#include "gc/space/image_space.h"
 #include "intern_table.h"
 #include "intrinsics.h"
-#include "leb128.h"
 #include "mirror/array-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/object_reference.h"
@@ -295,15 +298,6 @@ void CodeGenerator::EmitJitRootPatches(uint8_t* code ATTRIBUTE_UNUSED,
   DCHECK_EQ(code_generation_data_->GetNumberOfJitClassRoots(), 0u);
 }
 
-size_t CodeGenerator::GetCacheOffset(uint32_t index) {
-  return sizeof(GcRoot<mirror::Object>) * index;
-}
-
-size_t CodeGenerator::GetCachePointerOffset(uint32_t index) {
-  PointerSize pointer_size = InstructionSetPointerSize(GetInstructionSet());
-  return static_cast<size_t>(pointer_size) * index;
-}
-
 uint32_t CodeGenerator::GetArrayLengthOffset(HArrayLength* array_length) {
   return array_length->IsStringLength()
       ? mirror::String::CountOffset().Uint32Value()
@@ -453,6 +447,18 @@ void CodeGenerator::Finalize(CodeAllocator* allocator) {
 void CodeGenerator::EmitLinkerPatches(
     ArenaVector<linker::LinkerPatch>* linker_patches ATTRIBUTE_UNUSED) {
   // No linker patches by default.
+}
+
+bool CodeGenerator::NeedsThunkCode(const linker::LinkerPatch& patch ATTRIBUTE_UNUSED) const {
+  // Code generators that create patches requiring thunk compilation should override this function.
+  return false;
+}
+
+void CodeGenerator::EmitThunkCode(const linker::LinkerPatch& patch ATTRIBUTE_UNUSED,
+                                  /*out*/ ArenaVector<uint8_t>* code ATTRIBUTE_UNUSED,
+                                  /*out*/ std::string* debug_name ATTRIBUTE_UNUSED) {
+  // Code generators that create patches requiring thunk compilation should override this function.
+  LOG(FATAL) << "Unexpected call to EmitThunkCode().";
 }
 
 void CodeGenerator::InitializeCodeGeneration(size_t number_of_spill_slots,
@@ -730,6 +736,87 @@ void CodeGenerator::GenerateLoadClassRuntimeCall(HLoadClass* cls) {
   }
 }
 
+void CodeGenerator::CreateLoadMethodHandleRuntimeCallLocationSummary(
+    HLoadMethodHandle* method_handle,
+    Location runtime_proto_index_location,
+    Location runtime_return_location) {
+  DCHECK_EQ(method_handle->InputCount(), 1u);
+  LocationSummary* locations =
+      new (method_handle->GetBlock()->GetGraph()->GetAllocator()) LocationSummary(
+          method_handle, LocationSummary::kCallOnMainOnly);
+  locations->SetInAt(0, Location::NoLocation());
+  locations->AddTemp(runtime_proto_index_location);
+  locations->SetOut(runtime_return_location);
+}
+
+void CodeGenerator::GenerateLoadMethodHandleRuntimeCall(HLoadMethodHandle* method_handle) {
+  LocationSummary* locations = method_handle->GetLocations();
+  MoveConstant(locations->GetTemp(0), method_handle->GetMethodHandleIndex());
+  CheckEntrypointTypes<kQuickResolveMethodHandle, void*, uint32_t>();
+  InvokeRuntime(kQuickResolveMethodHandle, method_handle, method_handle->GetDexPc());
+}
+
+void CodeGenerator::CreateLoadMethodTypeRuntimeCallLocationSummary(
+    HLoadMethodType* method_type,
+    Location runtime_proto_index_location,
+    Location runtime_return_location) {
+  DCHECK_EQ(method_type->InputCount(), 1u);
+  LocationSummary* locations =
+      new (method_type->GetBlock()->GetGraph()->GetAllocator()) LocationSummary(
+          method_type, LocationSummary::kCallOnMainOnly);
+  locations->SetInAt(0, Location::NoLocation());
+  locations->AddTemp(runtime_proto_index_location);
+  locations->SetOut(runtime_return_location);
+}
+
+void CodeGenerator::GenerateLoadMethodTypeRuntimeCall(HLoadMethodType* method_type) {
+  LocationSummary* locations = method_type->GetLocations();
+  MoveConstant(locations->GetTemp(0), method_type->GetProtoIndex().index_);
+  CheckEntrypointTypes<kQuickResolveMethodType, void*, uint32_t>();
+  InvokeRuntime(kQuickResolveMethodType, method_type, method_type->GetDexPc());
+}
+
+static uint32_t GetBootImageOffsetImpl(const void* object, ImageHeader::ImageSections section) {
+  Runtime* runtime = Runtime::Current();
+  DCHECK(runtime->IsAotCompiler());
+  const std::vector<gc::space::ImageSpace*>& boot_image_spaces =
+      runtime->GetHeap()->GetBootImageSpaces();
+  // Check that the `object` is in the expected section of one of the boot image files.
+  DCHECK(std::any_of(boot_image_spaces.begin(),
+                     boot_image_spaces.end(),
+                     [object, section](gc::space::ImageSpace* space) {
+                       uintptr_t begin = reinterpret_cast<uintptr_t>(space->Begin());
+                       uintptr_t offset = reinterpret_cast<uintptr_t>(object) - begin;
+                       return space->GetImageHeader().GetImageSection(section).Contains(offset);
+                     }));
+  uintptr_t begin = reinterpret_cast<uintptr_t>(boot_image_spaces.front()->Begin());
+  uintptr_t offset = reinterpret_cast<uintptr_t>(object) - begin;
+  return dchecked_integral_cast<uint32_t>(offset);
+}
+
+// NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image classes are non-moveable.
+uint32_t CodeGenerator::GetBootImageOffset(HLoadClass* load_class) NO_THREAD_SAFETY_ANALYSIS {
+  DCHECK_EQ(load_class->GetLoadKind(), HLoadClass::LoadKind::kBootImageRelRo);
+  ObjPtr<mirror::Class> klass = load_class->GetClass().Get();
+  DCHECK(klass != nullptr);
+  return GetBootImageOffsetImpl(klass.Ptr(), ImageHeader::kSectionObjects);
+}
+
+// NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image strings are non-moveable.
+uint32_t CodeGenerator::GetBootImageOffset(HLoadString* load_string) NO_THREAD_SAFETY_ANALYSIS {
+  DCHECK_EQ(load_string->GetLoadKind(), HLoadString::LoadKind::kBootImageRelRo);
+  ObjPtr<mirror::String> string = load_string->GetString().Get();
+  DCHECK(string != nullptr);
+  return GetBootImageOffsetImpl(string.Ptr(), ImageHeader::kSectionObjects);
+}
+
+uint32_t CodeGenerator::GetBootImageOffset(HInvokeStaticOrDirect* invoke) {
+  DCHECK_EQ(invoke->GetMethodLoadKind(), HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo);
+  ArtMethod* method = invoke->GetResolvedMethod();
+  DCHECK(method != nullptr);
+  return GetBootImageOffsetImpl(method, ImageHeader::kSectionArtMethods);
+}
+
 void CodeGenerator::BlockIfInRegister(Location location, bool is_out) const {
   // The DCHECKS below check that a register is not specified twice in
   // the summary. The out location can overlap with an input, so we need
@@ -919,7 +1006,8 @@ static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
   }
   ArenaVector<size_t> covered(
       loop_headers.size(), 0, graph.GetAllocator()->Adapter(kArenaAllocMisc));
-  for (const DexInstructionPcPair& pair : code_item.Instructions()) {
+  for (const DexInstructionPcPair& pair : CodeItemInstructionAccessor(graph.GetDexFile(),
+                                                                      &code_item)) {
     const uint32_t dex_pc = pair.DexPc();
     const Instruction& instruction = pair.Inst();
     if (instruction.IsBranch()) {

@@ -43,9 +43,10 @@
 #include "base/stringpiece.h"
 #include "class_linker-inl.h"
 #include "debugger.h"
-#include "dex_file.h"
-#include "dex_file_loader.h"
-#include "dex_file_types.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_loader.h"
+#include "dex/dex_file_types.h"
 #include "events-inl.h"
 #include "gc/allocation_listener.h"
 #include "gc/heap.h"
@@ -57,7 +58,7 @@
 #include "jdwp/object_registry.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
-#include "jni_env_ext-inl.h"
+#include "jni/jni_env_ext-inl.h"
 #include "jvmti_allocator.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
@@ -233,12 +234,39 @@ jvmtiError Redefiner::IsModifiableClass(jvmtiEnv* env ATTRIBUTE_UNUSED,
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
   std::string err_unused;
   *is_redefinable =
-      Redefiner::GetClassRedefinitionError(h_klass, &err_unused) == OK ? JNI_TRUE : JNI_FALSE;
+      Redefiner::GetClassRedefinitionError(h_klass, &err_unused) != ERR(UNMODIFIABLE_CLASS)
+      ? JNI_TRUE : JNI_FALSE;
   return OK;
+}
+
+jvmtiError Redefiner::GetClassRedefinitionError(jclass klass, /*out*/std::string* error_msg) {
+  art::Thread* self = art::Thread::Current();
+  art::ScopedObjectAccess soa(self);
+  art::StackHandleScope<1> hs(self);
+  art::ObjPtr<art::mirror::Object> obj(self->DecodeJObject(klass));
+  if (obj.IsNull()) {
+    return ERR(INVALID_CLASS);
+  }
+  art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
+  return Redefiner::GetClassRedefinitionError(h_klass, error_msg);
 }
 
 jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> klass,
                                                 /*out*/std::string* error_msg) {
+  if (!klass->IsResolved()) {
+    // It's only a problem to try to retransform/redefine a unprepared class if it's happening on
+    // the same thread as the class-linking process. If it's on another thread we will be able to
+    // wait for the preparation to finish and continue from there.
+    if (klass->GetLockOwnerThreadId() == art::Thread::Current()->GetThreadId()) {
+      *error_msg = "Modification of class " + klass->PrettyClass() +
+          " from within the classes ClassLoad callback is not supported to prevent deadlocks." +
+          " Please use ClassFileLoadHook directly instead.";
+      return ERR(INTERNAL);
+    } else {
+      LOG(WARNING) << klass->PrettyClass() << " is not yet resolved. Attempting to transform "
+                   << "it could cause arbitrary length waits as the class is being resolved.";
+    }
+  }
   if (klass->IsPrimitive()) {
     *error_msg = "Modification of primitive classes is not supported";
     return ERR(UNMODIFIABLE_CLASS);
@@ -331,12 +359,9 @@ jvmtiError Redefiner::RedefineClasses(ArtJvmTiEnv* env,
   std::vector<ArtClassDefinition> def_vector;
   def_vector.reserve(class_count);
   for (jint i = 0; i < class_count; i++) {
-    jboolean is_modifiable = JNI_FALSE;
-    jvmtiError res = env->IsModifiableClass(definitions[i].klass, &is_modifiable);
+    jvmtiError res = Redefiner::GetClassRedefinitionError(definitions[i].klass, error_msg);
     if (res != OK) {
       return res;
-    } else if (!is_modifiable) {
-      return ERR(UNMODIFIABLE_CLASS);
     }
     // We make a copy of the class_bytes to pass into the retransformation.
     // This makes cleanup easier (since we unambiguously own the bytes) and also is useful since we
@@ -350,15 +375,14 @@ jvmtiError Redefiner::RedefineClasses(ArtJvmTiEnv* env,
     memcpy(class_bytes_copy, definitions[i].class_bytes, definitions[i].class_byte_count);
 
     ArtClassDefinition def;
-    res = def.Init(env, definitions[i]);
+    res = def.Init(self, definitions[i]);
     if (res != OK) {
       return res;
     }
     def_vector.push_back(std::move(def));
   }
   // Call all the transformation events.
-  jvmtiError res = Transformer::RetransformClassesDirect(env,
-                                                         event_handler,
+  jvmtiError res = Transformer::RetransformClassesDirect(event_handler,
                                                          self,
                                                          &def_vector);
   if (res != OK) {
@@ -426,12 +450,13 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
     return ERR(INVALID_CLASS_FORMAT);
   }
   uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map->Begin())->checksum_;
-  std::unique_ptr<const art::DexFile> dex_file(art::DexFileLoader::Open(map->GetName(),
-                                                                        checksum,
-                                                                        std::move(map),
-                                                                        /*verify*/true,
-                                                                        /*verify_checksum*/true,
-                                                                        error_msg_));
+  const art::ArtDexFileLoader dex_file_loader;
+  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(map->GetName(),
+                                                                    checksum,
+                                                                    std::move(map),
+                                                                    /*verify*/true,
+                                                                    /*verify_checksum*/true,
+                                                                    error_msg_));
   if (dex_file.get() == nullptr) {
     os << "Unable to load modified dex file for " << def.GetName() << ": " << *error_msg_;
     *error_msg_ = os.str();
@@ -1214,7 +1239,9 @@ void Redefiner::ClassRedefinition::UnregisterJvmtiBreakpoints() {
 }
 
 void Redefiner::ClassRedefinition::UnregisterBreakpoints() {
-  DCHECK(art::Dbg::IsDebuggerActive());
+  if (LIKELY(!art::Dbg::IsDebuggerActive())) {
+    return;
+  }
   art::JDWP::JdwpState* state = art::Dbg::GetJdwpState();
   if (state != nullptr) {
     state->UnregisterLocationEventsOnClass(GetMirrorClass());
@@ -1222,11 +1249,9 @@ void Redefiner::ClassRedefinition::UnregisterBreakpoints() {
 }
 
 void Redefiner::UnregisterAllBreakpoints() {
-  if (LIKELY(!art::Dbg::IsDebuggerActive())) {
-    return;
-  }
   for (Redefiner::ClassRedefinition& redef : redefinitions_) {
     redef.UnregisterBreakpoints();
+    redef.UnregisterJvmtiBreakpoints();
   }
 }
 
@@ -1355,7 +1380,6 @@ jvmtiError Redefiner::Run() {
     // TODO Rewrite so we don't do a stack walk for each and every class.
     redef.FindAndAllocateObsoleteMethods(klass);
     redef.UpdateClass(klass, data.GetNewDexCache(), data.GetOriginalDexFile());
-    redef.UnregisterJvmtiBreakpoints();
   }
   RestoreObsoleteMethodMapsIfUnneeded(holder);
   // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any
@@ -1402,13 +1426,6 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
     method.SetCodeItemOffset(dex_file_->FindCodeItemOffset(class_def, dex_method_idx));
     // Clear all the intrinsics related flags.
     method.SetNotIntrinsic();
-    // Notify the jit that this method is redefined.
-    art::jit::Jit* jit = driver_->runtime_->GetJit();
-    // Non-invokable methods don't have any JIT data associated with them so we don't need to tell
-    // the jit about them.
-    if (jit != nullptr && method.IsInvokable()) {
-      jit->GetCodeCache()->NotifyMethodRedefined(&method);
-    }
   }
 }
 
@@ -1450,6 +1467,23 @@ void Redefiner::ClassRedefinition::UpdateClass(
   art::ObjPtr<art::mirror::ClassExt> ext(mclass->GetExtData());
   CHECK(!ext.IsNull());
   ext->SetOriginalDexFile(original_dex_file);
+
+  // Notify the jit that all the methods in this class were redefined. Need to do this last since
+  // the jit relies on the dex_file_ being correct (for native methods at least) to find the method
+  // meta-data.
+  art::jit::Jit* jit = driver_->runtime_->GetJit();
+  if (jit != nullptr) {
+    art::PointerSize image_pointer_size =
+        driver_->runtime_->GetClassLinker()->GetImagePointerSize();
+    auto code_cache = jit->GetCodeCache();
+    // Non-invokable methods don't have any JIT data associated with them so we don't need to tell
+    // the jit about them.
+    for (art::ArtMethod& method : mclass->GetDeclaredMethods(image_pointer_size)) {
+      if (method.IsInvokable()) {
+        code_cache->NotifyMethodRedefined(&method);
+      }
+    }
+  }
 }
 
 // Restores the old obsolete methods maps if it turns out they weren't needed (ie there were no new

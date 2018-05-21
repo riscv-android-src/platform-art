@@ -38,6 +38,8 @@
   V(InitializeStaticStorage, void*, uint32_t) \
   V(InitializeTypeAndVerifyAccess, void*, uint32_t) \
   V(InitializeType, void*, uint32_t) \
+  V(ResolveMethodHandle, void*, uint32_t) \
+  V(ResolveMethodType, void*, uint32_t) \
   V(ResolveString, void*, uint32_t) \
 \
   V(Set8Instance, int, uint32_t, void*, int8_t) \
@@ -91,6 +93,7 @@
   V(Asin, double, double) \
   V(Atan, double, double) \
   V(Atan2, double, double, double) \
+  V(Pow, double, double, double) \
   V(Cbrt, double, double) \
   V(Cosh, double, double) \
   V(Exp, double, double) \

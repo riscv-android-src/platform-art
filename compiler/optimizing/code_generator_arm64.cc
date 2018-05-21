@@ -30,7 +30,6 @@
 #include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "intrinsics_arm64.h"
-#include "linker/arm64/relative_patcher_arm64.h"
 #include "linker/linker_patch.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
@@ -78,6 +77,7 @@ using helpers::OutputFPRegister;
 using helpers::OutputRegister;
 using helpers::QRegisterFrom;
 using helpers::RegisterFrom;
+using helpers::SRegisterFrom;
 using helpers::StackOperandFrom;
 using helpers::VIXLRegCodeFromART;
 using helpers::WRegisterFrom;
@@ -478,7 +478,7 @@ class TypeCheckSlowPathARM64 : public SlowPathCodeARM64 {
 
     __ Bind(GetEntryLabel());
 
-    if (!is_fatal_) {
+    if (!is_fatal_ || instruction_->CanThrowIntoCatchBlock()) {
       SaveLiveRegisters(codegen, locations);
     }
 
@@ -1395,11 +1395,11 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                        graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       uint64_literals_(std::less<uint64_t>(),
                        graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      pc_relative_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       method_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      pc_relative_type_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_type_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      pc_relative_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       baker_read_barrier_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(StringReferenceValueComparator(),
@@ -1424,6 +1424,62 @@ void CodeGeneratorARM64::Finalize(CodeAllocator* allocator) {
   __ FinalizeCode();
 
   CodeGenerator::Finalize(allocator);
+
+  // Verify Baker read barrier linker patches.
+  if (kIsDebugBuild) {
+    ArrayRef<const uint8_t> code = allocator->GetMemory();
+    for (const BakerReadBarrierPatchInfo& info : baker_read_barrier_patches_) {
+      DCHECK(info.label.IsBound());
+      uint32_t literal_offset = info.label.GetLocation();
+      DCHECK_ALIGNED(literal_offset, 4u);
+
+      auto GetInsn = [&code](uint32_t offset) {
+        DCHECK_ALIGNED(offset, 4u);
+        return
+            (static_cast<uint32_t>(code[offset + 0]) << 0) +
+            (static_cast<uint32_t>(code[offset + 1]) << 8) +
+            (static_cast<uint32_t>(code[offset + 2]) << 16)+
+            (static_cast<uint32_t>(code[offset + 3]) << 24);
+      };
+
+      const uint32_t encoded_data = info.custom_data;
+      BakerReadBarrierKind kind = BakerReadBarrierKindField::Decode(encoded_data);
+      // Check that the next instruction matches the expected LDR.
+      switch (kind) {
+        case BakerReadBarrierKind::kField: {
+          DCHECK_GE(code.size() - literal_offset, 8u);
+          uint32_t next_insn = GetInsn(literal_offset + 4u);
+          // LDR (immediate) with correct base_reg.
+          CheckValidReg(next_insn & 0x1fu);  // Check destination register.
+          const uint32_t base_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
+          CHECK_EQ(next_insn & 0xffc003e0u, 0xb9400000u | (base_reg << 5));
+          break;
+        }
+        case BakerReadBarrierKind::kArray: {
+          DCHECK_GE(code.size() - literal_offset, 8u);
+          uint32_t next_insn = GetInsn(literal_offset + 4u);
+          // LDR (register) with the correct base_reg, size=10 (32-bit), option=011 (extend = LSL),
+          // and S=1 (shift amount = 2 for 32-bit version), i.e. LDR Wt, [Xn, Xm, LSL #2].
+          CheckValidReg(next_insn & 0x1fu);  // Check destination register.
+          const uint32_t base_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
+          CHECK_EQ(next_insn & 0xffe0ffe0u, 0xb8607800u | (base_reg << 5));
+          CheckValidReg((next_insn >> 16) & 0x1f);  // Check index register
+          break;
+        }
+        case BakerReadBarrierKind::kGcRoot: {
+          DCHECK_GE(literal_offset, 4u);
+          uint32_t prev_insn = GetInsn(literal_offset - 4u);
+          // LDR (immediate) with correct root_reg.
+          const uint32_t root_reg = BakerReadBarrierFirstRegField::Decode(encoded_data);
+          CHECK_EQ(prev_insn & 0xffc0001fu, 0xb9400000u | root_reg);
+          break;
+        }
+        default:
+          LOG(FATAL) << "Unexpected kind: " << static_cast<uint32_t>(kind);
+          UNREACHABLE();
+      }
+    }
+  }
 }
 
 void ParallelMoveResolverARM64::PrepareForEmitNativeCode() {
@@ -1487,6 +1543,14 @@ void ParallelMoveResolverARM64::EmitMove(size_t index) {
 void CodeGeneratorARM64::GenerateFrameEntry() {
   MacroAssembler* masm = GetVIXLAssembler();
   __ Bind(&frame_entry_label_);
+
+  if (GetCompilerOptions().CountHotnessInCompiledCode()) {
+    UseScratchRegisterScope temps(masm);
+    Register temp = temps.AcquireX();
+    __ Ldrh(temp, MemOperand(kArtMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
+    __ Add(temp, temp, 1);
+    __ Strh(temp, MemOperand(kArtMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
+  }
 
   bool do_overflow_check =
       FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kArm64) || !IsLeafMethod();
@@ -1881,6 +1945,8 @@ void CodeGeneratorARM64::Load(DataType::Type type,
       DCHECK_EQ(dst.Is64Bits(), DataType::Is64BitType(type));
       __ Ldr(dst, src);
       break;
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
     case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << type;
   }
@@ -1959,6 +2025,8 @@ void CodeGeneratorARM64::LoadAcquire(HInstruction* instruction,
         __ Fmov(FPRegister(dst), temp);
         break;
       }
+      case DataType::Type::kUint32:
+      case DataType::Type::kUint64:
       case DataType::Type::kVoid:
         LOG(FATAL) << "Unreachable type " << type;
     }
@@ -1986,6 +2054,8 @@ void CodeGeneratorARM64::Store(DataType::Type type,
       DCHECK_EQ(src.Is64Bits(), DataType::Is64BitType(type));
       __ Str(src, dst);
       break;
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
     case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << type;
   }
@@ -2063,6 +2133,8 @@ void CodeGeneratorARM64::StoreRelease(HInstruction* instruction,
       }
       break;
     }
+    case DataType::Type::kUint32:
+    case DataType::Type::kUint64:
     case DataType::Type::kVoid:
       LOG(FATAL) << "Unreachable type " << type;
   }
@@ -2097,16 +2169,39 @@ void InstructionCodeGeneratorARM64::GenerateClassInitializationCheck(SlowPathCod
                                                                      Register class_reg) {
   UseScratchRegisterScope temps(GetVIXLAssembler());
   Register temp = temps.AcquireW();
-  size_t status_offset = mirror::Class::StatusOffset().SizeValue();
+  constexpr size_t status_lsb_position = SubtypeCheckBits::BitStructSizeOf();
+  const size_t status_byte_offset =
+      mirror::Class::StatusOffset().SizeValue() + (status_lsb_position / kBitsPerByte);
+  constexpr uint32_t shifted_initialized_value =
+      enum_cast<uint32_t>(ClassStatus::kInitialized) << (status_lsb_position % kBitsPerByte);
 
   // Even if the initialized flag is set, we need to ensure consistent memory ordering.
   // TODO(vixl): Let the MacroAssembler handle MemOperand.
-  __ Add(temp, class_reg, status_offset);
+  __ Add(temp, class_reg, status_byte_offset);
   __ Ldarb(temp, HeapOperand(temp));
-  __ Cmp(temp, mirror::Class::kStatusInitialized);
-  __ B(ne, slow_path->GetEntryLabel());
-  // Use Bne instead of Blt because ARM64 doesn't have Ldarsb.
+  __ Cmp(temp, shifted_initialized_value);
+  __ B(lo, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
+}
+
+void InstructionCodeGeneratorARM64::GenerateBitstringTypeCheckCompare(
+    HTypeCheckInstruction* check, vixl::aarch64::Register temp) {
+  uint32_t path_to_root = check->GetBitstringPathToRoot();
+  uint32_t mask = check->GetBitstringMask();
+  DCHECK(IsPowerOfTwo(mask + 1));
+  size_t mask_bits = WhichPowerOf2(mask + 1);
+
+  if (mask_bits == 16u) {
+    // Load only the bitstring part of the status word.
+    __ Ldrh(temp, HeapOperand(temp, mirror::Class::StatusOffset()));
+  } else {
+    // /* uint32_t */ temp = temp->status_
+    __ Ldr(temp, HeapOperand(temp, mirror::Class::StatusOffset()));
+    // Extract the bitstring bits.
+    __ Ubfx(temp, temp, 0, mask_bits);
+  }
+  // Compare the bitstring bits to `path_to_root`.
+  __ Cmp(temp, path_to_root);
 }
 
 void CodeGeneratorARM64::GenerateMemoryBarrier(MemBarrierKind kind) {
@@ -3488,12 +3583,25 @@ void InstructionCodeGeneratorARM64::VisitFloatConstant(HFloatConstant* constant 
 }
 
 void InstructionCodeGeneratorARM64::HandleGoto(HInstruction* got, HBasicBlock* successor) {
-  DCHECK(!successor->IsExitBlock());
+  if (successor->IsExitBlock()) {
+    DCHECK(got->GetPrevious()->AlwaysThrows());
+    return;  // no code needed
+  }
+
   HBasicBlock* block = got->GetBlock();
   HInstruction* previous = got->GetPrevious();
   HLoopInformation* info = block->GetLoopInformation();
 
   if (info != nullptr && info->IsBackEdge(*block) && info->HasSuspendCheck()) {
+    if (codegen_->GetCompilerOptions().CountHotnessInCompiledCode()) {
+      UseScratchRegisterScope temps(GetVIXLAssembler());
+      Register temp1 = temps.AcquireX();
+      Register temp2 = temps.AcquireX();
+      __ Ldr(temp1, MemOperand(sp, 0));
+      __ Ldrh(temp2, MemOperand(temp1, ArtMethod::HotnessCountOffset().Int32Value()));
+      __ Add(temp2, temp2, 1);
+      __ Strh(temp2, MemOperand(temp1, ArtMethod::HotnessCountOffset().Int32Value()));
+    }
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
     return;
   }
@@ -3822,15 +3930,18 @@ void LocationsBuilderARM64::VisitInstanceOf(HInstanceOf* instruction) {
     case TypeCheckKind::kExactCheck:
     case TypeCheckKind::kAbstractClassCheck:
     case TypeCheckKind::kClassHierarchyCheck:
-    case TypeCheckKind::kArrayObjectCheck:
-      call_kind =
-          kEmitCompilerReadBarrier ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall;
-      baker_read_barrier_slow_path = kUseBakerReadBarrier;
+    case TypeCheckKind::kArrayObjectCheck: {
+      bool needs_read_barrier = CodeGenerator::InstanceOfNeedsReadBarrier(instruction);
+      call_kind = needs_read_barrier ? LocationSummary::kCallOnSlowPath : LocationSummary::kNoCall;
+      baker_read_barrier_slow_path = kUseBakerReadBarrier && needs_read_barrier;
       break;
+    }
     case TypeCheckKind::kArrayCheck:
     case TypeCheckKind::kUnresolvedCheck:
     case TypeCheckKind::kInterfaceCheck:
       call_kind = LocationSummary::kCallOnSlowPath;
+      break;
+    case TypeCheckKind::kBitstringCheck:
       break;
   }
 
@@ -3840,7 +3951,13 @@ void LocationsBuilderARM64::VisitInstanceOf(HInstanceOf* instruction) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
   locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RequiresRegister());
+  if (type_check_kind == TypeCheckKind::kBitstringCheck) {
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+  } else {
+    locations->SetInAt(1, Location::RequiresRegister());
+  }
   // The "out" register is used as a temporary, so it overlaps with the inputs.
   // Note that TypeCheckSlowPathARM64 uses this register too.
   locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
@@ -3853,7 +3970,9 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
   LocationSummary* locations = instruction->GetLocations();
   Location obj_loc = locations->InAt(0);
   Register obj = InputRegisterAt(instruction, 0);
-  Register cls = InputRegisterAt(instruction, 1);
+  Register cls = (type_check_kind == TypeCheckKind::kBitstringCheck)
+      ? Register()
+      : InputRegisterAt(instruction, 1);
   Location out_loc = locations->Out();
   Register out = OutputRegister(instruction);
   const size_t num_temps = NumberOfInstanceOfTemps(type_check_kind);
@@ -3875,13 +3994,15 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
 
   switch (type_check_kind) {
     case TypeCheckKind::kExactCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
                                         maybe_temp_loc,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       __ Cmp(out, cls);
       __ Cset(out, eq);
       if (zero.IsLinked()) {
@@ -3891,13 +4012,15 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kAbstractClassCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
                                         maybe_temp_loc,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // If the class is abstract, we eagerly fetch the super class of the
       // object to avoid doing a comparison we know will fail.
       vixl::aarch64::Label loop, success;
@@ -3907,7 +4030,7 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        super_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       // If `out` is null, we use it for the result, and jump to `done`.
       __ Cbz(out, &done);
       __ Cmp(out, cls);
@@ -3920,13 +4043,15 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kClassHierarchyCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
                                         maybe_temp_loc,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // Walk over the class hierarchy to find a match.
       vixl::aarch64::Label loop, success;
       __ Bind(&loop);
@@ -3937,7 +4062,7 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        super_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       __ Cbnz(out, &loop);
       // If `out` is null, we use it for the result, and jump to `done`.
       __ B(&done);
@@ -3950,13 +4075,15 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
     }
 
     case TypeCheckKind::kArrayObjectCheck: {
+      ReadBarrierOption read_barrier_option =
+          CodeGenerator::ReadBarrierOptionForInstanceOf(instruction);
       // /* HeapReference<Class> */ out = obj->klass_
       GenerateReferenceLoadTwoRegisters(instruction,
                                         out_loc,
                                         obj_loc,
                                         class_offset,
                                         maybe_temp_loc,
-                                        kCompilerReadBarrierOption);
+                                        read_barrier_option);
       // Do an exact check.
       vixl::aarch64::Label exact_check;
       __ Cmp(out, cls);
@@ -3967,7 +4094,7 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
                                        out_loc,
                                        component_offset,
                                        maybe_temp_loc,
-                                       kCompilerReadBarrierOption);
+                                       read_barrier_option);
       // If `out` is null, we use it for the result, and jump to `done`.
       __ Cbz(out, &done);
       __ Ldrh(out, HeapOperand(out, primitive_offset));
@@ -4031,6 +4158,23 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
       }
       break;
     }
+
+    case TypeCheckKind::kBitstringCheck: {
+      // /* HeapReference<Class> */ temp = obj->klass_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        out_loc,
+                                        obj_loc,
+                                        class_offset,
+                                        maybe_temp_loc,
+                                        kWithoutReadBarrier);
+
+      GenerateBitstringTypeCheckCompare(instruction, out);
+      __ Cset(out, eq);
+      if (zero.IsLinked()) {
+        __ B(&done);
+      }
+      break;
+    }
   }
 
   if (zero.IsLinked()) {
@@ -4048,30 +4192,18 @@ void InstructionCodeGeneratorARM64::VisitInstanceOf(HInstanceOf* instruction) {
 }
 
 void LocationsBuilderARM64::VisitCheckCast(HCheckCast* instruction) {
-  LocationSummary::CallKind call_kind = LocationSummary::kNoCall;
-  bool throws_into_catch = instruction->CanThrowIntoCatchBlock();
-
   TypeCheckKind type_check_kind = instruction->GetTypeCheckKind();
-  switch (type_check_kind) {
-    case TypeCheckKind::kExactCheck:
-    case TypeCheckKind::kAbstractClassCheck:
-    case TypeCheckKind::kClassHierarchyCheck:
-    case TypeCheckKind::kArrayObjectCheck:
-      call_kind = (throws_into_catch || kEmitCompilerReadBarrier) ?
-          LocationSummary::kCallOnSlowPath :
-          LocationSummary::kNoCall;  // In fact, call on a fatal (non-returning) slow path.
-      break;
-    case TypeCheckKind::kArrayCheck:
-    case TypeCheckKind::kUnresolvedCheck:
-    case TypeCheckKind::kInterfaceCheck:
-      call_kind = LocationSummary::kCallOnSlowPath;
-      break;
-  }
-
+  LocationSummary::CallKind call_kind = CodeGenerator::GetCheckCastCallKind(instruction);
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(instruction, call_kind);
   locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetInAt(1, Location::RequiresRegister());
+  if (type_check_kind == TypeCheckKind::kBitstringCheck) {
+    locations->SetInAt(1, Location::ConstantLocation(instruction->InputAt(1)->AsConstant()));
+    locations->SetInAt(2, Location::ConstantLocation(instruction->InputAt(2)->AsConstant()));
+    locations->SetInAt(3, Location::ConstantLocation(instruction->InputAt(3)->AsConstant()));
+  } else {
+    locations->SetInAt(1, Location::RequiresRegister());
+  }
   // Add temps for read barriers and other uses. One is used by TypeCheckSlowPathARM64.
   locations->AddRegisterTemps(NumberOfCheckCastTemps(type_check_kind));
 }
@@ -4081,7 +4213,9 @@ void InstructionCodeGeneratorARM64::VisitCheckCast(HCheckCast* instruction) {
   LocationSummary* locations = instruction->GetLocations();
   Location obj_loc = locations->InAt(0);
   Register obj = InputRegisterAt(instruction, 0);
-  Register cls = InputRegisterAt(instruction, 1);
+  Register cls = (type_check_kind == TypeCheckKind::kBitstringCheck)
+      ? Register()
+      : InputRegisterAt(instruction, 1);
   const size_t num_temps = NumberOfCheckCastTemps(type_check_kind);
   DCHECK_GE(num_temps, 1u);
   DCHECK_LE(num_temps, 3u);
@@ -4098,18 +4232,7 @@ void InstructionCodeGeneratorARM64::VisitCheckCast(HCheckCast* instruction) {
   const uint32_t object_array_data_offset =
       mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
 
-  bool is_type_check_slow_path_fatal = false;
-  // Always false for read barriers since we may need to go to the entrypoint for non-fatal cases
-  // from false negatives. The false negatives may come from avoiding read barriers below. Avoiding
-  // read barriers is done for performance and code size reasons.
-  if (!kEmitCompilerReadBarrier) {
-    is_type_check_slow_path_fatal =
-        (type_check_kind == TypeCheckKind::kExactCheck ||
-         type_check_kind == TypeCheckKind::kAbstractClassCheck ||
-         type_check_kind == TypeCheckKind::kClassHierarchyCheck ||
-         type_check_kind == TypeCheckKind::kArrayObjectCheck) &&
-        !instruction->CanThrowIntoCatchBlock();
-  }
+  bool is_type_check_slow_path_fatal = CodeGenerator::IsTypeCheckSlowPathFatal(instruction);
   SlowPathCodeARM64* type_check_slow_path =
       new (codegen_->GetScopedAllocator()) TypeCheckSlowPathARM64(
           instruction, is_type_check_slow_path_fatal);
@@ -4271,6 +4394,20 @@ void InstructionCodeGeneratorARM64::VisitCheckCast(HCheckCast* instruction) {
       // Compare the classes and continue the loop if they do not match.
       __ Cmp(cls, WRegisterFrom(maybe_temp3_loc));
       __ B(ne, &start_loop);
+      break;
+    }
+
+    case TypeCheckKind::kBitstringCheck: {
+      // /* HeapReference<Class> */ temp = obj->klass_
+      GenerateReferenceLoadTwoRegisters(instruction,
+                                        temp_loc,
+                                        obj_loc,
+                                        class_offset,
+                                        maybe_temp2_loc,
+                                        kWithoutReadBarrier);
+
+      GenerateBitstringTypeCheckCompare(instruction, temp);
+      __ B(ne, type_check_slow_path->GetEntryLabel());
       break;
     }
   }
@@ -4435,11 +4572,11 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage());
       // Add ADRP with its PC-relative method patch.
-      vixl::aarch64::Label* adrp_label = NewPcRelativeMethodPatch(invoke->GetTargetMethod());
+      vixl::aarch64::Label* adrp_label = NewBootImageMethodPatch(invoke->GetTargetMethod());
       EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
       // Add ADD with its PC-relative method patch.
       vixl::aarch64::Label* add_label =
-          NewPcRelativeMethodPatch(invoke->GetTargetMethod(), adrp_label);
+          NewBootImageMethodPatch(invoke->GetTargetMethod(), adrp_label);
       EmitAddPlaceholder(add_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
@@ -4447,12 +4584,23 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       // Load method address from literal pool.
       __ Ldr(XRegisterFrom(temp), DeduplicateUint64Literal(invoke->GetMethodAddress()));
       break;
+    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
+      // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
+      uint32_t boot_image_offset = GetBootImageOffset(invoke);
+      vixl::aarch64::Label* adrp_label = NewBootImageRelRoPatch(boot_image_offset);
+      EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
+      // Add LDR with its PC-relative .data.bimg.rel.ro patch.
+      vixl::aarch64::Label* ldr_label = NewBootImageRelRoPatch(boot_image_offset, adrp_label);
+      // Note: Boot image is in the low 4GiB and the entry is 32-bit, so emit a 32-bit load.
+      EmitLdrOffsetPlaceholder(ldr_label, WRegisterFrom(temp), XRegisterFrom(temp));
+      break;
+    }
     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
-      // Add ADRP with its PC-relative DexCache access patch.
+      // Add ADRP with its PC-relative .bss entry patch.
       MethodReference target_method(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex());
       vixl::aarch64::Label* adrp_label = NewMethodBssEntryPatch(target_method);
       EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
-      // Add LDR with its PC-relative DexCache access patch.
+      // Add LDR with its PC-relative .bss entry patch.
       vixl::aarch64::Label* ldr_label =
           NewMethodBssEntryPatch(target_method, adrp_label);
       EmitLdrOffsetPlaceholder(ldr_label, XRegisterFrom(temp), XRegisterFrom(temp));
@@ -4547,51 +4695,54 @@ void InstructionCodeGeneratorARM64::VisitInvokePolymorphic(HInvokePolymorphic* i
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
 }
 
-vixl::aarch64::Label* CodeGeneratorARM64::NewPcRelativeMethodPatch(
+vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageRelRoPatch(
+    uint32_t boot_image_offset,
+    vixl::aarch64::Label* adrp_label) {
+  return NewPcRelativePatch(
+      /* dex_file */ nullptr, boot_image_offset, adrp_label, &boot_image_method_patches_);
+}
+
+vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageMethodPatch(
     MethodReference target_method,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(*target_method.dex_file,
-                            target_method.index,
-                            adrp_label,
-                            &pc_relative_method_patches_);
+  return NewPcRelativePatch(
+      target_method.dex_file, target_method.index, adrp_label, &boot_image_method_patches_);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewMethodBssEntryPatch(
     MethodReference target_method,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(*target_method.dex_file,
-                            target_method.index,
-                            adrp_label,
-                            &method_bss_entry_patches_);
+  return NewPcRelativePatch(
+      target_method.dex_file, target_method.index, adrp_label, &method_bss_entry_patches_);
 }
 
-vixl::aarch64::Label* CodeGeneratorARM64::NewPcRelativeTypePatch(
+vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageTypePatch(
     const DexFile& dex_file,
     dex::TypeIndex type_index,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(dex_file, type_index.index_, adrp_label, &pc_relative_type_patches_);
+  return NewPcRelativePatch(&dex_file, type_index.index_, adrp_label, &boot_image_type_patches_);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewBssEntryTypePatch(
     const DexFile& dex_file,
     dex::TypeIndex type_index,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(dex_file, type_index.index_, adrp_label, &type_bss_entry_patches_);
+  return NewPcRelativePatch(&dex_file, type_index.index_, adrp_label, &type_bss_entry_patches_);
 }
 
-vixl::aarch64::Label* CodeGeneratorARM64::NewPcRelativeStringPatch(
+vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageStringPatch(
     const DexFile& dex_file,
     dex::StringIndex string_index,
     vixl::aarch64::Label* adrp_label) {
-  return
-      NewPcRelativePatch(dex_file, string_index.index_, adrp_label, &pc_relative_string_patches_);
+  return NewPcRelativePatch(
+      &dex_file, string_index.index_, adrp_label, &boot_image_string_patches_);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewStringBssEntryPatch(
     const DexFile& dex_file,
     dex::StringIndex string_index,
     vixl::aarch64::Label* adrp_label) {
-  return NewPcRelativePatch(dex_file, string_index.index_, adrp_label, &string_bss_entry_patches_);
+  return NewPcRelativePatch(&dex_file, string_index.index_, adrp_label, &string_bss_entry_patches_);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewBakerReadBarrierPatch(uint32_t custom_data) {
@@ -4600,7 +4751,7 @@ vixl::aarch64::Label* CodeGeneratorARM64::NewBakerReadBarrierPatch(uint32_t cust
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewPcRelativePatch(
-    const DexFile& dex_file,
+    const DexFile* dex_file,
     uint32_t offset_or_index,
     vixl::aarch64::Label* adrp_label,
     ArenaDeque<PcRelativePatchInfo>* patches) {
@@ -4667,36 +4818,43 @@ inline void CodeGeneratorARM64::EmitPcRelativeLinkerPatches(
     ArenaVector<linker::LinkerPatch>* linker_patches) {
   for (const PcRelativePatchInfo& info : infos) {
     linker_patches->push_back(Factory(info.label.GetLocation(),
-                                      &info.target_dex_file,
+                                      info.target_dex_file,
                                       info.pc_insn_label->GetLocation(),
                                       info.offset_or_index));
   }
 }
 
+linker::LinkerPatch DataBimgRelRoPatchAdapter(size_t literal_offset,
+                                              const DexFile* target_dex_file,
+                                              uint32_t pc_insn_offset,
+                                              uint32_t boot_image_offset) {
+  DCHECK(target_dex_file == nullptr);  // Unused for DataBimgRelRoPatch(), should be null.
+  return linker::LinkerPatch::DataBimgRelRoPatch(literal_offset, pc_insn_offset, boot_image_offset);
+}
+
 void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) {
   DCHECK(linker_patches->empty());
   size_t size =
-      pc_relative_method_patches_.size() +
+      boot_image_method_patches_.size() +
       method_bss_entry_patches_.size() +
-      pc_relative_type_patches_.size() +
+      boot_image_type_patches_.size() +
       type_bss_entry_patches_.size() +
-      pc_relative_string_patches_.size() +
+      boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
       baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage()) {
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
-        pc_relative_method_patches_, linker_patches);
+        boot_image_method_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeTypePatch>(
-        pc_relative_type_patches_, linker_patches);
+        boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
-        pc_relative_string_patches_, linker_patches);
+        boot_image_string_patches_, linker_patches);
   } else {
-    DCHECK(pc_relative_method_patches_.empty());
-    EmitPcRelativeLinkerPatches<linker::LinkerPatch::TypeClassTablePatch>(
-        pc_relative_type_patches_, linker_patches);
-    EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringInternTablePatch>(
-        pc_relative_string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<DataBimgRelRoPatchAdapter>(
+        boot_image_method_patches_, linker_patches);
+    DCHECK(boot_image_type_patches_.empty());
+    DCHECK(boot_image_string_patches_.empty());
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);
@@ -4709,6 +4867,44 @@ void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* lin
         info.label.GetLocation(), info.custom_data));
   }
   DCHECK_EQ(size, linker_patches->size());
+}
+
+bool CodeGeneratorARM64::NeedsThunkCode(const linker::LinkerPatch& patch) const {
+  return patch.GetType() == linker::LinkerPatch::Type::kBakerReadBarrierBranch ||
+         patch.GetType() == linker::LinkerPatch::Type::kCallRelative;
+}
+
+void CodeGeneratorARM64::EmitThunkCode(const linker::LinkerPatch& patch,
+                                       /*out*/ ArenaVector<uint8_t>* code,
+                                       /*out*/ std::string* debug_name) {
+  Arm64Assembler assembler(GetGraph()->GetAllocator());
+  switch (patch.GetType()) {
+    case linker::LinkerPatch::Type::kCallRelative: {
+      // The thunk just uses the entry point in the ArtMethod. This works even for calls
+      // to the generic JNI and interpreter trampolines.
+      Offset offset(ArtMethod::EntryPointFromQuickCompiledCodeOffset(
+          kArm64PointerSize).Int32Value());
+      assembler.JumpTo(ManagedRegister(arm64::X0), offset, ManagedRegister(arm64::IP0));
+      if (GetCompilerOptions().GenerateAnyDebugInfo()) {
+        *debug_name = "MethodCallThunk";
+      }
+      break;
+    }
+    case linker::LinkerPatch::Type::kBakerReadBarrierBranch: {
+      DCHECK_EQ(patch.GetBakerCustomValue2(), 0u);
+      CompileBakerReadBarrierThunk(assembler, patch.GetBakerCustomValue1(), debug_name);
+      break;
+    }
+    default:
+      LOG(FATAL) << "Unexpected patch type " << patch.GetType();
+      UNREACHABLE();
+  }
+
+  // Ensure we emit the literal pool if any.
+  assembler.FinalizeCode();
+  code->resize(assembler.CodeSize());
+  MemoryRegion code_region(code->data(), code->size());
+  assembler.FinalizeInstructions(code_region);
 }
 
 vixl::aarch64::Literal<uint32_t>* CodeGeneratorARM64::DeduplicateUint32Literal(uint32_t value) {
@@ -4771,7 +4967,7 @@ HLoadClass::LoadKind CodeGeneratorARM64::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kReferrersClass:
       break;
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-    case HLoadClass::LoadKind::kBootImageClassTable:
+    case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
@@ -4851,12 +5047,12 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       DCHECK(!cls->MustGenerateClinitCheck());
       // /* GcRoot<mirror::Class> */ out = current_method->declaring_class_
       Register current_method = InputRegisterAt(cls, 0);
-      GenerateGcRootFieldLoad(cls,
-                              out_loc,
-                              current_method,
-                              ArtMethod::DeclaringClassOffset().Int32Value(),
-                              /* fixup_label */ nullptr,
-                              read_barrier_option);
+      codegen_->GenerateGcRootFieldLoad(cls,
+                                        out_loc,
+                                        current_method,
+                                        ArtMethod::DeclaringClassOffset().Int32Value(),
+                                        /* fixup_label */ nullptr,
+                                        read_barrier_option);
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative: {
@@ -4864,11 +5060,11 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       // Add ADRP with its PC-relative type patch.
       const DexFile& dex_file = cls->GetDexFile();
       dex::TypeIndex type_index = cls->GetTypeIndex();
-      vixl::aarch64::Label* adrp_label = codegen_->NewPcRelativeTypePatch(dex_file, type_index);
+      vixl::aarch64::Label* adrp_label = codegen_->NewBootImageTypePatch(dex_file, type_index);
       codegen_->EmitAdrpPlaceholder(adrp_label, out.X());
       // Add ADD with its PC-relative type patch.
       vixl::aarch64::Label* add_label =
-          codegen_->NewPcRelativeTypePatch(dex_file, type_index, adrp_label);
+          codegen_->NewBootImageTypePatch(dex_file, type_index, adrp_label);
       codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
       break;
     }
@@ -4880,23 +5076,16 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
       break;
     }
-    case HLoadClass::LoadKind::kBootImageClassTable: {
+    case HLoadClass::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
-      // Add ADRP with its PC-relative type patch.
-      const DexFile& dex_file = cls->GetDexFile();
-      dex::TypeIndex type_index = cls->GetTypeIndex();
-      vixl::aarch64::Label* adrp_label = codegen_->NewPcRelativeTypePatch(dex_file, type_index);
+      uint32_t boot_image_offset = codegen_->GetBootImageOffset(cls);
+      // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
+      vixl::aarch64::Label* adrp_label = codegen_->NewBootImageRelRoPatch(boot_image_offset);
       codegen_->EmitAdrpPlaceholder(adrp_label, out.X());
-      // Add LDR with its PC-relative type patch.
+      // Add LDR with its PC-relative .data.bimg.rel.ro patch.
       vixl::aarch64::Label* ldr_label =
-          codegen_->NewPcRelativeTypePatch(dex_file, type_index, adrp_label);
+          codegen_->NewBootImageRelRoPatch(boot_image_offset, adrp_label);
       codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
-      // Extract the reference from the slot data, i.e. clear the hash bits.
-      int32_t masked_hash = ClassTable::TableSlot::MaskHash(
-          ComputeModifiedUtf8Hash(dex_file.StringByTypeIdx(type_index)));
-      if (masked_hash != 0) {
-        __ Sub(out.W(), out.W(), Operand(masked_hash));
-      }
       break;
     }
     case HLoadClass::LoadKind::kBssEntry: {
@@ -4906,16 +5095,16 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       vixl::aarch64::Register temp = XRegisterFrom(out_loc);
       vixl::aarch64::Label* adrp_label = codegen_->NewBssEntryTypePatch(dex_file, type_index);
       codegen_->EmitAdrpPlaceholder(adrp_label, temp);
-      // Add LDR with its PC-relative Class patch.
+      // Add LDR with its PC-relative Class .bss entry patch.
       vixl::aarch64::Label* ldr_label =
           codegen_->NewBssEntryTypePatch(dex_file, type_index, adrp_label);
       // /* GcRoot<mirror::Class> */ out = *(base_address + offset)  /* PC-relative */
-      GenerateGcRootFieldLoad(cls,
-                              out_loc,
-                              temp,
-                              /* offset placeholder */ 0u,
-                              ldr_label,
-                              read_barrier_option);
+      codegen_->GenerateGcRootFieldLoad(cls,
+                                        out_loc,
+                                        temp,
+                                        /* offset placeholder */ 0u,
+                                        ldr_label,
+                                        read_barrier_option);
       generate_null_check = true;
       break;
     }
@@ -4923,12 +5112,12 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       __ Ldr(out, codegen_->DeduplicateJitClassLiteral(cls->GetDexFile(),
                                                        cls->GetTypeIndex(),
                                                        cls->GetClass()));
-      GenerateGcRootFieldLoad(cls,
-                              out_loc,
-                              out.X(),
-                              /* offset */ 0,
-                              /* fixup_label */ nullptr,
-                              read_barrier_option);
+      codegen_->GenerateGcRootFieldLoad(cls,
+                                        out_loc,
+                                        out.X(),
+                                        /* offset */ 0,
+                                        /* fixup_label */ nullptr,
+                                        read_barrier_option);
       break;
     }
     case HLoadClass::LoadKind::kRuntimeCall:
@@ -4953,6 +5142,26 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
     }
     codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
   }
+}
+
+void LocationsBuilderARM64::VisitLoadMethodHandle(HLoadMethodHandle* load) {
+  InvokeRuntimeCallingConvention calling_convention;
+  Location location = LocationFrom(calling_convention.GetRegisterAt(0));
+  CodeGenerator::CreateLoadMethodHandleRuntimeCallLocationSummary(load, location, location);
+}
+
+void InstructionCodeGeneratorARM64::VisitLoadMethodHandle(HLoadMethodHandle* load) {
+  codegen_->GenerateLoadMethodHandleRuntimeCall(load);
+}
+
+void LocationsBuilderARM64::VisitLoadMethodType(HLoadMethodType* load) {
+  InvokeRuntimeCallingConvention calling_convention;
+  Location location = LocationFrom(calling_convention.GetRegisterAt(0));
+  CodeGenerator::CreateLoadMethodTypeRuntimeCallLocationSummary(load, location, location);
+}
+
+void InstructionCodeGeneratorARM64::VisitLoadMethodType(HLoadMethodType* load) {
+  codegen_->GenerateLoadMethodTypeRuntimeCall(load);
 }
 
 static MemOperand GetExceptionTlsAddress() {
@@ -4981,7 +5190,7 @@ HLoadString::LoadKind CodeGeneratorARM64::GetSupportedLoadStringKind(
     HLoadString::LoadKind desired_string_load_kind) {
   switch (desired_string_load_kind) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
-    case HLoadString::LoadKind::kBootImageInternTable:
+    case HLoadString::LoadKind::kBootImageRelRo:
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
@@ -5032,11 +5241,11 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       // Add ADRP with its PC-relative String patch.
       const DexFile& dex_file = load->GetDexFile();
       const dex::StringIndex string_index = load->GetStringIndex();
-      vixl::aarch64::Label* adrp_label = codegen_->NewPcRelativeStringPatch(dex_file, string_index);
+      vixl::aarch64::Label* adrp_label = codegen_->NewBootImageStringPatch(dex_file, string_index);
       codegen_->EmitAdrpPlaceholder(adrp_label, out.X());
       // Add ADD with its PC-relative String patch.
       vixl::aarch64::Label* add_label =
-          codegen_->NewPcRelativeStringPatch(dex_file, string_index, adrp_label);
+          codegen_->NewBootImageStringPatch(dex_file, string_index, adrp_label);
       codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
       return;
     }
@@ -5047,16 +5256,15 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
       return;
     }
-    case HLoadString::LoadKind::kBootImageInternTable: {
+    case HLoadString::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
-      // Add ADRP with its PC-relative String patch.
-      const DexFile& dex_file = load->GetDexFile();
-      const dex::StringIndex string_index = load->GetStringIndex();
-      vixl::aarch64::Label* adrp_label = codegen_->NewPcRelativeStringPatch(dex_file, string_index);
+      // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
+      uint32_t boot_image_offset = codegen_->GetBootImageOffset(load);
+      vixl::aarch64::Label* adrp_label = codegen_->NewBootImageRelRoPatch(boot_image_offset);
       codegen_->EmitAdrpPlaceholder(adrp_label, out.X());
-      // Add LDR with its PC-relative String patch.
+      // Add LDR with its PC-relative .data.bimg.rel.ro patch.
       vixl::aarch64::Label* ldr_label =
-          codegen_->NewPcRelativeStringPatch(dex_file, string_index, adrp_label);
+          codegen_->NewBootImageRelRoPatch(boot_image_offset, adrp_label);
       codegen_->EmitLdrOffsetPlaceholder(ldr_label, out.W(), out.X());
       return;
     }
@@ -5068,16 +5276,16 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       Register temp = XRegisterFrom(out_loc);
       vixl::aarch64::Label* adrp_label = codegen_->NewStringBssEntryPatch(dex_file, string_index);
       codegen_->EmitAdrpPlaceholder(adrp_label, temp);
-      // Add LDR with its .bss entry String patch.
+      // Add LDR with its PC-relative String .bss entry patch.
       vixl::aarch64::Label* ldr_label =
           codegen_->NewStringBssEntryPatch(dex_file, string_index, adrp_label);
       // /* GcRoot<mirror::String> */ out = *(base_address + offset)  /* PC-relative */
-      GenerateGcRootFieldLoad(load,
-                              out_loc,
-                              temp,
-                              /* offset placeholder */ 0u,
-                              ldr_label,
-                              kCompilerReadBarrierOption);
+      codegen_->GenerateGcRootFieldLoad(load,
+                                        out_loc,
+                                        temp,
+                                        /* offset placeholder */ 0u,
+                                        ldr_label,
+                                        kCompilerReadBarrierOption);
       SlowPathCodeARM64* slow_path =
           new (codegen_->GetScopedAllocator()) LoadStringSlowPathARM64(load);
       codegen_->AddSlowPath(slow_path);
@@ -5090,12 +5298,12 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       __ Ldr(out, codegen_->DeduplicateJitStringLiteral(load->GetDexFile(),
                                                         load->GetStringIndex(),
                                                         load->GetString()));
-      GenerateGcRootFieldLoad(load,
-                              out_loc,
-                              out.X(),
-                              /* offset */ 0,
-                              /* fixup_label */ nullptr,
-                              kCompilerReadBarrierOption);
+      codegen_->GenerateGcRootFieldLoad(load,
+                                        out_loc,
+                                        out.X(),
+                                        /* offset */ 0,
+                                        /* fixup_label */ nullptr,
+                                        kCompilerReadBarrierOption);
       return;
     }
     default:
@@ -5451,6 +5659,153 @@ void InstructionCodeGeneratorARM64::VisitRem(HRem* rem) {
     default:
       LOG(FATAL) << "Unexpected rem type " << type;
       UNREACHABLE();
+  }
+}
+
+// TODO: integrate with HandleBinaryOp?
+static void CreateMinMaxLocations(ArenaAllocator* allocator, HBinaryOperation* minmax) {
+  LocationSummary* locations = new (allocator) LocationSummary(minmax);
+  switch (minmax->GetResultType()) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      locations->SetInAt(0, Location::RequiresRegister());
+      locations->SetInAt(1, Location::RequiresRegister());
+      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      locations->SetInAt(0, Location::RequiresFpuRegister());
+      locations->SetInAt(1, Location::RequiresFpuRegister());
+      locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for HMinMax " << minmax->GetResultType();
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateMinMaxInt(LocationSummary* locations,
+                                                      bool is_min,
+                                                      DataType::Type type) {
+  Location op1 = locations->InAt(0);
+  Location op2 = locations->InAt(1);
+  Location out = locations->Out();
+
+  Register op1_reg;
+  Register op2_reg;
+  Register out_reg;
+  if (type == DataType::Type::kInt64) {
+    op1_reg = XRegisterFrom(op1);
+    op2_reg = XRegisterFrom(op2);
+    out_reg = XRegisterFrom(out);
+  } else {
+    DCHECK_EQ(type, DataType::Type::kInt32);
+    op1_reg = WRegisterFrom(op1);
+    op2_reg = WRegisterFrom(op2);
+    out_reg = WRegisterFrom(out);
+  }
+
+  __ Cmp(op1_reg, op2_reg);
+  __ Csel(out_reg, op1_reg, op2_reg, is_min ? lt : gt);
+}
+
+void InstructionCodeGeneratorARM64::GenerateMinMaxFP(LocationSummary* locations,
+                                                     bool is_min,
+                                                     DataType::Type type) {
+  Location op1 = locations->InAt(0);
+  Location op2 = locations->InAt(1);
+  Location out = locations->Out();
+
+  FPRegister op1_reg;
+  FPRegister op2_reg;
+  FPRegister out_reg;
+  if (type == DataType::Type::kFloat64) {
+    op1_reg = DRegisterFrom(op1);
+    op2_reg = DRegisterFrom(op2);
+    out_reg = DRegisterFrom(out);
+  } else {
+    DCHECK_EQ(type, DataType::Type::kFloat32);
+    op1_reg = SRegisterFrom(op1);
+    op2_reg = SRegisterFrom(op2);
+    out_reg = SRegisterFrom(out);
+  }
+
+  if (is_min) {
+    __ Fmin(out_reg, op1_reg, op2_reg);
+  } else {
+    __ Fmax(out_reg, op1_reg, op2_reg);
+  }
+}
+
+// TODO: integrate with HandleBinaryOp?
+void InstructionCodeGeneratorARM64::GenerateMinMax(HBinaryOperation* minmax, bool is_min) {
+  DataType::Type type = minmax->GetResultType();
+  switch (type) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      GenerateMinMaxInt(minmax->GetLocations(), is_min, type);
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      GenerateMinMaxFP(minmax->GetLocations(), is_min, type);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for HMinMax " << type;
+  }
+}
+
+void LocationsBuilderARM64::VisitMin(HMin* min) {
+  CreateMinMaxLocations(GetGraph()->GetAllocator(), min);
+}
+
+void InstructionCodeGeneratorARM64::VisitMin(HMin* min) {
+  GenerateMinMax(min, /*is_min*/ true);
+}
+
+void LocationsBuilderARM64::VisitMax(HMax* max) {
+  CreateMinMaxLocations(GetGraph()->GetAllocator(), max);
+}
+
+void InstructionCodeGeneratorARM64::VisitMax(HMax* max) {
+  GenerateMinMax(max, /*is_min*/ false);
+}
+
+void LocationsBuilderARM64::VisitAbs(HAbs* abs) {
+  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(abs);
+  switch (abs->GetResultType()) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      locations->SetInAt(0, Location::RequiresRegister());
+      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
+      break;
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64:
+      locations->SetInAt(0, Location::RequiresFpuRegister());
+      locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected type for abs operation " << abs->GetResultType();
+  }
+}
+
+void InstructionCodeGeneratorARM64::VisitAbs(HAbs* abs) {
+  switch (abs->GetResultType()) {
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64: {
+      Register in_reg = InputRegisterAt(abs, 0);
+      Register out_reg = OutputRegister(abs);
+      __ Cmp(in_reg, Operand(0));
+      __ Cneg(out_reg, in_reg, lt);
+      break;
+    }
+    case DataType::Type::kFloat32:
+    case DataType::Type::kFloat64: {
+      FPRegister in_reg = InputFPRegisterAt(abs, 0);
+      FPRegister out_reg = OutputFPRegister(abs);
+      __ Fabs(out_reg, in_reg);
+      break;
+    }
+    default:
+      LOG(FATAL) << "Unexpected type for abs operation " << abs->GetResultType();
   }
 }
 
@@ -5897,7 +6252,7 @@ void InstructionCodeGeneratorARM64::GenerateReferenceLoadTwoRegisters(
   }
 }
 
-void InstructionCodeGeneratorARM64::GenerateGcRootFieldLoad(
+void CodeGeneratorARM64::GenerateGcRootFieldLoad(
     HInstruction* instruction,
     Location root,
     Register obj,
@@ -5931,9 +6286,8 @@ void InstructionCodeGeneratorARM64::GenerateGcRootFieldLoad(
         DCHECK(temps.IsAvailable(ip0));
         DCHECK(temps.IsAvailable(ip1));
         temps.Exclude(ip0, ip1);
-        uint32_t custom_data =
-            linker::Arm64RelativePatcher::EncodeBakerReadBarrierGcRootData(root_reg.GetCode());
-        vixl::aarch64::Label* cbnz_label = codegen_->NewBakerReadBarrierPatch(custom_data);
+        uint32_t custom_data = EncodeBakerReadBarrierGcRootData(root_reg.GetCode());
+        vixl::aarch64::Label* cbnz_label = NewBakerReadBarrierPatch(custom_data);
 
         EmissionCheckScope guard(GetVIXLAssembler(), 3 * vixl::aarch64::kInstructionSize);
         vixl::aarch64::Label return_address;
@@ -5962,14 +6316,14 @@ void InstructionCodeGeneratorARM64::GenerateGcRootFieldLoad(
         // Slow path marking the GC root `root`. The entrypoint will
         // be loaded by the slow path code.
         SlowPathCodeARM64* slow_path =
-            new (codegen_->GetScopedAllocator()) ReadBarrierMarkSlowPathARM64(instruction, root);
-        codegen_->AddSlowPath(slow_path);
+            new (GetScopedAllocator()) ReadBarrierMarkSlowPathARM64(instruction, root);
+        AddSlowPath(slow_path);
 
         // /* GcRoot<mirror::Object> */ root = *(obj + offset)
         if (fixup_label == nullptr) {
           __ Ldr(root_reg, MemOperand(obj, offset));
         } else {
-          codegen_->EmitLdrOffsetPlaceholder(fixup_label, root_reg, obj);
+          EmitLdrOffsetPlaceholder(fixup_label, root_reg, obj);
         }
         static_assert(
             sizeof(mirror::CompressedReference<mirror::Object>) == sizeof(GcRoot<mirror::Object>),
@@ -5989,10 +6343,10 @@ void InstructionCodeGeneratorARM64::GenerateGcRootFieldLoad(
       if (fixup_label == nullptr) {
         __ Add(root_reg.X(), obj.X(), offset);
       } else {
-        codegen_->EmitAddPlaceholder(fixup_label, root_reg.X(), obj.X());
+        EmitAddPlaceholder(fixup_label, root_reg.X(), obj.X());
       }
       // /* mirror::Object* */ root = root->Read()
-      codegen_->GenerateReadBarrierForRootSlow(instruction, root, root);
+      GenerateReadBarrierForRootSlow(instruction, root, root);
     }
   } else {
     // Plain GC root load with no read barrier.
@@ -6000,12 +6354,12 @@ void InstructionCodeGeneratorARM64::GenerateGcRootFieldLoad(
     if (fixup_label == nullptr) {
       __ Ldr(root_reg, MemOperand(obj, offset));
     } else {
-      codegen_->EmitLdrOffsetPlaceholder(fixup_label, root_reg, obj.X());
+      EmitLdrOffsetPlaceholder(fixup_label, root_reg, obj.X());
     }
     // Note that GC roots are not affected by heap poisoning, thus we
     // do not have to unpoison `root_reg` here.
   }
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
+  MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
 }
 
 void CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
@@ -6054,9 +6408,7 @@ void CodeGeneratorARM64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* ins
     DCHECK(temps.IsAvailable(ip0));
     DCHECK(temps.IsAvailable(ip1));
     temps.Exclude(ip0, ip1);
-    uint32_t custom_data = linker::Arm64RelativePatcher::EncodeBakerReadBarrierFieldData(
-        base.GetCode(),
-        obj.GetCode());
+    uint32_t custom_data = EncodeBakerReadBarrierFieldData(base.GetCode(), obj.GetCode());
     vixl::aarch64::Label* cbnz_label = NewBakerReadBarrierPatch(custom_data);
 
     {
@@ -6141,8 +6493,7 @@ void CodeGeneratorARM64::GenerateArrayLoadWithBakerReadBarrier(HInstruction* ins
     DCHECK(temps.IsAvailable(ip0));
     DCHECK(temps.IsAvailable(ip1));
     temps.Exclude(ip0, ip1);
-    uint32_t custom_data =
-        linker::Arm64RelativePatcher::EncodeBakerReadBarrierArrayData(temp.GetCode());
+    uint32_t custom_data = EncodeBakerReadBarrierArrayData(temp.GetCode());
     vixl::aarch64::Label* cbnz_label = NewBakerReadBarrierPatch(custom_data);
 
     __ Add(temp.X(), obj.X(), Operand(data_offset));
@@ -6501,6 +6852,177 @@ void CodeGeneratorARM64::EmitJitRootPatches(uint8_t* code, const uint8_t* roots_
 
 #undef __
 #undef QUICK_ENTRY_POINT
+
+#define __ assembler.GetVIXLAssembler()->
+
+static void EmitGrayCheckAndFastPath(arm64::Arm64Assembler& assembler,
+                                     vixl::aarch64::Register base_reg,
+                                     vixl::aarch64::MemOperand& lock_word,
+                                     vixl::aarch64::Label* slow_path,
+                                     vixl::aarch64::Label* throw_npe = nullptr) {
+  // Load the lock word containing the rb_state.
+  __ Ldr(ip0.W(), lock_word);
+  // Given the numeric representation, it's enough to check the low bit of the rb_state.
+  static_assert(ReadBarrier::WhiteState() == 0, "Expecting white to have value 0");
+  static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
+  __ Tbnz(ip0.W(), LockWord::kReadBarrierStateShift, slow_path);
+  static_assert(
+      BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET == BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET,
+      "Field and array LDR offsets must be the same to reuse the same code.");
+  // To throw NPE, we return to the fast path; the artificial dependence below does not matter.
+  if (throw_npe != nullptr) {
+    __ Bind(throw_npe);
+  }
+  // Adjust the return address back to the LDR (1 instruction; 2 for heap poisoning).
+  static_assert(BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET == (kPoisonHeapReferences ? -8 : -4),
+                "Field LDR must be 1 instruction (4B) before the return address label; "
+                " 2 instructions (8B) for heap poisoning.");
+  __ Add(lr, lr, BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET);
+  // Introduce a dependency on the lock_word including rb_state,
+  // to prevent load-load reordering, and without using
+  // a memory barrier (which would be more expensive).
+  __ Add(base_reg, base_reg, Operand(ip0, LSR, 32));
+  __ Br(lr);          // And return back to the function.
+  // Note: The fake dependency is unnecessary for the slow path.
+}
+
+// Load the read barrier introspection entrypoint in register `entrypoint`.
+static void LoadReadBarrierMarkIntrospectionEntrypoint(arm64::Arm64Assembler& assembler,
+                                                       vixl::aarch64::Register entrypoint) {
+  // entrypoint = Thread::Current()->pReadBarrierMarkReg16, i.e. pReadBarrierMarkIntrospection.
+  DCHECK_EQ(ip0.GetCode(), 16u);
+  const int32_t entry_point_offset =
+      Thread::ReadBarrierMarkEntryPointsOffset<kArm64PointerSize>(ip0.GetCode());
+  __ Ldr(entrypoint, MemOperand(tr, entry_point_offset));
+}
+
+void CodeGeneratorARM64::CompileBakerReadBarrierThunk(Arm64Assembler& assembler,
+                                                      uint32_t encoded_data,
+                                                      /*out*/ std::string* debug_name) {
+  BakerReadBarrierKind kind = BakerReadBarrierKindField::Decode(encoded_data);
+  switch (kind) {
+    case BakerReadBarrierKind::kField: {
+      auto base_reg =
+          Register::GetXRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      CheckValidReg(base_reg.GetCode());
+      auto holder_reg =
+          Register::GetXRegFromCode(BakerReadBarrierSecondRegField::Decode(encoded_data));
+      CheckValidReg(holder_reg.GetCode());
+      UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
+      temps.Exclude(ip0, ip1);
+      // If base_reg differs from holder_reg, the offset was too large and we must have emitted
+      // an explicit null check before the load. Otherwise, for implicit null checks, we need to
+      // null-check the holder as we do not necessarily do that check before going to the thunk.
+      vixl::aarch64::Label throw_npe_label;
+      vixl::aarch64::Label* throw_npe = nullptr;
+      if (GetCompilerOptions().GetImplicitNullChecks() && holder_reg.Is(base_reg)) {
+        throw_npe = &throw_npe_label;
+        __ Cbz(holder_reg.W(), throw_npe);
+      }
+      // Check if the holder is gray and, if not, add fake dependency to the base register
+      // and return to the LDR instruction to load the reference. Otherwise, use introspection
+      // to load the reference and call the entrypoint that performs further checks on the
+      // reference and marks it if needed.
+      vixl::aarch64::Label slow_path;
+      MemOperand lock_word(holder_reg, mirror::Object::MonitorOffset().Int32Value());
+      EmitGrayCheckAndFastPath(assembler, base_reg, lock_word, &slow_path, throw_npe);
+      __ Bind(&slow_path);
+      MemOperand ldr_address(lr, BAKER_MARK_INTROSPECTION_FIELD_LDR_OFFSET);
+      __ Ldr(ip0.W(), ldr_address);         // Load the LDR (immediate) unsigned offset.
+      LoadReadBarrierMarkIntrospectionEntrypoint(assembler, ip1);
+      __ Ubfx(ip0.W(), ip0.W(), 10, 12);    // Extract the offset.
+      __ Ldr(ip0.W(), MemOperand(base_reg, ip0, LSL, 2));   // Load the reference.
+      // Do not unpoison. With heap poisoning enabled, the entrypoint expects a poisoned reference.
+      __ Br(ip1);                           // Jump to the entrypoint.
+      break;
+    }
+    case BakerReadBarrierKind::kArray: {
+      auto base_reg =
+          Register::GetXRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      CheckValidReg(base_reg.GetCode());
+      DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
+                BakerReadBarrierSecondRegField::Decode(encoded_data));
+      UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
+      temps.Exclude(ip0, ip1);
+      vixl::aarch64::Label slow_path;
+      int32_t data_offset =
+          mirror::Array::DataOffset(Primitive::ComponentSize(Primitive::kPrimNot)).Int32Value();
+      MemOperand lock_word(base_reg, mirror::Object::MonitorOffset().Int32Value() - data_offset);
+      DCHECK_LT(lock_word.GetOffset(), 0);
+      EmitGrayCheckAndFastPath(assembler, base_reg, lock_word, &slow_path);
+      __ Bind(&slow_path);
+      MemOperand ldr_address(lr, BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET);
+      __ Ldr(ip0.W(), ldr_address);         // Load the LDR (register) unsigned offset.
+      LoadReadBarrierMarkIntrospectionEntrypoint(assembler, ip1);
+      __ Ubfx(ip0, ip0, 16, 6);             // Extract the index register, plus 32 (bit 21 is set).
+      __ Bfi(ip1, ip0, 3, 6);               // Insert ip0 to the entrypoint address to create
+                                            // a switch case target based on the index register.
+      __ Mov(ip0, base_reg);                // Move the base register to ip0.
+      __ Br(ip1);                           // Jump to the entrypoint's array switch case.
+      break;
+    }
+    case BakerReadBarrierKind::kGcRoot: {
+      // Check if the reference needs to be marked and if so (i.e. not null, not marked yet
+      // and it does not have a forwarding address), call the correct introspection entrypoint;
+      // otherwise return the reference (or the extracted forwarding address).
+      // There is no gray bit check for GC roots.
+      auto root_reg =
+          Register::GetWRegFromCode(BakerReadBarrierFirstRegField::Decode(encoded_data));
+      CheckValidReg(root_reg.GetCode());
+      DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
+                BakerReadBarrierSecondRegField::Decode(encoded_data));
+      UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
+      temps.Exclude(ip0, ip1);
+      vixl::aarch64::Label return_label, not_marked, forwarding_address;
+      __ Cbz(root_reg, &return_label);
+      MemOperand lock_word(root_reg.X(), mirror::Object::MonitorOffset().Int32Value());
+      __ Ldr(ip0.W(), lock_word);
+      __ Tbz(ip0.W(), LockWord::kMarkBitStateShift, &not_marked);
+      __ Bind(&return_label);
+      __ Br(lr);
+      __ Bind(&not_marked);
+      __ Tst(ip0.W(), Operand(ip0.W(), LSL, 1));
+      __ B(&forwarding_address, mi);
+      LoadReadBarrierMarkIntrospectionEntrypoint(assembler, ip1);
+      // Adjust the art_quick_read_barrier_mark_introspection address in IP1 to
+      // art_quick_read_barrier_mark_introspection_gc_roots.
+      __ Add(ip1, ip1, Operand(BAKER_MARK_INTROSPECTION_GC_ROOT_ENTRYPOINT_OFFSET));
+      __ Mov(ip0.W(), root_reg);
+      __ Br(ip1);
+      __ Bind(&forwarding_address);
+      __ Lsl(root_reg, ip0.W(), LockWord::kForwardingAddressShift);
+      __ Br(lr);
+      break;
+    }
+    default:
+      LOG(FATAL) << "Unexpected kind: " << static_cast<uint32_t>(kind);
+      UNREACHABLE();
+  }
+
+  if (GetCompilerOptions().GenerateAnyDebugInfo()) {
+    std::ostringstream oss;
+    oss << "BakerReadBarrierThunk";
+    switch (kind) {
+      case BakerReadBarrierKind::kField:
+        oss << "Field_r" << BakerReadBarrierFirstRegField::Decode(encoded_data)
+            << "_r" << BakerReadBarrierSecondRegField::Decode(encoded_data);
+        break;
+      case BakerReadBarrierKind::kArray:
+        oss << "Array_r" << BakerReadBarrierFirstRegField::Decode(encoded_data);
+        DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
+                  BakerReadBarrierSecondRegField::Decode(encoded_data));
+        break;
+      case BakerReadBarrierKind::kGcRoot:
+        oss << "GcRoot_r" << BakerReadBarrierFirstRegField::Decode(encoded_data);
+        DCHECK_EQ(kBakerReadBarrierInvalidEncodedReg,
+                  BakerReadBarrierSecondRegField::Decode(encoded_data));
+        break;
+    }
+    *debug_name = oss.str();
+  }
+}
+
+#undef __
 
 }  // namespace arm64
 }  // namespace art

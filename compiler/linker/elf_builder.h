@@ -24,9 +24,9 @@
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/casts.h"
+#include "base/leb128.h"
 #include "base/unix_file/fd_file.h"
 #include "elf_utils.h"
-#include "leb128.h"
 #include "linker/error_delaying_output_stream.h"
 
 namespace art {
@@ -38,9 +38,10 @@ namespace linker {
 //   Elf_Ehdr                    - The ELF header.
 //   Elf_Phdr[]                  - Program headers for the linker.
 //   .note.gnu.build-id          - Optional build ID section (SHA-1 digest).
-//   .rodata                     - DEX files and oat metadata.
+//   .rodata                     - Oat metadata.
 //   .text                       - Compiled code.
 //   .bss                        - Zero-initialized writeable section.
+//   .dex                        - Reserved NOBITS space for dex-related data.
 //   .MIPS.abiflags              - MIPS specific section.
 //   .dynstr                     - Names for .dynsym.
 //   .dynsym                     - A few oat-specific dynamic symbols.
@@ -108,8 +109,6 @@ class ElfBuilder FINAL {
           section_index_(0),
           name_(name),
           link_(link),
-          started_(false),
-          finished_(false),
           phdr_flags_(PF_R),
           phdr_type_(0) {
       DCHECK_GE(align, 1u);
@@ -120,90 +119,62 @@ class ElfBuilder FINAL {
       header_.sh_entsize = entsize;
     }
 
-    // Start writing of this section.
-    void Start() {
-      CHECK(!started_);
-      CHECK(!finished_);
-      started_ = true;
-      auto& sections = owner_->sections_;
-      // Check that the previous section is complete.
-      CHECK(sections.empty() || sections.back()->finished_);
-      // The first ELF section index is 1. Index 0 is reserved for NULL.
-      section_index_ = sections.size() + 1;
-      // Page-align if we switch between allocated and non-allocated sections,
-      // or if we change the type of allocation (e.g. executable vs non-executable).
-      if (!sections.empty()) {
-        if (header_.sh_flags != sections.back()->header_.sh_flags) {
-          header_.sh_addralign = kPageSize;
-        }
-      }
-      // Align file position.
-      if (header_.sh_type != SHT_NOBITS) {
-        header_.sh_offset = owner_->AlignFileOffset(header_.sh_addralign);
-      } else {
-        header_.sh_offset = 0;
-      }
-      // Align virtual memory address.
-      if ((header_.sh_flags & SHF_ALLOC) != 0) {
-        header_.sh_addr = owner_->AlignVirtualAddress(header_.sh_addralign);
-      } else {
-        header_.sh_addr = 0;
-      }
-      // Push this section on the list of written sections.
-      sections.push_back(this);
+    // Allocate chunk of virtual memory for this section from the owning ElfBuilder.
+    // This must be done at the start for all SHF_ALLOC sections (i.e. mmaped by linker).
+    // It is fine to allocate section but never call Start/End() (e.g. the .bss section).
+    void AllocateVirtualMemory(Elf_Word size) {
+      AllocateVirtualMemory(owner_->virtual_address_, size);
     }
 
-    // Finish writing of this section.
+    void AllocateVirtualMemory(Elf_Addr addr, Elf_Word size) {
+      CHECK_NE(header_.sh_flags & SHF_ALLOC, 0u);
+      Elf_Word align = AddSection();
+      CHECK_EQ(header_.sh_addr, 0u);
+      header_.sh_addr = RoundUp(addr, align);
+      CHECK(header_.sh_size == 0u || header_.sh_size == size);
+      header_.sh_size = size;
+      CHECK_LE(owner_->virtual_address_, header_.sh_addr);
+      owner_->virtual_address_ = header_.sh_addr + header_.sh_size;
+    }
+
+    // Start writing file data of this section.
+    void Start() {
+      CHECK(owner_->current_section_ == nullptr);
+      Elf_Word align = AddSection();
+      CHECK_EQ(header_.sh_offset, 0u);
+      header_.sh_offset = owner_->AlignFileOffset(align);
+      owner_->current_section_ = this;
+    }
+
+    // Finish writing file data of this section.
     void End() {
-      CHECK(started_);
-      CHECK(!finished_);
-      finished_ = true;
-      if (header_.sh_type == SHT_NOBITS) {
-        CHECK_GT(header_.sh_size, 0u);
-      } else {
-        // Use the current file position to determine section size.
-        off_t file_offset = owner_->stream_.Seek(0, kSeekCurrent);
-        CHECK_GE(file_offset, (off_t)header_.sh_offset);
-        header_.sh_size = file_offset - header_.sh_offset;
-      }
-      if ((header_.sh_flags & SHF_ALLOC) != 0) {
-        owner_->virtual_address_ += header_.sh_size;
-      }
+      CHECK(owner_->current_section_ == this);
+      Elf_Word position = GetPosition();
+      CHECK(header_.sh_size == 0u || header_.sh_size == position);
+      header_.sh_size = position;
+      owner_->current_section_ = nullptr;
+    }
+
+    // Get the number of bytes written so far.
+    // Only valid while writing the section.
+    Elf_Word GetPosition() const {
+      CHECK(owner_->current_section_ == this);
+      off_t file_offset = owner_->stream_.Seek(0, kSeekCurrent);
+      DCHECK_GE(file_offset, (off_t)header_.sh_offset);
+      return file_offset - header_.sh_offset;
     }
 
     // Get the location of this section in virtual memory.
     Elf_Addr GetAddress() const {
-      CHECK(started_);
-      return header_.sh_addr;
-    }
-
-    // Returns the size of the content of this section.
-    Elf_Word GetSize() const {
-      if (finished_) {
-        return header_.sh_size;
-      } else {
-        CHECK(started_);
-        CHECK_NE(header_.sh_type, (Elf_Word)SHT_NOBITS);
-        return owner_->stream_.Seek(0, kSeekCurrent) - header_.sh_offset;
-      }
-    }
-
-    // Write this section as "NOBITS" section. (used for the .bss section)
-    // This means that the ELF file does not contain the initial data for this section
-    // and it will be zero-initialized when the ELF file is loaded in the running program.
-    void WriteNoBitsSection(Elf_Word size) {
       DCHECK_NE(header_.sh_flags & SHF_ALLOC, 0u);
-      header_.sh_type = SHT_NOBITS;
-      Start();
-      header_.sh_size = size;
-      End();
+      DCHECK_NE(header_.sh_addr, 0u);
+      return header_.sh_addr;
     }
 
     // This function always succeeds to simplify code.
     // Use builder's Good() to check the actual status.
     bool WriteFully(const void* buffer, size_t byte_count) OVERRIDE {
-      CHECK(started_);
-      CHECK(!finished_);
+      CHECK(owner_->current_section_ == this);
       return owner_->stream_.WriteFully(buffer, byte_count);
     }
 
@@ -221,19 +192,37 @@ class ElfBuilder FINAL {
     }
 
     Elf_Word GetSectionIndex() const {
-      DCHECK(started_);
       DCHECK_NE(section_index_, 0u);
       return section_index_;
     }
 
-   private:
+    // Returns true if this section has been added.
+    bool Exists() const {
+      return section_index_ != 0;
+    }
+
+   protected:
+    // Add this section to the list of generated ELF sections (if not there already).
+    // It also ensures the alignment is sufficient to generate valid program headers,
+    // since that depends on the previous section. It returns the required alignment.
+    Elf_Word AddSection() {
+      if (section_index_ == 0) {
+        std::vector<Section*>& sections = owner_->sections_;
+        Elf_Word last = sections.empty() ? PF_R : sections.back()->phdr_flags_;
+        if (phdr_flags_ != last) {
+          header_.sh_addralign = kPageSize;  // Page-align if R/W/X flags changed.
+        }
+        sections.push_back(this);
+        section_index_ = sections.size();  // First ELF section has index 1.
+      }
+      return owner_->write_program_headers_ ? header_.sh_addralign : 1;
+    }
+
     ElfBuilder<ElfTypes>* owner_;
     Elf_Shdr header_;
     Elf_Word section_index_;
     const std::string name_;
     const Section* const link_;
-    bool started_;
-    bool finished_;
     Elf_Word phdr_flags_;
     Elf_Word phdr_type_;
 
@@ -320,42 +309,46 @@ class ElfBuilder FINAL {
                   /* info */ 0,
                   align,
                   /* entsize */ 0),
-          current_offset_(0) {
+          current_offset_(0),
+          last_offset_(0) {
     }
 
     Elf_Word Write(const std::string& name) {
       if (current_offset_ == 0) {
         DCHECK(name.empty());
+      } else if (name == last_name_) {
+        return last_offset_;  // Very simple string de-duplication.
       }
-      Elf_Word offset = current_offset_;
+      last_name_ = name;
+      last_offset_ = current_offset_;
       this->WriteFully(name.c_str(), name.length() + 1);
       current_offset_ += name.length() + 1;
-      return offset;
+      return last_offset_;
     }
 
    private:
     Elf_Word current_offset_;
+    std::string last_name_;
+    Elf_Word last_offset_;
   };
 
   // Writer of .dynsym and .symtab sections.
-  class SymbolSection FINAL : public CachedSection {
+  class SymbolSection FINAL : public Section {
    public:
     SymbolSection(ElfBuilder<ElfTypes>* owner,
                   const std::string& name,
                   Elf_Word type,
                   Elf_Word flags,
                   Section* strtab)
-        : CachedSection(owner,
-                        name,
-                        type,
-                        flags,
-                        strtab,
-                        /* info */ 0,
-                        sizeof(Elf_Off),
-                        sizeof(Elf_Sym)) {
-      // The symbol table always has to start with NULL symbol.
-      Elf_Sym null_symbol = Elf_Sym();
-      CachedSection::Add(&null_symbol, sizeof(null_symbol));
+        : Section(owner,
+                  name,
+                  type,
+                  flags,
+                  strtab,
+                  /* info */ 1,
+                  sizeof(Elf_Off),
+                  sizeof(Elf_Sym)) {
+      syms_.push_back(Elf_Sym());  // The symbol table always has to start with NULL symbol.
     }
 
     // Buffer symbol for this section.  It will be written later.
@@ -370,7 +363,7 @@ class ElfBuilder FINAL {
       Elf_Word section_index;
       if (section != nullptr) {
         DCHECK_LE(section->GetAddress(), addr);
-        DCHECK_LE(addr, section->GetAddress() + section->GetSize());
+        DCHECK_LE(addr, section->GetAddress() + section->header_.sh_size);
         section_index = section->GetSectionIndex();
       } else {
         section_index = static_cast<Elf_Word>(SHN_ABS);
@@ -378,6 +371,7 @@ class ElfBuilder FINAL {
       Add(name, section_index, addr, size, binding, type);
     }
 
+    // Buffer symbol for this section.  It will be written later.
     void Add(Elf_Word name,
              Elf_Word section_index,
              Elf_Addr addr,
@@ -391,8 +385,24 @@ class ElfBuilder FINAL {
       sym.st_other = 0;
       sym.st_shndx = section_index;
       sym.st_info = (binding << 4) + (type & 0xf);
-      CachedSection::Add(&sym, sizeof(sym));
+      syms_.push_back(sym);
+
+      // The sh_info file must be set to index one-past the last local symbol.
+      if (binding == STB_LOCAL) {
+        this->header_.sh_info = syms_.size();
+      }
     }
+
+    Elf_Word GetCacheSize() { return syms_.size() * sizeof(Elf_Sym); }
+
+    void WriteCachedSection() {
+      this->Start();
+      this->WriteFully(syms_.data(), syms_.size() * sizeof(Elf_Sym));
+      this->End();
+    }
+
+   private:
+    std::vector<Elf_Sym> syms_;  // Buffered/cached content of the whole section.
   };
 
   class AbiflagsSection FINAL : public Section {
@@ -479,6 +489,10 @@ class ElfBuilder FINAL {
           digest_start_(-1) {
     }
 
+    Elf_Word GetSize() {
+      return 16 + kBuildIdLen;
+    }
+
     void Write() {
       // The size fields are 32-bit on both 32-bit and 64-bit systems, confirmed
       // with the 64-bit linker and libbfd code. The size of name and desc must
@@ -490,6 +504,7 @@ class ElfBuilder FINAL {
       digest_start_ = this->Seek(0, kSeekCurrent);
       static_assert(kBuildIdLen % 4 == 0, "expecting a mutliple of 4 for build ID length");
       this->WriteFully(std::string(kBuildIdLen, '\0').c_str(), kBuildIdLen);  // desc.
+      DCHECK_EQ(this->GetPosition(), GetSize());
     }
 
     off_t GetDigestStart() {
@@ -514,7 +529,10 @@ class ElfBuilder FINAL {
         stream_(output),
         rodata_(this, ".rodata", SHT_PROGBITS, SHF_ALLOC, nullptr, 0, kPageSize, 0),
         text_(this, ".text", SHT_PROGBITS, SHF_ALLOC | SHF_EXECINSTR, nullptr, 0, kPageSize, 0),
+        data_bimg_rel_ro_(
+            this, ".data.bimg.rel.ro", SHT_PROGBITS, SHF_ALLOC, nullptr, 0, kPageSize, 0),
         bss_(this, ".bss", SHT_NOBITS, SHF_ALLOC, nullptr, 0, kPageSize, 0),
+        dex_(this, ".dex", SHT_NOBITS, SHF_ALLOC, nullptr, 0, kPageSize, 0),
         dynstr_(this, ".dynstr", SHF_ALLOC, kPageSize),
         dynsym_(this, ".dynsym", SHT_DYNSYM, SHF_ALLOC, &dynstr_),
         hash_(this, ".hash", SHT_HASH, SHF_ALLOC, &dynsym_, 0, sizeof(Elf_Word), sizeof(Elf_Word)),
@@ -530,12 +548,15 @@ class ElfBuilder FINAL {
         abiflags_(this, ".MIPS.abiflags", SHT_MIPS_ABIFLAGS, SHF_ALLOC, nullptr, 0, kPageSize, 0,
                   isa, features),
         build_id_(this, ".note.gnu.build-id", SHT_NOTE, SHF_ALLOC, nullptr, 0, 4, 0),
+        current_section_(nullptr),
         started_(false),
         write_program_headers_(false),
         loaded_size_(0u),
         virtual_address_(0) {
     text_.phdr_flags_ = PF_R | PF_X;
+    data_bimg_rel_ro_.phdr_flags_ = PF_R | PF_W;  // Shall be made read-only at run time.
     bss_.phdr_flags_ = PF_R | PF_W;
+    dex_.phdr_flags_ = PF_R;
     dynamic_.phdr_flags_ = PF_R | PF_W;
     dynamic_.phdr_type_ = PT_DYNAMIC;
     eh_frame_hdr_.phdr_type_ = PT_GNU_EH_FRAME;
@@ -545,9 +566,12 @@ class ElfBuilder FINAL {
   ~ElfBuilder() {}
 
   InstructionSet GetIsa() { return isa_; }
+  BuildIdSection* GetBuildId() { return &build_id_; }
   Section* GetRoData() { return &rodata_; }
   Section* GetText() { return &text_; }
+  Section* GetDataBimgRelRo() { return &data_bimg_rel_ro_; }
   Section* GetBss() { return &bss_; }
+  Section* GetDex() { return &dex_; }
   StringSection* GetStrTab() { return &strtab_; }
   SymbolSection* GetSymTab() { return &symtab_; }
   Section* GetEhFrame() { return &eh_frame_; }
@@ -622,6 +646,9 @@ class ElfBuilder FINAL {
       if (section->link_ != nullptr) {
         section->header_.sh_link = section->link_->GetSectionIndex();
       }
+      if (section->header_.sh_offset == 0) {
+        section->header_.sh_type = SHT_NOBITS;
+      }
     }
     shstrtab_.End();
 
@@ -671,75 +698,103 @@ class ElfBuilder FINAL {
   void PrepareDynamicSection(const std::string& elf_file_path,
                              Elf_Word rodata_size,
                              Elf_Word text_size,
+                             Elf_Word data_bimg_rel_ro_size,
                              Elf_Word bss_size,
                              Elf_Word bss_methods_offset,
-                             Elf_Word bss_roots_offset) {
+                             Elf_Word bss_roots_offset,
+                             Elf_Word dex_size) {
     std::string soname(elf_file_path);
     size_t directory_separator_pos = soname.rfind('/');
     if (directory_separator_pos != std::string::npos) {
       soname = soname.substr(directory_separator_pos + 1);
     }
 
-    // Calculate addresses of .text, .bss and .dynstr.
-    DCHECK_EQ(rodata_.header_.sh_addralign, static_cast<Elf_Word>(kPageSize));
-    DCHECK_EQ(text_.header_.sh_addralign, static_cast<Elf_Word>(kPageSize));
-    DCHECK_EQ(bss_.header_.sh_addralign, static_cast<Elf_Word>(kPageSize));
-    DCHECK_EQ(dynstr_.header_.sh_addralign, static_cast<Elf_Word>(kPageSize));
-    Elf_Word rodata_address = rodata_.GetAddress();
-    Elf_Word text_address = RoundUp(rodata_address + rodata_size, kPageSize);
-    Elf_Word bss_address = RoundUp(text_address + text_size, kPageSize);
-    Elf_Word abiflags_address = RoundUp(bss_address + bss_size, kPageSize);
-    Elf_Word abiflags_size = 0;
-    if (isa_ == InstructionSet::kMips || isa_ == InstructionSet::kMips64) {
-      abiflags_size = abiflags_.GetSize();
+    // Allocate all pre-dynamic sections.
+    rodata_.AllocateVirtualMemory(rodata_size);
+    text_.AllocateVirtualMemory(text_size);
+    if (data_bimg_rel_ro_size != 0) {
+      data_bimg_rel_ro_.AllocateVirtualMemory(data_bimg_rel_ro_size);
     }
-    Elf_Word dynstr_address = RoundUp(abiflags_address + abiflags_size, kPageSize);
+    if (bss_size != 0) {
+      bss_.AllocateVirtualMemory(bss_size);
+    }
+    if (dex_size != 0) {
+      dex_.AllocateVirtualMemory(dex_size);
+    }
+    if (isa_ == InstructionSet::kMips || isa_ == InstructionSet::kMips64) {
+      abiflags_.AllocateVirtualMemory(abiflags_.GetSize());
+    }
 
     // Cache .dynstr, .dynsym and .hash data.
     dynstr_.Add("");  // dynstr should start with empty string.
-    Elf_Word rodata_index = rodata_.GetSectionIndex();
     Elf_Word oatdata = dynstr_.Add("oatdata");
-    dynsym_.Add(oatdata, rodata_index, rodata_address, rodata_size, STB_GLOBAL, STT_OBJECT);
+    dynsym_.Add(oatdata, &rodata_, rodata_.GetAddress(), rodata_size, STB_GLOBAL, STT_OBJECT);
     if (text_size != 0u) {
-      Elf_Word text_index = rodata_index + 1u;
+      // The runtime does not care about the size of this symbol (it uses the "lastword" symbol).
+      // We use size 0 (meaning "unknown size" in ELF) to prevent overlap with the debug symbols.
       Elf_Word oatexec = dynstr_.Add("oatexec");
-      dynsym_.Add(oatexec, text_index, text_address, text_size, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatexec, &text_, text_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
       Elf_Word oatlastword = dynstr_.Add("oatlastword");
-      Elf_Word oatlastword_address = text_address + text_size - 4;
-      dynsym_.Add(oatlastword, text_index, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
+      Elf_Word oatlastword_address = text_.GetAddress() + text_size - 4;
+      dynsym_.Add(oatlastword, &text_, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
     } else if (rodata_size != 0) {
       // rodata_ can be size 0 for dwarf_test.
       Elf_Word oatlastword = dynstr_.Add("oatlastword");
-      Elf_Word oatlastword_address = rodata_address + rodata_size - 4;
-      dynsym_.Add(oatlastword, rodata_index, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
+      Elf_Word oatlastword_address = rodata_.GetAddress() + rodata_size - 4;
+      dynsym_.Add(oatlastword, &rodata_, oatlastword_address, 4, STB_GLOBAL, STT_OBJECT);
+    }
+    if (data_bimg_rel_ro_size != 0u) {
+      Elf_Word oatdatabimgrelro = dynstr_.Add("oatdatabimgrelro");
+      dynsym_.Add(oatdatabimgrelro,
+                  &data_bimg_rel_ro_,
+                  data_bimg_rel_ro_.GetAddress(),
+                  data_bimg_rel_ro_size,
+                  STB_GLOBAL,
+                  STT_OBJECT);
+      Elf_Word oatdatabimgrelrolastword = dynstr_.Add("oatdatabimgrelrolastword");
+      Elf_Word oatdatabimgrelrolastword_address =
+          data_bimg_rel_ro_.GetAddress() + data_bimg_rel_ro_size - 4;
+      dynsym_.Add(oatdatabimgrelrolastword,
+                  &data_bimg_rel_ro_,
+                  oatdatabimgrelrolastword_address,
+                  4,
+                  STB_GLOBAL,
+                  STT_OBJECT);
     }
     DCHECK_LE(bss_roots_offset, bss_size);
     if (bss_size != 0u) {
-      Elf_Word bss_index = rodata_index + 1u + (text_size != 0 ? 1u : 0u);
       Elf_Word oatbss = dynstr_.Add("oatbss");
-      dynsym_.Add(oatbss, bss_index, bss_address, bss_roots_offset, STB_GLOBAL, STT_OBJECT);
+      dynsym_.Add(oatbss, &bss_, bss_.GetAddress(), bss_roots_offset, STB_GLOBAL, STT_OBJECT);
       DCHECK_LE(bss_methods_offset, bss_roots_offset);
       DCHECK_LE(bss_roots_offset, bss_size);
       // Add a symbol marking the start of the methods part of the .bss, if not empty.
       if (bss_methods_offset != bss_roots_offset) {
-        Elf_Word bss_methods_address = bss_address + bss_methods_offset;
+        Elf_Word bss_methods_address = bss_.GetAddress() + bss_methods_offset;
         Elf_Word bss_methods_size = bss_roots_offset - bss_methods_offset;
         Elf_Word oatbssroots = dynstr_.Add("oatbssmethods");
         dynsym_.Add(
-            oatbssroots, bss_index, bss_methods_address, bss_methods_size, STB_GLOBAL, STT_OBJECT);
+            oatbssroots, &bss_, bss_methods_address, bss_methods_size, STB_GLOBAL, STT_OBJECT);
       }
       // Add a symbol marking the start of the GC roots part of the .bss, if not empty.
       if (bss_roots_offset != bss_size) {
-        Elf_Word bss_roots_address = bss_address + bss_roots_offset;
+        Elf_Word bss_roots_address = bss_.GetAddress() + bss_roots_offset;
         Elf_Word bss_roots_size = bss_size - bss_roots_offset;
         Elf_Word oatbssroots = dynstr_.Add("oatbssroots");
         dynsym_.Add(
-            oatbssroots, bss_index, bss_roots_address, bss_roots_size, STB_GLOBAL, STT_OBJECT);
+            oatbssroots, &bss_, bss_roots_address, bss_roots_size, STB_GLOBAL, STT_OBJECT);
       }
       Elf_Word oatbsslastword = dynstr_.Add("oatbsslastword");
-      Elf_Word bsslastword_address = bss_address + bss_size - 4;
-      dynsym_.Add(oatbsslastword, bss_index, bsslastword_address, 4, STB_GLOBAL, STT_OBJECT);
+      Elf_Word bsslastword_address = bss_.GetAddress() + bss_size - 4;
+      dynsym_.Add(oatbsslastword, &bss_, bsslastword_address, 4, STB_GLOBAL, STT_OBJECT);
     }
+    if (dex_size != 0u) {
+      Elf_Word oatdex = dynstr_.Add("oatdex");
+      dynsym_.Add(oatdex, &dex_, dex_.GetAddress(), /* size */ 0, STB_GLOBAL, STT_OBJECT);
+      Elf_Word oatdexlastword = dynstr_.Add("oatdexlastword");
+      Elf_Word oatdexlastword_address = dex_.GetAddress() + dex_size - 4;
+      dynsym_.Add(oatdexlastword, &dex_, oatdexlastword_address, 4, STB_GLOBAL, STT_OBJECT);
+    }
+
     Elf_Word soname_offset = dynstr_.Add(soname);
 
     // We do not really need a hash-table since there is so few entries.
@@ -759,28 +814,24 @@ class ElfBuilder FINAL {
     hash.push_back(0);  // Last symbol terminates the chain.
     hash_.Add(hash.data(), hash.size() * sizeof(hash[0]));
 
-    // Calculate addresses of .dynsym, .hash and .dynamic.
-    DCHECK_EQ(dynstr_.header_.sh_flags, dynsym_.header_.sh_flags);
-    DCHECK_EQ(dynsym_.header_.sh_flags, hash_.header_.sh_flags);
-    Elf_Word dynsym_address =
-        RoundUp(dynstr_address + dynstr_.GetCacheSize(), dynsym_.header_.sh_addralign);
-    Elf_Word hash_address =
-        RoundUp(dynsym_address + dynsym_.GetCacheSize(), hash_.header_.sh_addralign);
-    DCHECK_EQ(dynamic_.header_.sh_addralign, static_cast<Elf_Word>(kPageSize));
-    Elf_Word dynamic_address = RoundUp(hash_address + dynsym_.GetCacheSize(), kPageSize);
+    // Allocate all remaining sections.
+    dynstr_.AllocateVirtualMemory(dynstr_.GetCacheSize());
+    dynsym_.AllocateVirtualMemory(dynsym_.GetCacheSize());
+    hash_.AllocateVirtualMemory(hash_.GetCacheSize());
 
     Elf_Dyn dyns[] = {
-      { DT_HASH, { hash_address } },
-      { DT_STRTAB, { dynstr_address } },
-      { DT_SYMTAB, { dynsym_address } },
+      { DT_HASH, { hash_.GetAddress() } },
+      { DT_STRTAB, { dynstr_.GetAddress() } },
+      { DT_SYMTAB, { dynsym_.GetAddress() } },
       { DT_SYMENT, { sizeof(Elf_Sym) } },
       { DT_STRSZ, { dynstr_.GetCacheSize() } },
       { DT_SONAME, { soname_offset } },
       { DT_NULL, { 0 } },
     };
     dynamic_.Add(&dyns, sizeof(dyns));
+    dynamic_.AllocateVirtualMemory(dynamic_.GetCacheSize());
 
-    loaded_size_ = RoundUp(dynamic_address + dynamic_.GetCacheSize(), kPageSize);
+    loaded_size_ = RoundUp(virtual_address_, kPageSize);
   }
 
   void WriteDynamicSection() {
@@ -788,8 +839,6 @@ class ElfBuilder FINAL {
     dynsym_.WriteCachedSection();
     hash_.WriteCachedSection();
     dynamic_.WriteCachedSection();
-
-    CHECK_EQ(loaded_size_, RoundUp(dynamic_.GetAddress() + dynamic_.GetSize(), kPageSize));
   }
 
   Elf_Word GetLoadedSize() {
@@ -826,10 +875,6 @@ class ElfBuilder FINAL {
 
   off_t AlignFileOffset(size_t alignment) {
      return stream_.Seek(RoundUp(stream_.Seek(0, kSeekCurrent), alignment), kSeekSet);
-  }
-
-  Elf_Addr AlignVirtualAddress(size_t alignment) {
-     return virtual_address_ = RoundUp(virtual_address_, alignment);
   }
 
  private:
@@ -902,7 +947,6 @@ class ElfBuilder FINAL {
     elf_header.e_ehsize = sizeof(Elf_Ehdr);
     elf_header.e_phentsize = sizeof(Elf_Phdr);
     elf_header.e_shentsize = sizeof(Elf_Shdr);
-    elf_header.e_phoff = sizeof(Elf_Ehdr);
     return elf_header;
   }
 
@@ -933,6 +977,7 @@ class ElfBuilder FINAL {
     for (auto* section : sections_) {
       const Elf_Shdr& shdr = section->header_;
       if ((shdr.sh_flags & SHF_ALLOC) != 0 && shdr.sh_size != 0) {
+        DCHECK(shdr.sh_addr != 0u) << "Allocate virtual memory for the section";
         // PT_LOAD tells the linker to mmap part of the file.
         // The linker can only mmap page-aligned sections.
         // Single PT_LOAD may contain several ELF sections.
@@ -991,7 +1036,9 @@ class ElfBuilder FINAL {
 
   Section rodata_;
   Section text_;
+  Section data_bimg_rel_ro_;
   Section bss_;
+  Section dex_;
   CachedStringSection dynstr_;
   SymbolSection dynsym_;
   CachedSection hash_;
@@ -1010,6 +1057,7 @@ class ElfBuilder FINAL {
 
   // List of used section in the order in which they were written.
   std::vector<Section*> sections_;
+  Section* current_section_;  // The section which is currently being written.
 
   bool started_;
   bool write_program_headers_;

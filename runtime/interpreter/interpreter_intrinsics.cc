@@ -16,7 +16,7 @@
 
 #include "interpreter/interpreter_intrinsics.h"
 
-#include "dex_instruction.h"
+#include "dex/dex_instruction.h"
 #include "intrinsics_enum.h"
 #include "interpreter/interpreter_common.h"
 
@@ -91,7 +91,7 @@ BINARY_II_INTRINSIC(MterpIntegerRotateLeft, (Rot<int32_t, true>), SetI);
 // java.lang.Integer.signum(I)I
 UNARY_INTRINSIC(MterpIntegerSignum, Signum, GetVReg, SetI);
 
-// java.lang.Long.reverse(I)I
+// java.lang.Long.reverse(J)J
 UNARY_INTRINSIC(MterpLongReverse, ReverseBits64, GetVRegLong, SetJ);
 
 // java.lang.Long.reverseBytes(J)J
@@ -399,6 +399,16 @@ VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetAcquire)
 VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetPlain)
 VAR_HANDLE_ACCESSOR_INTRINSIC(VarHandleWeakCompareAndSetRelease)
 
+static ALWAYS_INLINE bool MterpReachabilityFence(ShadowFrame* shadow_frame ATTRIBUTE_UNUSED,
+                                                 const Instruction* inst ATTRIBUTE_UNUSED,
+                                                 uint16_t inst_data ATTRIBUTE_UNUSED,
+                                                 JValue* result_register ATTRIBUTE_UNUSED)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  // Do nothing; Its only purpose is to keep the argument reference live
+  // at preceding suspend points. That's automatic in the interpreter.
+  return true;
+}
+
 // Macro to help keep track of what's left to implement.
 #define UNIMPLEMENTED_CASE(name)    \
     case Intrinsics::k##name:       \
@@ -478,6 +488,7 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
     UNIMPLEMENTED_CASE(MathLog /* (D)D */)
     UNIMPLEMENTED_CASE(MathLog10 /* (D)D */)
     UNIMPLEMENTED_CASE(MathNextAfter /* (DD)D */)
+    UNIMPLEMENTED_CASE(MathPow /* (DD)D */)
     UNIMPLEMENTED_CASE(MathSinh /* (D)D */)
     INTRINSIC_CASE(MathTan)
     UNIMPLEMENTED_CASE(MathTanh /* (D)D */)
@@ -498,6 +509,7 @@ bool MterpHandleIntrinsic(ShadowFrame* shadow_frame,
     UNIMPLEMENTED_CASE(MemoryPokeIntNative /* (JI)V */)
     UNIMPLEMENTED_CASE(MemoryPokeLongNative /* (JJ)V */)
     UNIMPLEMENTED_CASE(MemoryPokeShortNative /* (JS)V */)
+    INTRINSIC_CASE(ReachabilityFence /* (Ljava/lang/Object;)V */)
     INTRINSIC_CASE(StringCharAt)
     INTRINSIC_CASE(StringCompareTo)
     INTRINSIC_CASE(StringEquals)

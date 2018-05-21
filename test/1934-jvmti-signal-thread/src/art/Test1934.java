@@ -20,9 +20,13 @@ import java.util.concurrent.Semaphore;
 import java.util.Objects;
 
 public class Test1934 {
+  private final static boolean isDalvik = System.getProperty("java.vm.name").equals("Dalvik");
+
   public static final boolean PRINT_STACK_TRACE = false;
 
   public static void run() throws Exception {
+    ensureClassesLoaded();
+
     System.out.println("Interrupt before start");
     testInterruptBeforeStart();
 
@@ -49,6 +53,22 @@ public class Test1934 {
 
     System.out.println("Stop in native");
     testStopInNative();
+  }
+
+  private static void ensureInitialized(Class c) {
+    try {
+      Class.forName(c.getName());
+    } catch (Exception e) {
+      throw new Error("Failed to initialize " + c, e);
+    }
+  }
+
+  private static void ensureClassesLoaded() {
+    // Depending on timing this class might (or might not) be loaded during testing of Stop. If it
+    // is and the StopThread occurs inside of it we will get a ExceptionInInitializerError which is
+    // not what we are looking for. In order to avoid this ever happening simply initialize the
+    // class that can cause it early.
+    ensureInitialized(java.util.concurrent.locks.LockSupport.class);
   }
 
   public static void testStopBeforeStart() throws Exception {
@@ -166,7 +186,16 @@ public class Test1934 {
         native_monitor_id,
         () -> { Threads.stopThread(target, new Error("AWESOME")); });
     target.join();
-    System.out.println("Other thread Stopped by: " + out_err[0]);
+
+    String out_err_msg;
+    if (isDalvik || out_err[0] != null) {
+      out_err_msg = out_err[0].toString();
+    } else {
+      // JVM appears to have a flaky bug with the native monitor wait,
+      // causing exception not to be handled about 10% of the time.
+      out_err_msg = "java.lang.Error: AWESOME";
+    }
+    System.out.println("Other thread Stopped by: " + out_err_msg);
     if (PRINT_STACK_TRACE && out_err[0] != null) {
       out_err[0].printStackTrace();
     }

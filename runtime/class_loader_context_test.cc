@@ -23,7 +23,7 @@
 #include "base/stl_util.h"
 #include "class_linker.h"
 #include "common_runtime_test.h"
-#include "dex_file.h"
+#include "dex/dex_file.h"
 #include "handle_scope-inl.h"
 #include "mirror/class.h"
 #include "mirror/class_loader.h"
@@ -278,14 +278,17 @@ TEST_F(ClassLoaderContextTest, OpenValidDexFiles) {
   VerifyOpenDexFiles(context.get(), 1, &all_dex_files1);
 }
 
-static std::string CreateRelativeString(const std::string& in, const char* cwd) {
+// Creates a relative path from cwd to 'in'. Returns false if it cannot be done.
+// TODO We should somehow support this in all situations. b/72042237.
+static bool CreateRelativeString(const std::string& in, const char* cwd, std::string* out) {
   int cwd_len = strlen(cwd);
   if (!android::base::StartsWith(in, cwd) || (cwd_len < 1)) {
-    LOG(FATAL) << in << " " << cwd;
+    return false;
   }
   bool contains_trailing_slash = (cwd[cwd_len - 1] == '/');
   int start_position = cwd_len + (contains_trailing_slash ? 0 : 1);
-  return in.substr(start_position);
+  *out = in.substr(start_position);
+  return true;
 }
 
 TEST_F(ClassLoaderContextTest, OpenValidDexFilesRelative) {
@@ -293,9 +296,17 @@ TEST_F(ClassLoaderContextTest, OpenValidDexFilesRelative) {
   if (getcwd(cwd_buf, arraysize(cwd_buf)) == nullptr) {
     PLOG(FATAL) << "Could not get working directory";
   }
-  std::string multidex_name = CreateRelativeString(GetTestDexFileName("MultiDex"), cwd_buf);
-  std::string myclass_dex_name = CreateRelativeString(GetTestDexFileName("MyClass"), cwd_buf);
-  std::string dex_name = CreateRelativeString(GetTestDexFileName("Main"), cwd_buf);
+  std::string multidex_name;
+  std::string myclass_dex_name;
+  std::string dex_name;
+  if (!CreateRelativeString(GetTestDexFileName("MultiDex"), cwd_buf, &multidex_name) ||
+      !CreateRelativeString(GetTestDexFileName("MyClass"), cwd_buf, &myclass_dex_name) ||
+      !CreateRelativeString(GetTestDexFileName("Main"), cwd_buf, &dex_name)) {
+    LOG(ERROR) << "Test OpenValidDexFilesRelative cannot be run because target dex files have no "
+               << "relative path.";
+    SUCCEED();
+    return;
+  }
 
 
   std::unique_ptr<ClassLoaderContext> context =
@@ -321,10 +332,17 @@ TEST_F(ClassLoaderContextTest, OpenValidDexFilesClasspathDir) {
   if (getcwd(cwd_buf, arraysize(cwd_buf)) == nullptr) {
     PLOG(FATAL) << "Could not get working directory";
   }
-  std::string multidex_name = CreateRelativeString(GetTestDexFileName("MultiDex"), cwd_buf);
-  std::string myclass_dex_name = CreateRelativeString(GetTestDexFileName("MyClass"), cwd_buf);
-  std::string dex_name = CreateRelativeString(GetTestDexFileName("Main"), cwd_buf);
-
+  std::string multidex_name;
+  std::string myclass_dex_name;
+  std::string dex_name;
+  if (!CreateRelativeString(GetTestDexFileName("MultiDex"), cwd_buf, &multidex_name) ||
+      !CreateRelativeString(GetTestDexFileName("MyClass"), cwd_buf, &myclass_dex_name) ||
+      !CreateRelativeString(GetTestDexFileName("Main"), cwd_buf, &dex_name)) {
+    LOG(ERROR) << "Test OpenValidDexFilesClasspathDir cannot be run because target dex files have "
+               << "no relative path.";
+    SUCCEED();
+    return;
+  }
   std::unique_ptr<ClassLoaderContext> context =
       ClassLoaderContext::Create(
           "PCL[" + multidex_name + ":" + myclass_dex_name + "];" +
@@ -590,6 +608,17 @@ TEST_F(ClassLoaderContextTest, CreateContextForClassLoader) {
   VerifyClassLoaderPCLFromTestDex(context.get(), 3, "ForClassLoaderA");
 }
 
+
+TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextFirstElement) {
+  std::string context_spec = "PCL[]";
+  std::unique_ptr<ClassLoaderContext> context = ParseContextWithChecksums(context_spec);
+  ASSERT_TRUE(context != nullptr);
+  PretendContextOpenedDexFiles(context.get());
+  // Ensure that the special shared library marks as verified for the first thing in the class path.
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(OatFile::kSpecialSharedLibrary),
+            ClassLoaderContext::VerificationResult::kVerifies);
+}
+
 TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatch) {
   std::string context_spec = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890]";
   std::unique_ptr<ClassLoaderContext> context = ParseContextWithChecksums(context_spec);
@@ -601,28 +630,36 @@ TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatch) {
   VerifyClassLoaderPCL(context.get(), 0, "a.dex:b.dex");
   VerifyClassLoaderDLC(context.get(), 1, "c.dex");
 
-  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context_spec));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(context_spec),
+            ClassLoaderContext::VerificationResult::kVerifies);
 
   std::string wrong_class_loader_type = "PCL[a.dex*123:b.dex*456];PCL[c.dex*890]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_class_loader_type));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_class_loader_type),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_class_loader_order = "DLC[c.dex*890];PCL[a.dex*123:b.dex*456]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_class_loader_order));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_class_loader_order),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_classpath_order = "PCL[b.dex*456:a.dex*123];DLC[c.dex*890]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_classpath_order));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_classpath_order),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_checksum = "PCL[a.dex*999:b.dex*456];DLC[c.dex*890]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_checksum));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_checksum),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_extra_class_loader = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890];PCL[d.dex*321]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_extra_class_loader));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_extra_class_loader),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_extra_classpath = "PCL[a.dex*123:b.dex*456];DLC[c.dex*890:d.dex*321]";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_extra_classpath));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_extra_classpath),
+            ClassLoaderContext::VerificationResult::kMismatch);
 
   std::string wrong_spec = "PCL[a.dex*999:b.dex*456];DLC[";
-  ASSERT_FALSE(context->VerifyClassLoaderContextMatch(wrong_spec));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(wrong_spec),
+            ClassLoaderContext::VerificationResult::kMismatch);
 }
 
 TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncoding) {
@@ -634,7 +671,8 @@ TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncoding) {
   std::unique_ptr<ClassLoaderContext> context = CreateContextForClassLoader(class_loader_d);
 
   std::string context_with_no_base_dir = context->EncodeContextForOatFile("");
-  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context_with_no_base_dir));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(context_with_no_base_dir),
+            ClassLoaderContext::VerificationResult::kVerifies);
 
   std::string dex_location = GetTestDexFileName("ForClassLoaderA");
   size_t pos = dex_location.rfind('/');
@@ -643,7 +681,8 @@ TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncoding) {
 
   std::string context_with_base_dir = context->EncodeContextForOatFile(parent);
   ASSERT_NE(context_with_base_dir, context_with_no_base_dir);
-  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context_with_base_dir));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(context_with_base_dir),
+            ClassLoaderContext::VerificationResult::kVerifies);
 }
 
 TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncodingMultidex) {
@@ -651,7 +690,8 @@ TEST_F(ClassLoaderContextTest, VerifyClassLoaderContextMatchAfterEncodingMultide
 
   std::unique_ptr<ClassLoaderContext> context = CreateContextForClassLoader(class_loader);
 
-  ASSERT_TRUE(context->VerifyClassLoaderContextMatch(context->EncodeContextForOatFile("")));
+  ASSERT_EQ(context->VerifyClassLoaderContextMatch(context->EncodeContextForOatFile("")),
+            ClassLoaderContext::VerificationResult::kVerifies);
 }
 
 }  // namespace art

@@ -24,22 +24,25 @@
 
 #include "base/array_ref.h"
 #include "base/dchecked_vector.h"
-#include "cdex/compact_dex_level.h"
+#include "base/os.h"
+#include "base/mem_map.h"
+#include "base/safe_map.h"
+#include "compiler.h"
+#include "debug/debug_info.h"
+#include "dex/compact_dex_level.h"
+#include "dex/method_reference.h"
+#include "dex/string_reference.h"
+#include "dex/type_reference.h"
 #include "linker/relative_patcher.h"  // For RelativePatcherTargetProvider.
-#include "mem_map.h"
-#include "method_reference.h"
 #include "mirror/class.h"
 #include "oat.h"
-#include "os.h"
-#include "safe_map.h"
-#include "string_reference.h"
-#include "type_reference.h"
 
 namespace art {
 
 class BitVector;
 class CompiledMethod;
 class CompilerDriver;
+class DexContainer;
 class ProfileCompilationInfo;
 class TimingLogger;
 class TypeLookupTable;
@@ -134,6 +137,7 @@ class OatWriter {
   //   - PrepareLayout(),
   //   - WriteRodata(),
   //   - WriteCode(),
+  //   - WriteDataBimgRelRo() iff GetDataBimgRelRoSize() != 0,
   //   - WriteHeader().
 
   // Add dex file source(s) from a file, either a plain dex file or
@@ -173,7 +177,8 @@ class OatWriter {
                             SafeMap<std::string, std::string>* key_value_store,
                             bool verify,
                             bool update_input_vdex,
-                            /*out*/ std::unique_ptr<MemMap>* opened_dex_files_map,
+                            CopyOption copy_dex_files,
+                            /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
   bool WriteQuickeningInfo(OutputStream* vdex_out);
   bool WriteVerifierDeps(OutputStream* vdex_out, verifier::VerifierDeps* verifier_deps);
@@ -193,6 +198,10 @@ class OatWriter {
   bool WriteRodata(OutputStream* out);
   // Write the code to the .text section.
   bool WriteCode(OutputStream* out);
+  // Write the boot image relocation data to the .data.bimg.rel.ro section.
+  bool WriteDataBimgRelRo(OutputStream* out);
+  // Check the size of the written oat file.
+  bool CheckOatSize(OutputStream* out, size_t file_offset, size_t relative_offset);
   // Write the oat header. This finalizes the oat file.
   bool WriteHeader(OutputStream* out,
                    uint32_t image_file_location_oat_checksum,
@@ -214,8 +223,16 @@ class OatWriter {
     return *oat_header_;
   }
 
+  size_t GetCodeSize() const {
+    return code_size_;
+  }
+
   size_t GetOatSize() const {
     return oat_size_;
+  }
+
+  size_t GetDataBimgRelRoSize() const {
+    return data_bimg_rel_ro_size_;
   }
 
   size_t GetBssSize() const {
@@ -230,15 +247,17 @@ class OatWriter {
     return bss_roots_offset_;
   }
 
+  size_t GetVdexSize() const {
+    return vdex_size_;
+  }
+
   size_t GetOatDataOffset() const {
     return oat_data_offset_;
   }
 
   ~OatWriter();
 
-  ArrayRef<const debug::MethodDebugInfo> GetMethodDebugInfo() const {
-    return ArrayRef<const debug::MethodDebugInfo>(method_info_);
-  }
+  debug::DebugInfo GetDebugInfo() const;
 
   const CompilerDriver* GetCompilerDriver() const {
     return compiler_driver_;
@@ -271,7 +290,7 @@ class OatWriter {
   class WriteMapMethodVisitor;
   class WriteMethodInfoVisitor;
   class WriteQuickeningInfoMethodVisitor;
-  class WriteQuickeningIndicesMethodVisitor;
+  class WriteQuickeningInfoOffsetsMethodVisitor;
 
   // Visit all the methods in all the compiled dex files in their definition order
   // with a given DexMethodVisitor.
@@ -279,7 +298,10 @@ class OatWriter {
 
   // If `update_input_vdex` is true, then this method won't actually write the dex files,
   // and the compiler will just re-use the existing vdex file.
-  bool WriteDexFiles(OutputStream* out, File* file, bool update_input_vdex);
+  bool WriteDexFiles(OutputStream* out,
+                     File* file,
+                     bool update_input_vdex,
+                     CopyOption copy_dex_files);
   bool WriteDexFile(OutputStream* out,
                     File* file,
                     OatDexFile* oat_dex_file,
@@ -300,7 +322,7 @@ class OatWriter {
                     bool update_input_vdex);
   bool OpenDexFiles(File* file,
                     bool verify,
-                    /*out*/ std::unique_ptr<MemMap>* opened_dex_files_map,
+                    /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
                     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
 
   size_t InitOatHeader(InstructionSet instruction_set,
@@ -314,6 +336,7 @@ class OatWriter {
   size_t InitOatDexFiles(size_t offset);
   size_t InitOatCode(size_t offset);
   size_t InitOatCodeDexFiles(size_t offset);
+  size_t InitDataBimgRelRoLayout(size_t offset);
   void InitBssLayout(InstructionSet instruction_set);
 
   size_t WriteClassOffsets(OutputStream* out, size_t file_offset, size_t relative_offset);
@@ -323,6 +346,7 @@ class OatWriter {
   size_t WriteOatDexFiles(OutputStream* out, size_t file_offset, size_t relative_offset);
   size_t WriteCode(OutputStream* out, size_t file_offset, size_t relative_offset);
   size_t WriteCodeDexFiles(OutputStream* out, size_t file_offset, size_t relative_offset);
+  size_t WriteDataBimgRelRo(OutputStream* out, size_t file_offset, size_t relative_offset);
 
   bool RecordOatDataOffset(OutputStream* out);
   bool WriteTypeLookupTables(OutputStream* oat_rodata,
@@ -336,17 +360,16 @@ class OatWriter {
 
   bool MayHaveCompiledMethods() const;
 
-  // Find the address of the GcRoot<String> in the InternTable for a boot image string.
-  const uint8_t* LookupBootImageInternTableSlot(const DexFile& dex_file,
-                                                dex::StringIndex string_idx);
-  // Find the address of the ClassTable::TableSlot for a boot image class.
-  const uint8_t* LookupBootImageClassTableSlot(const DexFile& dex_file, dex::TypeIndex type_idx);
+  bool VdexWillContainDexFiles() const {
+    return dex_files_ != nullptr && extract_dex_files_into_vdex_;
+  }
 
   enum class WriteState {
     kAddingDexFileSources,
     kPrepareLayout,
     kWriteRoData,
     kWriteText,
+    kWriteDataBimgRelRo,
     kWriteHeader,
     kDone
   };
@@ -367,6 +390,8 @@ class OatWriter {
   const CompilerDriver* compiler_driver_;
   ImageWriter* image_writer_;
   const bool compiling_boot_image_;
+  // Whether the dex files being compiled are going to be extracted to the vdex.
+  bool extract_dex_files_into_vdex_;
 
   // note OatFile does not take ownership of the DexFiles
   const std::vector<const DexFile*>* dex_files_;
@@ -377,14 +402,26 @@ class OatWriter {
   // Offset of section holding Dex files inside Vdex.
   size_t vdex_dex_files_offset_;
 
+  // Offset of section holding shared dex data section in the Vdex.
+  size_t vdex_dex_shared_data_offset_;
+
   // Offset of section holding VerifierDeps inside Vdex.
   size_t vdex_verifier_deps_offset_;
 
   // Offset of section holding quickening info inside Vdex.
   size_t vdex_quickening_info_offset_;
 
+  // Size of the .text segment.
+  size_t code_size_;
+
   // Size required for Oat data structures.
   size_t oat_size_;
+
+  // The start of the required .data.bimg.rel.ro section.
+  size_t data_bimg_rel_ro_start_;
+
+  // The size of the required .data.bimg.rel.ro section holding the boot image relocations.
+  size_t data_bimg_rel_ro_size_;
 
   // The start of the required .bss section.
   size_t bss_start_;
@@ -397,6 +434,10 @@ class OatWriter {
 
   // The offset of the GC roots in .bss section.
   size_t bss_roots_offset_;
+
+  // Map for allocating .data.bimg.rel.ro entries. Indexed by the boot image offset of the
+  // relocation. The value is the assigned offset within the .data.bimg.rel.ro section.
+  SafeMap<uint32_t, size_t> data_bimg_rel_ro_entries_;
 
   // Map for recording references to ArtMethod entries in .bss.
   SafeMap<const DexFile*, BitVector> bss_method_entry_references_;
@@ -421,10 +462,6 @@ class OatWriter {
   // string in the dex file with the "string value comparator" for deduplication. The value
   // is the target offset for patching, starting at `bss_start_ + bss_roots_offset_`.
   SafeMap<StringReference, size_t, StringReferenceValueComparator> bss_string_entries_;
-
-  // Whether boot image tables should be mapped to the .bss. This is needed for compiled
-  // code that reads from these tables with PC-relative instructions.
-  bool map_boot_image_tables_to_bss_;
 
   // Offset of the oat data from the start of the mmapped region of the elf file.
   size_t oat_data_offset_;
@@ -466,6 +503,8 @@ class OatWriter {
   uint32_t size_method_header_;
   uint32_t size_code_;
   uint32_t size_code_alignment_;
+  uint32_t size_data_bimg_rel_ro_;
+  uint32_t size_data_bimg_rel_ro_alignment_;
   uint32_t size_relative_call_thunks_;
   uint32_t size_misc_thunks_;
   uint32_t size_vmap_table_;
@@ -512,6 +551,9 @@ class OatWriter {
   // Methods can be inserted more than once in case of duplicated methods.
   // This pointer is only non-null after InitOatCodeDexFiles succeeds.
   std::unique_ptr<OrderedMethodList> ordered_methods_;
+
+  // Container of shared dex data.
+  std::unique_ptr<DexContainer> dex_container_;
 
   DISALLOW_COPY_AND_ASSIGN(OatWriter);
 };

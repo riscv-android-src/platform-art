@@ -33,18 +33,18 @@
 #include "base/enums.h"
 #include "base/length_prefixed_array.h"
 #include "base/macros.h"
+#include "base/mem_map.h"
+#include "base/os.h"
+#include "base/safe_map.h"
+#include "base/utils.h"
 #include "class_table.h"
 #include "driver/compiler_driver.h"
 #include "image.h"
 #include "intern_table.h"
 #include "lock_word.h"
-#include "mem_map.h"
 #include "mirror/dex_cache.h"
 #include "oat_file.h"
 #include "obj_ptr.h"
-#include "os.h"
-#include "safe_map.h"
-#include "utils.h"
 
 namespace art {
 namespace gc {
@@ -62,7 +62,9 @@ class ClassLoader;
 }  // namespace mirror
 
 class ClassLoaderVisitor;
+class ImTable;
 class ImtConflictTable;
+class TimingLogger;
 
 static constexpr int kInvalidFd = -1;
 
@@ -80,7 +82,7 @@ class ImageWriter FINAL {
               const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
               const std::unordered_set<std::string>* dirty_image_objects);
 
-  bool PrepareImageAddressSpace();
+  bool PrepareImageAddressSpace(TimingLogger* timings);
 
   bool IsImageAddressSpaceReady() const {
     DCHECK(!image_infos_.empty());
@@ -266,7 +268,7 @@ class ImageWriter FINAL {
 
     // Create the image sections into the out sections variable, returns the size of the image
     // excluding the bitmap.
-    size_t CreateImageSections(ImageSection* out_sections, bool app_image) const;
+    size_t CreateImageSections(ImageSection* out_sections) const;
 
     size_t GetStubOffset(StubType stub_type) const {
       DCHECK_LT(static_cast<size_t>(stub_type), kNumberOfStubTypes);

@@ -39,19 +39,23 @@
 #include "art_jvmti.h"
 #include "base/array_ref.h"
 #include "base/macros.h"
+#include "base/utils.h"
 #include "class_linker.h"
+#include "class_loader_utils.h"
 #include "class_table-inl.h"
 #include "common_throws.h"
-#include "dex_file_annotations.h"
-#include "dex_file_loader.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file_annotations.h"
+#include "dex/dex_file_loader.h"
+#include "dex/primitive.h"
 #include "events-inl.h"
 #include "fixed_up_dex_file.h"
 #include "gc/heap-visit-objects-inl.h"
 #include "gc/heap.h"
 #include "gc_root.h"
 #include "handle.h"
-#include "jni_env_ext-inl.h"
-#include "jni_internal.h"
+#include "jni/jni_env_ext-inl.h"
+#include "jni/jni_internal.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
@@ -61,17 +65,15 @@
 #include "mirror/object_reference.h"
 #include "mirror/reference.h"
 #include "nativehelper/scoped_local_ref.h"
-#include "primitive.h"
 #include "reflection.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 #include "thread_list.h"
-#include "ti_class_loader.h"
+#include "ti_class_loader-inl.h"
 #include "ti_phase.h"
 #include "ti_redefine.h"
-#include "utils.h"
 #include "well_known_classes.h"
 
 namespace openjdkjvmti {
@@ -107,12 +109,13 @@ static std::unique_ptr<const art::DexFile> MakeSingleDexFile(art::Thread* self,
   }
   uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map->Begin())->checksum_;
   std::string map_name = map->GetName();
-  std::unique_ptr<const art::DexFile> dex_file(art::DexFileLoader::Open(map_name,
-                                                                        checksum,
-                                                                        std::move(map),
-                                                                        /*verify*/true,
-                                                                        /*verify_checksum*/true,
-                                                                        &error_msg));
+  const art::ArtDexFileLoader dex_file_loader;
+  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(map_name,
+                                                                    checksum,
+                                                                    std::move(map),
+                                                                    /*verify*/true,
+                                                                    /*verify_checksum*/true,
+                                                                    &error_msg));
   if (dex_file.get() == nullptr) {
     LOG(WARNING) << "Unable to load modified dex file for " << descriptor << ": " << error_msg;
     art::ThrowClassFormatError(nullptr,
@@ -182,73 +185,27 @@ struct ClassCallback : public art::ClassLoadCallback {
       return;
     }
 
-    // Strip the 'L' and ';' from the descriptor
-    std::string name(std::string(descriptor).substr(1, strlen(descriptor) - 2));
-
     art::Thread* self = art::Thread::Current();
-    art::JNIEnvExt* env = self->GetJniEnv();
-    ScopedLocalRef<jobject> loader(
-        env, class_loader.IsNull() ? nullptr : env->AddLocalReference<jobject>(class_loader.Get()));
-    std::unique_ptr<FixedUpDexFile> dex_file_copy(FixedUpDexFile::Create(initial_dex_file));
+    ArtClassDefinition def;
+    def.InitFirstLoad(descriptor, class_loader, initial_dex_file);
 
-    // Go back to native.
-    art::ScopedThreadSuspension sts(self, art::ThreadState::kNative);
-    // Call all Non-retransformable agents.
-    jint post_no_redefine_len = 0;
-    unsigned char* post_no_redefine_dex_data = nullptr;
-    std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>
-        post_no_redefine_unique_ptr(nullptr, FakeJvmtiDeleter<const unsigned char>());
-    event_handler->DispatchEvent<ArtJvmtiEvent::kClassFileLoadHookNonRetransformable>(
-        self,
-        static_cast<JNIEnv*>(env),
-        static_cast<jclass>(nullptr),  // The class doesn't really exist yet so send null.
-        loader.get(),
-        name.c_str(),
-        static_cast<jobject>(nullptr),  // Android doesn't seem to have protection domains
-        static_cast<jint>(dex_file_copy->Size()),
-        static_cast<const unsigned char*>(dex_file_copy->Begin()),
-        static_cast<jint*>(&post_no_redefine_len),
-        static_cast<unsigned char**>(&post_no_redefine_dex_data));
-    if (post_no_redefine_dex_data == nullptr) {
-      DCHECK_EQ(post_no_redefine_len, 0);
-      post_no_redefine_dex_data = const_cast<unsigned char*>(dex_file_copy->Begin());
-      post_no_redefine_len = dex_file_copy->Size();
-    } else {
-      post_no_redefine_unique_ptr =
-          std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>(
-              post_no_redefine_dex_data, FakeJvmtiDeleter<const unsigned char>());
-      DCHECK_GT(post_no_redefine_len, 0);
+    // Call all non-retransformable agents.
+    Transformer::TransformSingleClassDirect<ArtJvmtiEvent::kClassFileLoadHookNonRetransformable>(
+        event_handler, self, &def);
+
+    std::vector<unsigned char> post_non_retransform;
+    if (def.IsModified()) {
+      // Copy the dex data after the non-retransformable events.
+      post_non_retransform.resize(def.GetDexData().size());
+      memcpy(post_non_retransform.data(), def.GetDexData().data(), post_non_retransform.size());
     }
+
     // Call all retransformable agents.
-    jint final_len = 0;
-    unsigned char* final_dex_data = nullptr;
-    std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>
-        final_dex_unique_ptr(nullptr, FakeJvmtiDeleter<const unsigned char>());
-    event_handler->DispatchEvent<ArtJvmtiEvent::kClassFileLoadHookRetransformable>(
-        self,
-        static_cast<JNIEnv*>(env),
-        static_cast<jclass>(nullptr),  // The class doesn't really exist yet so send null.
-        loader.get(),
-        name.c_str(),
-        static_cast<jobject>(nullptr),  // Android doesn't seem to have protection domains
-        static_cast<jint>(post_no_redefine_len),
-        static_cast<const unsigned char*>(post_no_redefine_dex_data),
-        static_cast<jint*>(&final_len),
-        static_cast<unsigned char**>(&final_dex_data));
-    if (final_dex_data == nullptr) {
-      DCHECK_EQ(final_len, 0);
-      final_dex_data = post_no_redefine_dex_data;
-      final_len = post_no_redefine_len;
-    } else {
-      final_dex_unique_ptr =
-          std::unique_ptr<const unsigned char, FakeJvmtiDeleter<const unsigned char>>(
-              final_dex_data, FakeJvmtiDeleter<const unsigned char>());
-      DCHECK_GT(final_len, 0);
-    }
+    Transformer::TransformSingleClassDirect<ArtJvmtiEvent::kClassFileLoadHookRetransformable>(
+        event_handler, self, &def);
 
-    if (final_dex_data != dex_file_copy->Begin()) {
+    if (def.IsModified()) {
       LOG(WARNING) << "Changing class " << descriptor;
-      art::ScopedObjectAccess soa(self);
       art::StackHandleScope<2> hs(self);
       // Save the results of all the non-retransformable agents.
       // First allocate the ClassExt
@@ -265,7 +222,7 @@ struct ClassCallback : public art::ClassLoadCallback {
 
       // Allocate the byte array to store the dex file bytes in.
       art::MutableHandle<art::mirror::Object> arr(hs.NewHandle<art::mirror::Object>(nullptr));
-      if (post_no_redefine_dex_data == dex_file_copy->Begin() && name != "java/lang/Long") {
+      if (post_non_retransform.empty() && strcmp(descriptor, "Ljava/lang/Long;") != 0) {
         // we didn't have any non-retransformable agents. We can just cache a pointer to the
         // initial_dex_file. It will be kept live by the class_loader.
         jlong dex_ptr = reinterpret_cast<uintptr_t>(&initial_dex_file);
@@ -275,8 +232,8 @@ struct ClassCallback : public art::ClassLoadCallback {
       } else {
         arr.Assign(art::mirror::ByteArray::AllocateAndFill(
             self,
-            reinterpret_cast<const signed char*>(post_no_redefine_dex_data),
-            post_no_redefine_len));
+            reinterpret_cast<const signed char*>(post_non_retransform.data()),
+            post_non_retransform.size()));
       }
       if (arr.IsNull()) {
         LOG(WARNING) << "Unable to allocate memory for initial dex-file. Aborting transformation";
@@ -287,8 +244,8 @@ struct ClassCallback : public art::ClassLoadCallback {
       std::unique_ptr<const art::DexFile> dex_file(MakeSingleDexFile(self,
                                                                      descriptor,
                                                                      initial_dex_file.GetLocation(),
-                                                                     final_len,
-                                                                     final_dex_data));
+                                                                     def.GetDexData().size(),
+                                                                     def.GetDexData().data()));
       if (dex_file.get() == nullptr) {
         return;
       }
@@ -490,7 +447,7 @@ struct ClassCallback : public art::ClassLoadCallback {
 
         // Fix up the local table with a root visitor.
         RootUpdater local_update(local->input_, local->output_);
-        t->GetJniEnv()->locals.VisitRoots(
+        t->GetJniEnv()->VisitJniLocalRoots(
             &local_update, art::RootInfo(art::kRootJNILocal, t->GetThreadId()));
       }
 
@@ -904,6 +861,97 @@ jvmtiError ClassUtil::GetClassLoader(jvmtiEnv* env ATTRIBUTE_UNUSED,
   *classloader_ptr = soa.AddLocalReference<jobject>(klass->GetClassLoader());
 
   return ERR(NONE);
+}
+
+// Copies unique class descriptors into the classes list from dex_files.
+static jvmtiError CopyClassDescriptors(jvmtiEnv* env,
+                                       const std::vector<const art::DexFile*>& dex_files,
+                                       /*out*/jint* count_ptr,
+                                       /*out*/char*** classes) {
+  jvmtiError res = OK;
+  std::set<art::StringPiece> unique_descriptors;
+  std::vector<const char*> descriptors;
+  auto add_descriptor = [&](const char* desc) {
+    // Don't add duplicates.
+    if (res == OK && unique_descriptors.find(desc) == unique_descriptors.end()) {
+      // The desc will remain valid since we hold a ref to the class_loader.
+      unique_descriptors.insert(desc);
+      descriptors.push_back(CopyString(env, desc, &res).release());
+    }
+  };
+  for (const art::DexFile* dex_file : dex_files) {
+    uint32_t num_defs = dex_file->NumClassDefs();
+    for (uint32_t i = 0; i < num_defs; i++) {
+      add_descriptor(dex_file->GetClassDescriptor(dex_file->GetClassDef(i)));
+    }
+  }
+  char** out_data = nullptr;
+  if (res == OK) {
+    res = env->Allocate(sizeof(char*) * descriptors.size(),
+                        reinterpret_cast<unsigned char**>(&out_data));
+  }
+  if (res != OK) {
+    env->Deallocate(reinterpret_cast<unsigned char*>(out_data));
+    // Failed to allocate. Cleanup everything.
+    for (const char* data : descriptors) {
+      env->Deallocate(reinterpret_cast<unsigned char*>(const_cast<char*>(data)));
+    }
+    descriptors.clear();
+    return res;
+  }
+  // Everything is good.
+  memcpy(out_data, descriptors.data(), sizeof(char*) * descriptors.size());
+  *count_ptr = static_cast<jint>(descriptors.size());
+  *classes = out_data;
+  return OK;
+}
+
+jvmtiError ClassUtil::GetClassLoaderClassDescriptors(jvmtiEnv* env,
+                                                     jobject loader,
+                                                     /*out*/jint* count_ptr,
+                                                     /*out*/char*** classes) {
+  art::Thread* self = art::Thread::Current();
+  if (env == nullptr) {
+    return ERR(INVALID_ENVIRONMENT);
+  } else if (self == nullptr) {
+    return ERR(UNATTACHED_THREAD);
+  } else if (count_ptr == nullptr || classes == nullptr) {
+    return ERR(NULL_POINTER);
+  }
+  art::JNIEnvExt* jnienv = self->GetJniEnv();
+  if (loader == nullptr ||
+      jnienv->IsInstanceOf(loader, art::WellKnownClasses::java_lang_BootClassLoader)) {
+    // We can just get the dex files directly for the boot class path.
+    return CopyClassDescriptors(env,
+                                art::Runtime::Current()->GetClassLinker()->GetBootClassPath(),
+                                count_ptr,
+                                classes);
+  }
+  if (!jnienv->IsInstanceOf(loader, art::WellKnownClasses::java_lang_ClassLoader)) {
+    return ERR(ILLEGAL_ARGUMENT);
+  } else if (!jnienv->IsInstanceOf(loader,
+                                   art::WellKnownClasses::dalvik_system_BaseDexClassLoader)) {
+    LOG(ERROR) << "GetClassLoaderClassDescriptors is only implemented for BootClassPath and "
+               << "dalvik.system.BaseDexClassLoader class loaders";
+    // TODO Possibly return OK With no classes would  be better since these ones cannot have any
+    // real classes associated with them.
+    return ERR(NOT_IMPLEMENTED);
+  }
+
+  art::ScopedObjectAccess soa(self);
+  art::StackHandleScope<1> hs(self);
+  art::Handle<art::mirror::ClassLoader> class_loader(
+      hs.NewHandle(soa.Decode<art::mirror::ClassLoader>(loader)));
+  std::vector<const art::DexFile*> dex_files;
+  art::VisitClassLoaderDexFiles(
+      soa,
+      class_loader,
+      [&](const art::DexFile* dex_file) {
+        dex_files.push_back(dex_file);
+        return true;  // Continue with other dex files.
+      });
+  // We hold the loader so the dex files won't go away until after this call at worst.
+  return CopyClassDescriptors(env, dex_files, count_ptr, classes);
 }
 
 jvmtiError ClassUtil::GetClassLoaderClasses(jvmtiEnv* env,

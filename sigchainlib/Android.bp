@@ -16,17 +16,26 @@
 
 cc_library {
     name: "libsigchain",
+    cpp_std: "gnu++17",
+
     host_supported: true,
     defaults: ["art_defaults"],
-    shared: {
-        srcs: ["sigchain_dummy.cc"],
-    },
-    static: {
-        srcs: ["sigchain.cc"],
-    },
     target: {
+        linux: {
+            shared: {
+                srcs: ["sigchain_dummy.cc"],
+            },
+            static: {
+                srcs: ["sigchain.cc"],
+            },
+        },
+
+        darwin: {
+            srcs: ["sigchain_dummy.cc"],
+        },
+
         android: {
-            shared_libs: ["liblog"],
+            whole_static_libs: ["libasync_safe"],
         },
     },
     // Sigchainlib is whole-statically linked into binaries. For Android.mk-based binaries,
@@ -47,7 +56,16 @@ cc_library_static {
     srcs: ["sigchain_dummy.cc"],
     target: {
         android: {
-            shared_libs: ["liblog"],
+            whole_static_libs: ["libasync_safe"],
         },
     },
+}
+
+art_cc_test {
+    name: "art_sigchain_tests",
+    defaults: [
+        "art_gtest_defaults",
+    ],
+    srcs: ["sigchain_test.cc"],
+    whole_static_libs: ["libsigchain"],
 }

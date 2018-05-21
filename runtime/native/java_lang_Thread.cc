@@ -17,7 +17,7 @@
 #include "java_lang_Thread.h"
 
 #include "common_throws.h"
-#include "jni_internal.h"
+#include "jni/jni_internal.h"
 #include "mirror/object.h"
 #include "monitor.h"
 #include "native_util.h"
@@ -37,7 +37,7 @@ static jobject Thread_currentThread(JNIEnv* env, jclass) {
 }
 
 static jboolean Thread_interrupted(JNIEnv* env, jclass) {
-  return static_cast<JNIEnvExt*>(env)->self->Interrupted() ? JNI_TRUE : JNI_FALSE;
+  return static_cast<JNIEnvExt*>(env)->GetSelf()->Interrupted() ? JNI_TRUE : JNI_FALSE;
 }
 
 static jboolean Thread_isInterrupted(JNIEnv* env, jobject java_thread) {

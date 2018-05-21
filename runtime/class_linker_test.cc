@@ -26,7 +26,8 @@
 #include "base/enums.h"
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
-#include "dex_file_types.h"
+#include "dex/dex_file_types.h"
+#include "dex/standard_dex_file.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "experimental_flags.h"
 #include "gc/heap.h"
@@ -50,7 +51,6 @@
 #include "mirror/string-inl.h"
 #include "mirror/var_handle.h"
 #include "scoped_thread_state_change-inl.h"
-#include "standard_dex_file.h"
 #include "thread-current-inl.h"
 
 namespace art {
@@ -86,7 +86,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(primitive->GetSuperClass() == nullptr);
     EXPECT_FALSE(primitive->HasSuperClass());
     EXPECT_TRUE(primitive->GetClassLoader() == nullptr);
-    EXPECT_EQ(mirror::Class::kStatusInitialized, primitive->GetStatus());
+    EXPECT_EQ(ClassStatus::kInitialized, primitive->GetStatus());
     EXPECT_FALSE(primitive->IsErroneous());
     EXPECT_TRUE(primitive->IsLoaded());
     EXPECT_TRUE(primitive->IsResolved());
@@ -125,7 +125,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(JavaLangObject->GetSuperClass() == nullptr);
     EXPECT_FALSE(JavaLangObject->HasSuperClass());
     EXPECT_TRUE(JavaLangObject->GetClassLoader() == nullptr);
-    EXPECT_EQ(mirror::Class::kStatusInitialized, JavaLangObject->GetStatus());
+    EXPECT_EQ(ClassStatus::kInitialized, JavaLangObject->GetStatus());
     EXPECT_FALSE(JavaLangObject->IsErroneous());
     EXPECT_TRUE(JavaLangObject->IsLoaded());
     EXPECT_TRUE(JavaLangObject->IsResolved());
@@ -200,7 +200,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_TRUE(array->HasSuperClass());
     ASSERT_TRUE(array->GetComponentType() != nullptr);
     ASSERT_GT(strlen(array->GetComponentType()->GetDescriptor(&temp)), 0U);
-    EXPECT_EQ(mirror::Class::kStatusInitialized, array->GetStatus());
+    EXPECT_EQ(ClassStatus::kInitialized, array->GetStatus());
     EXPECT_FALSE(array->IsErroneous());
     EXPECT_TRUE(array->IsLoaded());
     EXPECT_TRUE(array->IsResolved());
@@ -795,6 +795,12 @@ struct FieldVarHandleOffsets : public CheckOffsets<mirror::FieldVarHandle> {
   }
 };
 
+struct ArrayElementVarHandleOffsets : public CheckOffsets<mirror::ArrayElementVarHandle> {
+  ArrayElementVarHandleOffsets() : CheckOffsets<mirror::ArrayElementVarHandle>(
+      false, "Ljava/lang/invoke/ArrayElementVarHandle;") {
+  }
+};
+
 struct ByteArrayViewVarHandleOffsets : public CheckOffsets<mirror::ByteArrayViewVarHandle> {
   ByteArrayViewVarHandleOffsets() : CheckOffsets<mirror::ByteArrayViewVarHandle>(
       false, "Ljava/lang/invoke/ByteArrayViewVarHandle;") {
@@ -838,6 +844,7 @@ TEST_F(ClassLinkerTest, ValidateFieldOrderOfJavaCppUnionClasses) {
   EXPECT_TRUE(CallSiteOffsets().Check());
   EXPECT_TRUE(VarHandleOffsets().Check());
   EXPECT_TRUE(FieldVarHandleOffsets().Check());
+  EXPECT_TRUE(ArrayElementVarHandleOffsets().Check());
   EXPECT_TRUE(ByteArrayViewVarHandleOffsets().Check());
   EXPECT_TRUE(ByteBufferViewVarHandleOffsets().Check());
 }
@@ -912,7 +919,7 @@ TEST_F(ClassLinkerTest, FindClass) {
   EXPECT_TRUE(MyClass->GetSuperClass() == JavaLangObject);
   EXPECT_TRUE(MyClass->HasSuperClass());
   EXPECT_EQ(class_loader.Get(), MyClass->GetClassLoader());
-  EXPECT_EQ(mirror::Class::kStatusResolved, MyClass->GetStatus());
+  EXPECT_EQ(ClassStatus::kResolved, MyClass->GetStatus());
   EXPECT_FALSE(MyClass->IsErroneous());
   EXPECT_TRUE(MyClass->IsLoaded());
   EXPECT_TRUE(MyClass->IsResolved());
@@ -1587,6 +1594,63 @@ TEST_F(ClassLinkerTest, CreateWellKnownClassLoader) {
   jobject class_loader_b = LoadDexInDelegateLastClassLoader("Nested", class_loader_a);
   jobject class_loader_c = LoadDexInPathClassLoader("MultiDex", class_loader_b);
   LoadDexInDelegateLastClassLoader("Interfaces", class_loader_c);
+}
+
+TEST_F(ClassLinkerTest, PrettyClass) {
+  ScopedObjectAccess soa(Thread::Current());
+  EXPECT_EQ("null", mirror::Class::PrettyClass(nullptr));
+  mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;");
+  ASSERT_TRUE(c != nullptr);
+  mirror::Object* o = mirror::ObjectArray<mirror::String>::Alloc(soa.Self(), c, 0);
+  EXPECT_EQ("java.lang.Class<java.lang.String[]>", mirror::Class::PrettyClass(o->GetClass()));
+}
+
+TEST_F(ClassLinkerTest, PrettyClassAndClassLoader) {
+  ScopedObjectAccess soa(Thread::Current());
+  EXPECT_EQ("null", mirror::Class::PrettyClassAndClassLoader(nullptr));
+  mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/String;");
+  ASSERT_TRUE(c != nullptr);
+  mirror::Object* o = mirror::ObjectArray<mirror::String>::Alloc(soa.Self(), c, 0);
+  EXPECT_EQ("java.lang.Class<java.lang.String[],null>",
+            mirror::Class::PrettyClassAndClassLoader(o->GetClass()));
+}
+
+TEST_F(ClassLinkerTest, PrettyField) {
+  ScopedObjectAccess soa(Thread::Current());
+  EXPECT_EQ("null", ArtField::PrettyField(nullptr));
+
+  mirror::Class* java_lang_String = class_linker_->FindSystemClass(soa.Self(),
+                                                                   "Ljava/lang/String;");
+
+  ArtField* f;
+  f = java_lang_String->FindDeclaredInstanceField("count", "I");
+  EXPECT_EQ("int java.lang.String.count", f->PrettyField());
+  EXPECT_EQ("java.lang.String.count", f->PrettyField(false));
+}
+
+TEST_F(ClassLinkerTest, JniShortName_JniLongName) {
+  ScopedObjectAccess soa(Thread::Current());
+  mirror::Class* c = class_linker_->FindSystemClass(soa.Self(), "Ljava/lang/String;");
+  ASSERT_TRUE(c != nullptr);
+  ArtMethod* m;
+
+  m = c->FindClassMethod("charAt", "(I)C", kRuntimePointerSize);
+  ASSERT_TRUE(m != nullptr);
+  ASSERT_FALSE(m->IsDirect());
+  EXPECT_EQ("Java_java_lang_String_charAt", m->JniShortName());
+  EXPECT_EQ("Java_java_lang_String_charAt__I", m->JniLongName());
+
+  m = c->FindClassMethod("indexOf", "(Ljava/lang/String;I)I", kRuntimePointerSize);
+  ASSERT_TRUE(m != nullptr);
+  ASSERT_FALSE(m->IsDirect());
+  EXPECT_EQ("Java_java_lang_String_indexOf", m->JniShortName());
+  EXPECT_EQ("Java_java_lang_String_indexOf__Ljava_lang_String_2I", m->JniLongName());
+
+  m = c->FindClassMethod("copyValueOf", "([CII)Ljava/lang/String;", kRuntimePointerSize);
+  ASSERT_TRUE(m != nullptr);
+  ASSERT_TRUE(m->IsStatic());
+  EXPECT_EQ("Java_java_lang_String_copyValueOf", m->JniShortName());
+  EXPECT_EQ("Java_java_lang_String_copyValueOf___3CII", m->JniLongName());
 }
 
 class ClassLinkerClassLoaderTest : public ClassLinkerTest {

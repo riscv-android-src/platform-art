@@ -20,6 +20,7 @@
 
 #include "android-base/stringprintf.h"
 
+#include "base/runtime_debug.h"
 #include "base/variant_map.h"
 #include "cmdline_parser.h"
 #include "compiler_options_map-inl.h"
@@ -50,6 +51,7 @@ CompilerOptions::CompilerOptions()
       implicit_suspend_checks_(false),
       compile_pic_(false),
       dump_timings_(false),
+      dump_pass_timings_(false),
       dump_stats_(false),
       verbose_methods_(),
       abort_on_hard_verifier_failure_(false),
@@ -59,6 +61,7 @@ CompilerOptions::CompilerOptions()
       dump_cfg_append_(false),
       force_determinism_(false),
       deduplicate_code_(true),
+      count_hotness_in_compiled_code_(false),
       register_allocation_strategy_(RegisterAllocator::kRegisterAllocatorDefault),
       passes_to_run_(nullptr) {
 }
@@ -68,17 +71,16 @@ CompilerOptions::~CompilerOptions() {
   // because we don't want to include the PassManagerOptions definition from the header file.
 }
 
+namespace {
+
+bool kEmitRuntimeReadBarrierChecks = kIsDebugBuild &&
+    RegisterRuntimeDebugFlag(&kEmitRuntimeReadBarrierChecks);
+
+}  // namespace
+
 bool CompilerOptions::EmitRunTimeChecksInDebugMode() const {
-  // Run-time checks (e.g. Marking Register checks) are only emitted
-  // in debug mode, and
-  // - when running on device; or
-  // - when running on host, but only
-  //   - when compiling the core image (which is used only for testing); or
-  //   - when JIT compiling (only relevant for non-native methods).
-  // This is to prevent these checks from being emitted into pre-opted
-  // boot image or apps, as these are compiled with dex2oatd.
-  return kIsDebugBuild &&
-      (kIsTargetBuild || IsCoreImage() || Runtime::Current()->UseJitCompilation());
+  // Run-time checks (e.g. Marking Register checks) are only emitted in slow-debug mode.
+  return kEmitRuntimeReadBarrierChecks;
 }
 
 bool CompilerOptions::ParseDumpInitFailures(const std::string& option, std::string* error_msg) {

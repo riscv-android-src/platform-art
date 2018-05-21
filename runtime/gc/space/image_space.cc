@@ -32,11 +32,14 @@
 #include "base/enums.h"
 #include "base/file_utils.h"
 #include "base/macros.h"
+#include "base/os.h"
 #include "base/scoped_flock.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "base/time_utils.h"
-#include "dex_file_loader.h"
+#include "base/utils.h"
+#include "dex/art_dex_file_loader.h"
+#include "dex/dex_file_loader.h"
 #include "exec_utils.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "image-inl.h"
@@ -45,10 +48,8 @@
 #include "mirror/object-inl.h"
 #include "mirror/object-refvisitor-inl.h"
 #include "oat_file.h"
-#include "os.h"
 #include "runtime.h"
 #include "space-inl.h"
-#include "utils.h"
 
 namespace art {
 namespace gc {
@@ -239,7 +240,7 @@ static bool ReadSpecificImageHeader(const char* filename, ImageHeader* image_hea
 
 // Relocate the image at image_location to dest_filename and relocate it by a random amount.
 static bool RelocateImage(const char* image_location,
-                          const char* dest_filename,
+                          const char* dest_directory,
                           InstructionSet isa,
                           std::string* error_msg) {
   // We should clean up so we are more likely to have room for the image.
@@ -253,8 +254,8 @@ static bool RelocateImage(const char* image_location,
   std::string input_image_location_arg("--input-image-location=");
   input_image_location_arg += image_location;
 
-  std::string output_image_filename_arg("--output-image-file=");
-  output_image_filename_arg += dest_filename;
+  std::string output_image_directory_arg("--output-image-directory=");
+  output_image_directory_arg += dest_directory;
 
   std::string instruction_set_arg("--instruction-set=");
   instruction_set_arg += GetInstructionSetString(isa);
@@ -266,13 +267,43 @@ static bool RelocateImage(const char* image_location,
   argv.push_back(patchoat);
 
   argv.push_back(input_image_location_arg);
-  argv.push_back(output_image_filename_arg);
+  argv.push_back(output_image_directory_arg);
 
   argv.push_back(instruction_set_arg);
   argv.push_back(base_offset_arg);
 
   std::string command_line(android::base::Join(argv, ' '));
   LOG(INFO) << "RelocateImage: " << command_line;
+  return Exec(argv, error_msg);
+}
+
+static bool VerifyImage(const char* image_location,
+                        const char* dest_directory,
+                        InstructionSet isa,
+                        std::string* error_msg) {
+  std::string patchoat(Runtime::Current()->GetPatchoatExecutable());
+
+  std::string input_image_location_arg("--input-image-location=");
+  input_image_location_arg += image_location;
+
+  std::string output_image_directory_arg("--output-image-directory=");
+  output_image_directory_arg += dest_directory;
+
+  std::string instruction_set_arg("--instruction-set=");
+  instruction_set_arg += GetInstructionSetString(isa);
+
+  std::vector<std::string> argv;
+  argv.push_back(patchoat);
+
+  argv.push_back(input_image_location_arg);
+  argv.push_back(output_image_directory_arg);
+
+  argv.push_back(instruction_set_arg);
+
+  argv.push_back("--verify");
+
+  std::string command_line(android::base::Join(argv, ' '));
+  LOG(INFO) << "VerifyImage: " << command_line;
   return Exec(argv, error_msg);
 }
 
@@ -641,7 +672,7 @@ class ImageSpaceLoader {
     // Loaded the map, use the image header from the file now in case we patch it with
     // RelocateInPlace.
     image_header = reinterpret_cast<ImageHeader*>(map->Begin());
-    const uint32_t bitmap_index = ImageSpace::bitmap_index_.FetchAndAddSequentiallyConsistent(1);
+    const uint32_t bitmap_index = ImageSpace::bitmap_index_.fetch_add(1, std::memory_order_seq_cst);
     std::string bitmap_name(StringPrintf("imagespace %s live-bitmap %u",
                                          image_filename,
                                          bitmap_index));
@@ -1387,7 +1418,8 @@ class ImageSpaceLoader {
 
     CHECK(image_header.GetOatDataBegin() != nullptr);
 
-    std::unique_ptr<OatFile> oat_file(OatFile::Open(oat_filename,
+    std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+                                                    oat_filename,
                                                     oat_filename,
                                                     image_header.GetOatDataBegin(),
                                                     image_header.GetOatFileBegin(),
@@ -1500,10 +1532,20 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
                                            &has_cache,
                                            &cache_filename);
 
-  if (is_zygote && dalvik_cache_exists) {
+  bool dex2oat_enabled = Runtime::Current()->IsImageDex2OatEnabled();
+
+  if (is_zygote && dalvik_cache_exists && !secondary_image) {
+    // Extra checks for the zygote. These only apply when loading the first image, explained below.
     DCHECK(!dalvik_cache.empty());
     std::string local_error_msg;
-    if (!CheckSpace(dalvik_cache, &local_error_msg)) {
+    // All secondary images are verified when the primary image is verified.
+    bool verified = VerifyImage(image_location, dalvik_cache.c_str(), image_isa, &local_error_msg);
+    // If we prune for space at a secondary image, we may end up in a crash loop with the _exit
+    // path.
+    bool check_space = CheckSpace(dalvik_cache, &local_error_msg);
+    if (!verified || !check_space) {
+      // Note: it is important to only prune for space on the primary image, or we will hit the
+      //       restart path.
       LOG(WARNING) << local_error_msg << " Preemptively pruning the dalvik cache.";
       PruneDalvikCache(image_isa);
 
@@ -1517,6 +1559,10 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
                                           &is_global_cache,
                                           &has_cache,
                                           &cache_filename);
+    }
+    if (!check_space) {
+      // Disable compilation/patching - we do not want to fill up the space again.
+      dex2oat_enabled = false;
     }
   }
 
@@ -1584,13 +1630,15 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   //           secondary image.
   if (found_image && has_system && relocate) {
     std::string local_error_msg;
-    if (!Runtime::Current()->IsImageDex2OatEnabled()) {
+    if (!dex2oat_enabled) {
       local_error_msg = "Patching disabled.";
     } else if (secondary_image) {
-      local_error_msg = "Cannot patch a secondary image.";
+      // We really want a working image. Prune and restart.
+      PruneDalvikCache(image_isa);
+      _exit(1);
     } else if (ImageCreationAllowed(is_global_cache, image_isa, &local_error_msg)) {
       bool patch_success =
-          RelocateImage(image_location, cache_filename.c_str(), image_isa, &local_error_msg);
+          RelocateImage(image_location, dalvik_cache.c_str(), image_isa, &local_error_msg);
       if (patch_success) {
         std::unique_ptr<ImageSpace> patched_space =
             ImageSpaceLoader::Load(image_location,
@@ -1614,7 +1662,7 @@ std::unique_ptr<ImageSpace> ImageSpace::CreateBootImage(const char* image_locati
   //         cache. This step fails if this is a secondary image.
   if (!has_system) {
     std::string local_error_msg;
-    if (!Runtime::Current()->IsImageDex2OatEnabled()) {
+    if (!dex2oat_enabled) {
       local_error_msg = "Image compilation disabled.";
     } else if (secondary_image) {
       local_error_msg = "Cannot compile a secondary image.";
@@ -1826,6 +1874,7 @@ std::string ImageSpace::GetMultiImageBootClassPath(
 }
 
 bool ImageSpace::ValidateOatFile(const OatFile& oat_file, std::string* error_msg) {
+  const ArtDexFileLoader dex_file_loader;
   for (const OatFile::OatDexFile* oat_dex_file : oat_file.GetOatDexFiles()) {
     const std::string& dex_file_location = oat_dex_file->GetDexFileLocation();
 
@@ -1836,7 +1885,7 @@ bool ImageSpace::ValidateOatFile(const OatFile& oat_file, std::string* error_msg
     }
 
     std::vector<uint32_t> checksums;
-    if (!DexFileLoader::GetMultiDexChecksums(dex_file_location.c_str(), &checksums, error_msg)) {
+    if (!dex_file_loader.GetMultiDexChecksums(dex_file_location.c_str(), &checksums, error_msg)) {
       *error_msg = StringPrintf("ValidateOatFile failed to get checksums of dex file '%s' "
                                 "referenced by oat file %s: %s",
                                 dex_file_location.c_str(),

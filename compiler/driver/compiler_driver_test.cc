@@ -16,24 +16,26 @@
 
 #include "driver/compiler_driver.h"
 
+#include <limits>
 #include <stdint.h>
 #include <stdio.h>
 #include <memory>
 
 #include "art_method-inl.h"
+#include "base/casts.h"
 #include "class_linker-inl.h"
 #include "common_compiler_test.h"
 #include "compiler_callbacks.h"
-#include "dex_file.h"
-#include "dex_file_types.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_types.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
-#include "jit/profile_compilation_info.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -182,59 +184,6 @@ TEST_F(CompilerDriverTest, AbstractMethodErrorStub) {
   }
 }
 
-class CompilerDriverMethodsTest : public CompilerDriverTest {
- protected:
-  std::unordered_set<std::string>* GetCompiledMethods() OVERRIDE {
-    return new std::unordered_set<std::string>({
-      "byte StaticLeafMethods.identity(byte)",
-      "int StaticLeafMethods.sum(int, int, int)",
-      "double StaticLeafMethods.sum(double, double, double, double)"
-    });
-  }
-};
-
-TEST_F(CompilerDriverMethodsTest, Selection) {
-  Thread* self = Thread::Current();
-  jobject class_loader;
-  {
-    ScopedObjectAccess soa(self);
-    class_loader = LoadDex("StaticLeafMethods");
-  }
-  ASSERT_NE(class_loader, nullptr);
-
-  // Need to enable dex-file writability. Methods rejected to be compiled will run through the
-  // dex-to-dex compiler.
-  for (const DexFile* dex_file : GetDexFiles(class_loader)) {
-    ASSERT_TRUE(dex_file->EnableWrite());
-  }
-
-  CompileAll(class_loader);
-
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-  ScopedObjectAccess soa(self);
-  StackHandleScope<1> hs(self);
-  Handle<mirror::ClassLoader> h_loader(
-      hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-  mirror::Class* klass = class_linker->FindClass(self, "LStaticLeafMethods;", h_loader);
-  ASSERT_NE(klass, nullptr);
-
-  std::unique_ptr<std::unordered_set<std::string>> expected(GetCompiledMethods());
-
-  const auto pointer_size = class_linker->GetImagePointerSize();
-  for (auto& m : klass->GetDirectMethods(pointer_size)) {
-    std::string name = m.PrettyMethod(true);
-    const void* code = m.GetEntryPointFromQuickCompiledCodePtrSize(pointer_size);
-    ASSERT_NE(code, nullptr);
-    if (expected->find(name) != expected->end()) {
-      expected->erase(name);
-      EXPECT_FALSE(class_linker->IsQuickToInterpreterBridge(code));
-    } else {
-      EXPECT_TRUE(class_linker->IsQuickToInterpreterBridge(code));
-    }
-  }
-  EXPECT_TRUE(expected->empty());
-}
-
 class CompilerDriverProfileTest : public CompilerDriverTest {
  protected:
   ProfileCompilationInfo* GetProfileCompilationInfo() OVERRIDE {
@@ -344,11 +293,11 @@ class CompilerDriverVerifyTest : public CompilerDriverTest {
     ASSERT_NE(klass, nullptr);
     EXPECT_TRUE(klass->IsVerified());
 
-    mirror::Class::Status status;
+    ClassStatus status;
     bool found = compiler_driver_->GetCompiledClass(
         ClassReference(&klass->GetDexFile(), klass->GetDexTypeIndex().index_), &status);
     ASSERT_TRUE(found);
-    EXPECT_EQ(status, mirror::Class::kStatusVerified);
+    EXPECT_EQ(status, ClassStatus::kVerified);
   }
 };
 
@@ -367,8 +316,8 @@ TEST_F(CompilerDriverVerifyTest, VerifyCompilation) {
   CheckVerifiedClass(class_loader, "LSecond;");
 }
 
-// Test that a class of status kStatusRetryVerificationAtRuntime is indeed recorded that way in the
-// driver.
+// Test that a class of status ClassStatus::kRetryVerificationAtRuntime is indeed
+// recorded that way in the driver.
 TEST_F(CompilerDriverVerifyTest, RetryVerifcationStatusCheckVerified) {
   Thread* const self = Thread::Current();
   jobject class_loader;
@@ -386,17 +335,19 @@ TEST_F(CompilerDriverVerifyTest, RetryVerifcationStatusCheckVerified) {
   callbacks_->SetDoesClassUnloading(true, compiler_driver_.get());
   ClassReference ref(dex_file, 0u);
   // Test that the status is read from the compiler driver as expected.
-  for (size_t i = mirror::Class::kStatusRetryVerificationAtRuntime;
-      i < mirror::Class::kStatusMax;
-      ++i) {
-    const mirror::Class::Status expected_status = static_cast<mirror::Class::Status>(i);
+  static_assert(enum_cast<size_t>(ClassStatus::kLast) < std::numeric_limits<size_t>::max(),
+                "Make sure incrementing the class status does not overflow.");
+  for (size_t i = enum_cast<size_t>(ClassStatus::kRetryVerificationAtRuntime);
+       i <= enum_cast<size_t>(ClassStatus::kLast);
+       ++i) {
+    const ClassStatus expected_status = enum_cast<ClassStatus>(i);
     // Skip unsupported status that are not supposed to be ever recorded.
-    if (expected_status == mirror::Class::kStatusVerifyingAtRuntime ||
-        expected_status == mirror::Class::kStatusInitializing) {
+    if (expected_status == ClassStatus::kVerifyingAtRuntime ||
+        expected_status == ClassStatus::kInitializing) {
       continue;
     }
     compiler_driver_->RecordClassStatus(ref, expected_status);
-    mirror::Class::Status status = {};
+    ClassStatus status = {};
     ASSERT_TRUE(compiler_driver_->GetCompiledClass(ref, &status));
     EXPECT_EQ(status, expected_status);
   }

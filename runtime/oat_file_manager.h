@@ -108,25 +108,44 @@ class OatFileManager {
   void SetOnlyUseSystemOatFiles();
 
  private:
+  enum class CheckCollisionResult {
+    kSkippedUnsupportedClassLoader,
+    kSkippedClassLoaderContextSharedLibrary,
+    kNoCollisions,
+    kPerformedHasCollisions,
+  };
+
   // Check that the class loader context of the given oat file matches the given context.
   // This will perform a check that all class loaders in the chain have the same type and
   // classpath.
   // If the context is null (which means the initial class loader was null or unsupported)
-  // this returns false.
+  // this returns kSkippedUnsupportedClassLoader.
   // If the context does not validate the method will check for duplicate class definitions of
   // the given oat file against the oat files (either from the class loaders if possible or all
   // non-boot oat files otherwise).
-  // Return true if there are any class definition collisions in the oat_file.
-  bool HasCollisions(const OatFile* oat_file,
-                     const ClassLoaderContext* context,
-                     /*out*/ std::string* error_msg) const
+  // Return kPerformedHasCollisions if there are any class definition collisions in the oat_file.
+  CheckCollisionResult CheckCollision(const OatFile* oat_file,
+                                      const ClassLoaderContext* context,
+                                      /*out*/ std::string* error_msg) const
       REQUIRES(!Locks::oat_file_manager_lock_);
 
   const OatFile* FindOpenedOatFileFromOatLocationLocked(const std::string& oat_location) const
       REQUIRES(Locks::oat_file_manager_lock_);
 
+  // Return true if we should accept the oat file.
+  bool AcceptOatFile(CheckCollisionResult result) const;
+
+  // Return true if we should attempt to load the app image.
+  bool ShouldLoadAppImage(CheckCollisionResult check_collision_result,
+                          const OatFile* source_oat_file,
+                          ClassLoaderContext* context,
+                          std::string* error_msg);
+
   std::set<std::unique_ptr<const OatFile>> oat_files_ GUARDED_BY(Locks::oat_file_manager_lock_);
   bool have_non_pic_oat_file_;
+
+  // Only use the compiled code in an OAT file when the file is on /system. If the OAT file
+  // is not on /system, don't load it "executable".
   bool only_use_system_oat_files_;
 
   DISALLOW_COPY_AND_ASSIGN(OatFileManager);

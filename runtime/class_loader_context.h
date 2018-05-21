@@ -22,8 +22,10 @@
 
 #include "arch/instruction_set.h"
 #include "base/dchecked_vector.h"
+#include "dex/dex_file.h"
 #include "handle_scope.h"
 #include "mirror/class_loader.h"
+#include "oat_file.h"
 #include "scoped_thread_state_change.h"
 
 namespace art {
@@ -34,6 +36,18 @@ class OatFile;
 // Utility class which holds the class loader context used during compilation/verification.
 class ClassLoaderContext {
  public:
+  enum class VerificationResult {
+    kVerifies,
+    kForcedToSkipChecks,
+    kMismatch,
+  };
+
+  enum ClassLoaderType {
+    kInvalidClassLoader = 0,
+    kPathClassLoader = 1,
+    kDelegateLastClassLoader = 2
+  };
+
   ~ClassLoaderContext();
 
   // Opens requested class path files and appends them to ClassLoaderInfo::opened_dex_files.
@@ -84,9 +98,12 @@ class ClassLoaderContext {
   // (so that it can be read and verified at runtime against the actual class
   // loader hierarchy).
   // Should only be called if OpenDexFiles() returned true.
+  // If stored context is non-null, the stored names are overwritten by the class path from the
+  // stored context.
   // E.g. if the context is PCL[a.dex:b.dex] this will return
   // "PCL[a.dex*a_checksum*b.dex*a_checksum]".
-  std::string EncodeContextForOatFile(const std::string& base_dir) const;
+  std::string EncodeContextForOatFile(const std::string& base_dir,
+                                      ClassLoaderContext* stored_context = nullptr) const;
 
   // Encodes the context as a string suitable to be passed to dex2oat.
   // This is the same as EncodeContextForOatFile but without adding the checksums
@@ -104,7 +121,11 @@ class ClassLoaderContext {
   //    - the class loader from the same position have the same classpath
   //      (the order and checksum of the dex files matches)
   // This should be called after OpenDexFiles().
-  bool VerifyClassLoaderContextMatch(const std::string& context_spec) const;
+  // Names are only verified if verify_names is true.
+  // Checksums are only verified if verify_checksums is true.
+  VerificationResult VerifyClassLoaderContextMatch(const std::string& context_spec,
+                                     bool verify_names = true,
+                                     bool verify_checksums = true) const;
 
   // Creates the class loader context from the given string.
   // The format: ClassLoaderType1[ClasspathElem1:ClasspathElem2...];ClassLoaderType2[...]...
@@ -134,18 +155,14 @@ class ClassLoaderContext {
   static std::unique_ptr<ClassLoaderContext> Default();
 
  private:
-  enum ClassLoaderType {
-    kInvalidClassLoader = 0,
-    kPathClassLoader = 1,
-    kDelegateLastClassLoader = 2
-  };
-
   struct ClassLoaderInfo {
     // The type of this class loader.
     ClassLoaderType type;
     // The list of class path elements that this loader loads.
     // Note that this list may contain relative paths.
     std::vector<std::string> classpath;
+    // Original opened class path (ignoring multidex).
+    std::vector<std::string> original_classpath;
     // The list of class path elements checksums.
     // May be empty if the checksums are not given when the context is created.
     std::vector<uint32_t> checksums;
@@ -198,7 +215,9 @@ class ClassLoaderContext {
   // location). Otherwise, for oat files, the encoding adds all the dex files (including multidex)
   // together with their checksums.
   // Should only be called if OpenDexFiles() returned true.
-  std::string EncodeContext(const std::string& base_dir, bool for_dex2oat) const;
+  std::string EncodeContext(const std::string& base_dir,
+                            bool for_dex2oat,
+                            ClassLoaderContext* stored_context) const;
 
   // Extracts the class loader type from the given spec.
   // Return ClassLoaderContext::kInvalidClassLoader if the class loader type is not

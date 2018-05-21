@@ -17,8 +17,8 @@
 #include "assembler_x86.h"
 
 #include "base/casts.h"
+#include "base/memory_region.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "memory_region.h"
 #include "thread.h"
 
 namespace art {
@@ -909,6 +909,78 @@ void X86Assembler::psubq(XmmRegister dst, XmmRegister src) {
   EmitUint8(0x66);
   EmitUint8(0x0F);
   EmitUint8(0xFB);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddusb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xDC);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddsb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xEC);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddusw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xDD);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::paddsw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xED);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubusb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xD8);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubsb(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xE8);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubusw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xD9);
+  EmitXmmRegisterOperand(dst, src);
+}
+
+
+void X86Assembler::psubsw(XmmRegister dst, XmmRegister src) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x66);
+  EmitUint8(0x0F);
+  EmitUint8(0xE9);
   EmitXmmRegisterOperand(dst, src);
 }
 
@@ -1914,7 +1986,7 @@ void X86Assembler::cmpb(const Address& address, const Immediate& imm) {
 void X86Assembler::cmpw(const Address& address, const Immediate& imm) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x66);
-  EmitComplex(7, address, imm);
+  EmitComplex(7, address, imm, /* is_16_op */ true);
 }
 
 
@@ -2097,6 +2169,14 @@ void X86Assembler::addl(const Address& address, Register reg) {
 void X86Assembler::addl(const Address& address, const Immediate& imm) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitComplex(0, address, imm);
+}
+
+
+void X86Assembler::addw(const Address& address, const Immediate& imm) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  CHECK(imm.is_uint16() || imm.is_int16()) << imm.value();
+  EmitUint8(0x66);
+  EmitComplex(0, address, imm, /* is_16_op */ true);
 }
 
 
@@ -2751,14 +2831,20 @@ void X86Assembler::EmitOperand(int reg_or_opcode, const Operand& operand) {
 }
 
 
-void X86Assembler::EmitImmediate(const Immediate& imm) {
-  EmitInt32(imm.value());
+void X86Assembler::EmitImmediate(const Immediate& imm, bool is_16_op) {
+  if (is_16_op) {
+    EmitUint8(imm.value() & 0xFF);
+    EmitUint8(imm.value() >> 8);
+  } else {
+    EmitInt32(imm.value());
+  }
 }
 
 
 void X86Assembler::EmitComplex(int reg_or_opcode,
                                const Operand& operand,
-                               const Immediate& immediate) {
+                               const Immediate& immediate,
+                               bool is_16_op) {
   CHECK_GE(reg_or_opcode, 0);
   CHECK_LT(reg_or_opcode, 8);
   if (immediate.is_int8()) {
@@ -2769,11 +2855,11 @@ void X86Assembler::EmitComplex(int reg_or_opcode,
   } else if (operand.IsRegister(EAX)) {
     // Use short form if the destination is eax.
     EmitUint8(0x05 + (reg_or_opcode << 3));
-    EmitImmediate(immediate);
+    EmitImmediate(immediate, is_16_op);
   } else {
     EmitUint8(0x81);
     EmitOperand(reg_or_opcode, operand);
-    EmitImmediate(immediate);
+    EmitImmediate(immediate, is_16_op);
   }
 }
 

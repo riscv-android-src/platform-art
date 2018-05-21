@@ -19,14 +19,14 @@
 
 #include "instrumentation.h"
 
-#include "atomic.h"
 #include "base/arena_containers.h"
+#include "base/atomic.h"
 #include "base/histogram-inl.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "base/safe_map.h"
+#include "dex/method_reference.h"
 #include "gc_root.h"
-#include "method_reference.h"
-#include "safe_map.h"
 
 namespace art {
 
@@ -68,6 +68,7 @@ template<class T> class ObjectArray;
 namespace jit {
 
 class JitInstrumentationCache;
+class ScopedCodeCacheWrite;
 
 // Alignment in bits that will suit all architectures.
 static constexpr int kJitCodeAlignment = 16;
@@ -88,6 +89,7 @@ class JitCodeCache {
   static JitCodeCache* Create(size_t initial_capacity,
                               size_t max_capacity,
                               bool generate_debug_info,
+                              bool used_only_for_profile_data,
                               std::string* error_msg);
   ~JitCodeCache();
 
@@ -270,7 +272,8 @@ class JitCodeCache {
                size_t initial_code_capacity,
                size_t initial_data_capacity,
                size_t max_capacity,
-               bool garbage_collect_code);
+               bool garbage_collect_code,
+               int memmap_flags_prot_code);
 
   // Internal version of 'CommitCode' that will not retry if the
   // allocation fails. Return null if the allocation fails.
@@ -314,8 +317,8 @@ class JitCodeCache {
       REQUIRES(lock_)
       REQUIRES(Locks::mutator_lock_);
 
-  // Free in the mspace allocations for `code_ptr`.
-  void FreeCode(const void* code_ptr) REQUIRES(lock_);
+  // Free code and data allocations for `code_ptr`.
+  void FreeCodeAndData(const void* code_ptr) REQUIRES(lock_);
 
   // Number of bytes allocated in the code cache.
   size_t CodeCacheSizeLocked() REQUIRES(lock_);
@@ -354,10 +357,10 @@ class JitCodeCache {
       REQUIRES(lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void FreeCode(uint8_t* code) REQUIRES(lock_);
   uint8_t* AllocateCode(size_t code_size) REQUIRES(lock_);
-  void FreeData(uint8_t* data) REQUIRES(lock_);
+  void FreeCode(uint8_t* code) REQUIRES(lock_);
   uint8_t* AllocateData(size_t data_size) REQUIRES(lock_);
+  void FreeData(uint8_t* data) REQUIRES(lock_);
 
   bool IsWeakAccessEnabled(Thread* self) const;
   void WaitUntilInlineCacheAccessible(Thread* self)
@@ -407,10 +410,6 @@ class JitCodeCache {
   // Whether the last collection round increased the code cache.
   bool last_collection_increased_code_cache_ GUARDED_BY(lock_);
 
-  // Last time the the code_cache was updated.
-  // It is atomic to avoid locking when reading it.
-  Atomic<uint64_t> last_update_time_ns_;
-
   // Whether we can do garbage collection. Not 'const' as tests may override this.
   bool garbage_collect_code_;
 
@@ -446,7 +445,12 @@ class JitCodeCache {
   // Condition to wait on for accessing inline caches.
   ConditionVariable inline_cache_cond_ GUARDED_BY(lock_);
 
+  // Mapping flags for the code section.
+  const int memmap_flags_prot_code_;
+
   friend class art::JitJniStubTestHelper;
+  friend class ScopedCodeCacheWrite;
+
   DISALLOW_IMPLICIT_CONSTRUCTORS(JitCodeCache);
 };
 
