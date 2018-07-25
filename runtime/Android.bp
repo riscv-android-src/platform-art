@@ -31,21 +31,23 @@ libart_cc_defaults {
         "aot_class_linker.cc",
         "art_field.cc",
         "art_method.cc",
+        "backtrace_helper.cc",
         "barrier.cc",
         "base/mem_map_arena_pool.cc",
         "base/mutex.cc",
         "base/quasi_atomic.cc",
         "base/timing_logger.cc",
         "cha.cc",
-        "check_jni.cc",
         "class_linker.cc",
         "class_loader_context.cc",
+        "class_root.cc",
         "class_table.cc",
         "common_throws.cc",
         "compiler_filter.cc",
         "debug_print.cc",
         "debugger.cc",
         "dex/dex_file_annotations.cc",
+        "dex_register_location.cc",
         "dex_to_dex_decompiler.cc",
         "elf_file.cc",
         "exec_utils.cc",
@@ -110,6 +112,7 @@ libart_cc_defaults {
         "jit/jit_code_cache.cc",
         "jit/profiling_info.cc",
         "jit/profile_saver.cc",
+        "jni/check_jni.cc",
         "jni/java_vm_ext.cc",
         "jni/jni_env_ext.cc",
         "jni/jni_internal.cc",
@@ -129,7 +132,6 @@ libart_cc_defaults {
         "mirror/method_handles_lookup.cc",
         "mirror/method_type.cc",
         "mirror/object.cc",
-        "mirror/reference.cc",
         "mirror/stack_trace_element.cc",
         "mirror/string.cc",
         "mirror/throwable.cc",
@@ -242,7 +244,6 @@ libart_cc_defaults {
 
     arch: {
         arm: {
-            clang_asflags: ["-no-integrated-as"],
             srcs: [
                 "interpreter/mterp/mterp.cc",
                 "interpreter/mterp/out/mterp_arm.S",
@@ -337,14 +338,10 @@ libart_cc_defaults {
                 "thread_android.cc",
             ],
             shared_libs: [
-                // For android::FileMap used by libziparchive.
-                "libutils",
                 "libtombstoned_client",
             ],
             static_libs: [
-                // ZipArchive support, the order matters here to get all symbols.
-                "libziparchive",
-                "libz",
+                "libz",  // For adler32.
             ],
         },
         android_arm: {
@@ -366,8 +363,7 @@ libart_cc_defaults {
                 "thread_linux.cc",
             ],
             shared_libs: [
-                "libziparchive",
-                "libz",
+                "libz",  // For adler32.
             ],
         },
     },
@@ -574,6 +570,7 @@ art_cc_test {
         "interpreter/safe_math_test.cc",
         "interpreter/unstarted_runtime_test.cc",
         "jdwp/jdwp_options_test.cc",
+        "jit/profiling_info_test.cc",
         "jni/java_vm_ext_test.cc",
         "method_handles_test.cc",
         "mirror/dex_cache_test.cc",
@@ -598,7 +595,6 @@ art_cc_test {
     ],
     shared_libs: [
         "libbacktrace",
-        "libziparchive",
     ],
     header_libs: [
         "art_cmdlineparser_headers", // For parsed_options_test.

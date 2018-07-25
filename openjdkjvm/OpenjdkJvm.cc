@@ -65,11 +65,6 @@
 #undef LOG_TAG
 #define LOG_TAG "artopenjdk"
 
-using ::android::base::WARNING;
-using ::android::base::INFO;
-using ::android::base::ERROR;
-using ::android::base::FATAL;
-
 /* posix open() with extensions; used by e.g. ZipFile */
 JNIEXPORT jint JVM_Open(const char* fname, jint flags, jint mode) {
     /*
@@ -401,7 +396,7 @@ JNIEXPORT jboolean JVM_HoldsLock(JNIEnv* env, jclass unused ATTRIBUTE_UNUSED, jo
     art::ThrowNullPointerException("object == null");
     return JNI_FALSE;
   }
-  return soa.Self()->HoldsLock(object.Ptr());
+  return soa.Self()->HoldsLock(object);
 }
 
 JNIEXPORT void JVM_SetNativeThreadName(JNIEnv* env, jobject jthread, jstring java_name) {

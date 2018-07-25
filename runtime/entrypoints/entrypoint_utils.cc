@@ -74,11 +74,11 @@ JValue InvokeProxyInvocationHandler(ScopedObjectAccessAlreadyRunnable& soa, cons
     }
     for (size_t i = 0; i < args.size(); ++i) {
       if (shorty[i + 1] == 'L') {
-        jobject val = args.at(i).l;
+        jobject val = args[i].l;
         soa.Env()->SetObjectArrayElement(args_jobj, i, val);
       } else {
         JValue jv;
-        jv.SetJ(args.at(i).j);
+        jv.SetJ(args[i].j);
         mirror::Object* val = BoxPrimitive(Primitive::GetType(shorty[i + 1]), jv).Ptr();
         if (val == nullptr) {
           CHECK(soa.Self()->IsExceptionPending());
@@ -180,10 +180,10 @@ static inline std::pair<ArtMethod*, uintptr_t> DoGetCalleeSaveMethodOuterCallerA
     ArtMethod** sp, CalleeSaveType type) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK_EQ(*sp, Runtime::Current()->GetCalleeSaveMethod(type));
 
-  const size_t callee_frame_size = GetCalleeSaveFrameSize(kRuntimeISA, type);
+  const size_t callee_frame_size = RuntimeCalleeSaveFrame::GetFrameSize(type);
   auto** caller_sp = reinterpret_cast<ArtMethod**>(
       reinterpret_cast<uintptr_t>(sp) + callee_frame_size);
-  const size_t callee_return_pc_offset = GetCalleeSaveReturnPcOffset(kRuntimeISA, type);
+  const size_t callee_return_pc_offset = RuntimeCalleeSaveFrame::GetReturnPcOffset(type);
   uintptr_t caller_pc = *reinterpret_cast<uintptr_t*>(
       (reinterpret_cast<uint8_t*>(sp) + callee_return_pc_offset));
   ArtMethod* outer_method = *caller_sp;
@@ -201,18 +201,13 @@ static inline ArtMethod* DoGetCalleeSaveMethodCaller(ArtMethod* outer_method,
       DCHECK(current_code != nullptr);
       DCHECK(current_code->IsOptimized());
       uintptr_t native_pc_offset = current_code->NativeQuickPcOffset(caller_pc);
-      CodeInfo code_info = current_code->GetOptimizedCodeInfo();
+      CodeInfo code_info(current_code);
       MethodInfo method_info = current_code->GetOptimizedMethodInfo();
-      CodeInfoEncoding encoding = code_info.ExtractEncoding();
-      StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset, encoding);
+      StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
       DCHECK(stack_map.IsValid());
-      if (stack_map.HasInlineInfo(encoding.stack_map.encoding)) {
-        InlineInfo inline_info = code_info.GetInlineInfoOf(stack_map, encoding);
-        caller = GetResolvedMethod(outer_method,
-                                   method_info,
-                                   inline_info,
-                                   encoding.inline_info.encoding,
-                                   inline_info.GetDepth(encoding.inline_info.encoding) - 1);
+      BitTableRange<InlineInfo> inline_infos = code_info.GetInlineInfosOf(stack_map);
+      if (!inline_infos.empty()) {
+        caller = GetResolvedMethod(outer_method, method_info, inline_infos);
       }
     }
     if (kIsDebugBuild && do_caller_check) {

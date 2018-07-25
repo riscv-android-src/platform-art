@@ -26,7 +26,7 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '5', '9', '\0' };  // ReachabilityFence.
+const uint8_t ImageHeader::kImageVersion[] = { '0', '6', '3', '\0' };  // Image relocations.
 
 ImageHeader::ImageHeader(uint32_t image_begin,
                          uint32_t image_size,
@@ -133,11 +133,6 @@ const char* ImageHeader::GetMagic() const {
 ArtMethod* ImageHeader::GetImageMethod(ImageMethod index) const {
   CHECK_LT(static_cast<size_t>(index), kImageMethodsCount);
   return reinterpret_cast<ArtMethod*>(image_methods_[index]);
-}
-
-void ImageHeader::SetImageMethod(ImageMethod index, ArtMethod* method) {
-  CHECK_LT(static_cast<size_t>(index), kImageMethodsCount);
-  image_methods_[index] = reinterpret_cast<uint64_t>(method);
 }
 
 std::ostream& operator<<(std::ostream& os, const ImageSection& section) {

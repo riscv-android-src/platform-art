@@ -193,6 +193,22 @@
         "bug": "http://b/34369284"
     },
     {
+        "tests": ["018-stack-overflow",
+                  "107-int-math2",
+                  "667-jit-jni-stub"],
+        "description": ["We run for long enough for jit to compile some of the methods ",
+                        "which means it takes so long to finish the test that it will ",
+                        "timeout. The timeout is due to having to walk the stack ",
+                        "when entering and exiting methods due to the way the instrumentation ",
+                        "trampoline is implemented."],
+        "variant": "debuggable & jit & trace | debuggable & jit & stream"
+    },
+    {
+        "tests": "1935-get-set-current-frame-jit",
+        "description": ["Test expects that OSR works but tracing turns this feature off."],
+        "variant": "trace | stream"
+    },
+    {
         "tests": "1940-ddms-ext",
         "description": ["Test expects to be able to start tracing but we cannot",
                         "do that if tracing is already ongoing."],
@@ -201,7 +217,7 @@
     {
         "tests": "137-cfi",
         "description": ["This test unrolls and expects managed frames, but",
-                        "tracing means we run the interpreter."],
+                        "tracing means we run the interpreter or trampolines."],
         "variant": "trace | stream"
     },
     {
@@ -339,14 +355,6 @@
         "env_vars": {"ART_READ_BARRIER_TYPE": "TABLELOOKUP"}
     },
     {
-        "tests": ["476-clinit-inline-static-invoke",
-                  "496-checker-inlining-class-loader",
-                  "508-referrer-method",
-                  "637-checker-throw-inline"],
-        "bug": "http://b/36365552",
-        "variant": "no-image & jit"
-    },
-    {
         "tests": ["530-checker-lse",
                   "530-checker-lse2",
                   "030-bad-finalizer",
@@ -359,6 +367,12 @@
                   "634-vdex-duplicate"],
         "description": ["Profile driven dexlayout does not work with vdex or dex verifier."],
         "variant": "speed-profile"
+    },
+    {
+        "test_patterns": ["616-cha.*"],
+        "description": ["cha tests rely on knowing the exact set of optimizations available. ",
+                        "Debuggable runtimes change the set of optimizations."],
+        "variant": "debuggable"
     },
     {
         "test_patterns": ["616-cha.*"],
@@ -448,6 +462,14 @@
     },
     {
         "tests": [
+            "638-no-line-number"
+        ],
+        "description": ["Tests that fail on redefine stress due to branch instruction selection"],
+        "bug": "b/110869946",
+        "variant": "redefine-stress"
+    },
+    {
+        "tests": [
             "097-duplicate-method",
             "138-duplicate-classes-check2",
             "159-app-image-fields",
@@ -524,13 +546,6 @@
         "variant": "debug",
         "description": "Test disabled in debug mode because of dex2oatd timeouts.",
         "bug": "b/33650497"
-    },
-    {
-        "tests": "640-checker-integer-valueof",
-        "description": [
-            "The java.lang.Integer.valueOf intrinsic is not supported in PIC mode."
-        ],
-        "variant": "optimizing & pictest | speed-profile & pictest"
     },
     {
         "tests": "202-thread-oome",
@@ -649,12 +664,6 @@
         "tests": "674-HelloWorld-Dm",
         "variant": "target",
         "description": ["Requires zip, which isn't available on device"]
-    },
-    {
-        "tests": "712-varhandle-invocations",
-        "variant": "speed-profile & debug & gcstress & target",
-        "bug": "b/73275005",
-        "description": ["Time out"]
     },
     {
         "tests": ["1941-dispose-stress", "522-checker-regression-monitor-exit"],
@@ -956,6 +965,7 @@
     {
         "tests": ["616-cha-unloading",
                   "674-hiddenapi",
+                  "677-fsi2",
                   "678-quickening",
                   "679-locks",
                   "999-redefine-hiddenapi"],
@@ -990,5 +1000,35 @@
         "variant": "jit",
         "bug": "b/77567088",
         "description": ["Test throws exception before or during OOME."]
+    },
+    {
+        "tests": ["151-OpenFileLimit"],
+        "variant": "gcstress",
+        "bug": "b/111544552",
+        "description" : ["Gcstress requires the ability to open at least one file which means this test fails when it runs out."]
+    },
+    {
+        "tests": ["530-checker-lse2", "141-class-unload", "071-dexfile"],
+        "variant": "gcstress",
+        "bug": "b/111543628",
+        "description" : ["Test seems to timeout when run with gcstress due to slower unwinding by libbacktrace"]
+    },
+    {
+        "tests": ["712-varhandle-invocations"],
+        "variant": "interpreter & gcstress",
+        "bug": "b/111630237",
+        "description": ["Test timing out under gcstress possibly due to slower unwinding by libbacktrace"]
+    },
+    {
+        "tests": ["712-varhandle-invocations", "624-checker-stringops"],
+        "variant": "optimizing & gcstress | speed-profile & gcstress",
+        "bug": "b/111545159",
+        "description": ["These tests seem to expose some error with our gc when run in these configurations"]
+    },
+    {
+        "tests": ["021-string2"],
+        "variant": "jit & debuggable",
+        "bug": "b/109791792",
+        "description": ["Stack too big."]
     }
 ]

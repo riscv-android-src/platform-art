@@ -21,6 +21,7 @@
 #include "arch/context.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/histogram-inl.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/mem_map.h"
 #include "base/quasi_atomic.h"
@@ -30,10 +31,12 @@
 #include "cha.h"
 #include "debugger_interface.h"
 #include "dex/dex_file_loader.h"
+#include "dex/method_reference.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/bitmap-inl.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "handle.h"
+#include "instrumentation.h"
 #include "intern_table.h"
 #include "jit/jit.h"
 #include "jit/profiling_info.h"
@@ -167,11 +170,14 @@ JitCodeCache* JitCodeCache::Create(size_t initial_capacity,
 
   // Generating debug information is for using the Linux perf tool on
   // host which does not work with ashmem.
-  // Also, target linux does not support ashmem.
-  bool use_ashmem = !generate_debug_info && !kIsTargetLinux;
+  // Also, targets linux and fuchsia do not support ashmem.
+  bool use_ashmem = !generate_debug_info && !kIsTargetLinux && !kIsTargetFuchsia;
 
   // With 'perf', we want a 1-1 mapping between an address and a method.
-  bool garbage_collect_code = !generate_debug_info;
+  // We aren't able to keep method pointers live during the instrumentation method entry trampoline
+  // so we will just disable jit-gc if we are doing that.
+  bool garbage_collect_code = !generate_debug_info &&
+      !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled();
 
   // We need to have 32 bit offsets from method headers in code cache which point to things
   // in the data cache. If the maps are more than 4G apart, having multiple maps wouldn't work.
@@ -313,6 +319,17 @@ bool JitCodeCache::ContainsPc(const void* ptr) const {
   return code_map_->Begin() <= ptr && ptr < code_map_->End();
 }
 
+bool JitCodeCache::WillExecuteJitCode(ArtMethod* method) {
+  ScopedObjectAccess soa(art::Thread::Current());
+  ScopedAssertNoThreadSuspension sants(__FUNCTION__);
+  if (ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
+    return true;
+  } else if (method->GetEntryPointFromQuickCompiledCode() == GetQuickInstrumentationEntryPoint()) {
+    return FindCompiledCodeForInstrumentation(method) != nullptr;
+  }
+  return false;
+}
+
 bool JitCodeCache::ContainsMethod(ArtMethod* method) {
   MutexLock mu(Thread::Current(), lock_);
   if (UNLIKELY(method->IsNative())) {
@@ -343,6 +360,22 @@ const void* JitCodeCache::GetJniStubCode(ArtMethod* method) {
     }
   }
   return nullptr;
+}
+
+const void* JitCodeCache::FindCompiledCodeForInstrumentation(ArtMethod* method) {
+  // If jit-gc is still on we use the SavedEntryPoint field for doing that and so cannot use it to
+  // find the instrumentation entrypoint.
+  if (LIKELY(GetGarbageCollectCode())) {
+    return nullptr;
+  }
+  ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
+  if (info == nullptr) {
+    return nullptr;
+  }
+  // When GC is disabled for trampoline tracing we will use SavedEntrypoint to hold the actual
+  // jit-compiled version of the method. If jit-gc is disabled for other reasons this will just be
+  // nullptr.
+  return info->GetSavedEntryPoint();
 }
 
 class ScopedCodeCacheWrite : ScopedTrace {
@@ -461,21 +494,31 @@ static const uint8_t* FromStackMapToRoots(const uint8_t* stack_map_data) {
   return stack_map_data - ComputeRootTableSize(GetNumberOfRoots(stack_map_data));
 }
 
-static void FillRootTable(uint8_t* roots_data, Handle<mirror::ObjectArray<mirror::Object>> roots)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+static void DCheckRootsAreValid(Handle<mirror::ObjectArray<mirror::Object>> roots)
+    REQUIRES(!Locks::intern_table_lock_) REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!kIsDebugBuild) {
+    return;
+  }
+  const uint32_t length = roots->GetLength();
+  // Put all roots in `roots_data`.
+  for (uint32_t i = 0; i < length; ++i) {
+    ObjPtr<mirror::Object> object = roots->Get(i);
+    // Ensure the string is strongly interned. b/32995596
+    if (object->IsString()) {
+      ObjPtr<mirror::String> str = ObjPtr<mirror::String>::DownCast(object);
+      ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+      CHECK(class_linker->GetInternTable()->LookupStrong(Thread::Current(), str) != nullptr);
+    }
+  }
+}
+
+void JitCodeCache::FillRootTable(uint8_t* roots_data,
+                                 Handle<mirror::ObjectArray<mirror::Object>> roots) {
   GcRoot<mirror::Object>* gc_roots = reinterpret_cast<GcRoot<mirror::Object>*>(roots_data);
   const uint32_t length = roots->GetLength();
   // Put all roots in `roots_data`.
   for (uint32_t i = 0; i < length; ++i) {
     ObjPtr<mirror::Object> object = roots->Get(i);
-    if (kIsDebugBuild) {
-      // Ensure the string is strongly interned. b/32995596
-      if (object->IsString()) {
-        ObjPtr<mirror::String> str = reinterpret_cast<mirror::String*>(object.Ptr());
-        ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-        CHECK(class_linker->GetInternTable()->LookupStrong(Thread::Current(), str) != nullptr);
-      }
-    }
     gc_roots[i] = GcRoot<mirror::Object>(object);
   }
 }
@@ -701,11 +744,7 @@ void JitCodeCache::CopyInlineCacheInto(const InlineCache& ic,
 
 static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
   if (was_warm) {
-    // Don't do any read barrier, as the declaring class of `method` may
-    // be in the process of being GC'ed (reading the declaring class is done
-    // when DCHECKing the declaring class is resolved, which we know it is
-    // at this point).
-    method->SetPreviouslyWarm<kWithoutReadBarrier>();
+    method->SetPreviouslyWarm();
   }
   // We reset the counter to 1 so that the profile knows that the method was executed at least once.
   // This is required for layout purposes.
@@ -731,7 +770,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           bool has_should_deoptimize_flag,
                                           const ArenaSet<ArtMethod*>&
                                               cha_single_implementation_list) {
-  DCHECK_NE(stack_map != nullptr, method->IsNative());
   DCHECK(!method->IsNative() || !osr);
   size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
   // Ensure the header ends up at expected instruction alignment.
@@ -808,13 +846,17 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
           single_impl, method, method_header);
     }
 
+    if (!method->IsNative()) {
+      // We need to do this before grabbing the lock_ because it needs to be able to see the string
+      // InternTable. Native methods do not have roots.
+      DCheckRootsAreValid(roots);
+    }
+
     // The following needs to be guarded by cha_lock_ also. Otherwise it's
     // possible that the compiled code is considered invalidated by some class linking,
     // but below we still make the compiled code valid for the method.
     MutexLock mu(self, lock_);
     if (UNLIKELY(method->IsNative())) {
-      DCHECK(stack_map == nullptr);
-      DCHECK(roots_data == nullptr);
       auto it = jni_stubs_map_.find(JniStubKey(method));
       DCHECK(it != jni_stubs_map_.end())
           << "Entry inserted in NotifyCompilationOf() should be alive.";
@@ -978,6 +1020,8 @@ void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_meth
     // checks should always pass.
     DCHECK(!info->IsInUseByCompiler());
     new_method->SetProfilingInfo(info);
+    // Get rid of the old saved entrypoint if it is there.
+    info->SetSavedEntryPoint(nullptr);
     info->method_ = new_method;
   }
   // Update method_code_map_ to point to the new method.
@@ -1321,7 +1365,8 @@ void JitCodeCache::RemoveUnmarkedCode(Thread* self) {
       if (GetLiveBitmap()->Test(allocation)) {
         ++it;
       } else {
-        method_headers.insert(OatQuickMethodHeader::FromCodePointer(code_ptr));
+        OatQuickMethodHeader* header = OatQuickMethodHeader::FromCodePointer(code_ptr);
+        method_headers.insert(header);
         it = method_code_map_.erase(it);
       }
     }
@@ -1786,13 +1831,18 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
                                              const OatQuickMethodHeader* header) {
   DCHECK(!method->IsNative());
   ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
+  const void* method_entrypoint = method->GetEntryPointFromQuickCompiledCode();
   if ((profiling_info != nullptr) &&
       (profiling_info->GetSavedEntryPoint() == header->GetEntryPoint())) {
+    // When instrumentation is set, the actual entrypoint is the one in the profiling info.
+    method_entrypoint = profiling_info->GetSavedEntryPoint();
     // Prevent future uses of the compiled code.
     profiling_info->SetSavedEntryPoint(nullptr);
   }
 
-  if (method->GetEntryPointFromQuickCompiledCode() == header->GetEntryPoint()) {
+  // Clear the method counter if we are running jitted code since we might want to jit this again in
+  // the future.
+  if (method_entrypoint == header->GetEntryPoint()) {
     // The entrypoint is the one to invalidate, so we just update it to the interpreter entry point
     // and clear the counter to get the method Jitted again.
     Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(

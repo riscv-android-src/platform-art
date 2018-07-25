@@ -36,10 +36,9 @@ if [ -z "$ANDROID_HOST_OUT" ] ; then
   ANDROID_HOST_OUT=${OUT_DIR-$ANDROID_BUILD_TOP/out}/host/linux-x86
 fi
 
-android_root="/system"
-if [ -n "$ART_TEST_ANDROID_ROOT" ]; then
-  android_root="$ART_TEST_ANDROID_ROOT"
-fi
+# "Root" (actually "system") directory on device (in the case of
+# target testing).
+android_root=${ART_TEST_ANDROID_ROOT:-/system}
 
 java_lib_location="${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES"
 make_target_name="apache-harmony-jdwp-tests-hostdex"
@@ -48,6 +47,7 @@ vm_args=""
 art="$android_root/bin/art"
 art_debugee="sh $android_root/bin/art"
 args=$@
+chroot_option=
 debuggee_args="-Xcompiler-option --debuggable"
 device_dir="--device-dir=/data/local/tmp"
 # We use the art script on target to ensure the runner and the debuggee share the same
@@ -68,8 +68,7 @@ test="org.apache.harmony.jpda.tests.share.AllTests"
 mode="target"
 # Use JIT compiling by default.
 use_jit=true
-# Don't use chroot by default.
-use_chroot=false
+instant_jit=false
 variant_cmdline_parameter="--variant=X32"
 dump_command="/bin/true"
 # Timeout of JDWP test in ms.
@@ -112,15 +111,6 @@ while true; do
     # We don't care about jit with the RI
     use_jit=false
     shift
-  elif [[ "$1" == "--chroot" ]]; then
-    use_chroot=true
-    # Adjust settings for chroot environment.
-    art="/system/bin/art"
-    art_debugee="sh /system/bin/art"
-    vm_command="--vm-command=$art"
-    device_dir="--device-dir=/tmp"
-    # Shift the "--chroot" flag and its argument.
-    shift 2
   elif [[ $1 == --test-timeout-ms ]]; then
     # Remove the --test-timeout-ms from the arguments.
     args=${args/$1}
@@ -139,6 +129,11 @@ while true; do
     shift
   elif [[ $1 == -Ximage:* ]]; then
     image="$1"
+    shift
+  elif [[ "$1" == "--instant-jit" ]]; then
+    instant_jit=true
+    # Remove the --instant-jit from the arguments.
+    args=${args/$1}
     shift
   elif [[ "$1" == "--no-jit" ]]; then
     use_jit=false
@@ -202,10 +197,17 @@ while true; do
   fi
 done
 
-if $use_chroot && [[ $mode == "host" ]]; then
-  # Chroot-based testing is not supported on host.
-  echo "Cannot use --chroot with --mode=host"
-  exit 1
+if [[ $mode == "target" ]]; then
+  # Honor environment variable ART_TEST_CHROOT.
+  if [[ -n "$ART_TEST_CHROOT" ]]; then
+    # Set Vogar's `--chroot` option.
+    chroot_option="--chroot $ART_TEST_CHROOT"
+    # Adjust settings for chroot environment.
+    art="/system/bin/art"
+    art_debugee="sh /system/bin/art"
+    vm_command="--vm-command=$art"
+    device_dir="--device-dir=/tmp"
+  fi
 fi
 
 if [[ $has_gdb = "yes" ]]; then
@@ -255,6 +257,9 @@ else
     vm_args="${vm_args} --vm-arg -Djpda.settings.debuggeeAgentName=${with_jdwp_path}"
   fi
   vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --debuggable"
+  # we don't want to be trying to connect to adbconnection which might not have
+  # been built.
+  vm_args="${vm_args} --vm-arg -XjdwpProvider:none"
   # Make sure the debuggee doesn't clean up what the debugger has generated.
   art_debugee="$art_debugee --no-clean"
 fi
@@ -311,6 +316,10 @@ if $use_jit; then
   debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=quicken"
 fi
 
+if $instant_jit; then
+  debuggee_args="$debuggee_args -Xjitthreshold:0"
+fi
+
 if [[ $mode != "ri" ]]; then
   vm_args="$vm_args --vm-arg -Xusejit:$use_jit"
   debuggee_args="$debuggee_args -Xusejit:$use_jit"
@@ -331,6 +340,10 @@ if [[ $mode != "ri" ]]; then
   if [[ "x$with_jdwp_path" == "x" ]]; then
     # Need to enable the internal jdwp implementation.
     art_debugee="${art_debugee} -XjdwpProvider:internal"
+  else
+    # need to disable the jdwpProvider since we give the agent explicitly on the
+    # cmdline.
+    art_debugee="${art_debugee} -XjdwpProvider:none"
   fi
 else
   toolchain_args="--toolchain javac --language CUR"
@@ -341,6 +354,7 @@ vogar $vm_command \
       $vm_args \
       --verbose \
       $args \
+      $chroot_option \
       $device_dir \
       $image_compiler_option \
       --timeout 800 \
@@ -360,7 +374,9 @@ echo "Killing stalled dalvikvm processes..."
 if [[ $mode == "host" ]]; then
   pkill -9 -f /bin/dalvikvm
 else
-  adb shell pkill -9 -f /bin/dalvikvm
+  # Tests may run on older Android versions where pkill requires "-l SIGNAL"
+  # rather than "-SIGNAL".
+  adb shell pkill -l 9 -f /bin/dalvikvm
 fi
 echo "Done."
 

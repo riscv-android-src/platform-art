@@ -28,6 +28,9 @@
   V(AllocObjectResolved, void*, mirror::Class*) \
   V(AllocObjectInitialized, void*, mirror::Class*) \
   V(AllocObjectWithChecks, void*, mirror::Class*) \
+  /* NB Class argument is purely to match the ABI of the other object alloc entrypoints. It is */ \
+  /*    not actually used for anything. */ \
+  V(AllocStringObject, void*, mirror::Class*) \
   V(AllocStringFromBytes, void*, void*, int32_t, int32_t, int32_t) \
   V(AllocStringFromChars, void*, int32_t, int32_t, void*) \
   V(AllocStringFromString, void*, void*) \
@@ -134,6 +137,7 @@
   V(InvokeSuperTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokeVirtualTrampolineWithAccessCheck, void, uint32_t, void*) \
   V(InvokePolymorphic, void, uint32_t, void*) \
+  V(InvokeCustom, void, uint32_t, void*) \
 \
   V(TestSuspend, void, void) \
 \

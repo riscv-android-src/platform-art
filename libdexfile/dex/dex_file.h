@@ -27,8 +27,8 @@
 #include "base/iteration_range.h"
 #include "base/macros.h"
 #include "base/value_object.h"
+#include "class_iterator.h"
 #include "dex_file_types.h"
-#include "dex_instruction_iterator.h"
 #include "hidden_api_access_flags.h"
 #include "jni.h"
 #include "modifiers.h"
@@ -37,6 +37,7 @@ namespace art {
 
 class ClassDataItemIterator;
 class CompactDexFile;
+class DexInstructionIterator;
 enum InvokeType : uint32_t;
 class MemMap;
 class OatDexFile;
@@ -736,6 +737,8 @@ class DexFile {
     return DataBegin() + call_site_id.data_off_;
   }
 
+  dex::ProtoIndex GetProtoIndexForCallSite(uint32_t call_site_idx) const;
+
   static const TryItem* GetTryItems(const DexInstructionIterator& code_item_end, uint32_t offset);
 
   // Get the base of the encoded data for the given DexCode.
@@ -1009,8 +1012,10 @@ class DexFile {
     return container_.get();
   }
 
-  // Changes the dex file pointed to by class_it to not have any hiddenapi flags.
-  static void UnHideAccessFlags(ClassDataItemIterator& class_it);
+  // Changes the dex class data pointed to by data_ptr it to not have any hiddenapi flags.
+  static void UnHideAccessFlags(uint8_t* data_ptr, uint32_t new_access_flags, bool is_method);
+
+  inline IterationRange<ClassIterator> GetClasses() const;
 
  protected:
   // First Dex format version supporting default methods.
@@ -1194,6 +1199,9 @@ class ClassDataItemIterator {
   }
   bool IsAtMethod() const {
     return pos_ >= EndOfInstanceFieldsPos();
+  }
+  bool IsAtVirtualMethod() const {
+    return pos_ >= EndOfDirectMethodsPos();
   }
   bool HasNextStaticField() const {
     return pos_ < EndOfStaticFieldsPos();

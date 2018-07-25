@@ -102,11 +102,13 @@ static std::unique_ptr<const DexFile> OpenDexFileBase64(const char* base64,
   // read dex
   std::vector<std::unique_ptr<const DexFile>> tmp;
   const DexFileLoader dex_file_loader;
+  DexFileLoaderErrorCode error_code;
   bool success = dex_file_loader.OpenAll(dex_bytes.get(),
                                          length,
                                          location,
                                          /* verify */ true,
                                          /* verify_checksum */ true,
+                                         &error_code,
                                          error_msg,
                                          &tmp);
   CHECK(success) << *error_msg;
@@ -174,6 +176,21 @@ TEST_F(DexFileVerifierTest, MethodId) {
         method_id->name_idx_ = dex::StringIndex(0xFF);
       },
       "Bad index for method flags verification");
+}
+
+TEST_F(DexFileVerifierTest, InitCachingWithUnicode) {
+  static const char kInitWithUnicode[] =
+      "ZGV4CjAzNQDhN60rgMnSK13MoRscTuD+NZe7f6rIkHAAAgAAcAAAAHhWNBIAAAAAAAAAAGwBAAAJ"
+      "AAAAcAAAAAMAAACUAAAAAQAAAKAAAAAAAAAAAAAAAAIAAACsAAAAAQAAALwAAAAkAQAA3AAAANwA"
+      "AADgAAAA5gAAAO4AAAD1AAAAAQEAABUBAAAgAQAAIwEAAAQAAAAFAAAABwAAAAcAAAACAAAAAAAA"
+      "AAAAAAACAAAAAQAAAAIAAAAAAAAAAAAAAAEAAAAAAAAABgAAAAAAAABgAQAAAAAAAAHAgAACwIDA"
+      "gAAGPGluaXQ+AAVIZWxsbwAKTFRlc3RTeW5jOwASTGphdmEvbGFuZy9PYmplY3Q7AAlNYWluLmph"
+      "dmEAAVYABVdvcmxkAAAAAAAAAAYABw4AAAAACgABAAEAAAAwAQAADAAAAHAQAQAJABoBAwAaAggA"
+      "GgMAABoEAQAOAAAAAQAAgIAEuAIAAAwAAAAAAAAAAQAAAAAAAAABAAAACQAAAHAAAAACAAAAAwAA"
+      "AJQAAAADAAAAAQAAAKAAAAAFAAAAAgAAAKwAAAAGAAAAAQAAALwAAAACIAAACQAAANwAAAADEAAA"
+      "AQAAACwBAAADIAAAAQAAADABAAABIAAAAQAAADgBAAAAIAAAAQAAAGABAAAAEAAAAQAAAGwBAAA=";
+  // Just ensure it verifies w/o modification.
+  VerifyModification(kInitWithUnicode, "init_with_unicode", [](DexFile*) {}, nullptr);
 }
 
 // Method flags test class generated from the following smali code. The declared-synchronized

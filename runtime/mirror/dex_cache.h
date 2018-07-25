@@ -21,16 +21,20 @@
 #include "base/bit_utils.h"
 #include "base/mutex.h"
 #include "dex/dex_file_types.h"
+#include "gc_root-inl.h"
 #include "object.h"
 #include "object_array.h"
 
 namespace art {
 
+namespace linker {
+class ImageWriter;
+}  // namespace linker
+
 class ArtField;
 class ArtMethod;
 struct DexCacheOffsets;
 class DexFile;
-class ImageWriter;
 union JValue;
 class LinearAlloc;
 class Thread;
@@ -319,8 +323,8 @@ class MANAGED DexCache FINAL : public Object {
   // because multiple threads can invoke the bootstrap method each
   // producing a call site, but the method handle invocation on the
   // call site must be on a common agreed value.
-  CallSite* SetResolvedCallSite(uint32_t call_site_idx, CallSite* resolved) WARN_UNUSED
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<CallSite> SetResolvedCallSite(uint32_t call_site_idx, ObjPtr<CallSite> resolved)
+      REQUIRES_SHARED(Locks::mutator_lock_) WARN_UNUSED;
 
   StringDexCacheType* GetStrings() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_) {
     return GetFieldPtr64<StringDexCacheType*>(StringsOffset());
@@ -538,6 +542,7 @@ class MANAGED DexCache FINAL : public Object {
   uint32_t num_strings_;                // Number of elements in the strings_ array.
 
   friend struct art::DexCacheOffsets;  // for verifying offset information
+  friend class linker::ImageWriter;
   friend class Object;  // For VisitReferences
   DISALLOW_IMPLICIT_CONSTRUCTORS(DexCache);
 };

@@ -912,7 +912,11 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
               return utf.c_str();
             }
           }
-          env->ExceptionClear();
+          if (env->ExceptionCheck()) {
+            // We can't do much better logging, really. So leave it with a Describe.
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+          }
           return "(Error calling toString)";
         }
         return "null";
@@ -1074,7 +1078,7 @@ static void* FindCodeForNativeMethodInAgents(ArtMethod* m) REQUIRES_SHARED(Locks
 
 void* JavaVMExt::FindCodeForNativeMethod(ArtMethod* m) {
   CHECK(m->IsNative());
-  mirror::Class* c = m->GetDeclaringClass();
+  ObjPtr<mirror::Class> c = m->GetDeclaringClass();
   // If this is a static method, it could be called before the class has been initialized.
   CHECK(c->IsInitializing()) << c->GetStatus() << " " << m->PrettyMethod();
   std::string detail;

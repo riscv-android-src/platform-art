@@ -22,6 +22,7 @@
 #include "base/bit_vector-inl.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "code_generator.h"
 #include "common_dominator.h"
 #include "intrinsics.h"
@@ -40,9 +41,8 @@ static constexpr bool kEnableFloatingPointStaticEvaluation = (FLT_EVAL_METHOD ==
 void HGraph::InitializeInexactObjectRTI(VariableSizedHandleScope* handles) {
   ScopedObjectAccess soa(Thread::Current());
   // Create the inexact Object reference type and store it in the HGraph.
-  ClassLinker* linker = Runtime::Current()->GetClassLinker();
   inexact_object_rti_ = ReferenceTypeInfo::Create(
-      handles->NewHandle(linker->GetClassRoot(ClassLinker::kJavaLangObject)),
+      handles->NewHandle(GetClassRoot<mirror::Object>()),
       /* is_exact */ false);
 }
 
@@ -1121,6 +1121,23 @@ void HEnvironment::RemoveAsUserOfInput(size_t index) const {
   user->FixUpUserRecordsAfterEnvUseRemoval(before_env_use_node);
 }
 
+void HEnvironment::ReplaceInput(HInstruction* replacement, size_t index) {
+  const HUserRecord<HEnvironment*>& env_use_record = vregs_[index];
+  HInstruction* orig_instr = env_use_record.GetInstruction();
+
+  DCHECK(orig_instr != replacement);
+
+  HUseList<HEnvironment*>::iterator before_use_node = env_use_record.GetBeforeUseNode();
+  // Note: fixup_end remains valid across splice_after().
+  auto fixup_end = replacement->env_uses_.empty() ? replacement->env_uses_.begin()
+                                                  : ++replacement->env_uses_.begin();
+  replacement->env_uses_.splice_after(replacement->env_uses_.before_begin(),
+                                      env_use_record.GetInstruction()->env_uses_,
+                                      before_use_node);
+  replacement->FixUpUserRecordsAfterEnvUseInsertion(fixup_end);
+  orig_instr->FixUpUserRecordsAfterEnvUseRemoval(before_use_node);
+}
+
 HInstruction* HInstruction::GetNextDisregardingMoves() const {
   HInstruction* next = GetNext();
   while (next != nullptr && next->IsParallelMove()) {
@@ -1283,6 +1300,19 @@ void HInstruction::ReplaceUsesDominatedBy(HInstruction* dominator, HInstruction*
     // Increment `it` now because `*it` may disappear thanks to user->ReplaceInput().
     ++it;
     if (dominator->StrictlyDominates(user)) {
+      user->ReplaceInput(replacement, index);
+    }
+  }
+}
+
+void HInstruction::ReplaceEnvUsesDominatedBy(HInstruction* dominator, HInstruction* replacement) {
+  const HUseList<HEnvironment*>& uses = GetEnvUses();
+  for (auto it = uses.begin(), end = uses.end(); it != end; /* ++it below */) {
+    HEnvironment* user = it->GetUser();
+    size_t index = it->GetIndex();
+    // Increment `it` now because `*it` may disappear thanks to user->ReplaceInput().
+    ++it;
+    if (dominator->StrictlyDominates(user->GetHolder())) {
       user->ReplaceInput(replacement, index);
     }
   }
@@ -1949,6 +1979,11 @@ bool HBasicBlock::IsSingleTryBoundary() const {
 
 bool HBasicBlock::EndsWithControlFlowInstruction() const {
   return !GetInstructions().IsEmpty() && GetLastInstruction()->IsControlFlow();
+}
+
+bool HBasicBlock::EndsWithReturn() const {
+  return !GetInstructions().IsEmpty() &&
+      (GetLastInstruction()->IsReturn() || GetLastInstruction()->IsReturnVoid());
 }
 
 bool HBasicBlock::EndsWithIf() const {
@@ -2764,6 +2799,14 @@ void HInstruction::SetReferenceTypeInfo(ReferenceTypeInfo rti) {
   SetPackedFlag<kFlagReferenceTypeIsExact>(rti.IsExact());
 }
 
+bool HBoundType::InstructionDataEquals(const HInstruction* other) const {
+  const HBoundType* other_bt = other->AsBoundType();
+  ScopedObjectAccess soa(Thread::Current());
+  return GetUpperBound().IsEqual(other_bt->GetUpperBound()) &&
+         GetUpperCanBeNull() == other_bt->GetUpperCanBeNull() &&
+         CanBeNull() == other_bt->CanBeNull();
+}
+
 void HBoundType::SetUpperBound(const ReferenceTypeInfo& upper_bound, bool can_be_null) {
   if (kIsDebugBuild) {
     ScopedObjectAccess soa(Thread::Current());
@@ -2849,8 +2892,7 @@ void HInvoke::SetIntrinsic(Intrinsics intrinsic,
 }
 
 bool HNewInstance::IsStringAlloc() const {
-  ScopedObjectAccess soa(Thread::Current());
-  return GetReferenceTypeInfo().IsStringClass();
+  return GetEntrypoint() == kQuickAllocStringObject;
 }
 
 bool HInvoke::NeedsEnvironment() const {
@@ -2888,12 +2930,12 @@ std::ostream& operator<<(std::ostream& os, HInvokeStaticOrDirect::MethodLoadKind
       return os << "Recursive";
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative:
       return os << "BootImageLinkTimePcRelative";
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      return os << "DirectAddress";
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo:
       return os << "BootImageRelRo";
     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry:
       return os << "BssEntry";
+    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+      return os << "JitDirectAddress";
     case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall:
       return os << "RuntimeCall";
     default:
@@ -2925,8 +2967,8 @@ bool HLoadClass::InstructionDataEquals(const HInstruction* other) const {
     return false;
   }
   switch (GetLoadKind()) {
-    case LoadKind::kBootImageAddress:
     case LoadKind::kBootImageRelRo:
+    case LoadKind::kJitBootImageAddress:
     case LoadKind::kJitTableAddress: {
       ScopedObjectAccess soa(Thread::Current());
       return GetClass().Get() == other_load_class->GetClass().Get();
@@ -2943,12 +2985,12 @@ std::ostream& operator<<(std::ostream& os, HLoadClass::LoadKind rhs) {
       return os << "ReferrersClass";
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
       return os << "BootImageLinkTimePcRelative";
-    case HLoadClass::LoadKind::kBootImageAddress:
-      return os << "BootImageAddress";
     case HLoadClass::LoadKind::kBootImageRelRo:
       return os << "BootImageRelRo";
     case HLoadClass::LoadKind::kBssEntry:
       return os << "BssEntry";
+    case HLoadClass::LoadKind::kJitBootImageAddress:
+      return os << "JitBootImageAddress";
     case HLoadClass::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
     case HLoadClass::LoadKind::kRuntimeCall:
@@ -2968,8 +3010,8 @@ bool HLoadString::InstructionDataEquals(const HInstruction* other) const {
     return false;
   }
   switch (GetLoadKind()) {
-    case LoadKind::kBootImageAddress:
     case LoadKind::kBootImageRelRo:
+    case LoadKind::kJitBootImageAddress:
     case LoadKind::kJitTableAddress: {
       ScopedObjectAccess soa(Thread::Current());
       return GetString().Get() == other_load_string->GetString().Get();
@@ -2983,12 +3025,12 @@ std::ostream& operator<<(std::ostream& os, HLoadString::LoadKind rhs) {
   switch (rhs) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
       return os << "BootImageLinkTimePcRelative";
-    case HLoadString::LoadKind::kBootImageAddress:
-      return os << "BootImageAddress";
     case HLoadString::LoadKind::kBootImageRelRo:
       return os << "BootImageRelRo";
     case HLoadString::LoadKind::kBssEntry:
       return os << "BssEntry";
+    case HLoadString::LoadKind::kJitBootImageAddress:
+      return os << "JitBootImageAddress";
     case HLoadString::LoadKind::kJitTableAddress:
       return os << "JitTableAddress";
     case HLoadString::LoadKind::kRuntimeCall:

@@ -23,6 +23,7 @@
 #include "base/quasi_atomic.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
+#include "class_root.h"
 #include "debugger.h"
 #include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/heap_bitmap-inl.h"
@@ -128,13 +129,14 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
 
 void ConcurrentCopying::MarkHeapReference(mirror::HeapReference<mirror::Object>* field,
                                           bool do_atomic_update) {
+  Thread* const self = Thread::Current();
   if (UNLIKELY(do_atomic_update)) {
     // Used to mark the referent in DelayReferenceReferent in transaction mode.
     mirror::Object* from_ref = field->AsMirrorPtr();
     if (from_ref == nullptr) {
       return;
     }
-    mirror::Object* to_ref = Mark(from_ref);
+    mirror::Object* to_ref = Mark(self, from_ref);
     if (from_ref != to_ref) {
       do {
         if (field->AsMirrorPtr() != from_ref) {
@@ -147,7 +149,7 @@ void ConcurrentCopying::MarkHeapReference(mirror::HeapReference<mirror::Object>*
     // Used for preserving soft references, should be OK to not have a CAS here since there should be
     // no other threads which can trigger read barriers on the same referent during reference
     // processing.
-    field->Assign(Mark(field->AsMirrorPtr()));
+    field->Assign(Mark(self, field->AsMirrorPtr()));
   }
 }
 
@@ -299,6 +301,8 @@ void ConcurrentCopying::InitializePhase() {
   immune_spaces_.Reset();
   bytes_moved_.store(0, std::memory_order_relaxed);
   objects_moved_.store(0, std::memory_order_relaxed);
+  bytes_moved_gc_thread_ = 0;
+  objects_moved_gc_thread_ = 0;
   GcCause gc_cause = GetCurrentIteration()->GetGcCause();
   if (gc_cause == kGcCauseExplicit ||
       gc_cause == kGcCauseCollectorTransition ||
@@ -369,11 +373,12 @@ class ConcurrentCopying::ThreadFlipVisitor : public Closure, public RootVisitor 
                   size_t count,
                   const RootInfo& info ATTRIBUTE_UNUSED)
       REQUIRES_SHARED(Locks::mutator_lock_) {
+    Thread* self = Thread::Current();
     for (size_t i = 0; i < count; ++i) {
       mirror::Object** root = roots[i];
       mirror::Object* ref = *root;
       if (ref != nullptr) {
-        mirror::Object* to_ref = concurrent_copying_->Mark(ref);
+        mirror::Object* to_ref = concurrent_copying_->Mark(self, ref);
         if (to_ref != ref) {
           *root = to_ref;
         }
@@ -385,11 +390,12 @@ class ConcurrentCopying::ThreadFlipVisitor : public Closure, public RootVisitor 
                   size_t count,
                   const RootInfo& info ATTRIBUTE_UNUSED)
       REQUIRES_SHARED(Locks::mutator_lock_) {
+    Thread* self = Thread::Current();
     for (size_t i = 0; i < count; ++i) {
       mirror::CompressedReference<mirror::Object>* const root = roots[i];
       if (!root->IsNull()) {
         mirror::Object* ref = root->AsMirrorPtr();
-        mirror::Object* to_ref = concurrent_copying_->Mark(ref);
+        mirror::Object* to_ref = concurrent_copying_->Mark(self, ref);
         if (to_ref != ref) {
           root->Assign(to_ref);
         }
@@ -451,7 +457,7 @@ class ConcurrentCopying::FlipCallback : public Closure {
     // This is safe since single threaded behavior should mean FillDummyObject does not
     // happen when java_lang_Object_ is null.
     if (WellKnownClasses::java_lang_Object != nullptr) {
-      cc->java_lang_Object_ = down_cast<mirror::Class*>(cc->Mark(
+      cc->java_lang_Object_ = down_cast<mirror::Class*>(cc->Mark(thread,
           WellKnownClasses::ToClass(WellKnownClasses::java_lang_Object).Ptr()));
     } else {
       cc->java_lang_Object_ = nullptr;
@@ -1023,10 +1029,10 @@ void ConcurrentCopying::DisableMarking() {
   mark_stack_mode_.store(kMarkStackModeOff, std::memory_order_seq_cst);
 }
 
-void ConcurrentCopying::PushOntoFalseGrayStack(mirror::Object* ref) {
+void ConcurrentCopying::PushOntoFalseGrayStack(Thread* const self, mirror::Object* ref) {
   CHECK(kUseBakerReadBarrier);
   DCHECK(ref != nullptr);
-  MutexLock mu(Thread::Current(), mark_stack_lock_);
+  MutexLock mu(self, mark_stack_lock_);
   false_gray_stack_.push_back(ref);
 }
 
@@ -1069,10 +1075,9 @@ void ConcurrentCopying::ExpandGcMarkStack() {
   DCHECK(!gc_mark_stack_->IsFull());
 }
 
-void ConcurrentCopying::PushOntoMarkStack(mirror::Object* to_ref) {
+void ConcurrentCopying::PushOntoMarkStack(Thread* const self, mirror::Object* to_ref) {
   CHECK_EQ(is_mark_stack_push_disallowed_.load(std::memory_order_relaxed), 0)
       << " " << to_ref << " " << mirror::Object::PrettyTypeOf(to_ref);
-  Thread* self = Thread::Current();  // TODO: pass self as an argument from call sites?
   CHECK(thread_running_gc_ != nullptr);
   MarkStackMode mark_stack_mode = mark_stack_mode_.load(std::memory_order_relaxed);
   if (LIKELY(mark_stack_mode == kMarkStackModeThreadLocal)) {
@@ -1408,10 +1413,10 @@ void ConcurrentCopying::ProcessMarkStack() {
 }
 
 bool ConcurrentCopying::ProcessMarkStackOnce() {
-  Thread* self = Thread::Current();
-  CHECK(thread_running_gc_ != nullptr);
-  CHECK(self == thread_running_gc_);
-  CHECK(self->GetThreadLocalMarkStack() == nullptr);
+  DCHECK(thread_running_gc_ != nullptr);
+  Thread* const self = Thread::Current();
+  DCHECK(self == thread_running_gc_);
+  DCHECK(thread_running_gc_->GetThreadLocalMarkStack() == nullptr);
   size_t count = 0;
   MarkStackMode mark_stack_mode = mark_stack_mode_.load(std::memory_order_relaxed);
   if (mark_stack_mode == kMarkStackModeThreadLocal) {
@@ -1431,14 +1436,14 @@ bool ConcurrentCopying::ProcessMarkStackOnce() {
     IssueEmptyCheckpoint();
     // Process the shared GC mark stack with a lock.
     {
-      MutexLock mu(self, mark_stack_lock_);
+      MutexLock mu(thread_running_gc_, mark_stack_lock_);
       CHECK(revoked_mark_stacks_.empty());
     }
     while (true) {
       std::vector<mirror::Object*> refs;
       {
         // Copy refs with lock. Note the number of refs should be small.
-        MutexLock mu(self, mark_stack_lock_);
+        MutexLock mu(thread_running_gc_, mark_stack_lock_);
         if (gc_mark_stack_->IsEmpty()) {
           break;
         }
@@ -1457,7 +1462,7 @@ bool ConcurrentCopying::ProcessMarkStackOnce() {
     CHECK_EQ(static_cast<uint32_t>(mark_stack_mode),
              static_cast<uint32_t>(kMarkStackModeGcExclusive));
     {
-      MutexLock mu(self, mark_stack_lock_);
+      MutexLock mu(thread_running_gc_, mark_stack_lock_);
       CHECK(revoked_mark_stacks_.empty());
     }
     // Process the GC mark stack in the exclusive mode. No need to take the lock.
@@ -1480,7 +1485,7 @@ size_t ConcurrentCopying::ProcessThreadLocalMarkStacks(bool disable_weak_ref_acc
   size_t count = 0;
   std::vector<accounting::AtomicStack<mirror::Object>*> mark_stacks;
   {
-    MutexLock mu(Thread::Current(), mark_stack_lock_);
+    MutexLock mu(thread_running_gc_, mark_stack_lock_);
     // Make a copy of the mark stack vector.
     mark_stacks = revoked_mark_stacks_;
     revoked_mark_stacks_.clear();
@@ -1492,7 +1497,7 @@ size_t ConcurrentCopying::ProcessThreadLocalMarkStacks(bool disable_weak_ref_acc
       ++count;
     }
     {
-      MutexLock mu(Thread::Current(), mark_stack_lock_);
+      MutexLock mu(thread_running_gc_, mark_stack_lock_);
       if (pooled_mark_stacks_.size() >= kMarkStackPoolSize) {
         // The pool has enough. Delete it.
         delete mark_stack;
@@ -1546,7 +1551,7 @@ inline void ConcurrentCopying::ProcessMarkStackRef(mirror::Object* to_ref) {
     // above IsInToSpace() evaluates to true and we change the color from gray to white here in this
     // else block.
     if (kUseBakerReadBarrier) {
-      bool success = to_ref->AtomicSetReadBarrierState</*kCasRelease*/true>(
+      bool success = to_ref->AtomicSetReadBarrierState<std::memory_order_release>(
           ReadBarrier::GrayState(),
           ReadBarrier::WhiteState());
       DCHECK(success) << "Must succeed as we won the race.";
@@ -1595,9 +1600,9 @@ class ConcurrentCopying::DisableWeakRefAccessCallback : public Closure {
 
 void ConcurrentCopying::SwitchToSharedMarkStackMode() {
   Thread* self = Thread::Current();
-  CHECK(thread_running_gc_ != nullptr);
-  CHECK_EQ(self, thread_running_gc_);
-  CHECK(self->GetThreadLocalMarkStack() == nullptr);
+  DCHECK(thread_running_gc_ != nullptr);
+  DCHECK(self == thread_running_gc_);
+  DCHECK(thread_running_gc_->GetThreadLocalMarkStack() == nullptr);
   MarkStackMode before_mark_stack_mode = mark_stack_mode_.load(std::memory_order_relaxed);
   CHECK_EQ(static_cast<uint32_t>(before_mark_stack_mode),
            static_cast<uint32_t>(kMarkStackModeThreadLocal));
@@ -1613,9 +1618,9 @@ void ConcurrentCopying::SwitchToSharedMarkStackMode() {
 
 void ConcurrentCopying::SwitchToGcExclusiveMarkStackMode() {
   Thread* self = Thread::Current();
-  CHECK(thread_running_gc_ != nullptr);
-  CHECK_EQ(self, thread_running_gc_);
-  CHECK(self->GetThreadLocalMarkStack() == nullptr);
+  DCHECK(thread_running_gc_ != nullptr);
+  DCHECK(self == thread_running_gc_);
+  DCHECK(thread_running_gc_->GetThreadLocalMarkStack() == nullptr);
   MarkStackMode before_mark_stack_mode = mark_stack_mode_.load(std::memory_order_relaxed);
   CHECK_EQ(static_cast<uint32_t>(before_mark_stack_mode),
            static_cast<uint32_t>(kMarkStackModeShared));
@@ -1628,14 +1633,14 @@ void ConcurrentCopying::SwitchToGcExclusiveMarkStackMode() {
 
 void ConcurrentCopying::CheckEmptyMarkStack() {
   Thread* self = Thread::Current();
-  CHECK(thread_running_gc_ != nullptr);
-  CHECK_EQ(self, thread_running_gc_);
-  CHECK(self->GetThreadLocalMarkStack() == nullptr);
+  DCHECK(thread_running_gc_ != nullptr);
+  DCHECK(self == thread_running_gc_);
+  DCHECK(thread_running_gc_->GetThreadLocalMarkStack() == nullptr);
   MarkStackMode mark_stack_mode = mark_stack_mode_.load(std::memory_order_relaxed);
   if (mark_stack_mode == kMarkStackModeThreadLocal) {
     // Thread-local mark stack mode.
     RevokeThreadLocalMarkStacks(false, nullptr);
-    MutexLock mu(Thread::Current(), mark_stack_lock_);
+    MutexLock mu(thread_running_gc_, mark_stack_lock_);
     if (!revoked_mark_stacks_.empty()) {
       for (accounting::AtomicStack<mirror::Object>* mark_stack : revoked_mark_stacks_) {
         while (!mark_stack->IsEmpty()) {
@@ -1654,7 +1659,7 @@ void ConcurrentCopying::CheckEmptyMarkStack() {
     }
   } else {
     // Shared, GC-exclusive, or off.
-    MutexLock mu(Thread::Current(), mark_stack_lock_);
+    MutexLock mu(thread_running_gc_, mark_stack_lock_);
     CHECK(gc_mark_stack_->IsEmpty());
     CHECK(revoked_mark_stacks_.empty());
   }
@@ -1754,9 +1759,9 @@ void ConcurrentCopying::ReclaimPhase() {
     const uint64_t from_objects = region_space_->GetObjectsAllocatedInFromSpace();
     const uint64_t unevac_from_bytes = region_space_->GetBytesAllocatedInUnevacFromSpace();
     const uint64_t unevac_from_objects = region_space_->GetObjectsAllocatedInUnevacFromSpace();
-    uint64_t to_bytes = bytes_moved_.load(std::memory_order_seq_cst);
+    uint64_t to_bytes = bytes_moved_.load(std::memory_order_seq_cst) + bytes_moved_gc_thread_;
     cumulative_bytes_moved_.fetch_add(to_bytes, std::memory_order_relaxed);
-    uint64_t to_objects = objects_moved_.load(std::memory_order_seq_cst);
+    uint64_t to_objects = objects_moved_.load(std::memory_order_seq_cst) + objects_moved_gc_thread_;
     cumulative_objects_moved_.fetch_add(to_objects, std::memory_order_relaxed);
     if (kEnableFromSpaceAccountingCheck) {
       CHECK_EQ(from_space_num_objects_at_first_pause_, from_objects + unevac_from_objects);
@@ -1817,7 +1822,7 @@ void ConcurrentCopying::ReclaimPhase() {
 
 std::string ConcurrentCopying::DumpReferenceInfo(mirror::Object* ref,
                                                  const char* ref_name,
-                                                 std::string indent) {
+                                                 const char* indent) {
   std::ostringstream oss;
   oss << indent << heap_->GetVerification()->DumpObjectInfo(ref, ref_name) << '\n';
   if (ref != nullptr) {
@@ -1841,13 +1846,13 @@ std::string ConcurrentCopying::DumpHeapReference(mirror::Object* obj,
                                                  MemberOffset offset,
                                                  mirror::Object* ref) {
   std::ostringstream oss;
-  std::string indent = "  ";
-  oss << indent << "Invalid reference: ref=" << ref
+  constexpr const char* kIndent = "  ";
+  oss << kIndent << "Invalid reference: ref=" << ref
       << " referenced from: object=" << obj << " offset= " << offset << '\n';
   // Information about `obj`.
-  oss << DumpReferenceInfo(obj, "obj", indent) << '\n';
+  oss << DumpReferenceInfo(obj, "obj", kIndent) << '\n';
   // Information about `ref`.
-  oss << DumpReferenceInfo(ref, "ref", indent);
+  oss << DumpReferenceInfo(ref, "ref", kIndent);
   return oss.str();
 }
 
@@ -1923,10 +1928,10 @@ class RootPrinter {
 
 std::string ConcurrentCopying::DumpGcRoot(mirror::Object* ref) {
   std::ostringstream oss;
-  std::string indent = "  ";
-  oss << indent << "Invalid GC root: ref=" << ref << '\n';
+  constexpr const char* kIndent = "  ";
+  oss << kIndent << "Invalid GC root: ref=" << ref << '\n';
   // Information about `ref`.
-  oss << DumpReferenceInfo(ref, "ref", indent);
+  oss << DumpReferenceInfo(ref, "ref", kIndent);
   return oss.str();
 }
 
@@ -2074,8 +2079,8 @@ void ConcurrentCopying::AssertToSpaceInvariantInNonMovingSpace(mirror::Object* o
 // Used to scan ref fields of an object.
 class ConcurrentCopying::RefFieldsVisitor {
  public:
-  explicit RefFieldsVisitor(ConcurrentCopying* collector)
-      : collector_(collector) {}
+  explicit RefFieldsVisitor(ConcurrentCopying* collector, Thread* const thread)
+      : collector_(collector), thread_(thread) {}
 
   void operator()(mirror::Object* obj, MemberOffset offset, bool /* is_static */)
       const ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_)
@@ -2100,11 +2105,12 @@ class ConcurrentCopying::RefFieldsVisitor {
   void VisitRoot(mirror::CompressedReference<mirror::Object>* root) const
       ALWAYS_INLINE
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    collector_->MarkRoot</*kGrayImmuneObject*/false>(root);
+    collector_->MarkRoot</*kGrayImmuneObject*/false>(thread_, root);
   }
 
  private:
   ConcurrentCopying* const collector_;
+  Thread* const thread_;
 };
 
 inline void ConcurrentCopying::Scan(mirror::Object* to_ref) {
@@ -2116,12 +2122,12 @@ inline void ConcurrentCopying::Scan(mirror::Object* to_ref) {
   }
   DCHECK(!region_space_->IsInFromSpace(to_ref));
   DCHECK_EQ(Thread::Current(), thread_running_gc_);
-  RefFieldsVisitor visitor(this);
+  RefFieldsVisitor visitor(this, thread_running_gc_);
   // Disable the read barrier for a performance reason.
   to_ref->VisitReferences</*kVisitNativeRoots*/true, kDefaultVerifyFlags, kWithoutReadBarrier>(
       visitor, visitor);
   if (kDisallowReadBarrierDuringScan && !Runtime::Current()->IsActiveTransaction()) {
-    Thread::Current()->ModifyDebugDisallowReadBarrier(-1);
+    thread_running_gc_->ModifyDebugDisallowReadBarrier(-1);
   }
 }
 
@@ -2130,6 +2136,7 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
   mirror::Object* ref = obj->GetFieldObject<
       mirror::Object, kVerifyNone, kWithoutReadBarrier, false>(offset);
   mirror::Object* to_ref = Mark</*kGrayImmuneObject*/false, /*kFromGCThread*/true>(
+      thread_running_gc_,
       ref,
       /*holder*/ obj,
       offset);
@@ -2146,19 +2153,22 @@ inline void ConcurrentCopying::Process(mirror::Object* obj, MemberOffset offset)
       break;
     }
     // Use release CAS to make sure threads reading the reference see contents of copied objects.
-  } while (!obj->CasFieldWeakReleaseObjectWithoutWriteBarrier<false, false, kVerifyNone>(
+  } while (!obj->CasFieldObjectWithoutWriteBarrier<false, false, kVerifyNone>(
       offset,
       expected_ref,
-      new_ref));
+      new_ref,
+      CASMode::kWeak,
+      std::memory_order_release));
 }
 
 // Process some roots.
 inline void ConcurrentCopying::VisitRoots(
     mirror::Object*** roots, size_t count, const RootInfo& info ATTRIBUTE_UNUSED) {
+  Thread* const self = Thread::Current();
   for (size_t i = 0; i < count; ++i) {
     mirror::Object** root = roots[i];
     mirror::Object* ref = *root;
-    mirror::Object* to_ref = Mark(ref);
+    mirror::Object* to_ref = Mark(self, ref);
     if (to_ref == ref) {
       continue;
     }
@@ -2175,10 +2185,11 @@ inline void ConcurrentCopying::VisitRoots(
 }
 
 template<bool kGrayImmuneObject>
-inline void ConcurrentCopying::MarkRoot(mirror::CompressedReference<mirror::Object>* root) {
+inline void ConcurrentCopying::MarkRoot(Thread* const self,
+                                        mirror::CompressedReference<mirror::Object>* root) {
   DCHECK(!root->IsNull());
   mirror::Object* const ref = root->AsMirrorPtr();
-  mirror::Object* to_ref = Mark<kGrayImmuneObject>(ref);
+  mirror::Object* to_ref = Mark<kGrayImmuneObject>(self, ref);
   if (to_ref != ref) {
     auto* addr = reinterpret_cast<Atomic<mirror::CompressedReference<mirror::Object>>*>(root);
     auto expected_ref = mirror::CompressedReference<mirror::Object>::FromMirrorPtr(ref);
@@ -2196,11 +2207,12 @@ inline void ConcurrentCopying::MarkRoot(mirror::CompressedReference<mirror::Obje
 inline void ConcurrentCopying::VisitRoots(
     mirror::CompressedReference<mirror::Object>** roots, size_t count,
     const RootInfo& info ATTRIBUTE_UNUSED) {
+  Thread* const self = Thread::Current();
   for (size_t i = 0; i < count; ++i) {
     mirror::CompressedReference<mirror::Object>* const root = roots[i];
     if (!root->IsNull()) {
       // kGrayImmuneObject is true because this is used for the thread flip.
-      MarkRoot</*kGrayImmuneObject*/true>(root);
+      MarkRoot</*kGrayImmuneObject*/true>(self, root);
     }
   }
 }
@@ -2234,7 +2246,9 @@ class ConcurrentCopying::ScopedGcGraysImmuneObjects {
 
 // Fill the given memory block with a dummy object. Used to fill in a
 // copy of objects that was lost in race.
-void ConcurrentCopying::FillWithDummyObject(mirror::Object* dummy_obj, size_t byte_size) {
+void ConcurrentCopying::FillWithDummyObject(Thread* const self,
+                                            mirror::Object* dummy_obj,
+                                            size_t byte_size) {
   // GC doesn't gray immune objects while scanning immune objects. But we need to trigger the read
   // barriers here because we need the updated reference to the int array class, etc. Temporary set
   // gc_grays_immune_objects_ to true so that we won't cause a DCHECK failure in MarkImmuneSpace().
@@ -2244,7 +2258,7 @@ void ConcurrentCopying::FillWithDummyObject(mirror::Object* dummy_obj, size_t by
   // Avoid going through read barrier for since kDisallowReadBarrierDuringScan may be enabled.
   // Explicitly mark to make sure to get an object in the to-space.
   mirror::Class* int_array_class = down_cast<mirror::Class*>(
-      Mark(mirror::IntArray::GetArrayClass<kWithoutReadBarrier>()));
+      Mark(self, GetClassRoot<mirror::IntArray, kWithoutReadBarrier>().Ptr()));
   CHECK(int_array_class != nullptr);
   if (ReadBarrier::kEnableToSpaceInvariantChecks) {
     AssertToSpaceInvariant(nullptr, MemberOffset(0), int_array_class);
@@ -2278,10 +2292,9 @@ void ConcurrentCopying::FillWithDummyObject(mirror::Object* dummy_obj, size_t by
 }
 
 // Reuse the memory blocks that were copy of objects that were lost in race.
-mirror::Object* ConcurrentCopying::AllocateInSkippedBlock(size_t alloc_size) {
+mirror::Object* ConcurrentCopying::AllocateInSkippedBlock(Thread* const self, size_t alloc_size) {
   // Try to reuse the blocks that were unused due to CAS failures.
   CHECK_ALIGNED(alloc_size, space::RegionSpace::kAlignment);
-  Thread* self = Thread::Current();
   size_t min_object_size = RoundUp(sizeof(mirror::Object), space::RegionSpace::kAlignment);
   size_t byte_size;
   uint8_t* addr;
@@ -2324,8 +2337,9 @@ mirror::Object* ConcurrentCopying::AllocateInSkippedBlock(size_t alloc_size) {
     CHECK_GE(byte_size - alloc_size, min_object_size);
     // FillWithDummyObject may mark an object, avoid holding skipped_blocks_lock_ to prevent lock
     // violation and possible deadlock. The deadlock case is a recursive case:
-    // FillWithDummyObject -> IntArray::GetArrayClass -> Mark -> Copy -> AllocateInSkippedBlock.
-    FillWithDummyObject(reinterpret_cast<mirror::Object*>(addr + alloc_size),
+    // FillWithDummyObject -> Mark(IntArray.class) -> Copy -> AllocateInSkippedBlock.
+    FillWithDummyObject(self,
+                        reinterpret_cast<mirror::Object*>(addr + alloc_size),
                         byte_size - alloc_size);
     CHECK(region_space_->IsInToSpace(reinterpret_cast<mirror::Object*>(addr + alloc_size)));
     {
@@ -2336,7 +2350,8 @@ mirror::Object* ConcurrentCopying::AllocateInSkippedBlock(size_t alloc_size) {
   return reinterpret_cast<mirror::Object*>(addr);
 }
 
-mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
+mirror::Object* ConcurrentCopying::Copy(Thread* const self,
+                                        mirror::Object* from_ref,
                                         mirror::Object* holder,
                                         MemberOffset offset) {
   DCHECK(region_space_->IsInFromSpace(from_ref));
@@ -2365,7 +2380,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
     DCHECK_EQ(region_space_alloc_size, region_space_bytes_allocated);
   } else {
     // Failed to allocate in the region space. Try the skipped blocks.
-    to_ref = AllocateInSkippedBlock(region_space_alloc_size);
+    to_ref = AllocateInSkippedBlock(self, region_space_alloc_size);
     if (to_ref != nullptr) {
       // Succeeded to allocate in a skipped block.
       if (heap_->use_tlab_) {
@@ -2385,7 +2400,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
                   << " skipped_objects="
                   << to_space_objects_skipped_.load(std::memory_order_seq_cst);
       }
-      to_ref = heap_->non_moving_space_->Alloc(Thread::Current(), obj_size,
+      to_ref = heap_->non_moving_space_->Alloc(self, obj_size,
                                                &non_moving_space_bytes_allocated, nullptr, &dummy);
       if (UNLIKELY(to_ref == nullptr)) {
         LOG(FATAL_WITHOUT_ABORT) << "Fall-back non-moving space allocation failed for a "
@@ -2426,7 +2441,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
       // the forwarding pointer first. Make the lost copy (to_ref)
       // look like a valid but dead (dummy) object and keep it for
       // future reuse.
-      FillWithDummyObject(to_ref, bytes_allocated);
+      FillWithDummyObject(self, to_ref, bytes_allocated);
       if (!fall_back_to_non_moving) {
         DCHECK(region_space_->IsInToSpace(to_ref));
         if (bytes_allocated > space::RegionSpace::kRegionSize) {
@@ -2437,7 +2452,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
           heap_->num_bytes_allocated_.fetch_add(bytes_allocated, std::memory_order_seq_cst);
           to_space_bytes_skipped_.fetch_add(bytes_allocated, std::memory_order_seq_cst);
           to_space_objects_skipped_.fetch_add(1, std::memory_order_seq_cst);
-          MutexLock mu(Thread::Current(), skipped_blocks_lock_);
+          MutexLock mu(self, skipped_blocks_lock_);
           skipped_blocks_map_.insert(std::make_pair(bytes_allocated,
                                                     reinterpret_cast<uint8_t*>(to_ref)));
         }
@@ -2449,7 +2464,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
             heap_mark_bitmap_->GetContinuousSpaceBitmap(to_ref);
         CHECK(mark_bitmap != nullptr);
         CHECK(mark_bitmap->Clear(to_ref));
-        heap_->non_moving_space_->Free(Thread::Current(), to_ref);
+        heap_->non_moving_space_->Free(self, to_ref);
       }
 
       // Get the winner's forward ptr.
@@ -2477,11 +2492,21 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
     LockWord new_lock_word = LockWord::FromForwardingAddress(reinterpret_cast<size_t>(to_ref));
 
     // Try to atomically write the fwd ptr.
-    bool success = from_ref->CasLockWordWeakRelaxed(old_lock_word, new_lock_word);
+    bool success = from_ref->CasLockWord(old_lock_word,
+                                         new_lock_word,
+                                         CASMode::kWeak,
+                                         std::memory_order_relaxed);
     if (LIKELY(success)) {
       // The CAS succeeded.
-      objects_moved_.fetch_add(1, std::memory_order_relaxed);
-      bytes_moved_.fetch_add(region_space_alloc_size, std::memory_order_relaxed);
+      DCHECK(thread_running_gc_ != nullptr);
+      if (LIKELY(self == thread_running_gc_)) {
+        objects_moved_gc_thread_ += 1;
+        bytes_moved_gc_thread_ += region_space_alloc_size;
+      } else {
+        objects_moved_.fetch_add(1, std::memory_order_relaxed);
+        bytes_moved_.fetch_add(region_space_alloc_size, std::memory_order_relaxed);
+      }
+
       if (LIKELY(!fall_back_to_non_moving)) {
         DCHECK(region_space_->IsInToSpace(to_ref));
       } else {
@@ -2493,7 +2518,7 @@ mirror::Object* ConcurrentCopying::Copy(mirror::Object* from_ref,
       }
       DCHECK(GetFwdPtr(from_ref) == to_ref);
       CHECK_NE(to_ref->GetLockWord(false).GetState(), LockWord::kForwardingAddress);
-      PushOntoMarkStack(to_ref);
+      PushOntoMarkStack(self, to_ref);
       return to_ref;
     } else {
       // The CAS failed. It may have lost the race or may have failed
@@ -2572,7 +2597,8 @@ bool ConcurrentCopying::IsOnAllocStack(mirror::Object* ref) {
   return alloc_stack->Contains(ref);
 }
 
-mirror::Object* ConcurrentCopying::MarkNonMoving(mirror::Object* ref,
+mirror::Object* ConcurrentCopying::MarkNonMoving(Thread* const self,
+                                                 mirror::Object* ref,
                                                  mirror::Object* holder,
                                                  MemberOffset offset) {
   // ref is in a non-moving space (from_ref == to_ref).
@@ -2586,16 +2612,8 @@ mirror::Object* ConcurrentCopying::MarkNonMoving(mirror::Object* ref,
   bool is_los = mark_bitmap == nullptr;
   if (!is_los && mark_bitmap->Test(ref)) {
     // Already marked.
-    if (kUseBakerReadBarrier) {
-      DCHECK(ref->GetReadBarrierState() == ReadBarrier::GrayState() ||
-             ref->GetReadBarrierState() == ReadBarrier::WhiteState());
-    }
   } else if (is_los && los_bitmap->Test(ref)) {
     // Already marked in LOS.
-    if (kUseBakerReadBarrier) {
-      DCHECK(ref->GetReadBarrierState() == ReadBarrier::GrayState() ||
-             ref->GetReadBarrierState() == ReadBarrier::WhiteState());
-    }
   } else {
     // Not marked.
     if (IsOnAllocStack(ref)) {
@@ -2635,20 +2653,20 @@ mirror::Object* ConcurrentCopying::MarkNonMoving(mirror::Object* ref,
         // Already marked.
         if (kUseBakerReadBarrier && cas_success &&
             ref->GetReadBarrierState() == ReadBarrier::GrayState()) {
-          PushOntoFalseGrayStack(ref);
+          PushOntoFalseGrayStack(self, ref);
         }
       } else if (is_los && los_bitmap->AtomicTestAndSet(ref)) {
         // Already marked in LOS.
         if (kUseBakerReadBarrier && cas_success &&
             ref->GetReadBarrierState() == ReadBarrier::GrayState()) {
-          PushOntoFalseGrayStack(ref);
+          PushOntoFalseGrayStack(self, ref);
         }
       } else {
         // Newly marked.
         if (kUseBakerReadBarrier) {
           DCHECK_EQ(ref->GetReadBarrierState(), ReadBarrier::GrayState());
         }
-        PushOntoMarkStack(ref);
+        PushOntoMarkStack(self, ref);
       }
     }
   }
@@ -2741,7 +2759,7 @@ bool ConcurrentCopying::IsNullOrMarkedHeapReference(mirror::HeapReference<mirror
 }
 
 mirror::Object* ConcurrentCopying::MarkObject(mirror::Object* from_ref) {
-  return Mark(from_ref);
+  return Mark(Thread::Current(), from_ref);
 }
 
 void ConcurrentCopying::DelayReferenceReferent(ObjPtr<mirror::Class> klass,
@@ -2762,15 +2780,16 @@ void ConcurrentCopying::RevokeAllThreadLocalBuffers() {
   region_space_->RevokeAllThreadLocalBuffers();
 }
 
-mirror::Object* ConcurrentCopying::MarkFromReadBarrierWithMeasurements(mirror::Object* from_ref) {
-  if (Thread::Current() != thread_running_gc_) {
+mirror::Object* ConcurrentCopying::MarkFromReadBarrierWithMeasurements(Thread* const self,
+                                                                       mirror::Object* from_ref) {
+  if (self != thread_running_gc_) {
     rb_slow_path_count_.fetch_add(1u, std::memory_order_relaxed);
   } else {
     rb_slow_path_count_gc_.fetch_add(1u, std::memory_order_relaxed);
   }
   ScopedTrace tr(__FUNCTION__);
   const uint64_t start_time = measure_read_barrier_slow_path_ ? NanoTime() : 0u;
-  mirror::Object* ret = Mark(from_ref);
+  mirror::Object* ret = Mark(self, from_ref);
   if (measure_read_barrier_slow_path_) {
     rb_slow_path_ns_.fetch_add(NanoTime() - start_time, std::memory_order_relaxed);
   }

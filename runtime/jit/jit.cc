@@ -24,6 +24,7 @@
 #include "base/memory_tool.h"
 #include "base/runtime_debug.h"
 #include "base/utils.h"
+#include "class_root.h"
 #include "debugger.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
@@ -332,7 +333,7 @@ void Jit::DeleteThreadPool() {
     }
 
     // When running sanitized, let all tasks finish to not leak. Otherwise just clear the queue.
-    if (!RUNNING_ON_MEMORY_TOOL) {
+    if (!kRunningOnMemoryTool) {
       pool->StopWorkers(self);
       pool->RemoveAllTasks(self);
     }
@@ -473,11 +474,10 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
       return false;
     }
 
-    CodeInfo code_info = osr_method->GetOptimizedCodeInfo();
-    CodeInfoEncoding encoding = code_info.ExtractEncoding();
+    CodeInfo code_info(osr_method);
 
     // Find stack map starting at the target dex_pc.
-    StackMap stack_map = code_info.GetOsrStackMapForDexPc(dex_pc + dex_pc_offset, encoding);
+    StackMap stack_map = code_info.GetOsrStackMapForDexPc(dex_pc + dex_pc_offset);
     if (!stack_map.IsValid()) {
       // There is no OSR stack map for this dex pc offset. Just return to the interpreter in the
       // hope that the next branch has one.
@@ -493,8 +493,7 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
 
     // We found a stack map, now fill the frame with dex register values from the interpreter's
     // shadow frame.
-    DexRegisterMap vreg_map =
-        code_info.GetDexRegisterMapOf(stack_map, encoding, number_of_vregs);
+    DexRegisterMap vreg_map = code_info.GetDexRegisterMapOf(stack_map);
 
     frame_size = osr_method->GetFrameSizeInBytes();
 
@@ -510,13 +509,13 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
     memory[0] = method;
 
     shadow_frame = thread->PopShadowFrame();
-    if (!vreg_map.IsValid()) {
+    if (vreg_map.empty()) {
       // If we don't have a dex register map, then there are no live dex registers at
       // this dex pc.
     } else {
+      DCHECK_EQ(vreg_map.size(), number_of_vregs);
       for (uint16_t vreg = 0; vreg < number_of_vregs; ++vreg) {
-        DexRegisterLocation::Kind location =
-            vreg_map.GetLocationKind(vreg, number_of_vregs, code_info, encoding);
+        DexRegisterLocation::Kind location = vreg_map[vreg].GetKind();
         if (location == DexRegisterLocation::Kind::kNone) {
           // Dex register is dead or uninitialized.
           continue;
@@ -530,17 +529,14 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
         DCHECK_EQ(location, DexRegisterLocation::Kind::kInStack);
 
         int32_t vreg_value = shadow_frame->GetVReg(vreg);
-        int32_t slot_offset = vreg_map.GetStackOffsetInBytes(vreg,
-                                                             number_of_vregs,
-                                                             code_info,
-                                                             encoding);
+        int32_t slot_offset = vreg_map[vreg].GetStackOffsetInBytes();
         DCHECK_LT(slot_offset, static_cast<int32_t>(frame_size));
         DCHECK_GT(slot_offset, 0);
         (reinterpret_cast<int32_t*>(memory))[slot_offset / sizeof(int32_t)] = vreg_value;
       }
     }
 
-    native_pc = stack_map.GetNativePcOffset(encoding.stack_map.encoding, kRuntimeISA) +
+    native_pc = stack_map.GetNativePcOffset(kRuntimeISA) +
         osr_method->GetEntryPoint();
     VLOG(jit) << "Jumping to "
               << method_name
@@ -634,7 +630,8 @@ static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mut
   }
   if (method->IsNative()) {
     ObjPtr<mirror::Class> klass = method->GetDeclaringClass();
-    if (klass == mirror::MethodHandle::StaticClass() || klass == mirror::VarHandle::StaticClass()) {
+    if (klass == GetClassRoot<mirror::MethodHandle>() ||
+        klass == GetClassRoot<mirror::VarHandle>()) {
       // MethodHandle and VarHandle invocation methods are required to throw an
       // UnsupportedOperationException if invoked reflectively. We achieve this by having native
       // implementations that arise the exception. We need to disable JIT compilation of these JNI
@@ -738,8 +735,11 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
 
   ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
   // Update the entrypoint if the ProfilingInfo has one. The interpreter will call it
-  // instead of interpreting the method.
-  if ((profiling_info != nullptr) && (profiling_info->GetSavedEntryPoint() != nullptr)) {
+  // instead of interpreting the method. We don't update it for instrumentation as the entrypoint
+  // must remain the instrumentation entrypoint.
+  if ((profiling_info != nullptr) &&
+      (profiling_info->GetSavedEntryPoint() != nullptr) &&
+      (method->GetEntryPointFromQuickCompiledCode() != GetQuickInstrumentationEntryPoint())) {
     Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
         method, profiling_info->GetSavedEntryPoint());
   } else {

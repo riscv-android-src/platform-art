@@ -45,19 +45,18 @@ static_assert(std::is_trivially_copyable<dex::StringIndex>::value, "StringIndex 
 static_assert(sizeof(dex::TypeIndex) == sizeof(uint16_t), "TypeIndex size is wrong");
 static_assert(std::is_trivially_copyable<dex::TypeIndex>::value, "TypeIndex not trivial");
 
-void DexFile::UnHideAccessFlags(ClassDataItemIterator& class_it) {
-  uint8_t* data = const_cast<uint8_t*>(class_it.DataPointer());
-  uint32_t new_flag = class_it.GetMemberAccessFlags();
-  bool is_method = class_it.IsAtMethod();
+void DexFile::UnHideAccessFlags(uint8_t* data_ptr,
+                                uint32_t new_access_flags,
+                                bool is_method) {
   // Go back 1 uleb to start.
-  data = ReverseSearchUnsignedLeb128(data);
+  data_ptr = ReverseSearchUnsignedLeb128(data_ptr);
   if (is_method) {
     // Methods have another uleb field before the access flags
-    data = ReverseSearchUnsignedLeb128(data);
+    data_ptr = ReverseSearchUnsignedLeb128(data_ptr);
   }
-  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data)),
-            new_flag);
-  UpdateUnsignedLeb128(data, new_flag);
+  DCHECK_EQ(HiddenApiAccessFlags::RemoveFromDex(DecodeUnsignedLeb128WithoutMovingCursor(data_ptr)),
+            new_access_flags);
+  UpdateUnsignedLeb128(data_ptr, new_access_flags);
 }
 
 uint32_t DexFile::CalculateChecksum() const {
@@ -604,6 +603,15 @@ std::string DexFile::PrettyType(dex::TypeIndex type_idx) const {
   }
   const DexFile::TypeId& type_id = GetTypeId(type_idx);
   return PrettyDescriptor(GetTypeDescriptor(type_id));
+}
+
+dex::ProtoIndex DexFile::GetProtoIndexForCallSite(uint32_t call_site_idx) const {
+  const DexFile::CallSiteIdItem& csi = GetCallSiteId(call_site_idx);
+  CallSiteArrayValueIterator it(*this, csi);
+  it.Next();
+  it.Next();
+  DCHECK_EQ(EncodedArrayValueIterator::ValueType::kMethodType, it.GetValueType());
+  return dex::ProtoIndex(it.GetJavaValue().i);
 }
 
 // Checks that visibility is as expected. Includes special behavior for M and

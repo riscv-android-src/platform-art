@@ -17,7 +17,7 @@
 #include "method_type.h"
 
 #include "class-inl.h"
-#include "gc_root-inl.h"
+#include "class_root.h"
 #include "method_handles.h"
 
 namespace art {
@@ -27,22 +27,18 @@ namespace {
 
 ObjPtr<ObjectArray<Class>> AllocatePTypesArray(Thread* self, int count)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<Class> class_type = Class::GetJavaLangClass();
-  ObjPtr<Class> class_array_type =
-      Runtime::Current()->GetClassLinker()->FindArrayClass(self, &class_type);
+  ObjPtr<Class> class_array_type = GetClassRoot<mirror::ObjectArray<mirror::Class>>();
   return ObjectArray<Class>::Alloc(self, class_array_type, count);
 }
 
 }  // namespace
-
-GcRoot<Class> MethodType::static_class_;
 
 MethodType* MethodType::Create(Thread* const self,
                                Handle<Class> return_type,
                                Handle<ObjectArray<Class>> parameter_types) {
   StackHandleScope<1> hs(self);
   Handle<MethodType> mt(
-      hs.NewHandle(ObjPtr<MethodType>::DownCast(StaticClass()->AllocObject(self))));
+      hs.NewHandle(ObjPtr<MethodType>::DownCast(GetClassRoot<MethodType>()->AllocObject(self))));
 
   // TODO: Do we ever create a MethodType during a transaction ? There doesn't
   // seem like a good reason to do a polymorphic invoke that results in the
@@ -170,21 +166,6 @@ std::string MethodType::PrettyDescriptor() REQUIRES_SHARED(Locks::mutator_lock_)
   ss << GetRType()->PrettyDescriptor();
 
   return ss.str();
-}
-
-void MethodType::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void MethodType::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void MethodType::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
 }
 
 }  // namespace mirror

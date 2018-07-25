@@ -27,8 +27,8 @@
 
 namespace art {
 
-class CompilerDriver;
-class ArchDefaultLoopHelper;
+class CompilerOptions;
+class ArchNoOptsLoopHelper;
 
 /**
  * Loop optimizations. Builds a loop hierarchy and applies optimizations to
@@ -38,7 +38,7 @@ class ArchDefaultLoopHelper;
 class HLoopOptimization : public HOptimization {
  public:
   HLoopOptimization(HGraph* graph,
-                    CompilerDriver* compiler_driver,
+                    const CompilerOptions* compiler_options,
                     HInductionVarAnalysis* induction_analysis,
                     OptimizingCompilerStats* stats,
                     const char* name = kLoopOptimizationPassName);
@@ -144,12 +144,25 @@ class HLoopOptimization : public HOptimization {
   bool OptimizeInnerLoop(LoopNode* node);
 
   // Tries to apply loop unrolling for branch penalty reduction and better instruction scheduling
-  // opportunities. Returns whether transformation happened.
-  bool TryUnrollingForBranchPenaltyReduction(LoopNode* loop_node);
+  // opportunities. Returns whether transformation happened. 'generate_code' determines whether the
+  // optimization should be actually applied.
+  bool TryUnrollingForBranchPenaltyReduction(LoopAnalysisInfo* analysis_info,
+                                             bool generate_code = true);
 
   // Tries to apply loop peeling for loop invariant exits elimination. Returns whether
-  // transformation happened.
-  bool TryPeelingForLoopInvariantExitsElimination(LoopNode* loop_node);
+  // transformation happened. 'generate_code' determines whether the optimization should be
+  // actually applied.
+  bool TryPeelingForLoopInvariantExitsElimination(LoopAnalysisInfo* analysis_info,
+                                                  bool generate_code = true);
+
+  // Tries to perform whole loop unrolling for a small loop with a small trip count to eliminate
+  // the loop check overhead and to have more opportunities for inter-iteration optimizations.
+  // Returns whether transformation happened. 'generate_code' determines whether the optimization
+  // should be actually applied.
+  bool TryFullUnrolling(LoopAnalysisInfo* analysis_info, bool generate_code = true);
+
+  // Tries to apply scalar loop peeling and unrolling.
+  bool TryPeelingAndUnrolling(LoopNode* node);
 
   //
   // Vectorization analysis and synthesis.
@@ -243,8 +256,8 @@ class HLoopOptimization : public HOptimization {
   void RemoveDeadInstructions(const HInstructionList& list);
   bool CanRemoveCycle();  // Whether the current 'iset_' is removable.
 
-  // Compiler driver (to query ISA features).
-  const CompilerDriver* compiler_driver_;
+  // Compiler options (to query ISA features).
+  const CompilerOptions* compiler_options_;
 
   // Range information based on prior induction variable analysis.
   InductionVarRange induction_range_;
@@ -308,7 +321,7 @@ class HLoopOptimization : public HOptimization {
   HInstruction* vector_index_;  // normalized index of the new loop
 
   // Helper for target-specific behaviour for loop optimizations.
-  ArchDefaultLoopHelper* arch_loop_helper_;
+  ArchNoOptsLoopHelper* arch_loop_helper_;
 
   friend class LoopOptimizationTest;
 

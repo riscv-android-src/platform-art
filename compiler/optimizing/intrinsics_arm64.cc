@@ -2791,33 +2791,27 @@ void IntrinsicLocationsBuilderARM64::VisitIntegerValueOf(HInvoke* invoke) {
 }
 
 void IntrinsicCodeGeneratorARM64::VisitIntegerValueOf(HInvoke* invoke) {
-  IntrinsicVisitor::IntegerValueOfInfo info = IntrinsicVisitor::ComputeIntegerValueOfInfo();
+  IntrinsicVisitor::IntegerValueOfInfo info =
+      IntrinsicVisitor::ComputeIntegerValueOfInfo(invoke, codegen_->GetCompilerOptions());
   LocationSummary* locations = invoke->GetLocations();
   MacroAssembler* masm = GetVIXLAssembler();
 
   Register out = RegisterFrom(locations->Out(), DataType::Type::kReference);
   UseScratchRegisterScope temps(masm);
   Register temp = temps.AcquireW();
-  InvokeRuntimeCallingConvention calling_convention;
-  Register argument = calling_convention.GetRegisterAt(0);
   if (invoke->InputAt(0)->IsConstant()) {
     int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
-    if (value >= info.low && value <= info.high) {
+    if (static_cast<uint32_t>(value - info.low) < info.length) {
       // Just embed the j.l.Integer in the code.
-      ScopedObjectAccess soa(Thread::Current());
-      mirror::Object* boxed = info.cache->Get(value + (-info.low));
-      DCHECK(boxed != nullptr && Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(boxed));
-      uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(boxed));
-      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
+      DCHECK_NE(info.value_boot_image_reference, IntegerValueOfInfo::kInvalidReference);
+      codegen_->LoadBootImageAddress(out, info.value_boot_image_reference);
     } else {
+      DCHECK(locations->CanCall());
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      uint32_t address =
-          dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
-      __ Ldr(argument.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
-      codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-      CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                             info.integer_boot_image_offset);
       __ Mov(temp.W(), value);
       __ Str(temp.W(), HeapOperand(out.W(), info.value_offset));
       // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
@@ -2825,16 +2819,15 @@ void IntrinsicCodeGeneratorARM64::VisitIntegerValueOf(HInvoke* invoke) {
       codegen_->GenerateMemoryBarrier(MemBarrierKind::kStoreStore);
     }
   } else {
+    DCHECK(locations->CanCall());
     Register in = RegisterFrom(locations->InAt(0), DataType::Type::kInt32);
     // Check bounds of our cache.
     __ Add(out.W(), in.W(), -info.low);
-    __ Cmp(out.W(), info.high - info.low + 1);
+    __ Cmp(out.W(), info.length);
     vixl::aarch64::Label allocate, done;
     __ B(&allocate, hs);
     // If the value is within the bounds, load the j.l.Integer directly from the array.
-    uint32_t data_offset = mirror::Array::DataOffset(kHeapReferenceSize).Uint32Value();
-    uint32_t address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.cache));
-    __ Ldr(temp.W(), codegen_->DeduplicateBootImageAddressLiteral(data_offset + address));
+    codegen_->LoadBootImageAddress(temp, info.array_data_boot_image_reference);
     MemOperand source = HeapOperand(
         temp, out.X(), LSL, DataType::SizeShift(DataType::Type::kReference));
     codegen_->Load(DataType::Type::kReference, out, source);
@@ -2842,10 +2835,8 @@ void IntrinsicCodeGeneratorARM64::VisitIntegerValueOf(HInvoke* invoke) {
     __ B(&done);
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    address = dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(info.integer));
-    __ Ldr(argument.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
-    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+                                           info.integer_boot_image_offset);
     __ Str(in.W(), HeapOperand(out.W(), info.value_offset));
     // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
     // one.

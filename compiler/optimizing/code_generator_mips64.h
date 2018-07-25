@@ -352,7 +352,6 @@ class InstructionCodeGeneratorMIPS64 : public InstructionCodeGenerator {
 class CodeGeneratorMIPS64 : public CodeGenerator {
  public:
   CodeGeneratorMIPS64(HGraph* graph,
-                      const Mips64InstructionSetFeatures& isa_features,
                       const CompilerOptions& compiler_options,
                       OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorMIPS64() {}
@@ -484,9 +483,7 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
 
   InstructionSet GetInstructionSet() const OVERRIDE { return InstructionSet::kMips64; }
 
-  const Mips64InstructionSetFeatures& GetInstructionSetFeatures() const {
-    return isa_features_;
-  }
+  const Mips64InstructionSetFeatures& GetInstructionSetFeatures() const;
 
   Mips64Label* GetLabelOf(HBasicBlock* block) const {
     return CommonGetLabelOf<Mips64Label>(block_labels_, block);
@@ -591,6 +588,8 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
     DISALLOW_COPY_AND_ASSIGN(PcRelativePatchInfo);
   };
 
+  PcRelativePatchInfo* NewBootImageIntrinsicPatch(uint32_t intrinsic_data,
+                                                  const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewBootImageRelRoPatch(uint32_t boot_image_offset,
                                               const PcRelativePatchInfo* info_high = nullptr);
   PcRelativePatchInfo* NewBootImageMethodPatch(MethodReference target_method,
@@ -614,6 +613,9 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   void EmitPcRelativeAddressPlaceholderHigh(PcRelativePatchInfo* info_high,
                                             GpuRegister out,
                                             PcRelativePatchInfo* info_low = nullptr);
+
+  void LoadBootImageAddress(GpuRegister reg, uint32_t boot_image_reference);
+  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
 
   void PatchJitRootUse(uint8_t* code,
                        const uint8_t* roots_data,
@@ -655,7 +657,6 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   InstructionCodeGeneratorMIPS64 instruction_visitor_;
   ParallelMoveResolverMIPS64 move_resolver_;
   Mips64Assembler assembler_;
-  const Mips64InstructionSetFeatures& isa_features_;
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
@@ -675,6 +676,8 @@ class CodeGeneratorMIPS64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
+  // PC-relative patch info for IntrinsicObjects.
+  ArenaDeque<PcRelativePatchInfo> boot_image_intrinsic_patches_;
 
   // Patches for string root accesses in JIT compiled code.
   StringToLiteralMap jit_string_patches_;

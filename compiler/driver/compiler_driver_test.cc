@@ -46,7 +46,7 @@ class CompilerDriverTest : public CommonCompilerTest {
     TimingLogger timings("CompilerDriverTest::CompileAll", false, false);
     TimingLogger::ScopedTiming t(__FUNCTION__, &timings);
     dex_files_ = GetDexFiles(class_loader);
-    compiler_driver_->SetDexFilesForOatFile(dex_files_);;
+    SetDexFilesForOatFile(dex_files_);
     compiler_driver_->CompileAll(class_loader, dex_files_, &timings);
     t.NewTiming("MakeAllExecutable");
     MakeAllExecutable(class_loader);
@@ -88,7 +88,7 @@ class CompilerDriverTest : public CommonCompilerTest {
       StackHandleScope<1> hs(soa.Self());
       Handle<mirror::ClassLoader> loader(
           hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-      mirror::Class* c = class_linker->FindClass(soa.Self(), descriptor, loader);
+      ObjPtr<mirror::Class> c = class_linker->FindClass(soa.Self(), descriptor, loader);
       CHECK(c != nullptr);
       const auto pointer_size = class_linker->GetImagePointerSize();
       for (auto& m : c->GetMethods(pointer_size)) {
@@ -115,14 +115,14 @@ TEST_F(CompilerDriverTest, DISABLED_LARGE_CompileDexLibCore) {
   ObjPtr<mirror::DexCache> dex_cache = class_linker_->FindDexCache(soa.Self(), dex);
   EXPECT_EQ(dex.NumStringIds(), dex_cache->NumStrings());
   for (size_t i = 0; i < dex_cache->NumStrings(); i++) {
-    const mirror::String* string = dex_cache->GetResolvedString(dex::StringIndex(i));
+    const ObjPtr<mirror::String> string = dex_cache->GetResolvedString(dex::StringIndex(i));
     EXPECT_TRUE(string != nullptr) << "string_idx=" << i;
   }
   EXPECT_EQ(dex.NumTypeIds(), dex_cache->NumResolvedTypes());
   for (size_t i = 0; i < dex_cache->NumResolvedTypes(); i++) {
-    mirror::Class* type = dex_cache->GetResolvedType(dex::TypeIndex(i));
-    EXPECT_TRUE(type != nullptr) << "type_idx=" << i
-                              << " " << dex.GetTypeDescriptor(dex.GetTypeId(dex::TypeIndex(i)));
+    const ObjPtr<mirror::Class> type = dex_cache->GetResolvedType(dex::TypeIndex(i));
+    EXPECT_TRUE(type != nullptr)
+        << "type_idx=" << i << " " << dex.GetTypeDescriptor(dex.GetTypeId(dex::TypeIndex(i)));
   }
   EXPECT_TRUE(dex_cache->StaticMethodSize() == dex_cache->NumResolvedMethods()
       || dex.NumMethodIds() ==  dex_cache->NumResolvedMethods());
@@ -228,7 +228,7 @@ class CompilerDriverProfileTest : public CompilerDriverTest {
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-    mirror::Class* klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
+    ObjPtr<mirror::Class> klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
     ASSERT_NE(klass, nullptr);
 
     const auto pointer_size = class_linker->GetImagePointerSize();
@@ -289,7 +289,7 @@ class CompilerDriverVerifyTest : public CompilerDriverTest {
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> h_loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(class_loader)));
-    mirror::Class* klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
+    ObjPtr<mirror::Class> klass = class_linker->FindClass(self, clazz.c_str(), h_loader);
     ASSERT_NE(klass, nullptr);
     EXPECT_TRUE(klass->IsVerified());
 
@@ -331,7 +331,7 @@ TEST_F(CompilerDriverVerifyTest, RetryVerifcationStatusCheckVerified) {
     ASSERT_GT(dex_files.size(), 0u);
     dex_file = dex_files.front();
   }
-  compiler_driver_->SetDexFilesForOatFile(dex_files);
+  SetDexFilesForOatFile(dex_files);
   callbacks_->SetDoesClassUnloading(true, compiler_driver_.get());
   ClassReference ref(dex_file, 0u);
   // Test that the status is read from the compiler driver as expected.

@@ -27,6 +27,7 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "gc/accounting/card_table.h"
+#include "gc/space/image_space.h"
 #include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "intrinsics_arm64.h"
@@ -63,12 +64,11 @@ using helpers::DRegisterFrom;
 using helpers::FPRegisterFrom;
 using helpers::HeapOperand;
 using helpers::HeapOperandFrom;
-using helpers::InputCPURegisterAt;
 using helpers::InputCPURegisterOrZeroRegAt;
 using helpers::InputFPRegisterAt;
 using helpers::InputOperandAt;
 using helpers::InputRegisterAt;
-using helpers::Int64ConstantFrom;
+using helpers::Int64FromLocation;
 using helpers::IsConstantZeroBitPattern;
 using helpers::LocationFrom;
 using helpers::OperandFromMemOperand;
@@ -77,7 +77,6 @@ using helpers::OutputFPRegister;
 using helpers::OutputRegister;
 using helpers::QRegisterFrom;
 using helpers::RegisterFrom;
-using helpers::SRegisterFrom;
 using helpers::StackOperandFrom;
 using helpers::VIXLRegCodeFromART;
 using helpers::WRegisterFrom;
@@ -1373,7 +1372,6 @@ Location InvokeDexCallingConventionVisitorARM64::GetMethodLocation() const {
 }
 
 CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
-                                       const Arm64InstructionSetFeatures& isa_features,
                                        const CompilerOptions& compiler_options,
                                        OptimizingCompilerStats* stats)
     : CodeGenerator(graph,
@@ -1390,7 +1388,6 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
       instruction_visitor_(graph, this),
       move_resolver_(graph->GetAllocator(), this),
       assembler_(graph->GetAllocator()),
-      isa_features_(isa_features),
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       uint64_literals_(std::less<uint64_t>(),
@@ -1401,6 +1398,7 @@ CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       baker_read_barrier_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(StringReferenceValueComparator(),
                           graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -1726,6 +1724,10 @@ void CodeGeneratorARM64::DumpCoreRegister(std::ostream& stream, int reg) const {
 
 void CodeGeneratorARM64::DumpFloatingPointRegister(std::ostream& stream, int reg) const {
   stream << DRegister(reg);
+}
+
+const Arm64InstructionSetFeatures& CodeGeneratorARM64::GetInstructionSetFeatures() const {
+  return *GetCompilerOptions().GetInstructionSetFeatures()->AsArm64InstructionSetFeatures();
 }
 
 void CodeGeneratorARM64::MoveConstant(CPURegister destination, HConstant* constant) {
@@ -2459,6 +2461,9 @@ void InstructionCodeGeneratorARM64::HandleBinaryOp(HBinaryOperation* instr) {
           // all & reg_bits - 1.
           __ Ror(dst, lhs, RegisterFrom(instr->GetLocations()->InAt(1), type));
         }
+      } else if (instr->IsMin() || instr->IsMax()) {
+          __ Cmp(lhs, rhs);
+          __ Csel(dst, lhs, rhs, instr->IsMin() ? lt : gt);
       } else {
         DCHECK(instr->IsXor());
         __ Eor(dst, lhs, rhs);
@@ -2474,6 +2479,10 @@ void InstructionCodeGeneratorARM64::HandleBinaryOp(HBinaryOperation* instr) {
         __ Fadd(dst, lhs, rhs);
       } else if (instr->IsSub()) {
         __ Fsub(dst, lhs, rhs);
+      } else if (instr->IsMin()) {
+        __ Fmin(dst, lhs, rhs);
+      } else if (instr->IsMax()) {
+        __ Fmax(dst, lhs, rhs);
       } else {
         LOG(FATAL) << "Unexpected floating-point binary operation";
       }
@@ -2694,7 +2703,7 @@ void LocationsBuilderARM64::VisitIntermediateAddressIndex(HIntermediateAddressIn
 void InstructionCodeGeneratorARM64::VisitIntermediateAddressIndex(
     HIntermediateAddressIndex* instruction) {
   Register index_reg = InputRegisterAt(instruction, 0);
-  uint32_t shift = Int64ConstantFrom(instruction->GetLocations()->InAt(2));
+  uint32_t shift = Int64FromLocation(instruction->GetLocations()->InAt(2));
   uint32_t offset = instruction->GetOffset()->AsIntConstant()->GetValue();
 
   if (shift == 0) {
@@ -2824,7 +2833,7 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
     DCHECK(!instruction->CanDoImplicitNullCheckOn(instruction->InputAt(0)));
     if (index.IsConstant()) {
       // Array load with a constant index can be treated as a field load.
-      offset += Int64ConstantFrom(index) << DataType::SizeShift(type);
+      offset += Int64FromLocation(index) << DataType::SizeShift(type);
       Location maybe_temp =
           (locations->GetTempCount() != 0) ? locations->GetTemp(0) : Location::NoLocation();
       codegen_->GenerateFieldLoadWithBakerReadBarrier(instruction,
@@ -2869,14 +2878,14 @@ void InstructionCodeGeneratorARM64::VisitArrayGet(HArrayGet* instruction) {
                       "Expecting 0=compressed, 1=uncompressed");
         __ Tbnz(length.W(), 0, &uncompressed_load);
         __ Ldrb(Register(OutputCPURegister(instruction)),
-                HeapOperand(obj, offset + Int64ConstantFrom(index)));
+                HeapOperand(obj, offset + Int64FromLocation(index)));
         __ B(&done);
         __ Bind(&uncompressed_load);
         __ Ldrh(Register(OutputCPURegister(instruction)),
-                HeapOperand(obj, offset + (Int64ConstantFrom(index) << 1)));
+                HeapOperand(obj, offset + (Int64FromLocation(index) << 1)));
         __ Bind(&done);
       } else {
-        offset += Int64ConstantFrom(index) << DataType::SizeShift(type);
+        offset += Int64FromLocation(index) << DataType::SizeShift(type);
         source = HeapOperand(obj, offset);
       }
     } else {
@@ -2989,7 +2998,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
   if (!needs_write_barrier) {
     DCHECK(!may_need_runtime_call_for_type_check);
     if (index.IsConstant()) {
-      offset += Int64ConstantFrom(index) << DataType::SizeShift(value_type);
+      offset += Int64FromLocation(index) << DataType::SizeShift(value_type);
       destination = HeapOperand(array, offset);
     } else {
       UseScratchRegisterScope temps(masm);
@@ -3027,7 +3036,7 @@ void InstructionCodeGeneratorARM64::VisitArraySet(HArraySet* instruction) {
       UseScratchRegisterScope temps(masm);
       Register temp = temps.AcquireSameSizeAs(array);
       if (index.IsConstant()) {
-        offset += Int64ConstantFrom(index) << DataType::SizeShift(value_type);
+        offset += Int64FromLocation(index) << DataType::SizeShift(value_type);
         destination = HeapOperand(array, offset);
       } else {
         destination = HeapOperand(temp,
@@ -3336,61 +3345,30 @@ FOR_EACH_CONDITION_INSTRUCTION(DEFINE_CONDITION_VISITORS)
 #undef DEFINE_CONDITION_VISITORS
 #undef FOR_EACH_CONDITION_INSTRUCTION
 
-void InstructionCodeGeneratorARM64::DivRemOneOrMinusOne(HBinaryOperation* instruction) {
-  DCHECK(instruction->IsDiv() || instruction->IsRem());
-
-  LocationSummary* locations = instruction->GetLocations();
-  Location second = locations->InAt(1);
-  DCHECK(second.IsConstant());
-
-  Register out = OutputRegister(instruction);
-  Register dividend = InputRegisterAt(instruction, 0);
-  int64_t imm = Int64FromConstant(second.GetConstant());
-  DCHECK(imm == 1 || imm == -1);
-
-  if (instruction->IsRem()) {
-    __ Mov(out, 0);
-  } else {
-    if (imm == 1) {
-      __ Mov(out, dividend);
-    } else {
-      __ Neg(out, dividend);
-    }
-  }
-}
-
-void InstructionCodeGeneratorARM64::DivRemByPowerOfTwo(HBinaryOperation* instruction) {
-  DCHECK(instruction->IsDiv() || instruction->IsRem());
-
-  LocationSummary* locations = instruction->GetLocations();
-  Location second = locations->InAt(1);
-  DCHECK(second.IsConstant());
-
-  Register out = OutputRegister(instruction);
-  Register dividend = InputRegisterAt(instruction, 0);
-  int64_t imm = Int64FromConstant(second.GetConstant());
+void InstructionCodeGeneratorARM64::GenerateIntDivForPower2Denom(HDiv* instruction) {
+  int64_t imm = Int64FromLocation(instruction->GetLocations()->InAt(1));
   uint64_t abs_imm = static_cast<uint64_t>(AbsOrMin(imm));
-  int ctz_imm = CTZ(abs_imm);
+  DCHECK(IsPowerOfTwo(abs_imm)) << abs_imm;
 
-  UseScratchRegisterScope temps(GetVIXLAssembler());
-  Register temp = temps.AcquireSameSizeAs(out);
+  Register out = OutputRegister(instruction);
+  Register dividend = InputRegisterAt(instruction, 0);
 
-  if (instruction->IsDiv()) {
+  if (abs_imm == 2) {
+    int bits = DataType::Size(instruction->GetResultType()) * kBitsPerByte;
+    __ Add(out, dividend, Operand(dividend, LSR, bits - 1));
+  } else {
+    UseScratchRegisterScope temps(GetVIXLAssembler());
+    Register temp = temps.AcquireSameSizeAs(out);
     __ Add(temp, dividend, abs_imm - 1);
     __ Cmp(dividend, 0);
     __ Csel(out, temp, dividend, lt);
-    if (imm > 0) {
-      __ Asr(out, out, ctz_imm);
-    } else {
-      __ Neg(out, Operand(out, ASR, ctz_imm));
-    }
+  }
+
+  int ctz_imm = CTZ(abs_imm);
+  if (imm > 0) {
+    __ Asr(out, out, ctz_imm);
   } else {
-    int bits = instruction->GetResultType() == DataType::Type::kInt32 ? 32 : 64;
-    __ Asr(temp, dividend, bits - 1);
-    __ Lsr(temp, temp, bits - ctz_imm);
-    __ Add(out, dividend, temp);
-    __ And(out, out, abs_imm - 1);
-    __ Sub(out, out, temp);
+    __ Neg(out, Operand(out, ASR, ctz_imm));
   }
 }
 
@@ -3446,39 +3424,34 @@ void InstructionCodeGeneratorARM64::GenerateDivRemWithAnyConstant(HBinaryOperati
   }
 }
 
-void InstructionCodeGeneratorARM64::GenerateDivRemIntegral(HBinaryOperation* instruction) {
-  DCHECK(instruction->IsDiv() || instruction->IsRem());
-  DataType::Type type = instruction->GetResultType();
-  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64);
+void InstructionCodeGeneratorARM64::GenerateIntDivForConstDenom(HDiv *instruction) {
+  int64_t imm = Int64FromLocation(instruction->GetLocations()->InAt(1));
 
-  LocationSummary* locations = instruction->GetLocations();
-  Register out = OutputRegister(instruction);
-  Location second = locations->InAt(1);
+  if (imm == 0) {
+    // Do not generate anything. DivZeroCheck would prevent any code to be executed.
+    return;
+  }
 
-  if (second.IsConstant()) {
-    int64_t imm = Int64FromConstant(second.GetConstant());
-
-    if (imm == 0) {
-      // Do not generate anything. DivZeroCheck would prevent any code to be executed.
-    } else if (imm == 1 || imm == -1) {
-      DivRemOneOrMinusOne(instruction);
-    } else if (IsPowerOfTwo(AbsOrMin(imm))) {
-      DivRemByPowerOfTwo(instruction);
-    } else {
-      DCHECK(imm <= -2 || imm >= 2);
-      GenerateDivRemWithAnyConstant(instruction);
-    }
+  if (IsPowerOfTwo(AbsOrMin(imm))) {
+    GenerateIntDivForPower2Denom(instruction);
   } else {
+    // Cases imm == -1 or imm == 1 are handled by InstructionSimplifier.
+    DCHECK(imm < -2 || imm > 2) << imm;
+    GenerateDivRemWithAnyConstant(instruction);
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateIntDiv(HDiv *instruction) {
+  DCHECK(DataType::IsIntOrLongType(instruction->GetResultType()))
+       << instruction->GetResultType();
+
+  if (instruction->GetLocations()->InAt(1).IsConstant()) {
+    GenerateIntDivForConstDenom(instruction);
+  } else {
+    Register out = OutputRegister(instruction);
     Register dividend = InputRegisterAt(instruction, 0);
     Register divisor = InputRegisterAt(instruction, 1);
-    if (instruction->IsDiv()) {
-      __ Sdiv(out, dividend, divisor);
-    } else {
-      UseScratchRegisterScope temps(GetVIXLAssembler());
-      Register temp = temps.AcquireSameSizeAs(out);
-      __ Sdiv(temp, dividend, divisor);
-      __ Msub(out, temp, divisor, dividend);
-    }
+    __ Sdiv(out, dividend, divisor);
   }
 }
 
@@ -3510,7 +3483,7 @@ void InstructionCodeGeneratorARM64::VisitDiv(HDiv* div) {
   switch (type) {
     case DataType::Type::kInt32:
     case DataType::Type::kInt64:
-      GenerateDivRemIntegral(div);
+      GenerateIntDiv(div);
       break;
 
     case DataType::Type::kFloat32:
@@ -3542,7 +3515,7 @@ void InstructionCodeGeneratorARM64::VisitDivZeroCheck(HDivZeroCheck* instruction
   }
 
   if (value.IsConstant()) {
-    int64_t divisor = Int64ConstantFrom(value);
+    int64_t divisor = Int64FromLocation(value);
     if (divisor == 0) {
       __ B(slow_path->GetEntryLabel());
     } else {
@@ -4580,10 +4553,6 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       EmitAddPlaceholder(add_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      // Load method address from literal pool.
-      __ Ldr(XRegisterFrom(temp), DeduplicateUint64Literal(invoke->GetMethodAddress()));
-      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
       // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
       uint32_t boot_image_offset = GetBootImageOffset(invoke);
@@ -4606,6 +4575,10 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       EmitLdrOffsetPlaceholder(ldr_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
+    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+      // Load method address from literal pool.
+      __ Ldr(XRegisterFrom(temp), DeduplicateUint64Literal(invoke->GetMethodAddress()));
+      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
@@ -4693,6 +4666,22 @@ void LocationsBuilderARM64::VisitInvokePolymorphic(HInvokePolymorphic* invoke) {
 void InstructionCodeGeneratorARM64::VisitInvokePolymorphic(HInvokePolymorphic* invoke) {
   codegen_->GenerateInvokePolymorphicCall(invoke);
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
+}
+
+void LocationsBuilderARM64::VisitInvokeCustom(HInvokeCustom* invoke) {
+  HandleInvoke(invoke);
+}
+
+void InstructionCodeGeneratorARM64::VisitInvokeCustom(HInvokeCustom* invoke) {
+  codegen_->GenerateInvokeCustomCall(invoke);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
+}
+
+vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageIntrinsicPatch(
+    uint32_t intrinsic_data,
+    vixl::aarch64::Label* adrp_label) {
+  return NewPcRelativePatch(
+      /* dex_file */ nullptr, intrinsic_data, adrp_label, &boot_image_intrinsic_patches_);
 }
 
 vixl::aarch64::Label* CodeGeneratorARM64::NewBootImageRelRoPatch(
@@ -4812,6 +4801,55 @@ void CodeGeneratorARM64::EmitLdrOffsetPlaceholder(vixl::aarch64::Label* fixup_la
   __ ldr(out, MemOperand(base, /* offset placeholder */ 0));
 }
 
+void CodeGeneratorARM64::LoadBootImageAddress(vixl::aarch64::Register reg,
+                                              uint32_t boot_image_reference) {
+  if (GetCompilerOptions().IsBootImage()) {
+    // Add ADRP with its PC-relative type patch.
+    vixl::aarch64::Label* adrp_label = NewBootImageIntrinsicPatch(boot_image_reference);
+    EmitAdrpPlaceholder(adrp_label, reg.X());
+    // Add ADD with its PC-relative type patch.
+    vixl::aarch64::Label* add_label = NewBootImageIntrinsicPatch(boot_image_reference, adrp_label);
+    EmitAddPlaceholder(add_label, reg.X(), reg.X());
+  } else if (Runtime::Current()->IsAotCompiler()) {
+    // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
+    vixl::aarch64::Label* adrp_label = NewBootImageRelRoPatch(boot_image_reference);
+    EmitAdrpPlaceholder(adrp_label, reg.X());
+    // Add LDR with its PC-relative .data.bimg.rel.ro patch.
+    vixl::aarch64::Label* ldr_label = NewBootImageRelRoPatch(boot_image_reference, adrp_label);
+    EmitLdrOffsetPlaceholder(ldr_label, reg.W(), reg.X());
+  } else {
+    DCHECK(Runtime::Current()->UseJitCompilation());
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    DCHECK(!heap->GetBootImageSpaces().empty());
+    const uint8_t* address = heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference;
+    __ Ldr(reg.W(), DeduplicateBootImageAddressLiteral(reinterpret_cast<uintptr_t>(address)));
+  }
+}
+
+void CodeGeneratorARM64::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
+                                                      uint32_t boot_image_offset) {
+  DCHECK(invoke->IsStatic());
+  InvokeRuntimeCallingConvention calling_convention;
+  Register argument = calling_convention.GetRegisterAt(0);
+  if (GetCompilerOptions().IsBootImage()) {
+    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
+    // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
+    MethodReference target_method = invoke->GetTargetMethod();
+    dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
+    // Add ADRP with its PC-relative type patch.
+    vixl::aarch64::Label* adrp_label = NewBootImageTypePatch(*target_method.dex_file, type_idx);
+    EmitAdrpPlaceholder(adrp_label, argument.X());
+    // Add ADD with its PC-relative type patch.
+    vixl::aarch64::Label* add_label =
+        NewBootImageTypePatch(*target_method.dex_file, type_idx, adrp_label);
+    EmitAddPlaceholder(add_label, argument.X(), argument.X());
+  } else {
+    LoadBootImageAddress(argument, boot_image_offset);
+  }
+  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+}
+
 template <linker::LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
 inline void CodeGeneratorARM64::EmitPcRelativeLinkerPatches(
     const ArenaDeque<PcRelativePatchInfo>& infos,
@@ -4824,12 +4862,13 @@ inline void CodeGeneratorARM64::EmitPcRelativeLinkerPatches(
   }
 }
 
-linker::LinkerPatch DataBimgRelRoPatchAdapter(size_t literal_offset,
-                                              const DexFile* target_dex_file,
-                                              uint32_t pc_insn_offset,
-                                              uint32_t boot_image_offset) {
-  DCHECK(target_dex_file == nullptr);  // Unused for DataBimgRelRoPatch(), should be null.
-  return linker::LinkerPatch::DataBimgRelRoPatch(literal_offset, pc_insn_offset, boot_image_offset);
+template <linker::LinkerPatch (*Factory)(size_t, uint32_t, uint32_t)>
+linker::LinkerPatch NoDexFileAdapter(size_t literal_offset,
+                                     const DexFile* target_dex_file,
+                                     uint32_t pc_insn_offset,
+                                     uint32_t boot_image_offset) {
+  DCHECK(target_dex_file == nullptr);  // Unused for these patches, should be null.
+  return Factory(literal_offset, pc_insn_offset, boot_image_offset);
 }
 
 void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) {
@@ -4841,6 +4880,7 @@ void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* lin
       type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
+      boot_image_intrinsic_patches_.size() +
       baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage()) {
@@ -4850,11 +4890,14 @@ void CodeGeneratorARM64::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* lin
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    EmitPcRelativeLinkerPatches<DataBimgRelRoPatchAdapter>(
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
         boot_image_method_patches_, linker_patches);
     DCHECK(boot_image_type_patches_.empty());
     DCHECK(boot_image_string_patches_.empty());
+    DCHECK(boot_image_intrinsic_patches_.empty());
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);
@@ -4971,10 +5014,10 @@ HLoadClass::LoadKind CodeGeneratorARM64::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kJitBootImageAddress:
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kRuntimeCall:
       break;
   }
@@ -5068,14 +5111,6 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
       codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
       break;
     }
-    case HLoadClass::LoadKind::kBootImageAddress: {
-      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(cls->GetClass().Get()));
-      DCHECK_NE(address, 0u);
-      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
-      break;
-    }
     case HLoadClass::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       uint32_t boot_image_offset = codegen_->GetBootImageOffset(cls);
@@ -5106,6 +5141,13 @@ void InstructionCodeGeneratorARM64::VisitLoadClass(HLoadClass* cls) NO_THREAD_SA
                                         ldr_label,
                                         read_barrier_option);
       generate_null_check = true;
+      break;
+    }
+    case HLoadClass::LoadKind::kJitBootImageAddress: {
+      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
+      uint32_t address = reinterpret_cast32<uint32_t>(cls->GetClass().Get());
+      DCHECK_NE(address, 0u);
+      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
       break;
     }
     case HLoadClass::LoadKind::kJitTableAddress: {
@@ -5194,10 +5236,10 @@ HLoadString::LoadKind CodeGeneratorARM64::GetSupportedLoadStringKind(
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kJitBootImageAddress:
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kRuntimeCall:
       break;
   }
@@ -5249,13 +5291,6 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       codegen_->EmitAddPlaceholder(add_label, out.X(), out.X());
       return;
     }
-    case HLoadString::LoadKind::kBootImageAddress: {
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(load->GetString().Get()));
-      DCHECK_NE(address, 0u);
-      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
-      return;
-    }
     case HLoadString::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       // Add ADRP with its PC-relative .data.bimg.rel.ro patch.
@@ -5292,6 +5327,12 @@ void InstructionCodeGeneratorARM64::VisitLoadString(HLoadString* load) NO_THREAD
       __ Cbz(out.X(), slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
       codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
+      return;
+    }
+    case HLoadString::LoadKind::kJitBootImageAddress: {
+      uint32_t address = reinterpret_cast32<uint32_t>(load->GetString().Get());
+      DCHECK_NE(address, 0u);
+      __ Ldr(out.W(), codegen_->DeduplicateBootImageAddressLiteral(address));
       return;
     }
     case HLoadString::LoadKind::kJitTableAddress: {
@@ -5448,36 +5489,13 @@ void LocationsBuilderARM64::VisitNewInstance(HNewInstance* instruction) {
   LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
       instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
-  if (instruction->IsStringAlloc()) {
-    locations->AddTemp(LocationFrom(kArtMethodRegister));
-  } else {
-    locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
-  }
+  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
   locations->SetOut(calling_convention.GetReturnLocation(DataType::Type::kReference));
 }
 
 void InstructionCodeGeneratorARM64::VisitNewInstance(HNewInstance* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes cares
-  // of poisoning the reference.
-  if (instruction->IsStringAlloc()) {
-    // String is allocated through StringFactory. Call NewEmptyString entry point.
-    Location temp = instruction->GetLocations()->GetTemp(0);
-    MemberOffset code_offset = ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize);
-    __ Ldr(XRegisterFrom(temp), MemOperand(tr, QUICK_ENTRY_POINT(pNewEmptyString)));
-    __ Ldr(lr, MemOperand(XRegisterFrom(temp), code_offset.Int32Value()));
-
-    {
-      // Ensure the pc position is recorded immediately after the `blr` instruction.
-      ExactAssemblyScope eas(GetVIXLAssembler(),
-                             kInstructionSize,
-                             CodeBufferCheckScope::kExactSize);
-      __ blr(lr);
-      codegen_->RecordPcInfo(instruction, instruction->GetDexPc());
-    }
-  } else {
-    codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-  }
+  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ __LINE__);
 }
 
@@ -5633,13 +5651,75 @@ void LocationsBuilderARM64::VisitRem(HRem* rem) {
   }
 }
 
+void InstructionCodeGeneratorARM64::GenerateIntRemForPower2Denom(HRem *instruction) {
+  int64_t imm = Int64FromLocation(instruction->GetLocations()->InAt(1));
+  uint64_t abs_imm = static_cast<uint64_t>(AbsOrMin(imm));
+  DCHECK(IsPowerOfTwo(abs_imm)) << abs_imm;
+
+  Register out = OutputRegister(instruction);
+  Register dividend = InputRegisterAt(instruction, 0);
+
+  if (abs_imm == 2) {
+    __ Cmp(dividend, 0);
+    __ And(out, dividend, 1);
+    __ Csneg(out, out, out, ge);
+  } else {
+    UseScratchRegisterScope temps(GetVIXLAssembler());
+    Register temp = temps.AcquireSameSizeAs(out);
+
+    __ Negs(temp, dividend);
+    __ And(out, dividend, abs_imm - 1);
+    __ And(temp, temp, abs_imm - 1);
+    __ Csneg(out, out, temp, mi);
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateIntRemForConstDenom(HRem *instruction) {
+  int64_t imm = Int64FromLocation(instruction->GetLocations()->InAt(1));
+
+  if (imm == 0) {
+    // Do not generate anything.
+    // DivZeroCheck would prevent any code to be executed.
+    return;
+  }
+
+  if (IsPowerOfTwo(AbsOrMin(imm))) {
+    // Cases imm == -1 or imm == 1 are handled in constant folding by
+    // InstructionWithAbsorbingInputSimplifier.
+    // If the cases have survided till code generation they are handled in
+    // GenerateIntRemForPower2Denom becauses -1 and 1 are the power of 2 (2^0).
+    // The correct code is generated for them, just more instructions.
+    GenerateIntRemForPower2Denom(instruction);
+  } else {
+    DCHECK(imm < -2 || imm > 2) << imm;
+    GenerateDivRemWithAnyConstant(instruction);
+  }
+}
+
+void InstructionCodeGeneratorARM64::GenerateIntRem(HRem* instruction) {
+  DCHECK(DataType::IsIntOrLongType(instruction->GetResultType()))
+         << instruction->GetResultType();
+
+  if (instruction->GetLocations()->InAt(1).IsConstant()) {
+    GenerateIntRemForConstDenom(instruction);
+  } else {
+    Register out = OutputRegister(instruction);
+    Register dividend = InputRegisterAt(instruction, 0);
+    Register divisor = InputRegisterAt(instruction, 1);
+    UseScratchRegisterScope temps(GetVIXLAssembler());
+    Register temp = temps.AcquireSameSizeAs(out);
+    __ Sdiv(temp, dividend, divisor);
+    __ Msub(out, temp, divisor, dividend);
+  }
+}
+
 void InstructionCodeGeneratorARM64::VisitRem(HRem* rem) {
   DataType::Type type = rem->GetResultType();
 
   switch (type) {
     case DataType::Type::kInt32:
     case DataType::Type::kInt64: {
-      GenerateDivRemIntegral(rem);
+      GenerateIntRem(rem);
       break;
     }
 
@@ -5662,111 +5742,20 @@ void InstructionCodeGeneratorARM64::VisitRem(HRem* rem) {
   }
 }
 
-// TODO: integrate with HandleBinaryOp?
-static void CreateMinMaxLocations(ArenaAllocator* allocator, HBinaryOperation* minmax) {
-  LocationSummary* locations = new (allocator) LocationSummary(minmax);
-  switch (minmax->GetResultType()) {
-    case DataType::Type::kInt32:
-    case DataType::Type::kInt64:
-      locations->SetInAt(0, Location::RequiresRegister());
-      locations->SetInAt(1, Location::RequiresRegister());
-      locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
-      break;
-    case DataType::Type::kFloat32:
-    case DataType::Type::kFloat64:
-      locations->SetInAt(0, Location::RequiresFpuRegister());
-      locations->SetInAt(1, Location::RequiresFpuRegister());
-      locations->SetOut(Location::RequiresFpuRegister(), Location::kNoOutputOverlap);
-      break;
-    default:
-      LOG(FATAL) << "Unexpected type for HMinMax " << minmax->GetResultType();
-  }
-}
-
-void InstructionCodeGeneratorARM64::GenerateMinMaxInt(LocationSummary* locations,
-                                                      bool is_min,
-                                                      DataType::Type type) {
-  Location op1 = locations->InAt(0);
-  Location op2 = locations->InAt(1);
-  Location out = locations->Out();
-
-  Register op1_reg;
-  Register op2_reg;
-  Register out_reg;
-  if (type == DataType::Type::kInt64) {
-    op1_reg = XRegisterFrom(op1);
-    op2_reg = XRegisterFrom(op2);
-    out_reg = XRegisterFrom(out);
-  } else {
-    DCHECK_EQ(type, DataType::Type::kInt32);
-    op1_reg = WRegisterFrom(op1);
-    op2_reg = WRegisterFrom(op2);
-    out_reg = WRegisterFrom(out);
-  }
-
-  __ Cmp(op1_reg, op2_reg);
-  __ Csel(out_reg, op1_reg, op2_reg, is_min ? lt : gt);
-}
-
-void InstructionCodeGeneratorARM64::GenerateMinMaxFP(LocationSummary* locations,
-                                                     bool is_min,
-                                                     DataType::Type type) {
-  Location op1 = locations->InAt(0);
-  Location op2 = locations->InAt(1);
-  Location out = locations->Out();
-
-  FPRegister op1_reg;
-  FPRegister op2_reg;
-  FPRegister out_reg;
-  if (type == DataType::Type::kFloat64) {
-    op1_reg = DRegisterFrom(op1);
-    op2_reg = DRegisterFrom(op2);
-    out_reg = DRegisterFrom(out);
-  } else {
-    DCHECK_EQ(type, DataType::Type::kFloat32);
-    op1_reg = SRegisterFrom(op1);
-    op2_reg = SRegisterFrom(op2);
-    out_reg = SRegisterFrom(out);
-  }
-
-  if (is_min) {
-    __ Fmin(out_reg, op1_reg, op2_reg);
-  } else {
-    __ Fmax(out_reg, op1_reg, op2_reg);
-  }
-}
-
-// TODO: integrate with HandleBinaryOp?
-void InstructionCodeGeneratorARM64::GenerateMinMax(HBinaryOperation* minmax, bool is_min) {
-  DataType::Type type = minmax->GetResultType();
-  switch (type) {
-    case DataType::Type::kInt32:
-    case DataType::Type::kInt64:
-      GenerateMinMaxInt(minmax->GetLocations(), is_min, type);
-      break;
-    case DataType::Type::kFloat32:
-    case DataType::Type::kFloat64:
-      GenerateMinMaxFP(minmax->GetLocations(), is_min, type);
-      break;
-    default:
-      LOG(FATAL) << "Unexpected type for HMinMax " << type;
-  }
-}
-
 void LocationsBuilderARM64::VisitMin(HMin* min) {
-  CreateMinMaxLocations(GetGraph()->GetAllocator(), min);
+  HandleBinaryOp(min);
 }
 
 void InstructionCodeGeneratorARM64::VisitMin(HMin* min) {
-  GenerateMinMax(min, /*is_min*/ true);
+  HandleBinaryOp(min);
 }
 
 void LocationsBuilderARM64::VisitMax(HMax* max) {
-  CreateMinMaxLocations(GetGraph()->GetAllocator(), max);
+  HandleBinaryOp(max);
 }
 
 void InstructionCodeGeneratorARM64::VisitMax(HMax* max) {
-  GenerateMinMax(max, /*is_min*/ false);
+  HandleBinaryOp(max);
 }
 
 void LocationsBuilderARM64::VisitAbs(HAbs* abs) {
@@ -6687,7 +6676,7 @@ void CodeGeneratorARM64::GenerateRawReferenceLoad(HInstruction* instruction,
       // ArrayGet and UnsafeGetObject and UnsafeCASObject intrinsics cases.
       // /* HeapReference<mirror::Object> */ ref = *(obj + offset + (index << scale_factor))
       if (index.IsConstant()) {
-        uint32_t computed_offset = offset + (Int64ConstantFrom(index) << scale_factor);
+        uint32_t computed_offset = offset + (Int64FromLocation(index) << scale_factor);
         EmissionCheckScope guard(GetVIXLAssembler(), kMaxMacroInstructionSizeInBytes);
         Load(type, ref_reg, HeapOperand(obj, computed_offset));
         if (needs_null_check) {

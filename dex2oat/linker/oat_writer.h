@@ -27,7 +27,6 @@
 #include "base/os.h"
 #include "base/mem_map.h"
 #include "base/safe_map.h"
-#include "compiler.h"
 #include "debug/debug_info.h"
 #include "dex/compact_dex_level.h"
 #include "dex/method_reference.h"
@@ -42,6 +41,7 @@ namespace art {
 class BitVector;
 class CompiledMethod;
 class CompilerDriver;
+class CompilerOptions;
 class DexContainer;
 class ProfileCompilationInfo;
 class TimingLogger;
@@ -62,6 +62,12 @@ namespace linker {
 class ImageWriter;
 class MultiOatRelativePatcher;
 class OutputStream;
+
+enum class CopyOption {
+  kNever,
+  kAlways,
+  kOnlyIfCompressed
+};
 
 // OatHeader         variable length with count of D OatDexFiles
 //
@@ -118,7 +124,7 @@ class OatWriter {
     kDefault = kCreate
   };
 
-  OatWriter(bool compiling_boot_image,
+  OatWriter(const CompilerOptions& compiler_options,
             TimingLogger* timings,
             ProfileCompilationInfo* info,
             CompactDexLevel compact_dex_level);
@@ -172,25 +178,19 @@ class OatWriter {
   // and the compiler will just re-use the existing vdex file.
   bool WriteAndOpenDexFiles(File* vdex_file,
                             OutputStream* oat_rodata,
-                            InstructionSet instruction_set,
-                            const InstructionSetFeatures* instruction_set_features,
                             SafeMap<std::string, std::string>* key_value_store,
                             bool verify,
                             bool update_input_vdex,
                             CopyOption copy_dex_files,
                             /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
+  // Initialize the writer with the given parameters.
+  void Initialize(const CompilerDriver* compiler_driver,
+                  ImageWriter* image_writer,
+                  const std::vector<const DexFile*>& dex_files);
   bool WriteQuickeningInfo(OutputStream* vdex_out);
   bool WriteVerifierDeps(OutputStream* vdex_out, verifier::VerifierDeps* verifier_deps);
   bool WriteChecksumsAndVdexHeader(OutputStream* vdex_out);
-  // Initialize the writer with the given parameters.
-  void Initialize(const CompilerDriver* compiler,
-                  ImageWriter* image_writer,
-                  const std::vector<const DexFile*>& dex_files) {
-    compiler_driver_ = compiler;
-    image_writer_ = image_writer;
-    dex_files_ = &dex_files;
-  }
 
   // Prepare layout of remaining data.
   void PrepareLayout(MultiOatRelativePatcher* relative_patcher);
@@ -213,10 +213,6 @@ class OatWriter {
     // Since the image is being created at the same time as the oat file,
     // check if there's an image writer.
     return image_writer_ != nullptr;
-  }
-
-  bool HasBootImage() const {
-    return compiling_boot_image_;
   }
 
   const OatHeader& GetOatHeader() const {
@@ -261,6 +257,10 @@ class OatWriter {
 
   const CompilerDriver* GetCompilerDriver() const {
     return compiler_driver_;
+  }
+
+  const CompilerOptions& GetCompilerOptions() const {
+    return compiler_options_;
   }
 
  private:
@@ -325,10 +325,7 @@ class OatWriter {
                     /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
                     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
 
-  size_t InitOatHeader(InstructionSet instruction_set,
-                       const InstructionSetFeatures* instruction_set_features,
-                       uint32_t num_dex_files,
-                       SafeMap<std::string, std::string>* key_value_store);
+  size_t InitOatHeader(uint32_t num_dex_files, SafeMap<std::string, std::string>* key_value_store);
   size_t InitClassOffsets(size_t offset);
   size_t InitOatClasses(size_t offset);
   size_t InitOatMaps(size_t offset);
@@ -388,8 +385,8 @@ class OatWriter {
   dchecked_vector<debug::MethodDebugInfo> method_info_;
 
   const CompilerDriver* compiler_driver_;
+  const CompilerOptions& compiler_options_;
   ImageWriter* image_writer_;
-  const bool compiling_boot_image_;
   // Whether the dex files being compiled are going to be extracted to the vdex.
   bool extract_dex_files_into_vdex_;
 
@@ -535,9 +532,6 @@ class OatWriter {
 
   // The helper for processing relative patches is external so that we can patch across oat files.
   MultiOatRelativePatcher* relative_patcher_;
-
-  // The locations of absolute patches relative to the start of the executable section.
-  dchecked_vector<uintptr_t> absolute_patch_locations_;
 
   // Profile info used to generate new layout of files.
   ProfileCompilationInfo* profile_compilation_info_;

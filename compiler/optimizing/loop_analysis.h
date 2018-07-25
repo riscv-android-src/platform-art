@@ -21,25 +21,33 @@
 
 namespace art {
 
+class InductionVarRange;
 class LoopAnalysis;
-
-// No loop unrolling factor (just one copy of the loop-body).
-static constexpr uint32_t kNoUnrollingFactor = 1;
 
 // Class to hold cached information on properties of the loop.
 class LoopAnalysisInfo : public ValueObject {
  public:
+  // No loop unrolling factor (just one copy of the loop-body).
+  static constexpr uint32_t kNoUnrollingFactor = 1;
+  // Used for unknown and non-constant trip counts (see InductionVarRange::HasKnownTripCount).
+  static constexpr int64_t kUnknownTripCount = -1;
+
   explicit LoopAnalysisInfo(HLoopInformation* loop_info)
-      : bb_num_(0),
+      : trip_count_(kUnknownTripCount),
+        bb_num_(0),
         instr_num_(0),
         exits_num_(0),
+        invariant_exits_num_(0),
         has_instructions_preventing_scalar_peeling_(false),
         has_instructions_preventing_scalar_unrolling_(false),
+        has_long_type_instructions_(false),
         loop_info_(loop_info) {}
 
+  int64_t GetTripCount() const { return trip_count_; }
   size_t GetNumberOfBasicBlocks() const { return bb_num_; }
   size_t GetNumberOfInstructions() const { return instr_num_; }
   size_t GetNumberOfExits() const { return exits_num_; }
+  size_t GetNumberOfInvariantExits() const { return invariant_exits_num_; }
 
   bool HasInstructionsPreventingScalarPeeling() const {
     return has_instructions_preventing_scalar_peeling_;
@@ -49,22 +57,37 @@ class LoopAnalysisInfo : public ValueObject {
     return has_instructions_preventing_scalar_unrolling_;
   }
 
-  const HLoopInformation* GetLoopInfo() const { return loop_info_; }
+  bool HasInstructionsPreventingScalarOpts() const {
+    return HasInstructionsPreventingScalarPeeling() || HasInstructionsPreventingScalarUnrolling();
+  }
+
+  bool HasLongTypeInstructions() const {
+    return has_long_type_instructions_;
+  }
+
+  HLoopInformation* GetLoopInfo() const { return loop_info_; }
 
  private:
+  // Trip count of the loop if known, kUnknownTripCount otherwise.
+  int64_t trip_count_;
   // Number of basic blocks in the loop body.
   size_t bb_num_;
   // Number of instructions in the loop body.
   size_t instr_num_;
   // Number of loop's exits.
   size_t exits_num_;
+  // Number of "if" loop exits (with HIf instruction) whose condition is loop-invariant.
+  size_t invariant_exits_num_;
   // Whether the loop has instructions which make scalar loop peeling non-beneficial.
   bool has_instructions_preventing_scalar_peeling_;
   // Whether the loop has instructions which make scalar loop unrolling non-beneficial.
   bool has_instructions_preventing_scalar_unrolling_;
+  // Whether the loop has instructions of primitive long type; unrolling these loop will
+  // likely introduce spill/fills on 32-bit targets.
+  bool has_long_type_instructions_;
 
   // Corresponding HLoopInformation.
-  const HLoopInformation* loop_info_;
+  HLoopInformation* loop_info_;
 
   friend class LoopAnalysis;
 };
@@ -76,20 +99,12 @@ class LoopAnalysis : public ValueObject {
   // Calculates loops basic properties like body size, exits number, etc. and fills
   // 'analysis_results' with this information.
   static void CalculateLoopBasicProperties(HLoopInformation* loop_info,
-                                           LoopAnalysisInfo* analysis_results);
+                                           LoopAnalysisInfo* analysis_results,
+                                           int64_t trip_count);
 
-  // Returns whether the loop has at least one loop invariant exit.
-  static bool HasLoopAtLeastOneInvariantExit(HLoopInformation* loop_info);
-
-  // Returns whether HIf's true or false successor is outside the specified loop.
-  //
-  // Prerequisite: HIf must be in the specified loop.
-  static bool IsLoopExit(HLoopInformation* loop_info, const HIf* hif) {
-    DCHECK(loop_info->Contains(*hif->GetBlock()));
-    HBasicBlock* true_succ = hif->IfTrueSuccessor();
-    HBasicBlock* false_succ = hif->IfFalseSuccessor();
-    return (!loop_info->Contains(*true_succ) || !loop_info->Contains(*false_succ));
-  }
+  // Returns the trip count of the loop if it is known and kUnknownTripCount otherwise.
+  static int64_t GetLoopTripCount(HLoopInformation* loop_info,
+                                  const InductionVarRange* induction_range);
 
  private:
   // Returns whether an instruction makes scalar loop peeling/unrolling non-beneficial.
@@ -105,9 +120,7 @@ class LoopAnalysis : public ValueObject {
         instruction->IsUnresolvedStaticFieldGet() ||
         instruction->IsUnresolvedStaticFieldSet() ||
         // TODO: Support loops with intrinsified invokes.
-        instruction->IsInvoke() ||
-        // TODO: Support loops with ClinitChecks.
-        instruction->IsClinitCheck());
+        instruction->IsInvoke());
   }
 };
 
@@ -117,36 +130,42 @@ class LoopAnalysis : public ValueObject {
 // To support peeling/unrolling for a new architecture one needs to create new helper class,
 // inherit it from this and add implementation for the following methods.
 //
-class ArchDefaultLoopHelper : public ArenaObject<kArenaAllocOptimization> {
+class ArchNoOptsLoopHelper : public ArenaObject<kArenaAllocOptimization> {
  public:
-  virtual ~ArchDefaultLoopHelper() {}
+  virtual ~ArchNoOptsLoopHelper() {}
 
   // Creates an instance of specialised helper for the target or default helper if the target
   // doesn't support loop peeling and unrolling.
-  static ArchDefaultLoopHelper* Create(InstructionSet isa, ArenaAllocator* allocator);
+  static ArchNoOptsLoopHelper* Create(InstructionSet isa, ArenaAllocator* allocator);
 
-  // Returns whether the loop is too big for loop peeling/unrolling by checking its total number of
-  // basic blocks and instructions.
+  // Returns whether the loop is not beneficial for loop peeling/unrolling.
   //
-  // If the loop body has too many instructions then peeling/unrolling optimization will not bring
-  // any noticeable performance improvement however will increase the code size.
+  // For example, if the loop body has too many instructions then peeling/unrolling optimization
+  // will not bring any noticeable performance improvement however will increase the code size.
   //
   // Returns 'true' by default, should be overridden by particular target loop helper.
-  virtual bool IsLoopTooBigForScalarPeelingUnrolling(
+  virtual bool IsLoopNonBeneficialForScalarOpts(
       LoopAnalysisInfo* loop_analysis_info ATTRIBUTE_UNUSED) const { return true; }
 
   // Returns optimal scalar unrolling factor for the loop.
   //
   // Returns kNoUnrollingFactor by default, should be overridden by particular target loop helper.
-  virtual uint32_t GetScalarUnrollingFactor(HLoopInformation* loop_info ATTRIBUTE_UNUSED,
-                                            uint64_t trip_count ATTRIBUTE_UNUSED) const {
-    return kNoUnrollingFactor;
+  virtual uint32_t GetScalarUnrollingFactor(
+      const LoopAnalysisInfo* analysis_info ATTRIBUTE_UNUSED) const {
+    return LoopAnalysisInfo::kNoUnrollingFactor;
   }
 
   // Returns whether scalar loop peeling is enabled,
   //
   // Returns 'false' by default, should be overridden by particular target loop helper.
   virtual bool IsLoopPeelingEnabled() const { return false; }
+
+  // Returns whether it is beneficial to fully unroll the loop.
+  //
+  // Returns 'false' by default, should be overridden by particular target loop helper.
+  virtual bool IsFullUnrollingBeneficial(LoopAnalysisInfo* analysis_info ATTRIBUTE_UNUSED) const {
+    return false;
+  }
 
   // Returns optimal SIMD unrolling factor for the loop.
   //
@@ -155,7 +174,7 @@ class ArchDefaultLoopHelper : public ArenaObject<kArenaAllocOptimization> {
                                           int64_t trip_count ATTRIBUTE_UNUSED,
                                           uint32_t max_peel ATTRIBUTE_UNUSED,
                                           uint32_t vector_length ATTRIBUTE_UNUSED) const {
-    return kNoUnrollingFactor;
+    return LoopAnalysisInfo::kNoUnrollingFactor;
   }
 };
 

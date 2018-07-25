@@ -18,6 +18,7 @@
 
 #include "art_method-inl.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "data_type-inl.h"
 #include "escape.h"
 #include "intrinsics.h"
@@ -35,11 +36,9 @@ class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
  public:
   InstructionSimplifierVisitor(HGraph* graph,
                                CodeGenerator* codegen,
-                               CompilerDriver* compiler_driver,
                                OptimizingCompilerStats* stats)
       : HGraphDelegateVisitor(graph),
         codegen_(codegen),
-        compiler_driver_(compiler_driver),
         stats_(stats) {}
 
   bool Run();
@@ -116,6 +115,7 @@ class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
   void SimplifyFP2Int(HInvoke* invoke);
   void SimplifyStringCharAt(HInvoke* invoke);
   void SimplifyStringIsEmptyOrLength(HInvoke* invoke);
+  void SimplifyStringIndexOf(HInvoke* invoke);
   void SimplifyNPEOnArgN(HInvoke* invoke, size_t);
   void SimplifyReturnThis(HInvoke* invoke);
   void SimplifyAllocationIntrinsic(HInvoke* invoke);
@@ -125,7 +125,6 @@ class InstructionSimplifierVisitor : public HGraphDelegateVisitor {
   void SimplifyAbs(HInvoke* invoke, DataType::Type type);
 
   CodeGenerator* codegen_;
-  CompilerDriver* compiler_driver_;
   OptimizingCompilerStats* stats_;
   bool simplification_occurred_ = false;
   int simplifications_at_current_position_ = 0;
@@ -142,7 +141,7 @@ bool InstructionSimplifier::Run() {
     visitor.VisitReversePostOrder();
   }
 
-  InstructionSimplifierVisitor visitor(graph_, codegen_, compiler_driver_, stats_);
+  InstructionSimplifierVisitor visitor(graph_, codegen_, stats_);
   return visitor.Run();
 }
 
@@ -636,8 +635,8 @@ void InstructionSimplifierVisitor::VisitCheckCast(HCheckCast* check_cast) {
     return;
   }
 
-  // Note: The `outcome` is initialized to please valgrind - the compiler can reorder
-  // the return value check with the `outcome` check, b/27651442 .
+  // Historical note: The `outcome` was initialized to please Valgrind - the compiler can reorder
+  // the return value check with the `outcome` check, b/27651442.
   bool outcome = false;
   if (TypeCheckHasKnownOutcome(check_cast->GetTargetClassRTI(), object, &outcome)) {
     if (outcome) {
@@ -682,8 +681,8 @@ void InstructionSimplifierVisitor::VisitInstanceOf(HInstanceOf* instruction) {
     return;
   }
 
-  // Note: The `outcome` is initialized to please valgrind - the compiler can reorder
-  // the return value check with the `outcome` check, b/27651442 .
+  // Historical note: The `outcome` was initialized to please Valgrind - the compiler can reorder
+  // the return value check with the `outcome` check, b/27651442.
   bool outcome = false;
   if (TypeCheckHasKnownOutcome(instruction->GetTargetClassRTI(), object, &outcome)) {
     MaybeRecordStat(stats_, MethodCompilationStat::kRemovedInstanceOf);
@@ -1563,8 +1562,7 @@ static bool RecognizeAndSimplifyClassCheck(HCondition* condition) {
 
   {
     ScopedObjectAccess soa(Thread::Current());
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    ArtField* field = class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0);
+    ArtField* field = GetClassRoot<mirror::Object>()->GetInstanceField(0);
     DCHECK_EQ(std::string(field->GetName()), "shadow$_klass_");
     if (field_get->GetFieldInfo().GetField() != field) {
       return false;
@@ -2270,7 +2268,7 @@ void InstructionSimplifierVisitor::SimplifySystemArrayCopy(HInvoke* instruction)
       ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
       PointerSize image_size = class_linker->GetImagePointerSize();
       HInvokeStaticOrDirect* invoke = instruction->AsInvokeStaticOrDirect();
-      mirror::Class* system = invoke->GetResolvedMethod()->GetDeclaringClass();
+      ObjPtr<mirror::Class> system = invoke->GetResolvedMethod()->GetDeclaringClass();
       ArtMethod* method = nullptr;
       switch (source_component_type) {
         case DataType::Type::kBool:
@@ -2308,7 +2306,7 @@ void InstructionSimplifierVisitor::SimplifySystemArrayCopy(HInvoke* instruction)
       // the invoke, as we would need to look it up in the current dex file, and it
       // is unlikely that it exists. The most usual situation for such typed
       // arraycopy methods is a direct pointer to the boot image.
-      HSharpening::SharpenInvokeStaticOrDirect(invoke, codegen_, compiler_driver_);
+      HSharpening::SharpenInvokeStaticOrDirect(invoke, codegen_);
     }
   }
 }
@@ -2415,6 +2413,43 @@ void InstructionSimplifierVisitor::SimplifyStringIsEmptyOrLength(HInvoke* invoke
     replacement = length;
   }
   invoke->GetBlock()->ReplaceAndRemoveInstructionWith(invoke, replacement);
+}
+
+void InstructionSimplifierVisitor::SimplifyStringIndexOf(HInvoke* invoke) {
+  DCHECK(invoke->GetIntrinsic() == Intrinsics::kStringIndexOf ||
+         invoke->GetIntrinsic() == Intrinsics::kStringIndexOfAfter);
+  if (invoke->InputAt(0)->IsLoadString()) {
+    HLoadString* load_string = invoke->InputAt(0)->AsLoadString();
+    const DexFile& dex_file = load_string->GetDexFile();
+    uint32_t utf16_length;
+    const char* data =
+        dex_file.StringDataAndUtf16LengthByIdx(load_string->GetStringIndex(), &utf16_length);
+    if (utf16_length == 0) {
+      invoke->ReplaceWith(GetGraph()->GetIntConstant(-1));
+      invoke->GetBlock()->RemoveInstruction(invoke);
+      RecordSimplification();
+      return;
+    }
+    if (utf16_length == 1 && invoke->GetIntrinsic() == Intrinsics::kStringIndexOf) {
+      // Simplify to HSelect(HEquals(., load_string.charAt(0)), 0, -1).
+      // If the sought character is supplementary, this gives the correct result, i.e. -1.
+      uint32_t c = GetUtf16FromUtf8(&data);
+      DCHECK_EQ(GetTrailingUtf16Char(c), 0u);
+      DCHECK_EQ(GetLeadingUtf16Char(c), c);
+      uint32_t dex_pc = invoke->GetDexPc();
+      ArenaAllocator* allocator = GetGraph()->GetAllocator();
+      HEqual* equal =
+          new (allocator) HEqual(invoke->InputAt(1), GetGraph()->GetIntConstant(c), dex_pc);
+      invoke->GetBlock()->InsertInstructionBefore(equal, invoke);
+      HSelect* result = new (allocator) HSelect(equal,
+                                                GetGraph()->GetIntConstant(0),
+                                                GetGraph()->GetIntConstant(-1),
+                                                dex_pc);
+      invoke->GetBlock()->ReplaceAndRemoveInstructionWith(invoke, result);
+      RecordSimplification();
+      return;
+    }
+  }
 }
 
 // This method should only be used on intrinsics whose sole way of throwing an
@@ -2553,6 +2588,10 @@ void InstructionSimplifierVisitor::VisitInvoke(HInvoke* instruction) {
     case Intrinsics::kStringIsEmpty:
     case Intrinsics::kStringLength:
       SimplifyStringIsEmptyOrLength(instruction);
+      break;
+    case Intrinsics::kStringIndexOf:
+    case Intrinsics::kStringIndexOfAfter:
+      SimplifyStringIndexOf(instruction);
       break;
     case Intrinsics::kStringStringIndexOf:
     case Intrinsics::kStringStringIndexOfAfter:

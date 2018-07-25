@@ -1285,6 +1285,7 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
   void SetLifetimeEnd(size_t end) { lifetime_end_ = end; }
 
   bool EndsWithControlFlowInstruction() const;
+  bool EndsWithReturn() const;
   bool EndsWithIf() const;
   bool EndsWithTryBoundary() const;
   bool HasSinglePhi() const;
@@ -1379,6 +1380,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(InvokeStaticOrDirect, Invoke)                                       \
   M(InvokeVirtual, Invoke)                                              \
   M(InvokePolymorphic, Invoke)                                          \
+  M(InvokeCustom, Invoke)                                               \
   M(LessThan, Condition)                                                \
   M(LessThanOrEqual, Condition)                                         \
   M(LoadClass, Instruction)                                             \
@@ -1908,6 +1910,11 @@ class HEnvironment : public ArenaObject<kArenaAllocEnvironment> {
 
   void RemoveAsUserOfInput(size_t index) const;
 
+  // Replaces the input at the position 'index' with the replacement; the replacement and old
+  // input instructions' env_uses_ lists are adjusted. The function works similar to
+  // HInstruction::ReplaceInput.
+  void ReplaceInput(HInstruction* replacement, size_t index);
+
   size_t Size() const { return vregs_.size(); }
 
   HEnvironment* GetParent() const { return parent_; }
@@ -2210,6 +2217,7 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
 
   void ReplaceWith(HInstruction* instruction);
   void ReplaceUsesDominatedBy(HInstruction* dominator, HInstruction* replacement);
+  void ReplaceEnvUsesDominatedBy(HInstruction* dominator, HInstruction* replacement);
   void ReplaceInput(HInstruction* replacement, size_t index);
 
   // This is almost the same as doing `ReplaceWith()`. But in this helper, the
@@ -4376,6 +4384,38 @@ class HInvokePolymorphic FINAL : public HInvoke {
   DEFAULT_COPY_CONSTRUCTOR(InvokePolymorphic);
 };
 
+class HInvokeCustom FINAL : public HInvoke {
+ public:
+  HInvokeCustom(ArenaAllocator* allocator,
+                uint32_t number_of_arguments,
+                uint32_t call_site_index,
+                DataType::Type return_type,
+                uint32_t dex_pc)
+      : HInvoke(kInvokeCustom,
+                allocator,
+                number_of_arguments,
+                /* number_of_other_inputs */ 0u,
+                return_type,
+                dex_pc,
+                /* dex_method_index */ dex::kDexNoIndex,
+                /* resolved_method */ nullptr,
+                kStatic),
+      call_site_index_(call_site_index) {
+  }
+
+  uint32_t GetCallSiteIndex() const { return call_site_index_; }
+
+  bool IsClonable() const OVERRIDE { return true; }
+
+  DECLARE_INSTRUCTION(InvokeCustom);
+
+ protected:
+  DEFAULT_COPY_CONSTRUCTOR(InvokeCustom);
+
+ private:
+  uint32_t call_site_index_;
+};
+
 class HInvokeStaticOrDirect FINAL : public HInvoke {
  public:
   // Requirements of this method call regarding the class
@@ -4399,17 +4439,17 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
     // Used for boot image methods referenced by boot image code.
     kBootImageLinkTimePcRelative,
 
-    // Use ArtMethod* at a known address, embed the direct address in the code.
-    // Used for app->boot calls with non-relocatable image and for JIT-compiled calls.
-    kDirectAddress,
-
     // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
     // Used for app->boot calls with relocatable image.
     kBootImageRelRo,
 
     // Load from an entry in the .bss section using a PC-relative load.
-    // Used for classes outside boot image when .bss is accessible with a PC-relative load.
+    // Used for methods outside boot image referenced by AOT-compiled app and boot image code.
     kBssEntry,
+
+    // Use ArtMethod* at a known address, embed the direct address in the code.
+    // Used for for JIT-compiled calls.
+    kJitDirectAddress,
 
     // Make a runtime call to resolve and call the method. This is the last-resort-kind
     // used when other kinds are unimplemented on a particular architecture.
@@ -4536,7 +4576,7 @@ class HInvokeStaticOrDirect FINAL : public HInvoke {
   bool IsRecursive() const { return GetMethodLoadKind() == MethodLoadKind::kRecursive; }
   bool NeedsDexCacheOfDeclaringClass() const OVERRIDE;
   bool IsStringInit() const { return GetMethodLoadKind() == MethodLoadKind::kStringInit; }
-  bool HasMethodAddress() const { return GetMethodLoadKind() == MethodLoadKind::kDirectAddress; }
+  bool HasMethodAddress() const { return GetMethodLoadKind() == MethodLoadKind::kJitDirectAddress; }
   bool HasPcRelativeMethodLoadKind() const {
     return GetMethodLoadKind() == MethodLoadKind::kBootImageLinkTimePcRelative ||
            GetMethodLoadKind() == MethodLoadKind::kBootImageRelRo ||
@@ -5116,6 +5156,7 @@ class HDivZeroCheck FINAL : public HExpression<1> {
     SetRawInputAt(0, value);
   }
 
+  bool IsClonable() const OVERRIDE { return true; }
   bool CanBeMoved() const OVERRIDE { return true; }
 
   bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
@@ -5567,6 +5608,7 @@ class HTypeConversion FINAL : public HExpression<1> {
   DataType::Type GetInputType() const { return GetInput()->GetType(); }
   DataType::Type GetResultType() const { return GetType(); }
 
+  bool IsClonable() const OVERRIDE { return true; }
   bool CanBeMoved() const OVERRIDE { return true; }
   bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
     return true;
@@ -6113,17 +6155,17 @@ class HLoadClass FINAL : public HInstruction {
     // Used for boot image classes referenced by boot image code.
     kBootImageLinkTimePcRelative,
 
-    // Use a known boot image Class* address, embedded in the code by the codegen.
-    // Used for boot image classes referenced by apps in JIT- and AOT-compiled code (non-PIC).
-    kBootImageAddress,
-
     // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
-    // Used for boot image classes referenced by apps in AOT-compiled code (PIC).
+    // Used for boot image classes referenced by apps in AOT-compiled code.
     kBootImageRelRo,
 
     // Load from an entry in the .bss section using a PC-relative load.
-    // Used for classes outside boot image when .bss is accessible with a PC-relative load.
+    // Used for classes outside boot image referenced by AOT-compiled app and boot image code.
     kBssEntry,
+
+    // Use a known boot image Class* address, embedded in the code by the codegen.
+    // Used for boot image classes referenced by apps in JIT-compiled code.
+    kJitBootImageAddress,
 
     // Load from the root table associated with the JIT compiled method.
     kJitTableAddress,
@@ -6206,8 +6248,6 @@ class HLoadClass FINAL : public HInstruction {
     return NeedsAccessCheck() ||
            MustGenerateClinitCheck() ||
            // If the class is in the boot image, the lookup in the runtime call cannot throw.
-           // This keeps CanThrow() consistent between non-PIC (using kBootImageAddress) and
-           // PIC and subsequently avoids a DCE behavior dependency on the PIC option.
            ((GetLoadKind() == LoadKind::kRuntimeCall ||
              GetLoadKind() == LoadKind::kBssEntry) &&
             !IsInBootImage());
@@ -6324,9 +6364,9 @@ inline void HLoadClass::AddSpecialInput(HInstruction* special_input) {
   // The special input is used for PC-relative loads on some architectures,
   // including literal pool loads, which are PC-relative too.
   DCHECK(GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
-         GetLoadKind() == LoadKind::kBootImageAddress ||
          GetLoadKind() == LoadKind::kBootImageRelRo ||
-         GetLoadKind() == LoadKind::kBssEntry) << GetLoadKind();
+         GetLoadKind() == LoadKind::kBssEntry ||
+         GetLoadKind() == LoadKind::kJitBootImageAddress) << GetLoadKind();
   DCHECK(special_input_.GetInstruction() == nullptr);
   special_input_ = HUserRecord<HInstruction*>(special_input);
   special_input->AddUseAt(this, 0);
@@ -6340,17 +6380,17 @@ class HLoadString FINAL : public HInstruction {
     // Used for boot image strings referenced by boot image code.
     kBootImageLinkTimePcRelative,
 
-    // Use a known boot image String* address, embedded in the code by the codegen.
-    // Used for boot image strings referenced by apps in JIT- and AOT-compiled code (non-PIC).
-    kBootImageAddress,
-
     // Load from an entry in the .data.bimg.rel.ro using a PC-relative load.
-    // Used for boot image strings referenced by apps in AOT-compiled code (PIC).
+    // Used for boot image strings referenced by apps in AOT-compiled code.
     kBootImageRelRo,
 
     // Load from an entry in the .bss section using a PC-relative load.
-    // Used for strings outside boot image when .bss is accessible with a PC-relative load.
+    // Used for strings outside boot image referenced by AOT-compiled app and boot image code.
     kBssEntry,
+
+    // Use a known boot image String* address, embedded in the code by the codegen.
+    // Used for boot image strings referenced by apps in JIT-compiled code.
+    kJitBootImageAddress,
 
     // Load from the root table associated with the JIT compiled method.
     kJitTableAddress,
@@ -6417,8 +6457,8 @@ class HLoadString FINAL : public HInstruction {
   bool NeedsEnvironment() const OVERRIDE {
     LoadKind load_kind = GetLoadKind();
     if (load_kind == LoadKind::kBootImageLinkTimePcRelative ||
-        load_kind == LoadKind::kBootImageAddress ||
         load_kind == LoadKind::kBootImageRelRo ||
+        load_kind == LoadKind::kJitBootImageAddress ||
         load_kind == LoadKind::kJitTableAddress) {
       return false;
     }
@@ -6491,9 +6531,9 @@ inline void HLoadString::AddSpecialInput(HInstruction* special_input) {
   // The special input is used for PC-relative loads on some architectures,
   // including literal pool loads, which are PC-relative too.
   DCHECK(GetLoadKind() == LoadKind::kBootImageLinkTimePcRelative ||
-         GetLoadKind() == LoadKind::kBootImageAddress ||
          GetLoadKind() == LoadKind::kBootImageRelRo ||
-         GetLoadKind() == LoadKind::kBssEntry) << GetLoadKind();
+         GetLoadKind() == LoadKind::kBssEntry ||
+         GetLoadKind() == LoadKind::kJitBootImageAddress) << GetLoadKind();
   // HLoadString::GetInputRecords() returns an empty array at this point,
   // so use the GetInputRecords() from the base class to set the input record.
   DCHECK(special_input_.GetInstruction() == nullptr);
@@ -6504,9 +6544,9 @@ inline void HLoadString::AddSpecialInput(HInstruction* special_input) {
 class HLoadMethodHandle FINAL : public HInstruction {
  public:
   HLoadMethodHandle(HCurrentMethod* current_method,
-                  uint16_t method_handle_idx,
-                  const DexFile& dex_file,
-                  uint32_t dex_pc)
+                    uint16_t method_handle_idx,
+                    const DexFile& dex_file,
+                    uint32_t dex_pc)
       : HInstruction(kLoadMethodHandle,
                      DataType::Type::kReference,
                      SideEffectsForArchRuntimeCalls(),
@@ -6602,8 +6642,7 @@ class HClinitCheck FINAL : public HExpression<1> {
             dex_pc) {
     SetRawInputAt(0, constant);
   }
-
-  bool IsClonable() const OVERRIDE { return true; }
+  // TODO: Make ClinitCheck clonable.
   bool CanBeMoved() const OVERRIDE { return true; }
   bool InstructionDataEquals(const HInstruction* other ATTRIBUTE_UNUSED) const OVERRIDE {
     return true;
@@ -7073,6 +7112,8 @@ class HInstanceOf FINAL : public HTypeCheckInstruction {
                               bitstring_mask,
                               SideEffectsForArchRuntimeCalls(check_kind)) {}
 
+  bool IsClonable() const OVERRIDE { return true; }
+
   bool NeedsEnvironment() const OVERRIDE {
     return CanCallRuntime(GetTypeCheckKind());
   }
@@ -7103,6 +7144,7 @@ class HBoundType FINAL : public HExpression<1> {
     SetRawInputAt(0, input);
   }
 
+  bool InstructionDataEquals(const HInstruction* other) const OVERRIDE;
   bool IsClonable() const OVERRIDE { return true; }
 
   // {Get,Set}Upper* should only be used in reference type propagation.
@@ -7161,6 +7203,7 @@ class HCheckCast FINAL : public HTypeCheckInstruction {
                               bitstring_mask,
                               SideEffects::CanTriggerGC()) {}
 
+  bool IsClonable() const OVERRIDE { return true; }
   bool NeedsEnvironment() const OVERRIDE {
     // Instruction may throw a CheckCastError.
     return true;

@@ -98,6 +98,8 @@ static void AddGeneratedArtifactMappings(Builder& builder) {
       .Define("--oat-symbols=_")
           .WithType<std::vector<std::string>>().AppendValues()
           .IntoKey(M::OatSymbols)
+      .Define("--strip")
+          .IntoKey(M::Strip)
       .Define("--oat-fd=_")
           .WithType<int>()
           .IntoKey(M::OatFd)
@@ -222,10 +224,10 @@ static Parser CreateArgumentParser() {
       .Define("--force-determinism")
           .IntoKey(M::ForceDeterminism)
       .Define("--copy-dex-files=_")
-          .WithType<CopyOption>()
-          .WithValueMap({{"true", CopyOption::kOnlyIfCompressed},
-                         {"false", CopyOption::kNever},
-                         {"always", CopyOption::kAlways}})
+          .WithType<linker::CopyOption>()
+          .WithValueMap({{"true", linker::CopyOption::kOnlyIfCompressed},
+                         {"false", linker::CopyOption::kNever},
+                         {"always", linker::CopyOption::kAlways}})
           .IntoKey(M::CopyDexFiles)
       .Define("--classpath-dir=_")
           .WithType<std::string>()

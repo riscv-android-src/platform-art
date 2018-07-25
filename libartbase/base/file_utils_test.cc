@@ -20,11 +20,11 @@
 #include <stdlib.h>
 
 #include "base/stl_util.h"
-#include "common_runtime_test.h"
+#include "common_art_test.h"
 
 namespace art {
 
-class FileUtilsTest : public CommonRuntimeTest {};
+class FileUtilsTest : public CommonArtTest {};
 
 TEST_F(FileUtilsTest, GetDalvikCacheFilename) {
   std::string name;
@@ -63,22 +63,21 @@ TEST_F(FileUtilsTest, GetAndroidRootSafe) {
 
   // We don't expect null returns for most cases, so don't check and let std::string crash.
 
-  // CommonRuntimeTest sets ANDROID_ROOT, so expect this to be the same.
+  // CommonArtTest sets ANDROID_ROOT, so expect this to be the same.
   std::string android_root = GetAndroidRootSafe(&error_msg);
   std::string android_root_env = getenv("ANDROID_ROOT");
   EXPECT_EQ(android_root, android_root_env);
 
   // Set ANDROID_ROOT to something else (but the directory must exist). So use dirname.
-  char* root_dup = strdup(android_root_env.c_str());
-  char* dir = dirname(root_dup);
+  UniqueCPtr<char> root_dup(strdup(android_root_env.c_str()));
+  char* dir = dirname(root_dup.get());
   ASSERT_EQ(0, setenv("ANDROID_ROOT", dir, 1 /* overwrite */));
   std::string android_root2 = GetAndroidRootSafe(&error_msg);
   EXPECT_STREQ(dir, android_root2.c_str());
-  free(root_dup);
 
   // Set a bogus value for ANDROID_ROOT. This should be an error.
   ASSERT_EQ(0, setenv("ANDROID_ROOT", "/this/is/obviously/bogus", 1 /* overwrite */));
-  EXPECT_TRUE(GetAndroidRootSafe(&error_msg) == nullptr);
+  EXPECT_EQ(GetAndroidRootSafe(&error_msg), "");
 
   // Unset ANDROID_ROOT and see that it still returns something (as libart code is running).
   ASSERT_EQ(0, unsetenv("ANDROID_ROOT"));

@@ -20,12 +20,13 @@
 #include "art_field-inl.h"
 #include "class-inl.h"
 #include "class_linker.h"
-#include "gc_root-inl.h"
+#include "class_root.h"
 #include "intrinsics_enum.h"
 #include "jni/jni_internal.h"
 #include "jvalue-inl.h"
-#include "method_handles.h"
+#include "method_handles-inl.h"
 #include "method_type.h"
+#include "obj_ptr-inl.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -265,29 +266,20 @@ int32_t BuildParameterArray(ObjPtr<Class> (&parameters)[VarHandle::kMaxAccessorP
 
 // Returns the return type associated with an AccessModeTemplate based
 // on the template and the variable type specified.
-Class* GetReturnType(AccessModeTemplate access_mode_template, ObjPtr<Class> varType)
+static ObjPtr<Class> GetReturnType(AccessModeTemplate access_mode_template, ObjPtr<Class> varType)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(varType != nullptr);
   switch (access_mode_template) {
     case AccessModeTemplate::kCompareAndSet:
-      return Runtime::Current()->GetClassLinker()->FindPrimitiveClass('Z');
+      return GetClassRoot(ClassRoot::kPrimitiveBoolean);
     case AccessModeTemplate::kCompareAndExchange:
     case AccessModeTemplate::kGet:
     case AccessModeTemplate::kGetAndUpdate:
-      return varType.Ptr();
+      return varType;
     case AccessModeTemplate::kSet:
-      return Runtime::Current()->GetClassLinker()->FindPrimitiveClass('V');
+      return GetClassRoot(ClassRoot::kPrimitiveVoid);
   }
   return nullptr;
-}
-
-ObjectArray<Class>* NewArrayOfClasses(Thread* self, int count)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  Runtime* const runtime = Runtime::Current();
-  ClassLinker* const class_linker = runtime->GetClassLinker();
-  ObjPtr<mirror::Class> class_type = mirror::Class::GetJavaLangClass();
-  ObjPtr<mirror::Class> array_of_class = class_linker->FindArrayClass(self, &class_type);
-  return ObjectArray<Class>::Alloc(Thread::Current(), array_of_class, count);
 }
 
 // Method to insert a read barrier for accessors to reference fields.
@@ -1029,15 +1021,17 @@ bool FieldAccessor<ObjPtr<Object>>::Dispatch(VarHandle::AccessMode access_mode,
       ObjPtr<Object> desired_value = ValueGetter<ObjPtr<Object>>::Get(getter);
       bool cas_result;
       if (Runtime::Current()->IsActiveTransaction()) {
-        cas_result = obj->CasFieldStrongSequentiallyConsistentObject<kTransactionActive>(
-            field_offset,
-            expected_value,
-            desired_value);
+        cas_result = obj->CasFieldObject<kTransactionActive>(field_offset,
+                                                             expected_value,
+                                                             desired_value,
+                                                             CASMode::kStrong,
+                                                             std::memory_order_seq_cst);
       } else {
-        cas_result = obj->CasFieldStrongSequentiallyConsistentObject<kTransactionInactive>(
-            field_offset,
-            expected_value,
-            desired_value);
+        cas_result = obj->CasFieldObject<kTransactionInactive>(field_offset,
+                                                               expected_value,
+                                                               desired_value,
+                                                               CASMode::kStrong,
+                                                               std::memory_order_seq_cst);
       }
       StoreResult(cas_result, result);
       break;
@@ -1051,15 +1045,18 @@ bool FieldAccessor<ObjPtr<Object>>::Dispatch(VarHandle::AccessMode access_mode,
       ObjPtr<Object> desired_value = ValueGetter<ObjPtr<Object>>::Get(getter);
       bool cas_result;
       if (Runtime::Current()->IsActiveTransaction()) {
-        cas_result = obj->CasFieldWeakSequentiallyConsistentObject<kTransactionActive>(
-            field_offset,
-            expected_value,
-            desired_value);
+        cas_result = obj->CasFieldObject<kTransactionActive>(field_offset,
+                                                             expected_value,
+                                                             desired_value,
+                                                             CASMode::kWeak,
+                                                             std::memory_order_seq_cst);
       } else {
-        cas_result = obj->CasFieldWeakSequentiallyConsistentObject<kTransactionInactive>(
+        cas_result = obj->CasFieldObject<kTransactionInactive>(
             field_offset,
             expected_value,
-            desired_value);
+            desired_value,
+            CASMode::kWeak,
+            std::memory_order_seq_cst);
       }
       StoreResult(cas_result, result);
       break;
@@ -1072,15 +1069,13 @@ bool FieldAccessor<ObjPtr<Object>>::Dispatch(VarHandle::AccessMode access_mode,
       ObjPtr<Object> desired_value = ValueGetter<ObjPtr<Object>>::Get(getter);
       ObjPtr<Object> witness_value;
       if (Runtime::Current()->IsActiveTransaction()) {
-        witness_value = obj->CompareAndExchangeFieldObject<kTransactionActive>(
-            field_offset,
-            expected_value,
-            desired_value);
+        witness_value = obj->CompareAndExchangeFieldObject<kTransactionActive>(field_offset,
+                                                                               expected_value,
+                                                                               desired_value);
       } else {
-        witness_value = obj->CompareAndExchangeFieldObject<kTransactionInactive>(
-            field_offset,
-            expected_value,
-            desired_value);
+        witness_value = obj->CompareAndExchangeFieldObject<kTransactionInactive>(field_offset,
+                                                                                 expected_value,
+                                                                                 desired_value);
       }
       StoreResult(witness_value, result);
       break;
@@ -1409,15 +1404,15 @@ class ByteArrayViewAccessor {
 
 }  // namespace
 
-Class* VarHandle::GetVarType() {
+ObjPtr<Class> VarHandle::GetVarType() {
   return GetFieldObject<Class>(VarTypeOffset());
 }
 
-Class* VarHandle::GetCoordinateType0() {
+ObjPtr<Class> VarHandle::GetCoordinateType0() {
   return GetFieldObject<Class>(CoordinateType0Offset());
 }
 
-Class* VarHandle::GetCoordinateType1() {
+ObjPtr<Class> VarHandle::GetCoordinateType1() {
   return GetFieldObject<Class>(CoordinateType1Offset());
 }
 
@@ -1437,7 +1432,7 @@ VarHandle::MatchKind VarHandle::GetMethodTypeMatchForAccessMode(AccessMode acces
   // Check return type first. If the return type of the method
   // of the VarHandle is immaterial.
   if (mt_rtype->GetPrimitiveType() != Primitive::Type::kPrimVoid) {
-    ObjPtr<Class> vh_rtype = GetReturnType(access_mode_template, var_type.Ptr());
+    ObjPtr<Class> vh_rtype = GetReturnType(access_mode_template, var_type);
     if (vh_rtype != mt_rtype) {
       if (!IsReturnTypeConvertible(vh_rtype, mt_rtype)) {
         return MatchKind::kNone;
@@ -1512,9 +1507,9 @@ bool VarHandle::IsInvokerMethodTypeCompatible(AccessMode access_mode,
   return true;
 }
 
-MethodType* VarHandle::GetMethodTypeForAccessMode(Thread* self,
-                                                  ObjPtr<VarHandle> var_handle,
-                                                  AccessMode access_mode) {
+ObjPtr<MethodType> VarHandle::GetMethodTypeForAccessMode(Thread* self,
+                                                         ObjPtr<VarHandle> var_handle,
+                                                         AccessMode access_mode) {
   // This is a static method as the var_handle might be moved by the GC during it's execution.
   AccessModeTemplate access_mode_template = GetAccessModeTemplate(access_mode);
 
@@ -1524,7 +1519,9 @@ MethodType* VarHandle::GetMethodTypeForAccessMode(Thread* self,
   const int32_t ptypes_count = GetNumberOfParameters(access_mode_template,
                                                      vh->GetCoordinateType0(),
                                                      vh->GetCoordinateType1());
-  Handle<ObjectArray<Class>> ptypes = hs.NewHandle(NewArrayOfClasses(self, ptypes_count));
+  ObjPtr<Class> array_of_class = GetClassRoot<ObjectArray<Class>>();
+  Handle<ObjectArray<Class>> ptypes =
+      hs.NewHandle(ObjectArray<Class>::Alloc(Thread::Current(), array_of_class, ptypes_count));
   if (ptypes == nullptr) {
     return nullptr;
   }
@@ -1536,30 +1533,62 @@ MethodType* VarHandle::GetMethodTypeForAccessMode(Thread* self,
                       vh->GetCoordinateType0(),
                       vh->GetCoordinateType1());
   for (int32_t i = 0; i < ptypes_count; ++i) {
-    ptypes->Set(i, ptypes_array[i].Ptr());
+    ptypes->Set(i, ptypes_array[i]);
   }
   return MethodType::Create(self, rtype, ptypes);
 }
 
-MethodType* VarHandle::GetMethodTypeForAccessMode(Thread* self, AccessMode access_mode) {
+ObjPtr<MethodType> VarHandle::GetMethodTypeForAccessMode(Thread* self, AccessMode access_mode) {
   return GetMethodTypeForAccessMode(self, this, access_mode);
+}
+
+std::string VarHandle::PrettyDescriptorForAccessMode(AccessMode access_mode) {
+  // Effect MethodType::PrettyDescriptor() without first creating a method type first.
+  std::ostringstream oss;
+  oss << '(';
+
+  AccessModeTemplate access_mode_template = GetAccessModeTemplate(access_mode);
+  ObjPtr<Class> var_type = GetVarType();
+  ObjPtr<Class> ctypes[2] = { GetCoordinateType0(), GetCoordinateType1() };
+  const int32_t ptypes_count = GetNumberOfParameters(access_mode_template, ctypes[0], ctypes[1]);
+  int32_t ptypes_done = 0;
+  for (ObjPtr<Class> ctype : ctypes) {
+    if (!ctype.IsNull()) {
+      if (ptypes_done != 0) {
+        oss << ", ";
+      }
+      oss << ctype->PrettyDescriptor();;
+      ptypes_done++;
+    }
+  }
+  while (ptypes_done != ptypes_count) {
+    if (ptypes_done != 0) {
+      oss << ", ";
+    }
+    oss << var_type->PrettyDescriptor();
+    ptypes_done++;
+  }
+  ObjPtr<Class> rtype = GetReturnType(access_mode_template, var_type);
+  oss << ')' << rtype->PrettyDescriptor();
+  return oss.str();
 }
 
 bool VarHandle::Access(AccessMode access_mode,
                        ShadowFrame* shadow_frame,
                        const InstructionOperands* const operands,
                        JValue* result) {
-  Class* klass = GetClass();
-  if (klass == FieldVarHandle::StaticClass()) {
+  ObjPtr<ObjectArray<Class>> class_roots = Runtime::Current()->GetClassLinker()->GetClassRoots();
+  ObjPtr<Class> klass = GetClass();
+  if (klass == GetClassRoot<FieldVarHandle>(class_roots)) {
     auto vh = reinterpret_cast<FieldVarHandle*>(this);
     return vh->Access(access_mode, shadow_frame, operands, result);
-  } else if (klass == ArrayElementVarHandle::StaticClass()) {
+  } else if (klass == GetClassRoot<ArrayElementVarHandle>(class_roots)) {
     auto vh = reinterpret_cast<ArrayElementVarHandle*>(this);
     return vh->Access(access_mode, shadow_frame, operands, result);
-  } else if (klass == ByteArrayViewVarHandle::StaticClass()) {
+  } else if (klass == GetClassRoot<ByteArrayViewVarHandle>(class_roots)) {
     auto vh = reinterpret_cast<ByteArrayViewVarHandle*>(this);
     return vh->Access(access_mode, shadow_frame, operands, result);
-  } else if (klass == ByteBufferViewVarHandle::StaticClass()) {
+  } else if (klass == GetClassRoot<ByteBufferViewVarHandle>(class_roots)) {
     auto vh = reinterpret_cast<ByteBufferViewVarHandle*>(this);
     return vh->Access(access_mode, shadow_frame, operands, result);
   } else {
@@ -1650,27 +1679,6 @@ bool VarHandle::GetAccessModeByMethodName(const char* method_name, AccessMode* a
   return true;
 }
 
-Class* VarHandle::StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return static_class_.Read();
-}
-
-void VarHandle::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void VarHandle::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void VarHandle::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-GcRoot<Class> VarHandle::static_class_;
-
 ArtField* FieldVarHandle::GetField() {
   uintptr_t opaque_field = static_cast<uintptr_t>(GetField64(ArtFieldOffset()));
   return reinterpret_cast<ArtField*>(opaque_field);
@@ -1726,27 +1734,6 @@ bool FieldVarHandle::Access(AccessMode access_mode,
   LOG(FATAL) << "Unreachable: Unexpected primitive " << primitive_type;
   UNREACHABLE();
 }
-
-Class* FieldVarHandle::StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return static_class_.Read();
-}
-
-void FieldVarHandle::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void FieldVarHandle::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void FieldVarHandle::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-GcRoot<Class> FieldVarHandle::static_class_;
 
 bool ArrayElementVarHandle::Access(AccessMode access_mode,
                                    ShadowFrame* shadow_frame,
@@ -1836,27 +1823,6 @@ bool ArrayElementVarHandle::Access(AccessMode access_mode,
   UNREACHABLE();
 }
 
-Class* ArrayElementVarHandle::StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return static_class_.Read();
-}
-
-void ArrayElementVarHandle::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void ArrayElementVarHandle::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void ArrayElementVarHandle::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-GcRoot<Class> ArrayElementVarHandle::static_class_;
-
 bool ByteArrayViewVarHandle::GetNativeByteOrder() {
   return GetFieldBoolean(NativeByteOrderOffset());
 }
@@ -1944,27 +1910,6 @@ bool ByteArrayViewVarHandle::Access(AccessMode access_mode,
   LOG(FATAL) << "Unreachable: Unexpected primitive " << primitive_type;
   UNREACHABLE();
 }
-
-Class* ByteArrayViewVarHandle::StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return static_class_.Read();
-}
-
-void ByteArrayViewVarHandle::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void ByteArrayViewVarHandle::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void ByteArrayViewVarHandle::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-GcRoot<Class> ByteArrayViewVarHandle::static_class_;
 
 bool ByteBufferViewVarHandle::GetNativeByteOrder() {
   return GetFieldBoolean(NativeByteOrderOffset());
@@ -2085,27 +2030,6 @@ bool ByteBufferViewVarHandle::Access(AccessMode access_mode,
   LOG(FATAL) << "Unreachable: Unexpected primitive " << primitive_type;
   UNREACHABLE();
 }
-
-Class* ByteBufferViewVarHandle::StaticClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return static_class_.Read();
-}
-
-void ByteBufferViewVarHandle::SetClass(Class* klass) {
-  CHECK(static_class_.IsNull()) << static_class_.Read() << " " << klass;
-  CHECK(klass != nullptr);
-  static_class_ = GcRoot<Class>(klass);
-}
-
-void ByteBufferViewVarHandle::ResetClass() {
-  CHECK(!static_class_.IsNull());
-  static_class_ = GcRoot<Class>(nullptr);
-}
-
-void ByteBufferViewVarHandle::VisitRoots(RootVisitor* visitor) {
-  static_class_.VisitRootIfNonNull(visitor, RootInfo(kRootStickyClass));
-}
-
-GcRoot<Class> ByteBufferViewVarHandle::static_class_;
 
 }  // namespace mirror
 }  // namespace art
