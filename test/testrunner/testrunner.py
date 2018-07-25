@@ -52,6 +52,8 @@ import json
 import multiprocessing
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -115,6 +117,7 @@ build = False
 gdb = False
 gdb_arg = ''
 runtime_option = ''
+run_test_option = []
 stop_testrunner = False
 dex2oat_jobs = -1   # -1 corresponds to default threads for dex2oat
 run_all_configs = False
@@ -320,16 +323,12 @@ def run_tests(tests):
   if env.ART_TEST_BISECTION:
     options_all += ' --bisection-search'
 
-  if env.ART_TEST_CHROOT:
-    options_all += ' --chroot ' + env.ART_TEST_CHROOT
-
-  if env.ART_TEST_ANDROID_ROOT:
-    options_all += ' --android-root ' + env.ART_TEST_ANDROID_ROOT
-
   if gdb:
     options_all += ' --gdb'
     if gdb_arg:
       options_all += ' --gdb-arg ' + gdb_arg
+
+  options_all += ' ' + ' '.join(run_test_option)
 
   if runtime_option:
     for opt in runtime_option:
@@ -401,6 +400,13 @@ def run_tests(tests):
       elif target == 'jvm':
         options_test += ' --jvm'
 
+      # Honor ART_TEST_CHROOT and ART_TEST_ANDROID_ROOT, but only for target tests.
+      if target == 'target':
+        if env.ART_TEST_CHROOT:
+          options_test += ' --chroot ' + env.ART_TEST_CHROOT
+        if env.ART_TEST_ANDROID_ROOT:
+          options_test += ' --android-root ' + env.ART_TEST_ANDROID_ROOT
+
       if run == 'ndebug':
         options_test += ' -O'
 
@@ -411,8 +417,9 @@ def run_tests(tests):
       elif prebuild == 'no-dex2oat':
         options_test += ' --no-prebuild --no-dex2oat'
 
-      # Add option and remove the cdex- prefix.
-      options_test += ' --compact-dex-level ' + cdex_level.replace('cdex-','')
+      if cdex_level:
+        # Add option and remove the cdex- prefix.
+        options_test += ' --compact-dex-level ' + cdex_level.replace('cdex-','')
 
       if compiler == 'optimizing':
         options_test += ' --optimizing'
@@ -481,12 +488,6 @@ def run_tests(tests):
         if env.HOST_2ND_ARCH_PREFIX_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES:
           options_test += ' --instruction-set-features ' + \
                           env.HOST_2ND_ARCH_PREFIX_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES
-
-      # Use the default run-test behavior unless ANDROID_COMPILE_WITH_JACK is explicitly set.
-      if env.ANDROID_COMPILE_WITH_JACK == True:
-        options_test += ' --build-with-jack'
-      elif env.ANDROID_COMPILE_WITH_JACK == False:
-        options_test += ' --build-with-javac-dx'
 
       # TODO(http://36039166): This is a temporary solution to
       # fix build breakages.
@@ -908,6 +909,7 @@ def parse_option():
   global gdb
   global gdb_arg
   global runtime_option
+  global run_test_option
   global timeout
   global dex2oat_jobs
   global run_all_configs
@@ -937,6 +939,12 @@ def parse_option():
   global_group.set_defaults(build = env.ART_TEST_RUN_TEST_BUILD)
   global_group.add_argument('--gdb', action='store_true', dest='gdb')
   global_group.add_argument('--gdb-arg', dest='gdb_arg')
+  global_group.add_argument('--run-test-option', action='append', dest='run_test_option',
+                            default=[],
+                            help="""Pass an option, unaltered, to the run-test script.
+                            This should be enclosed in single-quotes to allow for spaces. The option
+                            will be split using shlex.split() prior to invoking run-test.
+                            Example \"--run-test-option='--with-agent libtifast.so=MethodExit'\"""")
   global_group.add_argument('--runtime-option', action='append', dest='runtime_option',
                             help="""Pass an option to the runtime. Runtime options
                             starting with a '-' must be separated by a '=', for
@@ -985,6 +993,8 @@ def parse_option():
     if options['gdb_arg']:
       gdb_arg = options['gdb_arg']
   runtime_option = options['runtime_option'];
+  run_test_option = sum(map(shlex.split, options['run_test_option']), [])
+
   timeout = options['timeout']
   if options['dex2oat_jobs']:
     dex2oat_jobs = options['dex2oat_jobs']
@@ -1000,19 +1010,20 @@ def main():
   if build:
     build_targets = ''
     if 'host' in _user_input_variants['target']:
-      build_targets += 'test-art-host-run-test-dependencies'
+      build_targets += 'test-art-host-run-test-dependencies '
     if 'target' in _user_input_variants['target']:
-      build_targets += 'test-art-target-run-test-dependencies'
+      build_targets += 'test-art-target-run-test-dependencies '
     if 'jvm' in _user_input_variants['target']:
-      build_targets += 'test-art-host-run-test-dependencies'
+      build_targets += 'test-art-host-run-test-dependencies '
     build_command = 'make'
     build_command += ' DX='
     build_command += ' -j'
     build_command += ' -C ' + env.ANDROID_BUILD_TOP
     build_command += ' ' + build_targets
-    # Add 'dist' to avoid Jack issues b/36169180.
-    build_command += ' dist'
     if subprocess.call(build_command.split()):
+      # Debugging for b/62653020
+      if env.DIST_DIR:
+        shutil.copyfile(env.SOONG_OUT_DIR + '/build.ninja', env.DIST_DIR + '/soong.ninja')
       sys.exit(1)
   if user_requested_tests:
     test_runner_thread = threading.Thread(target=run_tests, args=(user_requested_tests,))

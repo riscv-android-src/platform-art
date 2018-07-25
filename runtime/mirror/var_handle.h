@@ -19,7 +19,6 @@
 
 #include "handle.h"
 #include "interpreter/shadow_frame.h"
-#include "gc_root.h"
 #include "jvalue.h"
 #include "object.h"
 
@@ -27,6 +26,7 @@ namespace art {
 
 template<class T> class Handle;
 class InstructionOperands;
+template<class T> class ObjPtr;
 
 enum class Intrinsics;
 
@@ -121,7 +121,12 @@ class MANAGED VarHandle : public Object {
   // AccessMode. No check is made for whether the AccessMode is a
   // supported operation so the MethodType can be used when raising a
   // WrongMethodTypeException exception.
-  MethodType* GetMethodTypeForAccessMode(Thread* self, AccessMode accessMode)
+  ObjPtr<MethodType> GetMethodTypeForAccessMode(Thread* self, AccessMode accessMode)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Returns a string representing the descriptor of the MethodType associated with
+  // this AccessMode.
+  std::string PrettyDescriptorForAccessMode(AccessMode access_mode)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool Access(AccessMode access_mode,
@@ -131,7 +136,7 @@ class MANAGED VarHandle : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Gets the variable type that is operated on by this VarHandle instance.
-  Class* GetVarType() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Class> GetVarType() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Gets the return type descriptor for a named accessor method,
   // nullptr if accessor_method is not supported.
@@ -144,19 +149,14 @@ class MANAGED VarHandle : public Object {
   // VarHandle access method, such as "setOpaque". Returns false otherwise.
   static bool GetAccessModeByMethodName(const char* method_name, AccessMode* access_mode);
 
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
-  Class* GetCoordinateType0() REQUIRES_SHARED(Locks::mutator_lock_);
-  Class* GetCoordinateType1() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Class> GetCoordinateType0() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Class> GetCoordinateType1() REQUIRES_SHARED(Locks::mutator_lock_);
   int32_t GetAccessModesBitMask() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MethodType* GetMethodTypeForAccessMode(Thread* self,
-                                                ObjPtr<VarHandle> var_handle,
-                                                AccessMode access_mode)
+  static ObjPtr<MethodType> GetMethodTypeForAccessMode(Thread* self,
+                                                       ObjPtr<VarHandle> var_handle,
+                                                       AccessMode access_mode)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static MemberOffset VarTypeOffset() {
@@ -180,9 +180,6 @@ class MANAGED VarHandle : public Object {
   HeapReference<mirror::Class> var_type_;
   int32_t access_modes_bit_mask_;
 
-  // Root representing java.lang.invoke.VarHandle.class.
-  static GcRoot<mirror::Class> static_class_;
-
   friend class VarHandleTest;  // for testing purposes
   friend struct art::VarHandleOffsets;  // for verifying offset information
   DISALLOW_IMPLICIT_CONSTRUCTORS(VarHandle);
@@ -200,11 +197,6 @@ class MANAGED FieldVarHandle : public VarHandle {
 
   ArtField* GetField() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
   static MemberOffset ArtFieldOffset() {
     return MemberOffset(OFFSETOF_MEMBER(FieldVarHandle, art_field_));
@@ -212,9 +204,6 @@ class MANAGED FieldVarHandle : public VarHandle {
 
   // ArtField instance corresponding to variable for accessors.
   int64_t art_field_;
-
-  // Root representing java.lang.invoke.FieldVarHandle.class.
-  static GcRoot<mirror::Class> static_class_;
 
   friend class VarHandleTest;  // for var_handle_test.
   friend struct art::FieldVarHandleOffsets;  // for verifying offset information
@@ -231,15 +220,7 @@ class MANAGED ArrayElementVarHandle : public VarHandle {
                 JValue* result)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
-  // Root representing java.lang.invoke.ArrayElementVarHandle.class.
-  static GcRoot<mirror::Class> static_class_;
-
   friend class VarHandleTest;
   DISALLOW_IMPLICIT_CONSTRUCTORS(ArrayElementVarHandle);
 };
@@ -256,11 +237,6 @@ class MANAGED ByteArrayViewVarHandle : public VarHandle {
 
   bool GetNativeByteOrder() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
   static MemberOffset NativeByteOrderOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ByteArrayViewVarHandle, native_byte_order_));
@@ -268,9 +244,6 @@ class MANAGED ByteArrayViewVarHandle : public VarHandle {
 
   // Flag indicating that accessors should use native byte-ordering.
   uint8_t native_byte_order_;
-
-  // Root representing java.lang.invoke.ByteArrayViewVarHandle.class.
-  static GcRoot<mirror::Class> static_class_;
 
   friend class VarHandleTest;  // for var_handle_test.
   friend struct art::ByteArrayViewVarHandleOffsets;  // for verifying offset information
@@ -288,11 +261,6 @@ class MANAGED ByteBufferViewVarHandle : public VarHandle {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool GetNativeByteOrder() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static mirror::Class* StaticClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void SetClass(Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
-  static void ResetClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  static void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   bool AccessHeapBuffer(AccessMode access_mode,
@@ -316,9 +284,6 @@ class MANAGED ByteBufferViewVarHandle : public VarHandle {
 
   // Flag indicating that accessors should use native byte-ordering.
   uint8_t native_byte_order_;
-
-  // Root representing java.lang.invoke.ByteBufferViewVarHandle.class.
-  static GcRoot<mirror::Class> static_class_;
 
   friend class VarHandleTest;  // for var_handle_test.
   friend struct art::ByteBufferViewVarHandleOffsets;  // for verifying offset information

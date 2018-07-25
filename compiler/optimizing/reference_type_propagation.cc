@@ -22,6 +22,7 @@
 #include "base/scoped_arena_containers.h"
 #include "base/enums.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache.h"
@@ -40,43 +41,40 @@ static inline ObjPtr<mirror::DexCache> FindDexCacheWithHint(
 }
 
 static inline ReferenceTypeInfo::TypeHandle GetRootHandle(VariableSizedHandleScope* handles,
-                                                          ClassLinker::ClassRoot class_root,
+                                                          ClassRoot class_root,
                                                           ReferenceTypeInfo::TypeHandle* cache) {
   if (!ReferenceTypeInfo::IsValidHandle(*cache)) {
     // Mutator lock is required for NewHandle.
-    ClassLinker* linker = Runtime::Current()->GetClassLinker();
     ScopedObjectAccess soa(Thread::Current());
-    *cache = handles->NewHandle(linker->GetClassRoot(class_root));
+    *cache = handles->NewHandle(GetClassRoot(class_root));
   }
   return *cache;
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetObjectClassHandle() {
-  return GetRootHandle(handles_, ClassLinker::kJavaLangObject, &object_class_handle_);
+  return GetRootHandle(handles_, ClassRoot::kJavaLangObject, &object_class_handle_);
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetClassClassHandle() {
-  return GetRootHandle(handles_, ClassLinker::kJavaLangClass, &class_class_handle_);
+  return GetRootHandle(handles_, ClassRoot::kJavaLangClass, &class_class_handle_);
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetMethodHandleClassHandle() {
   return GetRootHandle(handles_,
-                       ClassLinker::kJavaLangInvokeMethodHandleImpl,
+                       ClassRoot::kJavaLangInvokeMethodHandleImpl,
                        &method_handle_class_handle_);
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetMethodTypeClassHandle() {
-  return GetRootHandle(handles_,
-                       ClassLinker::kJavaLangInvokeMethodType,
-                       &method_type_class_handle_);
+  return GetRootHandle(handles_, ClassRoot::kJavaLangInvokeMethodType, &method_type_class_handle_);
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetStringClassHandle() {
-  return GetRootHandle(handles_, ClassLinker::kJavaLangString, &string_class_handle_);
+  return GetRootHandle(handles_, ClassRoot::kJavaLangString, &string_class_handle_);
 }
 
 ReferenceTypeInfo::TypeHandle ReferenceTypePropagation::HandleCache::GetThrowableClassHandle() {
-  return GetRootHandle(handles_, ClassLinker::kJavaLangThrowable, &throwable_class_handle_);
+  return GetRootHandle(handles_, ClassRoot::kJavaLangThrowable, &throwable_class_handle_);
 }
 
 class ReferenceTypePropagation::RTPVisitor : public HGraphDelegateVisitor {
@@ -341,8 +339,7 @@ static void BoundTypeForClassCheck(HInstruction* check) {
 
   {
     ScopedObjectAccess soa(Thread::Current());
-    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
-    ArtField* field = class_linker->GetClassRoot(ClassLinker::kJavaLangObject)->GetInstanceField(0);
+    ArtField* field = GetClassRoot<mirror::Object>()->GetInstanceField(0);
     DCHECK_EQ(std::string(field->GetName()), "shadow$_klass_");
     if (field_get->GetFieldInfo().GetField() != field) {
       return;
@@ -566,7 +563,7 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
       ArtMethod* method = cl->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
           dex_method_index, dex_cache, loader, /* referrer */ nullptr, kDirect);
       DCHECK(method != nullptr);
-      mirror::Class* declaring_class = method->GetDeclaringClass();
+      ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
       DCHECK(declaring_class != nullptr);
       DCHECK(declaring_class->IsStringClass())
           << "Expected String class: " << declaring_class->PrettyDescriptor();
@@ -575,7 +572,7 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
     }
     instr->SetReferenceTypeInfo(
         ReferenceTypeInfo::Create(handle_cache_->GetStringClassHandle(), /* is_exact */ true));
-  } else if (IsAdmissible(klass.Ptr())) {
+  } else if (IsAdmissible(klass)) {
     ReferenceTypeInfo::TypeHandle handle = handle_cache_->NewHandle(klass);
     is_exact = is_exact || handle->CannotBeAssignedFromOtherTypes();
     instr->SetReferenceTypeInfo(ReferenceTypeInfo::Create(handle, is_exact));

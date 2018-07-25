@@ -19,13 +19,11 @@ include art/build/Android.common_test.mk
 
 # Dependencies for actually running a run-test.
 TEST_ART_RUN_TEST_DEPENDENCIES := \
-  $(HOST_OUT_EXECUTABLES)/dx \
   $(HOST_OUT_EXECUTABLES)/d8 \
   $(HOST_OUT_EXECUTABLES)/d8-compat-dx \
   $(HOST_OUT_EXECUTABLES)/hiddenapi \
   $(HOST_OUT_EXECUTABLES)/jasmin \
-  $(HOST_OUT_EXECUTABLES)/smali \
-  $(HOST_OUT_JAVA_LIBRARIES)/desugar.jar
+  $(HOST_OUT_EXECUTABLES)/smali
 
 # We need dex2oat and dalvikvm on the target as well as the core images (all images as we sync
 # only once).
@@ -97,7 +95,7 @@ endif
 # Host executables.
 host_prereq_rules := $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES)
 
-# Required for dx, jasmin, smali.
+# Required for jasmin and smali.
 host_prereq_rules += $(TEST_ART_RUN_TEST_DEPENDENCIES)
 
 # Sync test files to the target, depends upon all things that must be pushed
@@ -140,8 +138,11 @@ $(foreach target, $(TARGET_TYPES), \
         $(call core-image-dependencies,$(target),$(image),$(compiler),$(address_size)))))))
 
 test-art-host-run-test-dependencies : $(host_prereq_rules)
+.PHONY: test-art-host-run-test-dependencies
 test-art-target-run-test-dependencies : $(target_prereq_rules)
+.PHONY: test-art-target-run-test-dependencies
 test-art-run-test-dependencies : test-art-host-run-test-dependencies test-art-target-run-test-dependencies
+.PHONY: test-art-run-test-dependencies
 
 # Create a rule to build and run a test group of the following form:
 # test-art-{1: host target}-run-test

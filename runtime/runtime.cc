@@ -39,18 +39,12 @@
 #include "android-base/strings.h"
 
 #include "aot_class_linker.h"
-#include "arch/arm/quick_method_frame_info_arm.h"
 #include "arch/arm/registers_arm.h"
-#include "arch/arm64/quick_method_frame_info_arm64.h"
 #include "arch/arm64/registers_arm64.h"
 #include "arch/instruction_set_features.h"
-#include "arch/mips/quick_method_frame_info_mips.h"
 #include "arch/mips/registers_mips.h"
-#include "arch/mips64/quick_method_frame_info_mips64.h"
 #include "arch/mips64/registers_mips64.h"
-#include "arch/x86/quick_method_frame_info_x86.h"
 #include "arch/x86/registers_x86.h"
-#include "arch/x86_64/quick_method_frame_info_x86_64.h"
 #include "arch/x86_64/registers_x86_64.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
@@ -73,6 +67,7 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "compiler_callbacks.h"
 #include "debugger.h"
 #include "dex/art_dex_file_loader.h"
@@ -245,7 +240,7 @@ Runtime::Runtime()
       exit_(nullptr),
       abort_(nullptr),
       stats_enabled_(false),
-      is_running_on_memory_tool_(RUNNING_ON_MEMORY_TOOL),
+      is_running_on_memory_tool_(kRunningOnMemoryTool),
       instrumentation_(),
       main_thread_group_(nullptr),
       system_thread_group_(nullptr),
@@ -718,6 +713,23 @@ std::string Runtime::GetCompilerExecutable() const {
   return compiler_executable;
 }
 
+void Runtime::RunRootClinits(Thread* self) {
+  class_linker_->RunRootClinits(self);
+
+  GcRoot<mirror::Throwable>* exceptions[] = {
+      &pre_allocated_OutOfMemoryError_when_throwing_exception_,
+      // &pre_allocated_OutOfMemoryError_when_throwing_oome_,             // Same class as above.
+      // &pre_allocated_OutOfMemoryError_when_handling_stack_overflow_,   // Same class as above.
+      &pre_allocated_NoClassDefFoundError_,
+  };
+  for (GcRoot<mirror::Throwable>* exception : exceptions) {
+    StackHandleScope<1> hs(self);
+    Handle<mirror::Class> klass = hs.NewHandle<mirror::Class>(exception->Read()->GetClass());
+    class_linker_->EnsureInitialized(self, klass, true, true);
+    self->AssertNoPendingException();
+  }
+}
+
 bool Runtime::Start() {
   VLOG(startup) << "Runtime::Start entering";
 
@@ -742,12 +754,15 @@ bool Runtime::Start() {
     ScopedObjectAccess soa(self);
     StackHandleScope<2> hs(soa.Self());
 
-    auto class_class(hs.NewHandle<mirror::Class>(mirror::Class::GetJavaLangClass()));
-    auto field_class(hs.NewHandle<mirror::Class>(mirror::Field::StaticClass()));
+    ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots = GetClassLinker()->GetClassRoots();
+    auto class_class(hs.NewHandle<mirror::Class>(GetClassRoot<mirror::Class>(class_roots)));
+    auto field_class(hs.NewHandle<mirror::Class>(GetClassRoot<mirror::Field>(class_roots)));
 
     class_linker_->EnsureInitialized(soa.Self(), class_class, true, true);
+    self->AssertNoPendingException();
     // Field class is needed for register_java_net_InetAddress in libcore, b/28153851.
     class_linker_->EnsureInitialized(soa.Self(), field_class, true, true);
+    self->AssertNoPendingException();
   }
 
   // InitNativeMethods needs to be after started_ so that the classes
@@ -1024,7 +1039,7 @@ static bool OpenDexFilesFromImage(const std::string& image_location,
       return false;
     }
 
-    for (const OatFile::OatDexFile* oat_dex_file : oat_file->GetOatDexFiles()) {
+    for (const OatDexFile* oat_dex_file : oat_file->GetOatDexFiles()) {
       if (oat_dex_file == nullptr) {
         *failures += 1;
         continue;
@@ -1092,6 +1107,32 @@ void Runtime::SetSentinel(mirror::Object* sentinel) {
   CHECK(sentinel != nullptr);
   CHECK(!heap_->IsMovableObject(sentinel));
   sentinel_ = GcRoot<mirror::Object>(sentinel);
+}
+
+static inline void CreatePreAllocatedException(Thread* self,
+                                               Runtime* runtime,
+                                               GcRoot<mirror::Throwable>* exception,
+                                               const char* exception_class_descriptor,
+                                               const char* msg)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK_EQ(self, Thread::Current());
+  ClassLinker* class_linker = runtime->GetClassLinker();
+  // Allocate an object without initializing the class to allow non-trivial Throwable.<clinit>().
+  ObjPtr<mirror::Class> klass = class_linker->FindSystemClass(self, exception_class_descriptor);
+  CHECK(klass != nullptr);
+  gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
+  ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
+      klass->Alloc</* kIsInstrumented */ true>(self, allocator_type));
+  CHECK(exception_object != nullptr);
+  *exception = GcRoot<mirror::Throwable>(exception_object);
+  // Initialize the "detailMessage" field.
+  ObjPtr<mirror::String> message = mirror::String::AllocFromModifiedUtf8(self, msg);
+  CHECK(message != nullptr);
+  ObjPtr<mirror::Class> throwable = GetClassRoot<mirror::Throwable>(class_linker);
+  ArtField* detailMessageField =
+      throwable->FindDeclaredInstanceField("detailMessage", "Ljava/lang/String;");
+  CHECK(detailMessageField != nullptr);
+  detailMessageField->SetObject</* kTransactionActive */ false>(exception->Read(), message);
 }
 
 bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
@@ -1276,7 +1317,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
   jdwp_options_ = runtime_options.GetOrDefault(Opt::JdwpOptions);
-  jdwp_provider_ = runtime_options.GetOrDefault(Opt::JdwpProvider);
+  jdwp_provider_ = CanonicalizeJdwpProvider(runtime_options.GetOrDefault(Opt::JdwpProvider),
+                                            IsJavaDebuggable());
   switch (jdwp_provider_) {
     case JdwpProvider::kNone: {
       VLOG(jdwp) << "Disabling all JDWP support.";
@@ -1310,6 +1352,11 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       constexpr const char* plugin_name = kIsDebugBuild ? "libadbconnectiond.so"
                                                         : "libadbconnection.so";
       plugins_.push_back(Plugin::Create(plugin_name));
+      break;
+    }
+    case JdwpProvider::kUnset: {
+      LOG(FATAL) << "Illegal jdwp provider " << jdwp_provider_ << " was not filtered out!";
+      break;
     }
   }
   callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
@@ -1355,8 +1402,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     case InstructionSet::kMips:
     case InstructionSet::kMips64:
       implicit_null_checks_ = true;
-      // Installing stack protection does not play well with valgrind.
-      implicit_so_checks_ = !(RUNNING_ON_MEMORY_TOOL && kMemoryToolIsValgrind);
+      // Historical note: Installing stack protection was not playing well with Valgrind.
+      implicit_so_checks_ = true;
       break;
     default:
       // Keep the defaults.
@@ -1371,8 +1418,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       // These need to be in a specific order.  The null point check handler must be
       // after the suspend check and stack overflow check handlers.
       //
-      // Note: the instances attach themselves to the fault manager and are handled by it. The manager
-      //       will delete the instance on Shutdown().
+      // Note: the instances attach themselves to the fault manager and are handled by it. The
+      //       manager will delete the instance on Shutdown().
       if (implicit_suspend_checks_) {
         new SuspensionHandler(&fault_manager);
       }
@@ -1509,34 +1556,58 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // TODO: move this to just be an Trace::Start argument
   Trace::SetDefaultClockSource(runtime_options.GetOrDefault(Opt::ProfileClock));
 
-  // Pre-allocate an OutOfMemoryError for the case when we fail to
-  // allocate the exception to be thrown.
-  InitPreAllocatedException(self,
-                            &Runtime::pre_allocated_OutOfMemoryError_when_throwing_exception_,
-                            "Ljava/lang/OutOfMemoryError;",
-                            "OutOfMemoryError thrown while trying to throw an exception; "
-                            "no stack trace available");
-  // Pre-allocate an OutOfMemoryError for the double-OOME case.
-  InitPreAllocatedException(self,
-                            &Runtime::pre_allocated_OutOfMemoryError_when_throwing_oome_,
-                            "Ljava/lang/OutOfMemoryError;",
-                            "OutOfMemoryError thrown while trying to throw OutOfMemoryError; "
-                            "no stack trace available");
-  // Pre-allocate an OutOfMemoryError for the case when we fail to
-  // allocate while handling a stack overflow.
-  InitPreAllocatedException(self,
-                            &Runtime::pre_allocated_OutOfMemoryError_when_handling_stack_overflow_,
-                            "Ljava/lang/OutOfMemoryError;",
-                            "OutOfMemoryError thrown while trying to handle a stack overflow; "
-                            "no stack trace available");
+  if (GetHeap()->HasBootImageSpace()) {
+    const ImageHeader& image_header = GetHeap()->GetBootImageSpaces()[0]->GetImageHeader();
+    pre_allocated_OutOfMemoryError_when_throwing_exception_ = GcRoot<mirror::Throwable>(
+        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingException)->AsThrowable());
+    DCHECK(pre_allocated_OutOfMemoryError_when_throwing_exception_.Read()->GetClass()
+               ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
+    pre_allocated_OutOfMemoryError_when_throwing_oome_ = GcRoot<mirror::Throwable>(
+        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingOome)->AsThrowable());
+    DCHECK(pre_allocated_OutOfMemoryError_when_throwing_oome_.Read()->GetClass()
+               ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
+    pre_allocated_OutOfMemoryError_when_handling_stack_overflow_ = GcRoot<mirror::Throwable>(
+        image_header.GetImageRoot(ImageHeader::kOomeWhenHandlingStackOverflow)->AsThrowable());
+    DCHECK(pre_allocated_OutOfMemoryError_when_handling_stack_overflow_.Read()->GetClass()
+               ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
+    pre_allocated_NoClassDefFoundError_ = GcRoot<mirror::Throwable>(
+        image_header.GetImageRoot(ImageHeader::kNoClassDefFoundError)->AsThrowable());
+    DCHECK(pre_allocated_NoClassDefFoundError_.Read()->GetClass()
+               ->DescriptorEquals("Ljava/lang/NoClassDefFoundError;"));
+  } else {
+    // Pre-allocate an OutOfMemoryError for the case when we fail to
+    // allocate the exception to be thrown.
+    CreatePreAllocatedException(self,
+                                this,
+                                &pre_allocated_OutOfMemoryError_when_throwing_exception_,
+                                "Ljava/lang/OutOfMemoryError;",
+                                "OutOfMemoryError thrown while trying to throw an exception; "
+                                    "no stack trace available");
+    // Pre-allocate an OutOfMemoryError for the double-OOME case.
+    CreatePreAllocatedException(self,
+                                this,
+                                &pre_allocated_OutOfMemoryError_when_throwing_oome_,
+                                "Ljava/lang/OutOfMemoryError;",
+                                "OutOfMemoryError thrown while trying to throw OutOfMemoryError; "
+                                    "no stack trace available");
+    // Pre-allocate an OutOfMemoryError for the case when we fail to
+    // allocate while handling a stack overflow.
+    CreatePreAllocatedException(self,
+                                this,
+                                &pre_allocated_OutOfMemoryError_when_handling_stack_overflow_,
+                                "Ljava/lang/OutOfMemoryError;",
+                                "OutOfMemoryError thrown while trying to handle a stack overflow; "
+                                    "no stack trace available");
 
-  // Pre-allocate a NoClassDefFoundError for the common case of failing to find a system class
-  // ahead of checking the application's class loader.
-  InitPreAllocatedException(self,
-                            &Runtime::pre_allocated_NoClassDefFoundError_,
-                            "Ljava/lang/NoClassDefFoundError;",
-                            "Class not found using the boot class loader; "
-                            "no stack trace available");
+    // Pre-allocate a NoClassDefFoundError for the common case of failing to find a system class
+    // ahead of checking the application's class loader.
+    CreatePreAllocatedException(self,
+                                this,
+                                &pre_allocated_NoClassDefFoundError_,
+                                "Ljava/lang/NoClassDefFoundError;",
+                                "Class not found using the boot class loader; "
+                                    "no stack trace available");
+  }
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1684,16 +1755,6 @@ void Runtime::AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject cla
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());
   }
-}
-
-void Runtime::InitPreAllocatedException(Thread* self,
-                                        GcRoot<mirror::Throwable> Runtime::* exception,
-                                        const char* exception_class_descriptor,
-                                        const char* msg) {
-  DCHECK_EQ(self, Thread::Current());
-  self->ThrowNewException(exception_class_descriptor, msg);
-  this->*exception = GcRoot<mirror::Throwable>(self->GetException());
-  self->ClearException();
 }
 
 void Runtime::InitNativeMethods() {
@@ -1980,36 +2041,6 @@ mirror::Throwable* Runtime::GetPreAllocatedNoClassDefFoundError() {
 }
 
 void Runtime::VisitConstantRoots(RootVisitor* visitor) {
-  // Visit the classes held as static in mirror classes, these can be visited concurrently and only
-  // need to be visited once per GC since they never change.
-  mirror::Class::VisitRoots(visitor);
-  mirror::Constructor::VisitRoots(visitor);
-  mirror::Reference::VisitRoots(visitor);
-  mirror::Method::VisitRoots(visitor);
-  mirror::StackTraceElement::VisitRoots(visitor);
-  mirror::String::VisitRoots(visitor);
-  mirror::Throwable::VisitRoots(visitor);
-  mirror::Field::VisitRoots(visitor);
-  mirror::MethodType::VisitRoots(visitor);
-  mirror::MethodHandleImpl::VisitRoots(visitor);
-  mirror::MethodHandlesLookup::VisitRoots(visitor);
-  mirror::EmulatedStackFrame::VisitRoots(visitor);
-  mirror::ClassExt::VisitRoots(visitor);
-  mirror::CallSite::VisitRoots(visitor);
-  mirror::VarHandle::VisitRoots(visitor);
-  mirror::FieldVarHandle::VisitRoots(visitor);
-  mirror::ArrayElementVarHandle::VisitRoots(visitor);
-  mirror::ByteArrayViewVarHandle::VisitRoots(visitor);
-  mirror::ByteBufferViewVarHandle::VisitRoots(visitor);
-  // Visit all the primitive array types classes.
-  mirror::PrimitiveArray<uint8_t>::VisitRoots(visitor);   // BooleanArray
-  mirror::PrimitiveArray<int8_t>::VisitRoots(visitor);    // ByteArray
-  mirror::PrimitiveArray<uint16_t>::VisitRoots(visitor);  // CharArray
-  mirror::PrimitiveArray<double>::VisitRoots(visitor);    // DoubleArray
-  mirror::PrimitiveArray<float>::VisitRoots(visitor);     // FloatArray
-  mirror::PrimitiveArray<int32_t>::VisitRoots(visitor);   // IntArray
-  mirror::PrimitiveArray<int64_t>::VisitRoots(visitor);   // LongArray
-  mirror::PrimitiveArray<int16_t>::VisitRoots(visitor);   // ShortArray
   // Visiting the roots of these ArtMethods is not currently required since all the GcRoots are
   // null.
   BufferedRootVisitor<16> buffered_visitor(visitor, RootInfo(kRootVMInternal));
@@ -2058,6 +2089,7 @@ void Runtime::VisitNonThreadRoots(RootVisitor* visitor) {
   pre_allocated_OutOfMemoryError_when_handling_stack_overflow_
       .VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
   pre_allocated_NoClassDefFoundError_.VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
+  VisitImageRoots(visitor);
   verifier::MethodVerifier::VisitStaticRoots(visitor);
   VisitTransactionRoots(visitor);
 }
@@ -2082,9 +2114,10 @@ void Runtime::VisitImageRoots(RootVisitor* visitor) {
       auto* image_space = space->AsImageSpace();
       const auto& image_header = image_space->GetImageHeader();
       for (int32_t i = 0, size = image_header.GetImageRoots()->GetLength(); i != size; ++i) {
-        auto* obj = image_header.GetImageRoot(static_cast<ImageHeader::ImageRoot>(i));
+        mirror::Object* obj =
+            image_header.GetImageRoot(static_cast<ImageHeader::ImageRoot>(i)).Ptr();
         if (obj != nullptr) {
-          auto* after_obj = obj;
+          mirror::Object* after_obj = obj;
           visitor->VisitRoot(&after_obj, RootInfo(kRootStickyClass));
           CHECK_EQ(after_obj, obj);
         }
@@ -2203,38 +2236,21 @@ void Runtime::BroadcastForNewSystemWeaks(bool broadcast_for_checkpoint) {
 
 void Runtime::SetInstructionSet(InstructionSet instruction_set) {
   instruction_set_ = instruction_set;
-  if ((instruction_set_ == InstructionSet::kThumb2) || (instruction_set_ == InstructionSet::kArm)) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = arm::ArmCalleeSaveMethodFrameInfo(type);
-    }
-  } else if (instruction_set_ == InstructionSet::kMips) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = mips::MipsCalleeSaveMethodFrameInfo(type);
-    }
-  } else if (instruction_set_ == InstructionSet::kMips64) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = mips64::Mips64CalleeSaveMethodFrameInfo(type);
-    }
-  } else if (instruction_set_ == InstructionSet::kX86) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = x86::X86CalleeSaveMethodFrameInfo(type);
-    }
-  } else if (instruction_set_ == InstructionSet::kX86_64) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = x86_64::X86_64CalleeSaveMethodFrameInfo(type);
-    }
-  } else if (instruction_set_ == InstructionSet::kArm64) {
-    for (int i = 0; i != kCalleeSaveSize; ++i) {
-      CalleeSaveType type = static_cast<CalleeSaveType>(i);
-      callee_save_method_frame_infos_[i] = arm64::Arm64CalleeSaveMethodFrameInfo(type);
-    }
-  } else {
-    UNIMPLEMENTED(FATAL) << instruction_set_;
+  switch (instruction_set) {
+    case InstructionSet::kThumb2:
+      // kThumb2 is the same as kArm, use the canonical value.
+      instruction_set_ = InstructionSet::kArm;
+      break;
+    case InstructionSet::kArm:
+    case InstructionSet::kArm64:
+    case InstructionSet::kMips:
+    case InstructionSet::kMips64:
+    case InstructionSet::kX86:
+    case InstructionSet::kX86_64:
+      break;
+    default:
+      UNIMPLEMENTED(FATAL) << instruction_set_;
+      UNREACHABLE();
   }
 }
 

@@ -316,7 +316,6 @@ class JumpTableRIPFixup;
 class CodeGeneratorX86 : public CodeGenerator {
  public:
   CodeGeneratorX86(HGraph* graph,
-                   const X86InstructionSetFeatures& isa_features,
                    const CompilerOptions& compiler_options,
                    OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorX86() {}
@@ -390,6 +389,8 @@ class CodeGeneratorX86 : public CodeGenerator {
     return InstructionSet::kX86;
   }
 
+  const X86InstructionSetFeatures& GetInstructionSetFeatures() const;
+
   // Helper method to move a 32bits value between two locations.
   void Move32(Location destination, Location source);
   // Helper method to move a 64bits value between two locations.
@@ -418,6 +419,8 @@ class CodeGeneratorX86 : public CodeGenerator {
   void GenerateVirtualCall(
       HInvokeVirtual* invoke, Location temp, SlowPathCode* slow_path = nullptr) OVERRIDE;
 
+  void RecordBootImageIntrinsicPatch(HX86ComputeBaseMethodAddress* method_address,
+                                     uint32_t intrinsic_data);
   void RecordBootImageRelRoPatch(HX86ComputeBaseMethodAddress* method_address,
                                  uint32_t boot_image_offset);
   void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
@@ -426,6 +429,12 @@ class CodeGeneratorX86 : public CodeGenerator {
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
   void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
+
+  void LoadBootImageAddress(Register reg,
+                            uint32_t boot_image_reference,
+                            HInvokeStaticOrDirect* invoke);
+  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+
   Label* NewJitRootStringPatch(const DexFile& dex_file,
                                dex::StringIndex string_index,
                                Handle<mirror::String> handle);
@@ -468,10 +477,6 @@ class CodeGeneratorX86 : public CodeGenerator {
   bool ShouldSplitLongMoves() const OVERRIDE { return true; }
 
   Label* GetFrameEntryLabel() { return &frame_entry_label_; }
-
-  const X86InstructionSetFeatures& GetInstructionSetFeatures() const {
-    return isa_features_;
-  }
 
   void AddMethodAddressOffset(HX86ComputeBaseMethodAddress* method_base, int32_t offset) {
     method_address_offset_.Put(method_base->GetId(), offset);
@@ -635,7 +640,6 @@ class CodeGeneratorX86 : public CodeGenerator {
   InstructionCodeGeneratorX86 instruction_visitor_;
   ParallelMoveResolverX86 move_resolver_;
   X86Assembler assembler_;
-  const X86InstructionSetFeatures& isa_features_;
 
   // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
   // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
@@ -650,6 +654,8 @@ class CodeGeneratorX86 : public CodeGenerator {
   ArenaDeque<X86PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> string_bss_entry_patches_;
+  // PC-relative patch info for IntrinsicObjects.
+  ArenaDeque<X86PcRelativePatchInfo> boot_image_intrinsic_patches_;
 
   // Patches for string root accesses in JIT compiled code.
   ArenaDeque<PatchInfo<Label>> jit_string_patches_;

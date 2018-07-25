@@ -26,6 +26,7 @@
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "entrypoints/quick/quick_entrypoints_enum.h"
 #include "gc/accounting/card_table.h"
+#include "gc/space/image_space.h"
 #include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "intrinsics_mips.h"
@@ -996,7 +997,6 @@ class ReadBarrierForRootSlowPathMIPS : public SlowPathCodeMIPS {
 };
 
 CodeGeneratorMIPS::CodeGeneratorMIPS(HGraph* graph,
-                                     const MipsInstructionSetFeatures& isa_features,
                                      const CompilerOptions& compiler_options,
                                      OptimizingCompilerStats* stats)
     : CodeGenerator(graph,
@@ -1013,8 +1013,8 @@ CodeGeneratorMIPS::CodeGeneratorMIPS(HGraph* graph,
       location_builder_(graph, this),
       instruction_visitor_(graph, this),
       move_resolver_(graph->GetAllocator(), this),
-      assembler_(graph->GetAllocator(), &isa_features),
-      isa_features_(isa_features),
+      assembler_(graph->GetAllocator(),
+                 compiler_options.GetInstructionSetFeatures()->AsMipsInstructionSetFeatures()),
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -1023,6 +1023,7 @@ CodeGeneratorMIPS::CodeGeneratorMIPS(HGraph* graph,
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       clobbered_ra_(false) {
@@ -1042,8 +1043,7 @@ void CodeGeneratorMIPS::Finalize(CodeAllocator* allocator) {
   // Adjust native pc offsets in stack maps.
   StackMapStream* stack_map_stream = GetStackMapStream();
   for (size_t i = 0, num = stack_map_stream->GetNumberOfStackMaps(); i != num; ++i) {
-    uint32_t old_position =
-        stack_map_stream->GetStackMap(i).native_pc_code_offset.Uint32Value(InstructionSet::kMips);
+    uint32_t old_position = stack_map_stream->GetStackMapNativePcOffset(i);
     uint32_t new_position = __ GetAdjustedPosition(old_position);
     DCHECK_GE(new_position, old_position);
     stack_map_stream->SetStackMapNativePcOffset(i, new_position);
@@ -1597,12 +1597,13 @@ inline void CodeGeneratorMIPS::EmitPcRelativeLinkerPatches(
   }
 }
 
-linker::LinkerPatch DataBimgRelRoPatchAdapter(size_t literal_offset,
-                                              const DexFile* target_dex_file,
-                                              uint32_t pc_insn_offset,
-                                              uint32_t boot_image_offset) {
-  DCHECK(target_dex_file == nullptr);  // Unused for DataBimgRelRoPatch(), should be null.
-  return linker::LinkerPatch::DataBimgRelRoPatch(literal_offset, pc_insn_offset, boot_image_offset);
+template <linker::LinkerPatch (*Factory)(size_t, uint32_t, uint32_t)>
+linker::LinkerPatch NoDexFileAdapter(size_t literal_offset,
+                                     const DexFile* target_dex_file,
+                                     uint32_t pc_insn_offset,
+                                     uint32_t boot_image_offset) {
+  DCHECK(target_dex_file == nullptr);  // Unused for these patches, should be null.
+  return Factory(literal_offset, pc_insn_offset, boot_image_offset);
 }
 
 void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) {
@@ -1613,7 +1614,8 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* link
       boot_image_type_patches_.size() +
       type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
-      string_bss_entry_patches_.size();
+      string_bss_entry_patches_.size() +
+      boot_image_intrinsic_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage()) {
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
@@ -1622,11 +1624,14 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* link
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    EmitPcRelativeLinkerPatches<DataBimgRelRoPatchAdapter>(
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
         boot_image_method_patches_, linker_patches);
     DCHECK(boot_image_type_patches_.empty());
     DCHECK(boot_image_string_patches_.empty());
+    DCHECK(boot_image_intrinsic_patches_.empty());
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);
@@ -1635,6 +1640,13 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* link
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringBssEntryPatch>(
       string_bss_entry_patches_, linker_patches);
   DCHECK_EQ(size, linker_patches->size());
+}
+
+CodeGeneratorMIPS::PcRelativePatchInfo* CodeGeneratorMIPS::NewBootImageIntrinsicPatch(
+    uint32_t intrinsic_data,
+    const PcRelativePatchInfo* info_high) {
+  return NewPcRelativePatch(
+      /* dex_file */ nullptr, intrinsic_data, info_high, &boot_image_intrinsic_patches_);
 }
 
 CodeGeneratorMIPS::PcRelativePatchInfo* CodeGeneratorMIPS::NewBootImageRelRoPatch(
@@ -1738,6 +1750,48 @@ void CodeGeneratorMIPS::EmitPcRelativeAddressPlaceholderHigh(PcRelativePatchInfo
   }
   // A following instruction will add the sign-extended low half of the 32-bit
   // offset to `out` (e.g. lw, jialc, addiu).
+}
+
+void CodeGeneratorMIPS::LoadBootImageAddress(Register reg, uint32_t boot_image_reference) {
+  if (GetCompilerOptions().IsBootImage()) {
+    PcRelativePatchInfo* info_high = NewBootImageIntrinsicPatch(boot_image_reference);
+    PcRelativePatchInfo* info_low = NewBootImageIntrinsicPatch(boot_image_reference, info_high);
+    EmitPcRelativeAddressPlaceholderHigh(info_high, TMP, /* base */ ZERO);
+    __ Addiu(reg, TMP, /* placeholder */ 0x5678, &info_low->label);
+  } else if (Runtime::Current()->IsAotCompiler()) {
+    PcRelativePatchInfo* info_high = NewBootImageRelRoPatch(boot_image_reference);
+    PcRelativePatchInfo* info_low = NewBootImageRelRoPatch(boot_image_reference, info_high);
+    EmitPcRelativeAddressPlaceholderHigh(info_high, reg, /* base */ ZERO);
+    __ Lw(reg, reg, /* placeholder */ 0x5678, &info_low->label);
+  } else {
+    DCHECK(Runtime::Current()->UseJitCompilation());
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    DCHECK(!heap->GetBootImageSpaces().empty());
+    const uint8_t* address = heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference;
+    __ LoadConst32(reg, dchecked_integral_cast<uint32_t>(reinterpret_cast<uintptr_t>(address)));
+  }
+}
+
+void CodeGeneratorMIPS::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
+                                                     uint32_t boot_image_offset) {
+  DCHECK(invoke->IsStatic());
+  InvokeRuntimeCallingConvention calling_convention;
+  Register argument = calling_convention.GetRegisterAt(0);
+  if (GetCompilerOptions().IsBootImage()) {
+    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
+    // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
+    MethodReference target_method = invoke->GetTargetMethod();
+    dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
+    PcRelativePatchInfo* info_high = NewBootImageTypePatch(*target_method.dex_file, type_idx);
+    PcRelativePatchInfo* info_low =
+        NewBootImageTypePatch(*target_method.dex_file, type_idx, info_high);
+    EmitPcRelativeAddressPlaceholderHigh(info_high, argument, /* base */ ZERO);
+    __ Addiu(argument, argument, /* placeholder */ 0x5678, &info_low->label);
+  } else {
+    LoadBootImageAddress(argument, boot_image_offset);
+  }
+  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
 }
 
 CodeGeneratorMIPS::JitPatchInfo* CodeGeneratorMIPS::NewJitRootStringPatch(
@@ -1894,6 +1948,10 @@ void CodeGeneratorMIPS::DumpCoreRegister(std::ostream& stream, int reg) const {
 
 void CodeGeneratorMIPS::DumpFloatingPointRegister(std::ostream& stream, int reg) const {
   stream << FRegister(reg);
+}
+
+const MipsInstructionSetFeatures& CodeGeneratorMIPS::GetInstructionSetFeatures() const {
+  return *GetCompilerOptions().GetInstructionSetFeatures()->AsMipsInstructionSetFeatures();
 }
 
 constexpr size_t kMipsDirectEntrypointRuntimeOffset = 16;
@@ -7796,6 +7854,14 @@ void InstructionCodeGeneratorMIPS::VisitInvokePolymorphic(HInvokePolymorphic* in
   codegen_->GenerateInvokePolymorphicCall(invoke);
 }
 
+void LocationsBuilderMIPS::VisitInvokeCustom(HInvokeCustom* invoke) {
+  HandleInvoke(invoke);
+}
+
+void InstructionCodeGeneratorMIPS::VisitInvokeCustom(HInvokeCustom* invoke) {
+  codegen_->GenerateInvokeCustomCall(invoke);
+}
+
 static bool TryGenerateIntrinsicCode(HInvoke* invoke, CodeGeneratorMIPS* codegen) {
   if (invoke->GetLocations()->Intrinsified()) {
     IntrinsicCodeGeneratorMIPS intrinsic(codegen);
@@ -7813,10 +7879,10 @@ HLoadString::LoadKind CodeGeneratorMIPS::GetSupportedLoadStringKind(
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kJitBootImageAddress:
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kRuntimeCall:
       break;
   }
@@ -7836,10 +7902,10 @@ HLoadClass::LoadKind CodeGeneratorMIPS::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kJitBootImageAddress:
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kRuntimeCall:
       break;
   }
@@ -7916,9 +7982,6 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(
       __ Addiu(temp_reg, TMP, /* placeholder */ 0x5678, &info_low->label);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      __ LoadConst32(temp.AsRegister<Register>(), invoke->GetMethodAddress());
-      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
       uint32_t boot_image_offset = GetBootImageOffset(invoke);
       PcRelativePatchInfo* info_high = NewBootImageRelRoPatch(boot_image_offset);
@@ -7938,6 +8001,9 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(
       __ Lw(temp_reg, TMP, /* placeholder */ 0x5678, &info_low->label);
       break;
     }
+    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+      __ LoadConst32(temp.AsRegister<Register>(), invoke->GetMethodAddress());
+      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
@@ -8048,14 +8114,14 @@ void LocationsBuilderMIPS::VisitLoadClass(HLoadClass* cls) {
   switch (load_kind) {
     // We need an extra register for PC-relative literals on R2.
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
+    case HLoadClass::LoadKind::kJitBootImageAddress:
       if (isR6) {
         break;
       }
       if (has_irreducible_loops) {
-        if (load_kind != HLoadClass::LoadKind::kBootImageAddress) {
+        if (load_kind != HLoadClass::LoadKind::kJitBootImageAddress) {
           codegen_->ClobberRA();
         }
         break;
@@ -8100,9 +8166,9 @@ void InstructionCodeGeneratorMIPS::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAF
   switch (load_kind) {
     // We need an extra register for PC-relative literals on R2.
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative:
-    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kBootImageRelRo:
     case HLoadClass::LoadKind::kBssEntry:
+    case HLoadClass::LoadKind::kJitBootImageAddress:
       base_or_current_method_reg =
           (isR6 || has_irreducible_loops) ? ZERO : locations->InAt(0).AsRegister<Register>();
       break;
@@ -8144,20 +8210,6 @@ void InstructionCodeGeneratorMIPS::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAF
       __ Addiu(out, out, /* placeholder */ 0x5678, &info_low->label);
       break;
     }
-    case HLoadClass::LoadKind::kBootImageAddress: {
-      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(cls->GetClass().Get()));
-      DCHECK_NE(address, 0u);
-      if (isR6 || !has_irreducible_loops) {
-        __ LoadLiteral(out,
-                       base_or_current_method_reg,
-                       codegen_->DeduplicateBootImageAddressLiteral(address));
-      } else {
-        __ LoadConst32(out, address);
-      }
-      break;
-    }
     case HLoadClass::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       uint32_t boot_image_offset = codegen_->GetBootImageOffset(cls);
@@ -8186,6 +8238,19 @@ void InstructionCodeGeneratorMIPS::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAF
                               read_barrier_option,
                               &info_low->label);
       generate_null_check = true;
+      break;
+    }
+    case HLoadClass::LoadKind::kJitBootImageAddress: {
+      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
+      uint32_t address = reinterpret_cast32<uint32_t>(cls->GetClass().Get());
+      DCHECK_NE(address, 0u);
+      if (isR6 || !has_irreducible_loops) {
+        __ LoadLiteral(out,
+                       base_or_current_method_reg,
+                       codegen_->DeduplicateBootImageAddressLiteral(address));
+      } else {
+        __ LoadConst32(out, address);
+      }
       break;
     }
     case HLoadClass::LoadKind::kJitTableAddress: {
@@ -8277,15 +8342,15 @@ void LocationsBuilderMIPS::VisitLoadString(HLoadString* load) {
   const bool has_irreducible_loops = codegen_->GetGraph()->HasIrreducibleLoops();
   switch (load_kind) {
     // We need an extra register for PC-relative literals on R2.
-    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
     case HLoadString::LoadKind::kBootImageRelRo:
     case HLoadString::LoadKind::kBssEntry:
+    case HLoadString::LoadKind::kJitBootImageAddress:
       if (isR6) {
         break;
       }
       if (has_irreducible_loops) {
-        if (load_kind != HLoadString::LoadKind::kBootImageAddress) {
+        if (load_kind != HLoadString::LoadKind::kJitBootImageAddress) {
           codegen_->ClobberRA();
         }
         break;
@@ -8329,10 +8394,10 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) NO_THREAD_
   bool has_irreducible_loops = GetGraph()->HasIrreducibleLoops();
   switch (load_kind) {
     // We need an extra register for PC-relative literals on R2.
-    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative:
     case HLoadString::LoadKind::kBootImageRelRo:
     case HLoadString::LoadKind::kBssEntry:
+    case HLoadString::LoadKind::kJitBootImageAddress:
       base_or_current_method_reg =
           (isR6 || has_irreducible_loops) ? ZERO : locations->InAt(0).AsRegister<Register>();
       break;
@@ -8352,19 +8417,6 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) NO_THREAD_
                                                      out,
                                                      base_or_current_method_reg);
       __ Addiu(out, out, /* placeholder */ 0x5678, &info_low->label);
-      return;
-    }
-    case HLoadString::LoadKind::kBootImageAddress: {
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(load->GetString().Get()));
-      DCHECK_NE(address, 0u);
-      if (isR6 || !has_irreducible_loops) {
-        __ LoadLiteral(out,
-                       base_or_current_method_reg,
-                       codegen_->DeduplicateBootImageAddressLiteral(address));
-      } else {
-        __ LoadConst32(out, address);
-      }
       return;
     }
     case HLoadString::LoadKind::kBootImageRelRo: {
@@ -8400,6 +8452,18 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) NO_THREAD_
       codegen_->AddSlowPath(slow_path);
       __ Beqz(out, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
+      return;
+    }
+    case HLoadString::LoadKind::kJitBootImageAddress: {
+      uint32_t address = reinterpret_cast32<uint32_t>(load->GetString().Get());
+      DCHECK_NE(address, 0u);
+      if (isR6 || !has_irreducible_loops) {
+        __ LoadLiteral(out,
+                       base_or_current_method_reg,
+                       codegen_->DeduplicateBootImageAddressLiteral(address));
+      } else {
+        __ LoadConst32(out, address);
+      }
       return;
     }
     case HLoadString::LoadKind::kJitTableAddress: {
@@ -8635,30 +8699,13 @@ void LocationsBuilderMIPS::VisitNewInstance(HNewInstance* instruction) {
   LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
       instruction, LocationSummary::kCallOnMainOnly);
   InvokeRuntimeCallingConvention calling_convention;
-  if (instruction->IsStringAlloc()) {
-    locations->AddTemp(Location::RegisterLocation(kMethodRegisterArgument));
-  } else {
-    locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
-  }
+  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
   locations->SetOut(calling_convention.GetReturnLocation(DataType::Type::kReference));
 }
 
 void InstructionCodeGeneratorMIPS::VisitNewInstance(HNewInstance* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes care
-  // of poisoning the reference.
-  if (instruction->IsStringAlloc()) {
-    // String is allocated through StringFactory. Call NewEmptyString entry point.
-    Register temp = instruction->GetLocations()->GetTemp(0).AsRegister<Register>();
-    MemberOffset code_offset = ArtMethod::EntryPointFromQuickCompiledCodeOffset(kMipsPointerSize);
-    __ LoadFromOffset(kLoadWord, temp, TR, QUICK_ENTRY_POINT(pNewEmptyString));
-    __ LoadFromOffset(kLoadWord, T9, temp, code_offset.Int32Value());
-    __ Jalr(T9);
-    __ NopIfNoReordering();
-    codegen_->RecordPcInfo(instruction, instruction->GetDexPc());
-  } else {
-    codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-  }
+  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
 }
 
 void LocationsBuilderMIPS::VisitNot(HNot* instruction) {

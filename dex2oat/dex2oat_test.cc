@@ -33,6 +33,7 @@
 #include "dex/art_dex_file_loader.h"
 #include "dex/base64_test_util.h"
 #include "dex/bytecode_utils.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_loader.h"
@@ -230,47 +231,15 @@ class Dex2oatTest : public Dex2oatEnvironmentTest {
       LOG(ERROR) << all_args;
     }
 
-    int link[2];
-
-    if (pipe(link) == -1) {
-      return false;
+    // We need dex2oat to actually log things.
+    auto post_fork_fn = []() { return setenv("ANDROID_LOG_TAGS", "*:d", 1) == 0; };
+    ForkAndExecResult res = ForkAndExec(argv, post_fork_fn, &output_);
+    if (res.stage != ForkAndExecResult::kFinished) {
+      *error_msg = strerror(errno);
+      return -1;
     }
-
-    pid_t pid = fork();
-    if (pid == -1) {
-      return false;
-    }
-
-    if (pid == 0) {
-      // We need dex2oat to actually log things.
-      setenv("ANDROID_LOG_TAGS", "*:d", 1);
-      dup2(link[1], STDERR_FILENO);
-      close(link[0]);
-      close(link[1]);
-      std::vector<const char*> c_args;
-      for (const std::string& str : argv) {
-        c_args.push_back(str.c_str());
-      }
-      c_args.push_back(nullptr);
-      execv(c_args[0], const_cast<char* const*>(c_args.data()));
-      exit(1);
-      UNREACHABLE();
-    } else {
-      close(link[1]);
-      char buffer[128];
-      memset(buffer, 0, 128);
-      ssize_t bytes_read = 0;
-
-      while (TEMP_FAILURE_RETRY(bytes_read = read(link[0], buffer, 128)) > 0) {
-        output_ += std::string(buffer, bytes_read);
-      }
-      close(link[0]);
-      int status = -1;
-      if (waitpid(pid, &status, 0) != -1) {
-        success_ = (status == 0);
-      }
-      return status;
-    }
+    success_ = res.StandardSuccess();
+    return res.status_code;
   }
 
   std::string output_ = "";
@@ -472,8 +441,8 @@ class Dex2oatSwapUseTest : public Dex2oatSwapTest {
 };
 
 TEST_F(Dex2oatSwapUseTest, CheckSwapUsage) {
-  // Native memory usage isn't correctly tracked under sanitization.
-  TEST_DISABLED_FOR_MEMORY_TOOL_ASAN();
+  // Native memory usage isn't correctly tracked when running under ASan.
+  TEST_DISABLED_FOR_MEMORY_TOOL();
 
   // The `native_alloc_2_ >= native_alloc_1_` assertion below may not
   // hold true on some x86 systems; disable this test while we
@@ -992,19 +961,10 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
     // Iterate over the dex files and ensure there is no quickened instruction.
     for (const OatDexFile* oat_dex_file : odex_file->GetOatDexFiles()) {
       std::unique_ptr<const DexFile> dex_file = oat_dex_file->OpenDexFile(&error_msg);
-      for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-        const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
-        const uint8_t* class_data = dex_file->GetClassData(class_def);
-        if (class_data != nullptr) {
-          for (ClassDataItemIterator class_it(*dex_file, class_data);
-               class_it.HasNext();
-               class_it.Next()) {
-            if (class_it.IsAtMethod() && class_it.GetMethodCodeItem() != nullptr) {
-              for (const DexInstructionPcPair& inst :
-                       CodeItemInstructionAccessor(*dex_file, class_it.GetMethodCodeItem())) {
-                ASSERT_FALSE(inst->IsQuickened()) << inst->Opcode() << " " << output_;
-              }
-            }
+      for (ClassAccessor accessor : dex_file->GetClasses()) {
+        for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+          for (const DexInstructionPcPair& inst : method.GetInstructions()) {
+            ASSERT_FALSE(inst->IsQuickened()) << inst->Opcode() << " " << output_;
           }
         }
       }
@@ -1054,8 +1014,6 @@ TEST_F(Dex2oatWatchdogTest, TestWatchdogOK) {
 }
 
 TEST_F(Dex2oatWatchdogTest, TestWatchdogTrigger) {
-  TEST_DISABLED_FOR_MEMORY_TOOL_VALGRIND();  // b/63052624
-
   // The watchdog is independent of dex2oat and will not delete intermediates. It is possible
   // that the compilation succeeds and the file is completely written by the time the watchdog
   // kills dex2oat (but the dex2oat threads must have been scheduled pretty badly).
@@ -1310,19 +1268,16 @@ TEST_F(Dex2oatTest, LayoutSections) {
   {
     const DexFile::TypeId* type_id = dex->FindTypeId("LManyMethods;");
     dex::TypeIndex type_idx = dex->GetIndexForTypeId(*type_id);
-    const DexFile::ClassDef* class_def = dex->FindClassDef(type_idx);
-    ClassDataItemIterator it(*dex, dex->GetClassData(*class_def));
-    it.SkipAllFields();
+    ClassAccessor accessor(*dex, *dex->FindClassDef(type_idx));
     std::set<size_t> code_item_offsets;
-    for (; it.HasNextMethod(); it.Next()) {
-      const uint16_t method_idx = it.GetMemberIndex();
-      const size_t code_item_offset = it.GetMethodCodeItemOffset();
+    for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+      const uint16_t method_idx = method.GetIndex();
+      const size_t code_item_offset = method.GetCodeItemOffset();
       if (code_item_offsets.insert(code_item_offset).second) {
         // Unique code item, add the method index.
         methods.push_back(method_idx);
       }
     }
-    DCHECK(!it.HasNext());
   }
   ASSERT_GE(methods.size(), 8u);
   std::vector<uint16_t> hot_methods = {methods[1], methods[3], methods[5]};
@@ -1425,11 +1380,10 @@ TEST_F(Dex2oatTest, LayoutSections) {
     size_t unused_count = 0;
     // Visit all of the methdos of the main class and cross reference the method indices to their
     // corresponding code item offsets to verify the layout.
-    ClassDataItemIterator it(*dex_file, dex_file->GetClassData(*class_def));
-    it.SkipAllFields();
-    for (; it.HasNextMethod(); it.Next()) {
-      const size_t method_idx = it.GetMemberIndex();
-      const size_t code_item_offset = it.GetMethodCodeItemOffset();
+    ClassAccessor accessor(*dex_file, *class_def);
+    for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+      const size_t method_idx = method.GetIndex();
+      const size_t code_item_offset = method.GetCodeItemOffset();
       const bool is_hot = ContainsElement(hot_methods, method_idx);
       const bool is_startup = ContainsElement(startup_methods, method_idx);
       const bool is_post_startup = ContainsElement(post_methods, method_idx);
@@ -1451,17 +1405,14 @@ TEST_F(Dex2oatTest, LayoutSections) {
           ++unused_count;
         } else {
           // or this method is part of the last code item and the end is 4 byte aligned.
-          ClassDataItemIterator it2(*dex_file, dex_file->GetClassData(*class_def));
-          it2.SkipAllFields();
-          for (; it2.HasNextMethod(); it2.Next()) {
-              EXPECT_LE(it2.GetMethodCodeItemOffset(), code_item_offset);
+          for (const ClassAccessor::Method& method2 : accessor.GetMethods()) {
+            EXPECT_LE(method2.GetCodeItemOffset(), code_item_offset);
           }
           uint32_t code_item_size = dex_file->FindCodeItemOffset(*class_def, method_idx);
           EXPECT_EQ((code_item_offset + code_item_size) % 4, 0u);
         }
       }
     }
-    DCHECK(!it.HasNext());
     EXPECT_GT(hot_count, 0u);
     EXPECT_GT(post_startup_count, 0u);
     EXPECT_GT(startup_count, 0u);
@@ -1512,14 +1463,13 @@ TEST_F(Dex2oatTest, GenerateCompactDex) {
     EXPECT_LE(header.OwnedDataBegin(), header.OwnedDataEnd());
     EXPECT_LE(header.OwnedDataBegin(), header.data_size_);
     EXPECT_LE(header.OwnedDataEnd(), header.data_size_);
-    for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
-      class_def.VisitMethods(dex_file.get(), [&](const ClassDataItemIterator& it) {
-        if (it.GetMethodCodeItemOffset() != 0u) {
-          ASSERT_GE(it.GetMethodCodeItemOffset(), header.OwnedDataBegin());
-          ASSERT_LT(it.GetMethodCodeItemOffset(), header.OwnedDataEnd());
+    for (ClassAccessor accessor : dex_file->GetClasses()) {
+      for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+        if (method.GetCodeItemOffset() != 0u) {
+          ASSERT_GE(method.GetCodeItemOffset(), header.OwnedDataBegin());
+          ASSERT_LT(method.GetCodeItemOffset(), header.OwnedDataEnd());
         }
-      });
+      }
     }
     // Test that the owned sections don't overlap.
     for (const std::unique_ptr<const CompactDexFile>& other_dex : compact_dex_files) {
@@ -1770,7 +1720,7 @@ TEST_F(Dex2oatTest, CompactDexGenerationFailureMultiDex) {
     writer.Finish();
     ASSERT_EQ(apk_file.GetFile()->Flush(), 0);
   }
-  const std::string dex_location = apk_file.GetFilename();
+  const std::string& dex_location = apk_file.GetFilename();
   const std::string odex_location = GetOdexDir() + "/output.odex";
   GenerateOdexForTest(dex_location,
                       odex_location,
@@ -1912,29 +1862,35 @@ TEST_F(Dex2oatTest, DontExtract) {
     ASSERT_EQ(dm_file.GetFile()->Flush(), 0);
   }
 
+  auto generate_and_check = [&](CompilerFilter::Filter filter) {
+    GenerateOdexForTest(dex_location,
+                        odex_location,
+                        filter,
+                        { "--dump-timings",
+                          "--dm-file=" + dm_file.GetFilename(),
+                          // Pass -Xuse-stderr-logger have dex2oat output in output_ on target.
+                          "--runtime-arg",
+                          "-Xuse-stderr-logger" },
+                        true,  // expect_success
+                        false,  // use_fd
+                        [](const OatFile& o) {
+                          CHECK(o.ContainsDexCode());
+                        });
+    // Check the output for "Fast verify", this is printed from --dump-timings.
+    std::istringstream iss(output_);
+    std::string line;
+    bool found_fast_verify = false;
+    const std::string kFastVerifyString = "Fast Verify";
+    while (std::getline(iss, line) && !found_fast_verify) {
+      found_fast_verify = found_fast_verify || line.find(kFastVerifyString) != std::string::npos;
+    }
+    EXPECT_TRUE(found_fast_verify) << "Expected to find " << kFastVerifyString << "\n" << output_;
+  };
+
   // Generate a quickened dex by using the input dm file to verify.
-  GenerateOdexForTest(dex_location,
-                      odex_location,
-                      CompilerFilter::Filter::kQuicken,
-                      { "--dump-timings",
-                        "--dm-file=" + dm_file.GetFilename(),
-                        // Pass -Xuse-stderr-logger have dex2oat output in output_ on target.
-                        "--runtime-arg",
-                        "-Xuse-stderr-logger" },
-                      true,  // expect_success
-                      false,  // use_fd
-                      [](const OatFile& o) {
-                        CHECK(o.ContainsDexCode());
-                      });
-  // Check the output for "Fast verify", this is printed from --dump-timings.
-  std::istringstream iss(output_);
-  std::string line;
-  bool found_fast_verify = false;
-  const std::string kFastVerifyString = "Fast Verify";
-  while (std::getline(iss, line) && !found_fast_verify) {
-    found_fast_verify = found_fast_verify || line.find(kFastVerifyString) != std::string::npos;
-  }
-  EXPECT_TRUE(found_fast_verify) << "Expected to find " << kFastVerifyString << "\n" << output_;
+  generate_and_check(CompilerFilter::Filter::kQuicken);
+  // Use verify compiler filter to sanity check that FastVerify works for that filter too.
+  generate_and_check(CompilerFilter::Filter::kVerify);
 }
 
 // Test that dex files with quickened opcodes aren't dequickened.
@@ -1944,33 +1900,22 @@ TEST_F(Dex2oatTest, QuickenedInput) {
   MutateDexFile(temp_dex.GetFile(), GetTestDexFileName("ManyMethods"), [] (DexFile* dex) {
     bool mutated_successfully = false;
     // Change the dex instructions to make an opcode that spans past the end of the code item.
-    for (size_t i = 0; i < dex->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& def = dex->GetClassDef(i);
-      const uint8_t* data = dex->GetClassData(def);
-      if (data == nullptr) {
-        continue;
-      }
-      ClassDataItemIterator it(*dex, data);
-      it.SkipAllFields();
-      while (it.HasNextMethod()) {
-        DexFile::CodeItem* item = const_cast<DexFile::CodeItem*>(it.GetMethodCodeItem());
-        if (item != nullptr) {
-          CodeItemInstructionAccessor instructions(*dex, item);
-          // Make a quickened instruction that doesn't run past the end of the code item.
-          if (instructions.InsnsSizeInCodeUnits() > 2) {
-            const_cast<Instruction&>(instructions.InstructionAt(0)).SetOpcode(
-                Instruction::IGET_BYTE_QUICK);
-            mutated_successfully = true;
-          }
+    for (ClassAccessor accessor : dex->GetClasses()) {
+      for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+        CodeItemInstructionAccessor instructions = method.GetInstructions();
+        // Make a quickened instruction that doesn't run past the end of the code item.
+        if (instructions.InsnsSizeInCodeUnits() > 2) {
+          const_cast<Instruction&>(instructions.InstructionAt(0)).SetOpcode(
+              Instruction::IGET_BYTE_QUICK);
+          mutated_successfully = true;
         }
-        it.Next();
       }
     }
     CHECK(mutated_successfully)
         << "Failed to find candidate code item with only one code unit in last instruction.";
   });
 
-  std::string dex_location = temp_dex.GetFilename();
+  const std::string& dex_location = temp_dex.GetFilename();
   std::string odex_location = GetOdexDir() + "/quickened.odex";
   std::string vdex_location = GetOdexDir() + "/quickened.vdex";
   std::unique_ptr<File> vdex_output(OS::CreateEmptyFile(vdex_location.c_str()));
@@ -2045,7 +1990,7 @@ TEST_F(Dex2oatTest, CompactDexInvalidSource) {
     writer.Finish();
     ASSERT_EQ(invalid_dex.GetFile()->Flush(), 0);
   }
-  const std::string dex_location = invalid_dex.GetFilename();
+  const std::string& dex_location = invalid_dex.GetFilename();
   const std::string odex_location = GetOdexDir() + "/output.odex";
   std::string error_msg;
   int status = GenerateOdexForTestWithStatus(

@@ -35,7 +35,6 @@
 #include "optimizing_compiler_stats.h"
 #include "read_barrier_option.h"
 #include "stack.h"
-#include "stack_map.h"
 #include "utils/label.h"
 
 namespace art {
@@ -189,8 +188,6 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   // Compiles the graph to executable instructions.
   void Compile(CodeAllocator* allocator);
   static std::unique_ptr<CodeGenerator> Create(HGraph* graph,
-                                               InstructionSet instruction_set,
-                                               const InstructionSetFeatures& isa_features,
                                                const CompilerOptions& compiler_options,
                                                OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGenerator();
@@ -324,7 +321,10 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   }
 
   // Record native to dex mapping for a suspend point.  Required by runtime.
-  void RecordPcInfo(HInstruction* instruction, uint32_t dex_pc, SlowPathCode* slow_path = nullptr);
+  void RecordPcInfo(HInstruction* instruction,
+                    uint32_t dex_pc,
+                    SlowPathCode* slow_path = nullptr,
+                    bool native_debug_info = false);
   // Check whether we have already recorded mapping at this PC.
   bool HasStackMapAtCurrentPc();
   // Record extra stack maps if we support native debugging.
@@ -543,9 +543,12 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   void GenerateInvokeStaticOrDirectRuntimeCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path);
+
   void GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invoke);
 
   void GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke);
+
+  void GenerateInvokeCustomCall(HInvokeCustom* invoke);
 
   void CreateUnresolvedFieldLocationSummary(
       HInstruction* field_access,

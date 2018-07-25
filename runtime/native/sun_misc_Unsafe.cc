@@ -41,9 +41,11 @@ static jboolean Unsafe_compareAndSwapInt(JNIEnv* env, jobject, jobject javaObj, 
   ScopedFastNativeObjectAccess soa(env);
   ObjPtr<mirror::Object> obj = soa.Decode<mirror::Object>(javaObj);
   // JNI must use non transactional mode.
-  bool success = obj->CasFieldStrongSequentiallyConsistent32<false>(MemberOffset(offset),
-                                                                    expectedValue,
-                                                                    newValue);
+  bool success = obj->CasField32<false>(MemberOffset(offset),
+                                        expectedValue,
+                                        newValue,
+                                        CASMode::kStrong,
+                                        std::memory_order_seq_cst);
   return success ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -78,9 +80,11 @@ static jboolean Unsafe_compareAndSwapObject(JNIEnv* env, jobject, jobject javaOb
         MemberOffset(offset),
         field_addr);
   }
-  bool success = obj->CasFieldStrongSequentiallyConsistentObject<false>(MemberOffset(offset),
-                                                                        expectedValue,
-                                                                        newValue);
+  bool success = obj->CasFieldObject<false>(MemberOffset(offset),
+                                            expectedValue,
+                                            newValue,
+                                            CASMode::kStrong,
+                                            std::memory_order_seq_cst);
   return success ? JNI_TRUE : JNI_FALSE;
 }
 

@@ -24,7 +24,9 @@
 #include "art_method-inl.h"
 #include "base/stringpiece.h"
 #include "class_linker-inl.h"
+#include "class_root.h"
 #include "debugger.h"
+#include "dex/class_accessor-inl.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_exception_helpers.h"
@@ -47,7 +49,6 @@
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
 #include "vdex_file.h"
-#include "well_known_classes.h"
 
 namespace art {
 
@@ -58,8 +59,6 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
 
-DEFINE_RUNTIME_DEBUG_FLAG(ArtMethod, kCheckDeclaringClassState);
-
 // Enforce that we he have the right index for runtime methods.
 static_assert(ArtMethod::kRuntimeMethodDexMethodIndex == dex::kDexNoIndex,
               "Wrong runtime-method dex method index");
@@ -68,7 +67,7 @@ ArtMethod* ArtMethod::GetCanonicalMethod(PointerSize pointer_size) {
   if (LIKELY(!IsDefault())) {
     return this;
   } else {
-    mirror::Class* declaring_class = GetDeclaringClass();
+    ObjPtr<mirror::Class> declaring_class = GetDeclaringClass();
     DCHECK(declaring_class->IsInterface());
     ArtMethod* ret = declaring_class->FindInterfaceMethod(declaring_class->GetDexCache(),
                                                           GetDexMethodIndex(),
@@ -89,18 +88,13 @@ ArtMethod* ArtMethod::GetNonObsoleteMethod() {
   }
 }
 
-template <ReadBarrierOption kReadBarrierOption>
 ArtMethod* ArtMethod::GetSingleImplementation(PointerSize pointer_size) {
-  if (!IsAbstract<kReadBarrierOption>()) {
+  if (!IsAbstract()) {
     // A non-abstract's single implementation is itself.
     return this;
   }
   return reinterpret_cast<ArtMethod*>(GetDataPtrSize(pointer_size));
 }
-template ArtMethod* ArtMethod::GetSingleImplementation<ReadBarrierOption::kWithReadBarrier>(
-    PointerSize pointer_size);
-template ArtMethod* ArtMethod::GetSingleImplementation<ReadBarrierOption::kWithoutReadBarrier>(
-    PointerSize pointer_size);
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
                                           jobject jlr_method) {
@@ -140,16 +134,6 @@ uint16_t ArtMethod::FindObsoleteDexClassDefIndex() {
   const DexFile::ClassDef* class_def = dex_file->FindClassDef(declaring_class_type);
   CHECK(class_def != nullptr);
   return dex_file->GetIndexForClassDef(*class_def);
-}
-
-ObjPtr<mirror::String> ArtMethod::GetNameAsString(Thread* self) {
-  CHECK(!IsProxyMethod());
-  StackHandleScope<1> hs(self);
-  Handle<mirror::DexCache> dex_cache(hs.NewHandle(GetDexCache()));
-  auto* dex_file = dex_cache->GetDexFile();
-  uint32_t dex_method_idx = GetDexMethodIndex();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(dex_method_idx);
-  return Runtime::Current()->GetClassLinker()->ResolveString(method_id.name_idx_, dex_cache);
 }
 
 void ArtMethod::ThrowInvocationTimeError() {
@@ -213,8 +197,8 @@ ArtMethod* ArtMethod::FindOverriddenMethod(PointerSize pointer_size) {
   if (IsStatic()) {
     return nullptr;
   }
-  mirror::Class* declaring_class = GetDeclaringClass();
-  mirror::Class* super_class = declaring_class->GetSuperClass();
+  ObjPtr<mirror::Class> declaring_class = GetDeclaringClass();
+  ObjPtr<mirror::Class> super_class = declaring_class->GetSuperClass();
   uint16_t method_index = GetMethodIndex();
   ArtMethod* result = nullptr;
   // Did this method override a super class method? If so load the result from the super class'
@@ -229,7 +213,7 @@ ArtMethod* ArtMethod::FindOverriddenMethod(PointerSize pointer_size) {
     } else {
       mirror::IfTable* iftable = GetDeclaringClass()->GetIfTable();
       for (size_t i = 0; i < iftable->Count() && result == nullptr; i++) {
-        mirror::Class* interface = iftable->GetInterface(i);
+        ObjPtr<mirror::Class> interface = iftable->GetInterface(i);
         for (ArtMethod& interface_method : interface->GetVirtualMethods(pointer_size)) {
           if (HasSameNameAndSignature(interface_method.GetInterfaceMethodIfProxy(pointer_size))) {
             result = &interface_method;
@@ -424,36 +408,24 @@ bool ArtMethod::IsPolymorphicSignature() {
   if (!IsNative() || !IsVarargs()) {
     return false;
   }
-  mirror::Class* cls = GetDeclaringClass();
-  return (cls == WellKnownClasses::ToClass(WellKnownClasses::java_lang_invoke_MethodHandle) ||
-          cls == WellKnownClasses::ToClass(WellKnownClasses::java_lang_invoke_VarHandle));
+  ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
+      Runtime::Current()->GetClassLinker()->GetClassRoots();
+  ObjPtr<mirror::Class> cls = GetDeclaringClass();
+  return (cls == GetClassRoot<mirror::MethodHandle>(class_roots) ||
+          cls == GetClassRoot<mirror::VarHandle>(class_roots));
 }
 
 static uint32_t GetOatMethodIndexFromMethodIndex(const DexFile& dex_file,
                                                  uint16_t class_def_idx,
                                                  uint32_t method_idx) {
-  const DexFile::ClassDef& class_def = dex_file.GetClassDef(class_def_idx);
-  const uint8_t* class_data = dex_file.GetClassData(class_def);
-  CHECK(class_data != nullptr);
-  ClassDataItemIterator it(dex_file, class_data);
-  it.SkipAllFields();
-  // Process methods
-  size_t class_def_method_index = 0;
-  while (it.HasNextDirectMethod()) {
-    if (it.GetMemberIndex() == method_idx) {
+  ClassAccessor accessor(dex_file, class_def_idx);
+  uint32_t class_def_method_index = 0u;
+  for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+    if (method.GetIndex() == method_idx) {
       return class_def_method_index;
     }
     class_def_method_index++;
-    it.Next();
   }
-  while (it.HasNextVirtualMethod()) {
-    if (it.GetMemberIndex() == method_idx) {
-      return class_def_method_index;
-    }
-    class_def_method_index++;
-    it.Next();
-  }
-  DCHECK(!it.HasNext());
   LOG(FATAL) << "Failed to find method index " << method_idx << " in " << dex_file.GetLocation();
   UNREACHABLE();
 }
@@ -510,7 +482,7 @@ static const OatFile::OatMethod FindOatMethodFor(ArtMethod* method,
   }
   // Although we overwrite the trampoline of non-static methods, we may get here via the resolution
   // method for direct methods (or virtual methods made direct).
-  mirror::Class* declaring_class = method->GetDeclaringClass();
+  ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
   size_t oat_method_index;
   if (method->IsStatic() || method->IsDirect()) {
     // Simple case where the oat method index was stashed at load time.
@@ -571,7 +543,7 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
 
 ArrayRef<const uint8_t> ArtMethod::GetQuickenedInfo() {
   const DexFile& dex_file = GetDeclaringClass()->GetDexFile();
-  const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   if (oat_dex_file == nullptr || (oat_dex_file->GetOatFile() == nullptr)) {
     return ArrayRef<const uint8_t>();
   }
@@ -821,26 +793,5 @@ ALWAYS_INLINE static inline void DoGetAccessFlagsHelper(ArtMethod* method)
         method->GetDeclaringClass<kReadBarrierOption>()->IsIdxLoaded() ||
         method->GetDeclaringClass<kReadBarrierOption>()->IsErroneous());
 }
-
-template <ReadBarrierOption kReadBarrierOption> void ArtMethod::GetAccessFlagsDCheck() {
-  if (kCheckDeclaringClassState) {
-    Thread* self = Thread::Current();
-    if (!Locks::mutator_lock_->IsSharedHeld(self)) {
-      if (self->IsThreadSuspensionAllowable()) {
-        ScopedObjectAccess soa(self);
-        CHECK(IsRuntimeMethod() ||
-              GetDeclaringClass<kReadBarrierOption>()->IsIdxLoaded() ||
-              GetDeclaringClass<kReadBarrierOption>()->IsErroneous());
-      }
-    } else {
-      // We cannot use SOA in this case. We might be holding the lock, but may not be in the
-      // runnable state (e.g., during GC).
-      Locks::mutator_lock_->AssertSharedHeld(self);
-      DoGetAccessFlagsHelper<kReadBarrierOption>(this);
-    }
-  }
-}
-template void ArtMethod::GetAccessFlagsDCheck<ReadBarrierOption::kWithReadBarrier>();
-template void ArtMethod::GetAccessFlagsDCheck<ReadBarrierOption::kWithoutReadBarrier>();
 
 }  // namespace art

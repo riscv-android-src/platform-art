@@ -191,9 +191,27 @@ class CheckJniAbortCatcher {
   DISALLOW_COPY_AND_ASSIGN(CheckJniAbortCatcher);
 };
 
+#define TEST_DISABLED_FOR_ARM() \
+  if (kRuntimeISA == InstructionSet::kArm || kRuntimeISA == InstructionSet::kThumb2) { \
+    printf("WARNING: TEST DISABLED FOR ARM\n"); \
+    return; \
+  }
+
+#define TEST_DISABLED_FOR_ARM64() \
+  if (kRuntimeISA == InstructionSet::kArm64) { \
+    printf("WARNING: TEST DISABLED FOR ARM64\n"); \
+    return; \
+  }
+
 #define TEST_DISABLED_FOR_MIPS() \
   if (kRuntimeISA == InstructionSet::kMips) { \
     printf("WARNING: TEST DISABLED FOR MIPS\n"); \
+    return; \
+  }
+
+#define TEST_DISABLED_FOR_MIPS64() \
+  if (kRuntimeISA == InstructionSet::kMips64) { \
+    printf("WARNING: TEST DISABLED FOR MIPS64\n"); \
     return; \
   }
 
@@ -220,6 +238,13 @@ class CheckJniAbortCatcher {
     printf("WARNING: TEST DISABLED FOR HEAP POISONING\n"); \
     return; \
   }
+
+#define TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING_WITHOUT_READ_BARRIERS() \
+  if (kRunningOnMemoryTool && kPoisonHeapReferences && !kEmitCompilerReadBarrier) { \
+    printf("WARNING: TEST DISABLED FOR MEMORY TOOL WITH HEAP POISONING WITHOUT READ BARRIERS\n"); \
+    return; \
+  }
+
 }  // namespace art
 
 #endif  // ART_RUNTIME_COMMON_RUNTIME_TEST_H_

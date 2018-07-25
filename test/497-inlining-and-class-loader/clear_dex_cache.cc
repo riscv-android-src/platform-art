@@ -52,11 +52,11 @@ extern "C" JNIEXPORT jobject JNICALL Java_Main_cloneResolvedMethods(JNIEnv* env,
     uint32_t index = pair.index;
     ArtMethod* method = pair.object;
     if (sizeof(void*) == 4) {
-      ObjPtr<mirror::IntArray> int_array = down_cast<mirror::IntArray*>(decoded_array.Ptr());
+      ObjPtr<mirror::IntArray> int_array = ObjPtr<mirror::IntArray>::DownCast(decoded_array);
       int_array->Set(2u * i, index);
-      int_array->Set(2u * i + 1u, static_cast<jint>(reinterpret_cast<uintptr_t>(method)));
+      int_array->Set(2u * i + 1u, reinterpret_cast32<jint>(method));
     } else {
-      ObjPtr<mirror::LongArray> long_array = down_cast<mirror::LongArray*>(decoded_array.Ptr());
+      ObjPtr<mirror::LongArray> long_array = ObjPtr<mirror::LongArray>::DownCast(decoded_array);
       long_array->Set(2u * i, index);
       long_array->Set(2u * i + 1u, reinterpret_cast64<jlong>(method));
     }
@@ -81,7 +81,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_restoreResolvedMethods(
     if (sizeof(void*) == 4) {
       ObjPtr<mirror::IntArray> int_array = down_cast<mirror::IntArray*>(old.Ptr());
       index = static_cast<uint32_t>(int_array->Get(2u * i));
-      method = reinterpret_cast<ArtMethod*>(static_cast<uint32_t>(int_array->Get(2u * i + 1u)));
+      method = reinterpret_cast32<ArtMethod*>(int_array->Get(2u * i + 1u));
     } else {
       ObjPtr<mirror::LongArray> long_array = down_cast<mirror::LongArray*>(old.Ptr());
       index = dchecked_integral_cast<uint32_t>(long_array->Get(2u * i));

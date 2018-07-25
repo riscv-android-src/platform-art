@@ -17,7 +17,6 @@
 #ifndef ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM64_H_
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM64_H_
 
-#include "arch/arm64/quick_method_frame_info_arm64.h"
 #include "base/bit_field.h"
 #include "code_generator.h"
 #include "common_arm64.h"
@@ -281,10 +280,6 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   void HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleCondition(HCondition* instruction);
 
-  void GenerateMinMaxInt(LocationSummary* locations, bool is_min, DataType::Type type);
-  void GenerateMinMaxFP(LocationSummary* locations, bool is_min, DataType::Type type);
-  void GenerateMinMax(HBinaryOperation* minmax, bool is_min);
-
   // Generate a heap reference load using one register `out`:
   //
   //   out <- *(out + offset)
@@ -327,7 +322,12 @@ class InstructionCodeGeneratorARM64 : public InstructionCodeGenerator {
   void DivRemOneOrMinusOne(HBinaryOperation* instruction);
   void DivRemByPowerOfTwo(HBinaryOperation* instruction);
   void GenerateDivRemWithAnyConstant(HBinaryOperation* instruction);
-  void GenerateDivRemIntegral(HBinaryOperation* instruction);
+  void GenerateIntDiv(HDiv* instruction);
+  void GenerateIntDivForConstDenom(HDiv *instruction);
+  void GenerateIntDivForPower2Denom(HDiv *instruction);
+  void GenerateIntRem(HRem* instruction);
+  void GenerateIntRemForConstDenom(HRem *instruction);
+  void GenerateIntRemForPower2Denom(HRem *instruction);
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
 
   vixl::aarch64::MemOperand VecAddress(
@@ -404,7 +404,6 @@ class ParallelMoveResolverARM64 : public ParallelMoveResolverNoSwap {
 class CodeGeneratorARM64 : public CodeGenerator {
  public:
   CodeGeneratorARM64(HGraph* graph,
-                     const Arm64InstructionSetFeatures& isa_features,
                      const CompilerOptions& compiler_options,
                      OptimizingCompilerStats* stats = nullptr);
   virtual ~CodeGeneratorARM64() {}
@@ -477,9 +476,7 @@ class CodeGeneratorARM64 : public CodeGenerator {
     return InstructionSet::kArm64;
   }
 
-  const Arm64InstructionSetFeatures& GetInstructionSetFeatures() const {
-    return isa_features_;
-  }
+  const Arm64InstructionSetFeatures& GetInstructionSetFeatures() const;
 
   void Initialize() OVERRIDE {
     block_labels_.resize(GetGraph()->GetBlocks().size());
@@ -562,6 +559,13 @@ class CodeGeneratorARM64 : public CodeGenerator {
     UNIMPLEMENTED(FATAL);
   }
 
+  // Add a new boot image intrinsic patch for an instruction and return the label
+  // to be bound before the instruction. The instruction will be either the
+  // ADRP (pass `adrp_label = null`) or the ADD (pass `adrp_label` pointing
+  // to the associated ADRP patch label).
+  vixl::aarch64::Label* NewBootImageIntrinsicPatch(uint32_t intrinsic_data,
+                                                   vixl::aarch64::Label* adrp_label = nullptr);
+
   // Add a new boot image relocation patch for an instruction and return the label
   // to be bound before the instruction. The instruction will be either the
   // ADRP (pass `adrp_label = null`) or the LDR (pass `adrp_label` pointing
@@ -634,6 +638,9 @@ class CodeGeneratorARM64 : public CodeGenerator {
   void EmitLdrOffsetPlaceholder(vixl::aarch64::Label* fixup_label,
                                 vixl::aarch64::Register out,
                                 vixl::aarch64::Register base);
+
+  void LoadBootImageAddress(vixl::aarch64::Register reg, uint32_t boot_image_reference);
+  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) OVERRIDE;
   bool NeedsThunkCode(const linker::LinkerPatch& patch) const OVERRIDE;
@@ -893,7 +900,6 @@ class CodeGeneratorARM64 : public CodeGenerator {
   InstructionCodeGeneratorARM64 instruction_visitor_;
   ParallelMoveResolverARM64 move_resolver_;
   Arm64Assembler assembler_;
-  const Arm64InstructionSetFeatures& isa_features_;
 
   // Deduplication map for 32-bit literals, used for non-patchable boot image addresses.
   Uint32ToLiteralMap uint32_literals_;
@@ -912,6 +918,8 @@ class CodeGeneratorARM64 : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> string_bss_entry_patches_;
+  // PC-relative patch info for IntrinsicObjects.
+  ArenaDeque<PcRelativePatchInfo> boot_image_intrinsic_patches_;
   // Baker read barrier patch info.
   ArenaDeque<BakerReadBarrierPatchInfo> baker_read_barrier_patches_;
 

@@ -60,7 +60,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasOatFile(JNIEnv* env, jclass c
 
   ObjPtr<mirror::Class> klass = soa.Decode<mirror::Class>(cls);
   const DexFile& dex_file = klass->GetDexFile();
-  const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   return (oat_dex_file != nullptr) ? JNI_TRUE : JNI_FALSE;
 }
 
@@ -100,7 +100,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_compiledWithOptimizing(JNIEnv* e
 
   ObjPtr<mirror::Class> klass = soa.Decode<mirror::Class>(cls);
   const DexFile& dex_file = klass->GetDexFile();
-  const OatFile::OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   if (oat_dex_file == nullptr) {
     // Could be JIT, which also uses optimizing, but conservatively say no.
     return JNI_FALSE;
@@ -132,9 +132,13 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_compiledWithOptimizing(JNIEnv* e
     constexpr const char* kInterpretOnly = "interpret-only";
     constexpr const char* kVerifyNone = "verify-none";
     constexpr const char* kVerifyAtRuntime = "verify-at-runtime";
+    constexpr const char* kQuicken = "quicken";
+    constexpr const char* kExtract = "extract";
     if (strncmp(filter, kInterpretOnly, strlen(kInterpretOnly)) == 0 ||
         strncmp(filter, kVerifyNone, strlen(kVerifyNone)) == 0 ||
-        strncmp(filter, kVerifyAtRuntime, strlen(kVerifyAtRuntime)) == 0) {
+        strncmp(filter, kVerifyAtRuntime, strlen(kVerifyAtRuntime)) == 0 ||
+        strncmp(filter, kExtract, strlen(kExtract)) == 0 ||
+        strncmp(filter, kQuicken, strlen(kQuicken)) == 0) {
       return JNI_FALSE;
     }
   }
@@ -176,7 +180,9 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasJitCompiledEntrypoint(JNIEnv*
   CHECK(chars.c_str() != nullptr);
   ArtMethod* method = soa.Decode<mirror::Class>(cls)->FindDeclaredDirectMethodByName(
         chars.c_str(), kRuntimePointerSize);
-  return jit->GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode());
+  ScopedAssertNoThreadSuspension sants(__FUNCTION__);
+  return jit->GetCodeCache()->ContainsPc(
+      Runtime::Current()->GetInstrumentation()->GetCodeForInvoke(method));
 }
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasJitCompiledCode(JNIEnv* env,
@@ -226,8 +232,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_ensureJitCompiled(JNIEnv* env,
   // Note: this will apply to all JIT compilations.
   code_cache->SetGarbageCollectCode(false);
   while (true) {
-    const void* pc = method->GetEntryPointFromQuickCompiledCode();
-    if (code_cache->ContainsPc(pc)) {
+    if (code_cache->WillExecuteJitCode(method)) {
       break;
     } else {
       // Sleep to yield to the compiler thread.

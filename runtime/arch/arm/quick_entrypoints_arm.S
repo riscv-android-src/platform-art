@@ -1152,6 +1152,7 @@ GENERATE_ALLOC_ENTRYPOINTS_FOR_NON_TLAB_ALLOCATORS
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_region_tlab, RegionTLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_region_tlab, RegionTLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_region_tlab, RegionTLAB)
@@ -1164,6 +1165,7 @@ GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_FROM_STRING(_region_tlab, RegionTLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_INITIALIZED(_tlab, TLAB)
 GENERATE_ALLOC_ENTRYPOINTS_ALLOC_OBJECT_WITH_ACCESS_CHECK(_tlab, TLAB)
+GENERATE_ALLOC_ENTRYPOINTS_ALLOC_STRING_OBJECT(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED8(_tlab, TLAB)
 // GENERATE_ALLOC_ENTRYPOINTS_ALLOC_ARRAY_RESOLVED16(_tlab, TLAB)
@@ -2515,7 +2517,6 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
 
 .macro BRBMI_FIELD_SLOW_PATH ldr_offset, label_suffix
     .balign 16
-.Lmark_introspection_unmarked\label_suffix:
     // Note: Generates exactly 16 bytes of code.
     BRBMI_UNMARKED_FORWARDING_ADDRESS_CHECK \label_suffix
     BRBMI_LOAD_AND_EXTRACT_RETURN_REG \ldr_offset, \label_suffix
@@ -2686,83 +2687,30 @@ END art_quick_read_barrier_mark_introspection
 .extern artInvokePolymorphic
 ENTRY art_quick_invoke_polymorphic
     SETUP_SAVE_REFS_AND_ARGS_FRAME r2
-    mov     r2, rSELF              @ pass Thread::Current
-    mov     r3, sp                 @ pass SP
-    mov     r0, #0                 @ initialize 64-bit JValue as zero.
-    str     r0, [sp, #-4]!
-    .cfi_adjust_cfa_offset 4
-    str     r0, [sp, #-4]!
-    .cfi_adjust_cfa_offset 4
-    mov     r0, sp                 @ pass JValue for return result as first argument.
-    bl      artInvokePolymorphic   @ artInvokePolymorphic(JValue, receiver, Thread*, SP)
-    sub     r0, 'A'                @ return value is descriptor of handle's return type.
-    cmp     r0, 'Z' - 'A'          @ check if value is in bounds of handler table
-    bgt     .Lcleanup_and_return   @ and clean-up if not.
-    adr     r1, .Lhandler_table
-    tbb     [r0, r1]               @ branch to handler for return value based on return type.
-
-.Lstart_of_handlers:
-.Lstore_boolean_result:
-    ldrb    r0, [sp]               @ Copy boolean value to return value of this function.
-    b       .Lcleanup_and_return
-.Lstore_char_result:
-    ldrh    r0, [sp]               @ Copy char value to return value of this function.
-    b       .Lcleanup_and_return
-.Lstore_float_result:
-    vldr    s0, [sp]               @ Copy float value from JValue result to the context restored by
-    vstr    s0, [sp, #16]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
-    b       .Lcleanup_and_return
-.Lstore_double_result:
-    vldr    d0, [sp]               @ Copy double value from JValue result to the context restored by
-    vstr    d0, [sp, #16]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
-    b       .Lcleanup_and_return
-.Lstore_long_result:
-    ldr     r1, [sp, #4]           @ Copy the upper bits from JValue result to the context restored by
-    str     r1, [sp, #80]          @ RESTORE_SAVE_REFS_AND_ARGS_FRAME.
-    // Fall-through for lower bits.
-.Lstore_int_result:
-    ldr     r0, [sp]               @ Copy int value to return value of this function.
-    // Fall-through to clean up and return.
-.Lcleanup_and_return:
-    add     sp, #8
-    .cfi_adjust_cfa_offset -8
+    mov     r0, r1                 @ r0 := receiver
+    mov     r1, rSELF              @ r1 := Thread::Current
+    mov     r2, sp                 @ r2 := SP
+    bl      artInvokePolymorphic   @ artInvokePolymorphic(receiver, Thread*, SP)
+    str     r1, [sp, 72]           @ r0:r1 := Result. Copy r1 to context.
     RESTORE_SAVE_REFS_AND_ARGS_FRAME
     REFRESH_MARKING_REGISTER
+    vmov    d0, r0, r1             @ Put result r0:r1 into floating point return register.
     RETURN_OR_DELIVER_PENDING_EXCEPTION_REG r2
-
-.macro HANDLER_TABLE_OFFSET handler_label
-    .byte (\handler_label - .Lstart_of_handlers) / 2
-.endm
-
-.Lhandler_table:
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // A
-    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // B (byte)
-    HANDLER_TABLE_OFFSET(.Lstore_char_result)     // C (char)
-    HANDLER_TABLE_OFFSET(.Lstore_double_result)   // D (double)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // E
-    HANDLER_TABLE_OFFSET(.Lstore_float_result)    // F (float)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // G
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // H
-    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // I (int)
-    HANDLER_TABLE_OFFSET(.Lstore_long_result)     // J (long)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // K
-    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // L (object)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // M
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // N
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // O
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // P
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Q
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // R
-    HANDLER_TABLE_OFFSET(.Lstore_int_result)      // S (short)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // T
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // U
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // V (void)
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // W
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // X
-    HANDLER_TABLE_OFFSET(.Lcleanup_and_return)    // Y
-    HANDLER_TABLE_OFFSET(.Lstore_boolean_result)  // Z (boolean)
-.purgem HANDLER_TABLE_OFFSET
 END art_quick_invoke_polymorphic
+
+.extern artInvokeCustom
+ENTRY art_quick_invoke_custom
+    SETUP_SAVE_REFS_AND_ARGS_FRAME r1
+                                   @ r0 := call_site_idx
+    mov     r1, rSELF              @ r1 := Thread::Current
+    mov     r2, sp                 @ r2 := SP
+    bl      artInvokeCustom        @ artInvokeCustom(call_site_idx, Thread*, SP)
+    str     r1, [sp, #72]          @ Save r1 to context (r0:r1 = result)
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    REFRESH_MARKING_REGISTER
+    vmov    d0, r0, r1             @ Put result r0:r1 into floating point return register.
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG r2
+END art_quick_invoke_custom
 
 // Wrap ExecuteSwitchImpl in assembly method which specifies DEX PC for unwinding.
 //  Argument 0: r0: The context pointer for ExecuteSwitchImpl.

@@ -37,7 +37,6 @@
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "common_throws.h"
-#include "cutils/sched_policy.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
 #include "entrypoints/quick/quick_alloc_entrypoints.h"
@@ -2248,7 +2247,8 @@ class ZygoteCompactingCollector FINAL : public collector::SemiSpace {
       // Add a new bin with the remaining space.
       AddBin(size - alloc_size, pos + alloc_size);
     }
-    // Copy the object over to its new location. Don't use alloc_size to avoid valgrind error.
+    // Copy the object over to its new location.
+    // Historical note: We did not use `alloc_size` to avoid a Valgrind error.
     memcpy(reinterpret_cast<void*>(forward_address), obj, obj_size);
     if (kUseBakerReadBarrier) {
       obj->AssertReadBarrierState();
@@ -3913,9 +3913,9 @@ void Heap::BroadcastForNewAllocationRecords() const {
 }
 
 void Heap::CheckGcStressMode(Thread* self, ObjPtr<mirror::Object>* obj) {
+  DCHECK(gc_stress_mode_);
   auto* const runtime = Runtime::Current();
-  if (gc_stress_mode_ && runtime->GetClassLinker()->IsInitialized() &&
-      !runtime->IsActiveTransaction() && mirror::Class::HasJavaLangClass()) {
+  if (runtime->GetClassLinker()->IsInitialized() && !runtime->IsActiveTransaction()) {
     // Check if we should GC.
     bool new_backtrace = false;
     {

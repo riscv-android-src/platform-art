@@ -57,6 +57,15 @@ class BitMemoryRegion FINAL : public ValueObject {
     return result;
   }
 
+  // Increase the size of the region and return the newly added range (starting at the old end).
+  ALWAYS_INLINE BitMemoryRegion Extend(size_t bit_length) {
+    BitMemoryRegion result = *this;
+    result.bit_start_ += result.bit_size_;
+    result.bit_size_ = bit_length;
+    bit_size_ += bit_length;
+    return result;
+  }
+
   // Load a single bit in the region. The bit at offset 0 is the least
   // significant bit in the first byte.
   ATTRIBUTE_NO_SANITIZE_ADDRESS  // We might touch extra bytes due to the alignment.
@@ -67,7 +76,7 @@ class BitMemoryRegion FINAL : public ValueObject {
     return ((data_[index] >> shift) & 1) != 0;
   }
 
-  ALWAYS_INLINE void StoreBit(uintptr_t bit_offset, bool value) const {
+  ALWAYS_INLINE void StoreBit(uintptr_t bit_offset, bool value) {
     DCHECK_LT(bit_offset, bit_size_);
     uint8_t* data = reinterpret_cast<uint8_t*>(data_);
     size_t index = (bit_start_ + bit_offset) / kBitsPerByte;
@@ -125,6 +134,33 @@ class BitMemoryRegion FINAL : public ValueObject {
     DCHECK_EQ(value, LoadBits(bit_offset, bit_length));
   }
 
+  // Store bits from other bit region.
+  ALWAYS_INLINE void StoreBits(size_t bit_offset, const BitMemoryRegion& src, size_t bit_length) {
+    DCHECK_LE(bit_offset, bit_size_);
+    DCHECK_LE(bit_length, bit_size_ - bit_offset);
+    size_t bit = 0;
+    constexpr size_t kNumBits = BitSizeOf<uint32_t>();
+    for (; bit + kNumBits <= bit_length; bit += kNumBits) {
+      StoreBits(bit_offset + bit, src.LoadBits(bit, kNumBits), kNumBits);
+    }
+    size_t num_bits = bit_length - bit;
+    StoreBits(bit_offset + bit, src.LoadBits(bit, num_bits), num_bits);
+  }
+
+  // Count the number of set bits within the given bit range.
+  ALWAYS_INLINE size_t PopCount(size_t bit_offset, size_t bit_length) const {
+    DCHECK_LE(bit_offset, bit_size_);
+    DCHECK_LE(bit_length, bit_size_ - bit_offset);
+    size_t count = 0;
+    size_t bit = 0;
+    constexpr size_t kNumBits = BitSizeOf<uint32_t>();
+    for (; bit + kNumBits <= bit_length; bit += kNumBits) {
+      count += POPCOUNT(LoadBits(bit_offset + bit, kNumBits));
+    }
+    count += POPCOUNT(LoadBits(bit_offset + bit, bit_length - bit));
+    return count;
+  }
+
   ALWAYS_INLINE bool Equals(const BitMemoryRegion& other) const {
     return data_ == other.data_ &&
            bit_start_ == other.bit_start_ &&
@@ -136,6 +172,62 @@ class BitMemoryRegion FINAL : public ValueObject {
   uintptr_t* data_ = nullptr;
   size_t bit_start_ = 0;
   size_t bit_size_ = 0;
+};
+
+class BitMemoryReader {
+ public:
+  explicit BitMemoryReader(const uint8_t* data, size_t bit_offset = 0) {
+    MemoryRegion region(const_cast<uint8_t*>(data), BitsToBytesRoundUp(bit_offset));
+    finished_region_ = BitMemoryRegion(region, 0, bit_offset);
+    DCHECK_EQ(GetBitOffset(), bit_offset);
+  }
+
+  size_t GetBitOffset() const { return finished_region_.size_in_bits(); }
+
+  ALWAYS_INLINE BitMemoryRegion Skip(size_t bit_length) {
+    return finished_region_.Extend(bit_length);
+  }
+
+  ALWAYS_INLINE uint32_t ReadBits(size_t bit_length) {
+    return finished_region_.Extend(bit_length).LoadBits(0, bit_length);
+  }
+
+ private:
+  // Represents all of the bits which were read so far. There is no upper bound.
+  // Therefore, by definition, the "cursor" is always at the end of the region.
+  BitMemoryRegion finished_region_;
+
+  DISALLOW_COPY_AND_ASSIGN(BitMemoryReader);
+};
+
+template<typename Vector>
+class BitMemoryWriter {
+ public:
+  explicit BitMemoryWriter(Vector* out, size_t bit_offset = 0)
+      : out_(out), bit_offset_(bit_offset) {
+    DCHECK_EQ(GetBitOffset(), bit_offset);
+  }
+
+  const uint8_t* data() const { return out_->data(); }
+
+  size_t GetBitOffset() const { return bit_offset_; }
+
+  ALWAYS_INLINE BitMemoryRegion Allocate(size_t bit_length) {
+    out_->resize(BitsToBytesRoundUp(bit_offset_ + bit_length));
+    BitMemoryRegion region(MemoryRegion(out_->data(), out_->size()), bit_offset_, bit_length);
+    bit_offset_ += bit_length;
+    return region;
+  }
+
+  ALWAYS_INLINE void WriteBits(uint32_t value, size_t bit_length) {
+    Allocate(bit_length).StoreBits(0, value, bit_length);
+  }
+
+ private:
+  Vector* out_;
+  size_t bit_offset_;
+
+  DISALLOW_COPY_AND_ASSIGN(BitMemoryWriter);
 };
 
 }  // namespace art

@@ -121,16 +121,15 @@ Object* Object::CopyObject(ObjPtr<mirror::Object> dest,
     CopyReferenceFieldsWithReadBarrierVisitor visitor(dest);
     src->VisitReferences(visitor, visitor);
   }
-  gc::Heap* heap = Runtime::Current()->GetHeap();
   // Perform write barriers on copied object references.
   ObjPtr<Class> c = src->GetClass();
   if (c->IsArrayClass()) {
     if (!c->GetComponentType()->IsPrimitive()) {
       ObjectArray<Object>* array = dest->AsObjectArray<Object>();
-      heap->WriteBarrierArray(dest, 0, array->GetLength());
+      WriteBarrier::ForArrayWrite(dest, 0, array->GetLength());
     }
   } else {
-    heap->WriteBarrierEveryFieldOf(dest);
+    WriteBarrier::ForEveryFieldWrite(dest);
   }
   return dest.Ptr();
 }
@@ -197,7 +196,9 @@ int32_t Object::IdentityHashCode() {
         // loop iteration.
         LockWord hash_word = LockWord::FromHashCode(GenerateIdentityHashCode(), lw.GCState());
         DCHECK_EQ(hash_word.GetState(), LockWord::kHashCode);
-        if (current_this->CasLockWordWeakRelaxed(lw, hash_word)) {
+        // Use a strong CAS to prevent spurious failures since these can make the boot image
+        // non-deterministic.
+        if (current_this->CasLockWord(lw, hash_word, CASMode::kStrong, std::memory_order_relaxed)) {
           return hash_word.GetHashCode();
         }
         break;
@@ -271,7 +272,7 @@ void Object::CheckFieldAssignmentImpl(MemberOffset field_offset, ObjPtr<Object> 
     }
   }
   LOG(FATAL) << "Failed to find field for assignment to " << reinterpret_cast<void*>(this)
-      << " of type " << c->PrettyDescriptor() << " at offset " << field_offset;
+             << " of type " << c->PrettyDescriptor() << " at offset " << field_offset;
   UNREACHABLE();
 }
 
@@ -281,10 +282,7 @@ ArtField* Object::FindFieldByOffset(MemberOffset offset) {
 }
 
 std::string Object::PrettyTypeOf(ObjPtr<mirror::Object> obj) {
-  if (obj == nullptr) {
-    return "null";
-  }
-  return obj->PrettyTypeOf();
+  return (obj == nullptr) ? "null" : obj->PrettyTypeOf();
 }
 
 std::string Object::PrettyTypeOf() {

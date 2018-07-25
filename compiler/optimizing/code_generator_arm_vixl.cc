@@ -27,7 +27,9 @@
 #include "compiled_method.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "gc/accounting/card_table.h"
+#include "gc/space/image_space.h"
 #include "heap_poisoning.h"
+#include "intrinsics.h"
 #include "intrinsics_arm_vixl.h"
 #include "linker/linker_patch.h"
 #include "mirror/array-inl.h"
@@ -46,7 +48,6 @@ using namespace vixl32;  // NOLINT(build/namespaces)
 
 using helpers::DRegisterFrom;
 using helpers::DWARFReg;
-using helpers::HighDRegisterFrom;
 using helpers::HighRegisterFrom;
 using helpers::InputDRegisterAt;
 using helpers::InputOperandAt;
@@ -1501,6 +1502,10 @@ void CodeGeneratorARMVIXL::DumpFloatingPointRegister(std::ostream& stream, int r
   stream << vixl32::SRegister(reg);
 }
 
+const ArmInstructionSetFeatures& CodeGeneratorARMVIXL::GetInstructionSetFeatures() const {
+  return *GetCompilerOptions().GetInstructionSetFeatures()->AsArmInstructionSetFeatures();
+}
+
 static uint32_t ComputeSRegisterListMask(const SRegisterList& regs) {
   uint32_t mask = 0;
   for (uint32_t i = regs.GetFirstSRegister().GetCode();
@@ -2318,7 +2323,6 @@ vixl32::Label* CodeGeneratorARMVIXL::GetFinalLabel(HInstruction* instruction,
 }
 
 CodeGeneratorARMVIXL::CodeGeneratorARMVIXL(HGraph* graph,
-                                           const ArmInstructionSetFeatures& isa_features,
                                            const CompilerOptions& compiler_options,
                                            OptimizingCompilerStats* stats)
     : CodeGenerator(graph,
@@ -2335,7 +2339,6 @@ CodeGeneratorARMVIXL::CodeGeneratorARMVIXL(HGraph* graph,
       instruction_visitor_(graph, this),
       move_resolver_(graph->GetAllocator(), this),
       assembler_(graph->GetAllocator()),
-      isa_features_(isa_features),
       uint32_literals_(std::less<uint32_t>(),
                        graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_method_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -2344,6 +2347,7 @@ CodeGeneratorARMVIXL::CodeGeneratorARMVIXL(HGraph* graph,
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       baker_read_barrier_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(StringReferenceValueComparator(),
                           graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -3740,6 +3744,15 @@ void LocationsBuilderARMVIXL::VisitInvokePolymorphic(HInvokePolymorphic* invoke)
 void InstructionCodeGeneratorARMVIXL::VisitInvokePolymorphic(HInvokePolymorphic* invoke) {
   codegen_->GenerateInvokePolymorphicCall(invoke);
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 9);
+}
+
+void LocationsBuilderARMVIXL::VisitInvokeCustom(HInvokeCustom* invoke) {
+  HandleInvoke(invoke);
+}
+
+void InstructionCodeGeneratorARMVIXL::VisitInvokeCustom(HInvokeCustom* invoke) {
+  codegen_->GenerateInvokeCustomCall(invoke);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 10);
 }
 
 void LocationsBuilderARMVIXL::VisitNeg(HNeg* neg) {
@@ -5465,35 +5478,15 @@ void InstructionCodeGeneratorARMVIXL::VisitUShr(HUShr* ushr) {
 void LocationsBuilderARMVIXL::VisitNewInstance(HNewInstance* instruction) {
   LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(
       instruction, LocationSummary::kCallOnMainOnly);
-  if (instruction->IsStringAlloc()) {
-    locations->AddTemp(LocationFrom(kMethodRegister));
-  } else {
-    InvokeRuntimeCallingConventionARMVIXL calling_convention;
-    locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
-  }
+  InvokeRuntimeCallingConventionARMVIXL calling_convention;
+  locations->SetInAt(0, LocationFrom(calling_convention.GetRegisterAt(0)));
   locations->SetOut(LocationFrom(r0));
 }
 
 void InstructionCodeGeneratorARMVIXL::VisitNewInstance(HNewInstance* instruction) {
-  // Note: if heap poisoning is enabled, the entry point takes cares
-  // of poisoning the reference.
-  if (instruction->IsStringAlloc()) {
-    // String is allocated through StringFactory. Call NewEmptyString entry point.
-    vixl32::Register temp = RegisterFrom(instruction->GetLocations()->GetTemp(0));
-    MemberOffset code_offset = ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArmPointerSize);
-    GetAssembler()->LoadFromOffset(kLoadWord, temp, tr, QUICK_ENTRY_POINT(pNewEmptyString));
-    GetAssembler()->LoadFromOffset(kLoadWord, lr, temp, code_offset.Int32Value());
-    // blx in T32 has only 16bit encoding that's why a stricter check for the scope is used.
-    ExactAssemblyScope aas(GetVIXLAssembler(),
-                           vixl32::k16BitT32InstructionSizeInBytes,
-                           CodeBufferCheckScope::kExactSize);
-    __ blx(lr);
-    codegen_->RecordPcInfo(instruction, instruction->GetDexPc());
-  } else {
-    codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
-    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-  }
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 10);
+  codegen_->InvokeRuntime(instruction->GetEntrypoint(), instruction, instruction->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 11);
 }
 
 void LocationsBuilderARMVIXL::VisitNewArray(HNewArray* instruction) {
@@ -5513,7 +5506,7 @@ void InstructionCodeGeneratorARMVIXL::VisitNewArray(HNewArray* instruction) {
   codegen_->InvokeRuntime(entrypoint, instruction, instruction->GetDexPc());
   CheckEntrypointTypes<kQuickAllocArrayResolved, void*, mirror::Class*, int32_t>();
   DCHECK(!codegen_->IsLeafMethod());
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 11);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 12);
 }
 
 void LocationsBuilderARMVIXL::VisitParameterValue(HParameterValue* instruction) {
@@ -7084,7 +7077,7 @@ void InstructionCodeGeneratorARMVIXL::VisitSuspendCheck(HSuspendCheck* instructi
     return;
   }
   GenerateSuspendCheck(instruction, nullptr);
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 12);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 13);
 }
 
 void InstructionCodeGeneratorARMVIXL::GenerateSuspendCheck(HSuspendCheck* instruction,
@@ -7380,10 +7373,10 @@ HLoadClass::LoadKind CodeGeneratorARMVIXL::GetSupportedLoadClassKind(
     case HLoadClass::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadClass::LoadKind::kJitBootImageAddress:
     case HLoadClass::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadClass::LoadKind::kBootImageAddress:
     case HLoadClass::LoadKind::kRuntimeCall:
       break;
   }
@@ -7437,7 +7430,7 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
   HLoadClass::LoadKind load_kind = cls->GetLoadKind();
   if (load_kind == HLoadClass::LoadKind::kRuntimeCall) {
     codegen_->GenerateLoadClassRuntimeCall(cls);
-    codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 13);
+    codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 14);
     return;
   }
   DCHECK(!cls->NeedsAccessCheck());
@@ -7471,14 +7464,6 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
       codegen_->EmitMovwMovtPlaceholder(labels, out);
       break;
     }
-    case HLoadClass::LoadKind::kBootImageAddress: {
-      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(cls->GetClass().Get()));
-      DCHECK_NE(address, 0u);
-      __ Ldr(out, codegen_->DeduplicateBootImageAddressLiteral(address));
-      break;
-    }
     case HLoadClass::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
@@ -7493,6 +7478,13 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
       codegen_->EmitMovwMovtPlaceholder(labels, out);
       codegen_->GenerateGcRootFieldLoad(cls, out_loc, out, /* offset */ 0, read_barrier_option);
       generate_null_check = true;
+      break;
+    }
+    case HLoadClass::LoadKind::kJitBootImageAddress: {
+      DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
+      uint32_t address = reinterpret_cast32<uint32_t>(cls->GetClass().Get());
+      DCHECK_NE(address, 0u);
+      __ Ldr(out, codegen_->DeduplicateBootImageAddressLiteral(address));
       break;
     }
     case HLoadClass::LoadKind::kJitTableAddress: {
@@ -7523,7 +7515,7 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadClass(HLoadClass* cls) NO_THREAD_
     } else {
       __ Bind(slow_path->GetExitLabel());
     }
-    codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 14);
+    codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 15);
   }
 }
 
@@ -7655,10 +7647,10 @@ HLoadString::LoadKind CodeGeneratorARMVIXL::GetSupportedLoadStringKind(
     case HLoadString::LoadKind::kBssEntry:
       DCHECK(!Runtime::Current()->UseJitCompilation());
       break;
+    case HLoadString::LoadKind::kJitBootImageAddress:
     case HLoadString::LoadKind::kJitTableAddress:
       DCHECK(Runtime::Current()->UseJitCompilation());
       break;
-    case HLoadString::LoadKind::kBootImageAddress:
     case HLoadString::LoadKind::kRuntimeCall:
       break;
   }
@@ -7705,13 +7697,6 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadString(HLoadString* load) NO_THRE
       codegen_->EmitMovwMovtPlaceholder(labels, out);
       return;
     }
-    case HLoadString::LoadKind::kBootImageAddress: {
-      uint32_t address = dchecked_integral_cast<uint32_t>(
-          reinterpret_cast<uintptr_t>(load->GetString().Get()));
-      DCHECK_NE(address, 0u);
-      __ Ldr(out, codegen_->DeduplicateBootImageAddressLiteral(address));
-      return;
-    }
     case HLoadString::LoadKind::kBootImageRelRo: {
       DCHECK(!codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
@@ -7732,7 +7717,13 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadString(HLoadString* load) NO_THRE
       codegen_->AddSlowPath(slow_path);
       __ CompareAndBranchIfZero(out, slow_path->GetEntryLabel());
       __ Bind(slow_path->GetExitLabel());
-      codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 15);
+      codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 16);
+      return;
+    }
+    case HLoadString::LoadKind::kJitBootImageAddress: {
+      uint32_t address = reinterpret_cast32<uint32_t>(load->GetString().Get());
+      DCHECK_NE(address, 0u);
+      __ Ldr(out, codegen_->DeduplicateBootImageAddressLiteral(address));
       return;
     }
     case HLoadString::LoadKind::kJitTableAddress: {
@@ -7754,7 +7745,7 @@ void InstructionCodeGeneratorARMVIXL::VisitLoadString(HLoadString* load) NO_THRE
   __ Mov(calling_convention.GetRegisterAt(0), load->GetStringIndex().index_);
   codegen_->InvokeRuntime(kQuickResolveString, load, load->GetDexPc());
   CheckEntrypointTypes<kQuickResolveString, void*, uint32_t>();
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 16);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 17);
 }
 
 static int32_t GetExceptionTlsOffset() {
@@ -8384,7 +8375,7 @@ void InstructionCodeGeneratorARMVIXL::VisitMonitorOperation(HMonitorOperation* i
   } else {
     CheckEntrypointTypes<kQuickUnlockObject, void, mirror::Object*>();
   }
-  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 17);
+  codegen_->MaybeGenerateMarkingRegisterCheck(/* code */ 18);
 }
 
 void LocationsBuilderARMVIXL::VisitAnd(HAnd* instruction) {
@@ -8883,7 +8874,7 @@ void CodeGeneratorARMVIXL::GenerateGcRootFieldLoad(
     // Note that GC roots are not affected by heap poisoning, thus we
     // do not have to unpoison `root_reg` here.
   }
-  MaybeGenerateMarkingRegisterCheck(/* code */ 18);
+  MaybeGenerateMarkingRegisterCheck(/* code */ 19);
 }
 
 void CodeGeneratorARMVIXL::GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
@@ -8963,7 +8954,7 @@ void CodeGeneratorARMVIXL::GenerateFieldLoadWithBakerReadBarrier(HInstruction* i
                 narrow ? BAKER_MARK_INTROSPECTION_FIELD_LDR_NARROW_OFFSET
                        : BAKER_MARK_INTROSPECTION_FIELD_LDR_WIDE_OFFSET);
     }
-    MaybeGenerateMarkingRegisterCheck(/* code */ 19, /* temp_loc */ LocationFrom(ip));
+    MaybeGenerateMarkingRegisterCheck(/* code */ 20, /* temp_loc */ LocationFrom(ip));
     return;
   }
 
@@ -9041,7 +9032,7 @@ void CodeGeneratorARMVIXL::GenerateArrayLoadWithBakerReadBarrier(HInstruction* i
       DCHECK_EQ(old_offset - GetVIXLAssembler()->GetBuffer()->GetCursorOffset(),
                 BAKER_MARK_INTROSPECTION_ARRAY_LDR_OFFSET);
     }
-    MaybeGenerateMarkingRegisterCheck(/* code */ 20, /* temp_loc */ LocationFrom(ip));
+    MaybeGenerateMarkingRegisterCheck(/* code */ 21, /* temp_loc */ LocationFrom(ip));
     return;
   }
 
@@ -9095,7 +9086,7 @@ void CodeGeneratorARMVIXL::GenerateReferenceLoadWithBakerReadBarrier(HInstructio
   // Fast path: the GC is not marking: just load the reference.
   GenerateRawReferenceLoad(instruction, ref, obj, offset, index, scale_factor, needs_null_check);
   __ Bind(slow_path->GetExitLabel());
-  MaybeGenerateMarkingRegisterCheck(/* code */ 21);
+  MaybeGenerateMarkingRegisterCheck(/* code */ 22);
 }
 
 void CodeGeneratorARMVIXL::UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
@@ -9150,7 +9141,7 @@ void CodeGeneratorARMVIXL::UpdateReferenceFieldWithBakerReadBarrier(HInstruction
   // Fast path: the GC is not marking: nothing to do (the field is
   // up-to-date, and we don't need to load the reference).
   __ Bind(slow_path->GetExitLabel());
-  MaybeGenerateMarkingRegisterCheck(/* code */ 22);
+  MaybeGenerateMarkingRegisterCheck(/* code */ 23);
 }
 
 void CodeGeneratorARMVIXL::GenerateRawReferenceLoad(HInstruction* instruction,
@@ -9342,9 +9333,6 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       EmitMovwMovtPlaceholder(labels, temp_reg);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kDirectAddress:
-      __ Mov(RegisterFrom(temp), Operand::From(invoke->GetMethodAddress()));
-      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
       uint32_t boot_image_offset = GetBootImageOffset(invoke);
       PcRelativePatchInfo* labels = NewBootImageRelRoPatch(boot_image_offset);
@@ -9361,6 +9349,9 @@ void CodeGeneratorARMVIXL::GenerateStaticOrDirectCall(
       GetAssembler()->LoadFromOffset(kLoadWord, temp_reg, temp_reg, /* offset*/ 0);
       break;
     }
+    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+      __ Mov(RegisterFrom(temp), Operand::From(invoke->GetMethodAddress()));
+      break;
     case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
@@ -9450,6 +9441,11 @@ void CodeGeneratorARMVIXL::GenerateVirtualCall(
   }
 }
 
+CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewBootImageIntrinsicPatch(
+    uint32_t intrinsic_data) {
+  return NewPcRelativePatch(/* dex_file */ nullptr, intrinsic_data, &boot_image_intrinsic_patches_);
+}
+
 CodeGeneratorARMVIXL::PcRelativePatchInfo* CodeGeneratorARMVIXL::NewBootImageRelRoPatch(
     uint32_t boot_image_offset) {
   return NewPcRelativePatch(/* dex_file */ nullptr,
@@ -9501,7 +9497,7 @@ vixl32::Label* CodeGeneratorARMVIXL::NewBakerReadBarrierPatch(uint32_t custom_da
 }
 
 VIXLUInt32Literal* CodeGeneratorARMVIXL::DeduplicateBootImageAddressLiteral(uint32_t address) {
-  return DeduplicateUint32Literal(dchecked_integral_cast<uint32_t>(address), &uint32_literals_);
+  return DeduplicateUint32Literal(address, &uint32_literals_);
 }
 
 VIXLUInt32Literal* CodeGeneratorARMVIXL::DeduplicateJitStringLiteral(
@@ -9527,6 +9523,46 @@ VIXLUInt32Literal* CodeGeneratorARMVIXL::DeduplicateJitClassLiteral(const DexFil
       });
 }
 
+void CodeGeneratorARMVIXL::LoadBootImageAddress(vixl32::Register reg,
+                                                uint32_t boot_image_reference) {
+  if (GetCompilerOptions().IsBootImage()) {
+    CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
+        NewBootImageIntrinsicPatch(boot_image_reference);
+    EmitMovwMovtPlaceholder(labels, reg);
+  } else if (Runtime::Current()->IsAotCompiler()) {
+    CodeGeneratorARMVIXL::PcRelativePatchInfo* labels =
+        NewBootImageRelRoPatch(boot_image_reference);
+    EmitMovwMovtPlaceholder(labels, reg);
+    __ Ldr(reg, MemOperand(reg, /* offset */ 0));
+  } else {
+    DCHECK(Runtime::Current()->UseJitCompilation());
+    gc::Heap* heap = Runtime::Current()->GetHeap();
+    DCHECK(!heap->GetBootImageSpaces().empty());
+    uintptr_t address =
+        reinterpret_cast<uintptr_t>(heap->GetBootImageSpaces()[0]->Begin() + boot_image_reference);
+    __ Ldr(reg, DeduplicateBootImageAddressLiteral(dchecked_integral_cast<uint32_t>(address)));
+  }
+}
+
+void CodeGeneratorARMVIXL::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
+                                                        uint32_t boot_image_offset) {
+  DCHECK(invoke->IsStatic());
+  InvokeRuntimeCallingConventionARMVIXL calling_convention;
+  vixl32::Register argument = calling_convention.GetRegisterAt(0);
+  if (GetCompilerOptions().IsBootImage()) {
+    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
+    // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
+    MethodReference target_method = invoke->GetTargetMethod();
+    dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
+    PcRelativePatchInfo* labels = NewBootImageTypePatch(*target_method.dex_file, type_idx);
+    EmitMovwMovtPlaceholder(labels, argument);
+  } else {
+    LoadBootImageAddress(argument, boot_image_offset);
+  }
+  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+}
+
 template <linker::LinkerPatch (*Factory)(size_t, const DexFile*, uint32_t, uint32_t)>
 inline void CodeGeneratorARMVIXL::EmitPcRelativeLinkerPatches(
     const ArenaDeque<PcRelativePatchInfo>& infos,
@@ -9547,12 +9583,13 @@ inline void CodeGeneratorARMVIXL::EmitPcRelativeLinkerPatches(
   }
 }
 
-linker::LinkerPatch DataBimgRelRoPatchAdapter(size_t literal_offset,
-                                              const DexFile* target_dex_file,
-                                              uint32_t pc_insn_offset,
-                                              uint32_t boot_image_offset) {
-  DCHECK(target_dex_file == nullptr);  // Unused for DataBimgRelRoPatch(), should be null.
-  return linker::LinkerPatch::DataBimgRelRoPatch(literal_offset, pc_insn_offset, boot_image_offset);
+template <linker::LinkerPatch (*Factory)(size_t, uint32_t, uint32_t)>
+linker::LinkerPatch NoDexFileAdapter(size_t literal_offset,
+                                     const DexFile* target_dex_file,
+                                     uint32_t pc_insn_offset,
+                                     uint32_t boot_image_offset) {
+  DCHECK(target_dex_file == nullptr);  // Unused for these patches, should be null.
+  return Factory(literal_offset, pc_insn_offset, boot_image_offset);
 }
 
 void CodeGeneratorARMVIXL::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) {
@@ -9564,6 +9601,7 @@ void CodeGeneratorARMVIXL::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* l
       /* MOVW+MOVT for each entry */ 2u * type_bss_entry_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * boot_image_string_patches_.size() +
       /* MOVW+MOVT for each entry */ 2u * string_bss_entry_patches_.size() +
+      /* MOVW+MOVT for each entry */ 2u * boot_image_intrinsic_patches_.size() +
       baker_read_barrier_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage()) {
@@ -9573,11 +9611,14 @@ void CodeGeneratorARMVIXL::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* l
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
+        boot_image_intrinsic_patches_, linker_patches);
   } else {
-    EmitPcRelativeLinkerPatches<DataBimgRelRoPatchAdapter>(
+    EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
         boot_image_method_patches_, linker_patches);
     DCHECK(boot_image_type_patches_.empty());
     DCHECK(boot_image_string_patches_.empty());
+    DCHECK(boot_image_intrinsic_patches_.empty());
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);

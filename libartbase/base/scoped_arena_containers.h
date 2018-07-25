@@ -66,15 +66,15 @@ using ScopedArenaSafeMap =
 
 template <typename T,
           typename EmptyFn = DefaultEmptyFn<T>,
-          typename HashFn = std::hash<T>,
-          typename Pred = std::equal_to<T>>
+          typename HashFn = DefaultHashFn<T>,
+          typename Pred = DefaultPred<T>>
 using ScopedArenaHashSet = HashSet<T, EmptyFn, HashFn, Pred, ScopedArenaAllocatorAdapter<T>>;
 
 template <typename Key,
           typename Value,
           typename EmptyFn = DefaultEmptyFn<std::pair<Key, Value>>,
-          typename HashFn = std::hash<Key>,
-          typename Pred = std::equal_to<Key>>
+          typename HashFn = DefaultHashFn<Key>,
+          typename Pred = DefaultPred<Key>>
 using ScopedArenaHashMap = HashMap<Key,
                                    Value,
                                    EmptyFn,
@@ -85,6 +85,14 @@ using ScopedArenaHashMap = HashMap<Key,
 template <typename K, typename V, class Hash = std::hash<K>, class KeyEqual = std::equal_to<K>>
 using ScopedArenaUnorderedMap =
     std::unordered_map<K, V, Hash, KeyEqual, ScopedArenaAllocatorAdapter<std::pair<const K, V>>>;
+
+template <typename K, typename V, class Hash = std::hash<K>, class KeyEqual = std::equal_to<K>>
+using ScopedArenaUnorderedMultimap =
+    std::unordered_multimap<K,
+                            V,
+                            Hash,
+                            KeyEqual,
+                            ScopedArenaAllocatorAdapter<std::pair<const K, V>>>;
 
 // Implementation details below.
 
@@ -228,7 +236,7 @@ class ArenaDelete {
  protected:
   // Used for variable sized objects such as RegisterLine.
   ALWAYS_INLINE void ProtectMemory(T* ptr, size_t size) const {
-    if (RUNNING_ON_MEMORY_TOOL > 0) {
+    if (kRunningOnMemoryTool) {
       // Writing to the memory will fail ift we already destroyed the pointer with
       // DestroyOnlyDelete since we make it no access.
       memset(ptr, kMagicFill, size);

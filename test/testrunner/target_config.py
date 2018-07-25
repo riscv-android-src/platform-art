@@ -44,7 +44,7 @@ target_config = {
         'run-test' : ['--interp-ac']
     },
     'art-jit' : {
-        'run-test' : ['--jit']
+        'run-test' : ['--jit', '--debuggable', '--ndebuggable']
     },
     'art-jit-on-first-use' : {
         'run-test' : ['--jit',
@@ -265,15 +265,11 @@ target_config = {
             'ART_USE_READ_BARRIER' : 'false'
         }
     },
-    'art-gtest-valgrind32': {
-      # Disabled: x86 valgrind does not understand SSE4.x
-      # 'make' : 'valgrind-test-art-host32',
-        'env': {
-            'ART_USE_READ_BARRIER' : 'false'
-        }
-    },
+    # TODO: Remove this configuration, when the ART Buildbot is no
+    # longer using it for 'host-x86_64-valgrind'.
     'art-gtest-valgrind64': {
-        'make' : 'valgrind-test-art-host64',
+      # Disabled: Valgrind is no longer supported.
+      # 'make' : 'valgrind-test-art-host64',
         'env': {
             'ART_USE_READ_BARRIER' : 'false'
         }
@@ -291,10 +287,12 @@ target_config = {
             'ASAN_OPTIONS' : 'detect_leaks=0'
         }
     },
+    # TODO: Also exercise '--interp-ac' in 'art-asan', when b/109813469 is addressed.
     'art-asan': {
         'run-test' : ['--interpreter',
                       '--optimizing',
-                      '--jit'],
+                      '--jit',
+                      '--speed-profile'],
         'env': {
             'SANITIZE_HOST' : 'address',
             'ASAN_OPTIONS' : 'detect_leaks=0'

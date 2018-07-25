@@ -57,10 +57,10 @@ constexpr uint32_t kAdrpThunkSize = 8u;
 
 inline bool IsAdrpPatch(const LinkerPatch& patch) {
   switch (patch.GetType()) {
-    case LinkerPatch::Type::kCall:
     case LinkerPatch::Type::kCallRelative:
     case LinkerPatch::Type::kBakerReadBarrierBranch:
       return false;
+    case LinkerPatch::Type::kIntrinsicReference:
     case LinkerPatch::Type::kDataBimgRelRo:
     case LinkerPatch::Type::kMethodRelative:
     case LinkerPatch::Type::kMethodBssEntry:
@@ -258,12 +258,14 @@ void Arm64RelativePatcher::PatchPcRelativeReference(std::vector<uint8_t>* code,
     if ((insn & 0xfffffc00) == 0x91000000) {
       // ADD immediate, 64-bit with imm12 == 0 (unset).
       if (!kEmitCompilerReadBarrier) {
-        DCHECK(patch.GetType() == LinkerPatch::Type::kMethodRelative ||
+        DCHECK(patch.GetType() == LinkerPatch::Type::kIntrinsicReference ||
+               patch.GetType() == LinkerPatch::Type::kMethodRelative ||
                patch.GetType() == LinkerPatch::Type::kTypeRelative ||
                patch.GetType() == LinkerPatch::Type::kStringRelative) << patch.GetType();
       } else {
         // With the read barrier (non-Baker) enabled, it could be kStringBssEntry or kTypeBssEntry.
-        DCHECK(patch.GetType() == LinkerPatch::Type::kMethodRelative ||
+        DCHECK(patch.GetType() == LinkerPatch::Type::kIntrinsicReference ||
+               patch.GetType() == LinkerPatch::Type::kMethodRelative ||
                patch.GetType() == LinkerPatch::Type::kTypeRelative ||
                patch.GetType() == LinkerPatch::Type::kStringRelative ||
                patch.GetType() == LinkerPatch::Type::kTypeBssEntry ||

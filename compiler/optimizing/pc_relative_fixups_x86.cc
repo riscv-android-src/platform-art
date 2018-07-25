@@ -17,6 +17,7 @@
 #include "pc_relative_fixups_x86.h"
 #include "code_generator_x86.h"
 #include "intrinsics_x86.h"
+#include "runtime.h"
 
 namespace art {
 namespace x86 {
@@ -193,18 +194,19 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
   }
 
   void HandleInvoke(HInvoke* invoke) {
-    // If this is an invoke-static/-direct with PC-relative dex cache array
-    // addressing, we need the PC-relative address base.
     HInvokeStaticOrDirect* invoke_static_or_direct = invoke->AsInvokeStaticOrDirect();
-    // We can't add a pointer to the constant area if we already have a current
-    // method pointer. This may arise when sharpening doesn't remove the current
-    // method pointer from the invoke.
-    if (invoke_static_or_direct != nullptr &&
-        invoke_static_or_direct->HasCurrentMethodInput()) {
+
+    // We can't add the method address if we already have a current method pointer.
+    // This may arise when sharpening doesn't remove the current method pointer from the invoke.
+    if (invoke_static_or_direct != nullptr && invoke_static_or_direct->HasCurrentMethodInput()) {
+      // Note: This happens only for recursive calls (including compiling an intrinsic
+      // by faking a call to itself; we use kRuntimeCall for this case).
       DCHECK(!invoke_static_or_direct->HasPcRelativeMethodLoadKind());
       return;
     }
 
+    // If this is an invoke-static/-direct with PC-relative addressing (within boot image
+    // or using .bss or .data.bimg.rel.ro), we need the PC-relative address base.
     bool base_added = false;
     if (invoke_static_or_direct != nullptr &&
         invoke_static_or_direct->HasPcRelativeMethodLoadKind() &&
@@ -224,7 +226,6 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
       }
     }
 
-    // These intrinsics need the constant area.
     switch (invoke->GetIntrinsic()) {
       case Intrinsics::kMathAbsDouble:
       case Intrinsics::kMathAbsFloat:
@@ -235,7 +236,15 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
         LOG(FATAL) << "Unreachable min/max/abs: intrinsics should have been lowered "
                       "to IR nodes by instruction simplifier";
         UNREACHABLE();
+      case Intrinsics::kIntegerValueOf:
+        // This intrinsic can be call free if it loads the address of the boot image object.
+        // If we're compiling PIC, we need the address base for loading from .data.bimg.rel.ro.
+        if (Runtime::Current()->UseJitCompilation()) {
+          break;
+        }
+        FALLTHROUGH_INTENDED;
       case Intrinsics::kMathRoundFloat:
+        // This intrinsic needs the constant area.
         if (!base_added) {
           DCHECK(invoke_static_or_direct != nullptr);
           DCHECK(!invoke_static_or_direct->HasCurrentMethodInput());

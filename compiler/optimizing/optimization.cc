@@ -40,6 +40,7 @@
 #include "constructor_fence_redundancy_elimination.h"
 #include "dead_code_elimination.h"
 #include "dex/code_item_accessors-inl.h"
+#include "driver/compiler_options.h"
 #include "driver/dex_compilation_unit.h"
 #include "gvn.h"
 #include "induction_var_analysis.h"
@@ -224,7 +225,7 @@ ArenaVector<HOptimization*> ConstructOptimizations(
       case OptimizationPass::kLoopOptimization:
         CHECK(most_recent_induction != nullptr);
         opt = new (allocator) HLoopOptimization(
-            graph, driver, most_recent_induction, stats, pass_name);
+            graph, &codegen->GetCompilerOptions(), most_recent_induction, stats, pass_name);
         break;
       case OptimizationPass::kBoundsCheckElimination:
         CHECK(most_recent_side_effects != nullptr && most_recent_induction != nullptr);
@@ -264,13 +265,13 @@ ArenaVector<HOptimization*> ConstructOptimizations(
         break;
       }
       case OptimizationPass::kSharpening:
-        opt = new (allocator) HSharpening(graph, codegen, driver, pass_name);
+        opt = new (allocator) HSharpening(graph, codegen, pass_name);
         break;
       case OptimizationPass::kSelectGenerator:
         opt = new (allocator) HSelectGenerator(graph, handles, stats, pass_name);
         break;
       case OptimizationPass::kInstructionSimplifier:
-        opt = new (allocator) InstructionSimplifier(graph, codegen, driver, stats, pass_name);
+        opt = new (allocator) InstructionSimplifier(graph, codegen, stats, pass_name);
         break;
       case OptimizationPass::kIntrinsicsRecognizer:
         opt = new (allocator) IntrinsicsRecognizer(graph, stats, pass_name);
@@ -286,7 +287,7 @@ ArenaVector<HOptimization*> ConstructOptimizations(
         break;
       case OptimizationPass::kScheduling:
         opt = new (allocator) HInstructionScheduling(
-            graph, driver->GetInstructionSet(), codegen, pass_name);
+            graph, codegen->GetCompilerOptions().GetInstructionSet(), codegen, pass_name);
         break;
       //
       // Arch-specific passes.

@@ -212,6 +212,8 @@ class Runtime {
     return finished_starting_;
   }
 
+  void RunRootClinits(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+
   static Runtime* Current() {
     return instance_;
   }
@@ -398,10 +400,6 @@ class Runtime {
 
   ArtMethod* GetCalleeSaveMethodUnchecked(CalleeSaveType type)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  QuickMethodFrameInfo GetCalleeSaveMethodFrameInfo(CalleeSaveType type) const {
-    return callee_save_method_frame_infos_[static_cast<size_t>(type)];
-  }
 
   QuickMethodFrameInfo GetRuntimeMethodFrameInfo(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -778,11 +776,6 @@ class Runtime {
 
   bool Init(RuntimeArgumentMap&& runtime_options)
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
-  void InitPreAllocatedException(Thread* self,
-                                 GcRoot<mirror::Throwable> Runtime::* exception,
-                                 const char* exception_class_descriptor,
-                                 const char* msg)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
 
@@ -831,7 +824,6 @@ class Runtime {
   GcRoot<mirror::Object> sentinel_;
 
   InstructionSet instruction_set_;
-  QuickMethodFrameInfo callee_save_method_frame_infos_[kCalleeSaveSize];
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;

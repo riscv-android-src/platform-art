@@ -618,10 +618,21 @@ class ImageSpaceLoader {
     const size_t image_bitmap_offset = RoundUp(sizeof(ImageHeader) + image_header->GetDataSize(),
                                                kPageSize);
     const size_t end_of_bitmap = image_bitmap_offset + bitmap_section.Size();
-    if (end_of_bitmap != image_file_size) {
+    const ImageSection& relocations_section = image_header->GetImageRelocationsSection();
+    if (relocations_section.Offset() != bitmap_section.Offset() + bitmap_section.Size()) {
       *error_msg = StringPrintf(
-          "Image file size does not equal end of bitmap: size=%" PRIu64 " vs. %zu.", image_file_size,
-          end_of_bitmap);
+          "Relocations do not start immediately after bitmap: %u vs. %u + %u.",
+          relocations_section.Offset(),
+          bitmap_section.Offset(),
+          bitmap_section.Size());
+      return nullptr;
+    }
+    const size_t end_of_relocations = end_of_bitmap + relocations_section.Size();
+    if (end_of_relocations != image_file_size) {
+      *error_msg = StringPrintf(
+          "Image file size does not equal end of relocations: size=%" PRIu64 " vs. %zu.",
+          image_file_size,
+          end_of_relocations);
       return nullptr;
     }
 
@@ -1163,7 +1174,7 @@ class ImageSpaceLoader {
         if (fixup_heap_objects_) {
           method->UpdateObjectsForImageRelocation(ForwardObjectAdapter(this));
         }
-        method->UpdateEntrypoints<kWithoutReadBarrier>(ForwardCodeAdapter(this), pointer_size_);
+        method->UpdateEntrypoints(ForwardCodeAdapter(this), pointer_size_);
       }
     }
 
@@ -1287,7 +1298,7 @@ class ImageSpaceLoader {
       bitmap->VisitMarkedRange(objects_begin, objects_end, fixup_object_visitor);
       // Fixup image roots.
       CHECK(app_image.InSource(reinterpret_cast<uintptr_t>(
-          image_header.GetImageRoots<kWithoutReadBarrier>())));
+          image_header.GetImageRoots<kWithoutReadBarrier>().Ptr())));
       image_header.RelocateImageObjects(app_image.Delta());
       CHECK_EQ(image_header.GetImageBegin(), target_base);
       // Fix up dex cache DexFile pointers.
@@ -1875,7 +1886,7 @@ std::string ImageSpace::GetMultiImageBootClassPath(
 
 bool ImageSpace::ValidateOatFile(const OatFile& oat_file, std::string* error_msg) {
   const ArtDexFileLoader dex_file_loader;
-  for (const OatFile::OatDexFile* oat_dex_file : oat_file.GetOatDexFiles()) {
+  for (const OatDexFile* oat_dex_file : oat_file.GetOatDexFiles()) {
     const std::string& dex_file_location = oat_dex_file->GetDexFileLocation();
 
     // Skip multidex locations - These will be checked when we visit their
@@ -1909,9 +1920,9 @@ bool ImageSpace::ValidateOatFile(const OatFile& oat_file, std::string* error_msg
       std::string multi_dex_location = DexFileLoader::GetMultiDexLocation(
           i,
           dex_file_location.c_str());
-      const OatFile::OatDexFile* multi_dex = oat_file.GetOatDexFile(multi_dex_location.c_str(),
-                                                                    nullptr,
-                                                                    error_msg);
+      const OatDexFile* multi_dex = oat_file.GetOatDexFile(multi_dex_location.c_str(),
+                                                           nullptr,
+                                                           error_msg);
       if (multi_dex == nullptr) {
         *error_msg = StringPrintf("ValidateOatFile oat file '%s' is missing entry '%s'",
                                   oat_file.GetLocation().c_str(),
