@@ -28,7 +28,6 @@
 #include "base/memory_region.h"
 #include "dex/dex_file_types.h"
 #include "dex_register_location.h"
-#include "method_info.h"
 #include "quick/quick_method_frame_info.h"
 
 namespace art {
@@ -164,7 +163,6 @@ class StackMap : public BitTableAccessor<8> {
 
   void Dump(VariableIndentationOutputStream* vios,
             const CodeInfo& code_info,
-            const MethodInfo& method_info,
             uint32_t code_offset,
             InstructionSet instruction_set) const;
 };
@@ -188,10 +186,6 @@ class InlineInfo : public BitTableAccessor<6> {
   static constexpr uint32_t kLast = -1;
   static constexpr uint32_t kMore = 0;
 
-  uint32_t GetMethodIndex(const MethodInfo& method_info) const {
-    return method_info.GetMethodIndex(GetMethodInfoIndex());
-  }
-
   bool EncodesArtMethod() const {
     return HasArtMethodLo();
   }
@@ -204,8 +198,7 @@ class InlineInfo : public BitTableAccessor<6> {
 
   void Dump(VariableIndentationOutputStream* vios,
             const CodeInfo& info,
-            const StackMap& stack_map,
-            const MethodInfo& method_info) const;
+            const StackMap& stack_map) const;
 };
 
 class MaskInfo : public BitTableAccessor<1> {
@@ -262,21 +255,34 @@ class RegisterMask : public BitTableAccessor<2> {
   }
 };
 
+// Method indices are not very dedup friendly.
+// Separating them greatly improves dedup efficiency of the other tables.
+class MethodInfo : public BitTableAccessor<1> {
+ public:
+  BIT_TABLE_HEADER()
+  BIT_TABLE_COLUMN(0, MethodIndex)
+};
+
 /**
  * Wrapper around all compiler information collected for a method.
  * See the Decode method at the end for the precise binary format.
  */
 class CodeInfo {
  public:
-  explicit CodeInfo(const void* data) {
-    Decode(reinterpret_cast<const uint8_t*>(data));
+  enum DecodeFlags {
+    Default = 0,
+    // Limits the decoding only to the data needed by GC.
+    GcMasksOnly = 1,
+    // Limits the decoding only to the main stack map table and inline info table.
+    // This is sufficient for many use cases and makes the header decoding faster.
+    InlineInfoOnly = 2,
+  };
+
+  explicit CodeInfo(const uint8_t* data, DecodeFlags flags = DecodeFlags::Default) {
+    Decode(reinterpret_cast<const uint8_t*>(data), flags);
   }
 
-  explicit CodeInfo(MemoryRegion region) : CodeInfo(region.begin()) {
-    DCHECK_EQ(Size(), region.size());
-  }
-
-  explicit CodeInfo(const OatQuickMethodHeader* header);
+  explicit CodeInfo(const OatQuickMethodHeader* header, DecodeFlags flags = DecodeFlags::Default);
 
   size_t Size() const {
     return BitsToBytesRoundUp(size_in_bits_);
@@ -320,6 +326,10 @@ class CodeInfo {
 
   uint32_t GetNumberOfStackMaps() const {
     return stack_maps_.NumRows();
+  }
+
+  uint32_t GetMethodIndexOf(InlineInfo inline_info) const {
+    return method_infos_.GetRow(inline_info.GetMethodInfoIndex()).GetMethodIndex();
   }
 
   ALWAYS_INLINE DexRegisterMap GetDexRegisterMapOf(StackMap stack_map) const {
@@ -398,18 +408,28 @@ class CodeInfo {
   void Dump(VariableIndentationOutputStream* vios,
             uint32_t code_offset,
             bool verbose,
-            InstructionSet instruction_set,
-            const MethodInfo& method_info) const;
+            InstructionSet instruction_set) const;
 
   // Accumulate code info size statistics into the given Stats tree.
   void AddSizeStats(/*out*/ Stats* parent) const;
 
   ALWAYS_INLINE static QuickMethodFrameInfo DecodeFrameInfo(const uint8_t* data) {
+    BitMemoryReader reader(data);
     return QuickMethodFrameInfo(
-        DecodeUnsignedLeb128(&data),
-        DecodeUnsignedLeb128(&data),
-        DecodeUnsignedLeb128(&data));
+        DecodeVarintBits(reader) * kStackAlignment,  // Decode packed_frame_size_ and unpack.
+        DecodeVarintBits(reader),  // core_spill_mask_.
+        DecodeVarintBits(reader));  // fp_spill_mask_.
   }
+
+  typedef std::map<BitMemoryRegion, uint32_t, BitMemoryRegion::Less> DedupeMap;
+
+  // Copy CodeInfo data while de-duplicating the internal bit tables.
+  // The 'out' vector must be reused between Dedupe calls (it does not have to be empty).
+  // The 'dedupe_map' stores the bit offsets of bit tables within the 'out' vector.
+  // It returns the byte offset of the copied CodeInfo within the 'out' vector.
+  static size_t Dedupe(std::vector<uint8_t>* out,
+                       const uint8_t* in,
+                       /*inout*/ DedupeMap* dedupe_map);
 
  private:
   // Returns lower bound (fist stack map which has pc greater or equal than the desired one).
@@ -421,9 +441,9 @@ class CodeInfo {
                             uint32_t first_dex_register,
                             /*out*/ DexRegisterMap* map) const;
 
-  void Decode(const uint8_t* data);
+  void Decode(const uint8_t* data, DecodeFlags flags);
 
-  uint32_t frame_size_in_bytes_;
+  uint32_t packed_frame_size_;  // Frame size in kStackAlignment units.
   uint32_t core_spill_mask_;
   uint32_t fp_spill_mask_;
   uint32_t number_of_dex_registers_;
@@ -431,10 +451,11 @@ class CodeInfo {
   BitTable<RegisterMask> register_masks_;
   BitTable<MaskInfo> stack_masks_;
   BitTable<InlineInfo> inline_infos_;
+  BitTable<MethodInfo> method_infos_;
   BitTable<MaskInfo> dex_register_masks_;
   BitTable<DexRegisterMapInfo> dex_register_maps_;
   BitTable<DexRegisterInfo> dex_register_catalog_;
-  uint32_t size_in_bits_;
+  uint32_t size_in_bits_ = 0;
 };
 
 #undef ELEMENT_BYTE_OFFSET_AFTER
