@@ -81,9 +81,9 @@ ArtMethod* StackVisitor::GetMethod() const {
   } else if (cur_quick_frame_ != nullptr) {
     if (IsInInlinedFrame()) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
-      MethodInfo method_info = method_header->GetOptimizedMethodInfo();
+      CodeInfo code_info(method_header);
       DCHECK(walk_kind_ != StackWalkKind::kSkipInlinedFrames);
-      return GetResolvedMethod(*GetCurrentQuickFrame(), method_info, current_inline_frames_);
+      return GetResolvedMethod(*GetCurrentQuickFrame(), code_info, current_inline_frames_);
     } else {
       return *cur_quick_frame_;
     }
@@ -795,7 +795,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
             // JNI methods cannot have any inlined frames.
             && !method->IsNative()) {
           DCHECK_NE(cur_quick_frame_pc_, 0u);
-          CodeInfo code_info(cur_oat_quick_method_header_);
+          CodeInfo code_info(cur_oat_quick_method_header_, CodeInfo::DecodeFlags::InlineInfoOnly);
           uint32_t native_pc_offset =
               cur_oat_quick_method_header_->NativeQuickPcOffset(cur_quick_frame_pc_);
           StackMap stack_map = code_info.GetStackMapForNativePcOffset(native_pc_offset);

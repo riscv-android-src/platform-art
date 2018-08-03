@@ -411,11 +411,7 @@ class ScopedCodeCacheWrite : ScopedTrace {
 uint8_t* JitCodeCache::CommitCode(Thread* self,
                                   ArtMethod* method,
                                   uint8_t* stack_map,
-                                  uint8_t* method_info,
                                   uint8_t* roots_data,
-                                  size_t frame_size_in_bytes,
-                                  size_t core_spill_mask,
-                                  size_t fp_spill_mask,
                                   const uint8_t* code,
                                   size_t code_size,
                                   size_t data_size,
@@ -426,11 +422,7 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
   uint8_t* result = CommitCodeInternal(self,
                                        method,
                                        stack_map,
-                                       method_info,
                                        roots_data,
-                                       frame_size_in_bytes,
-                                       core_spill_mask,
-                                       fp_spill_mask,
                                        code,
                                        code_size,
                                        data_size,
@@ -444,11 +436,7 @@ uint8_t* JitCodeCache::CommitCode(Thread* self,
     result = CommitCodeInternal(self,
                                 method,
                                 stack_map,
-                                method_info,
                                 roots_data,
-                                frame_size_in_bytes,
-                                core_spill_mask,
-                                fp_spill_mask,
                                 code,
                                 code_size,
                                 data_size,
@@ -757,11 +745,7 @@ static void ClearMethodCounter(ArtMethod* method, bool was_warm) {
 uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
                                           ArtMethod* method,
                                           uint8_t* stack_map,
-                                          uint8_t* method_info,
                                           uint8_t* roots_data,
-                                          size_t frame_size_in_bytes,
-                                          size_t core_spill_mask,
-                                          size_t fp_spill_mask,
                                           const uint8_t* code,
                                           size_t code_size,
                                           size_t data_size,
@@ -795,10 +779,6 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
       method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
       new (method_header) OatQuickMethodHeader(
           (stack_map != nullptr) ? code_ptr - stack_map : 0u,
-          (method_info != nullptr) ? code_ptr - method_info : 0u,
-          frame_size_in_bytes,
-          core_spill_mask,
-          fp_spill_mask,
           code_size);
       // Flush caches before we remove write permission because some ARMv8 Qualcomm kernels may
       // trigger a segfault if a page fault occurs when requesting a cache maintenance operation.
@@ -1061,14 +1041,12 @@ void JitCodeCache::ClearData(Thread* self,
 
 size_t JitCodeCache::ReserveData(Thread* self,
                                  size_t stack_map_size,
-                                 size_t method_info_size,
                                  size_t number_of_roots,
                                  ArtMethod* method,
                                  uint8_t** stack_map_data,
-                                 uint8_t** method_info_data,
                                  uint8_t** roots_data) {
   size_t table_size = ComputeRootTableSize(number_of_roots);
-  size_t size = RoundUp(stack_map_size + method_info_size + table_size, sizeof(void*));
+  size_t size = RoundUp(stack_map_size + table_size, sizeof(void*));
   uint8_t* result = nullptr;
 
   {
@@ -1098,13 +1076,11 @@ size_t JitCodeCache::ReserveData(Thread* self,
   if (result != nullptr) {
     *roots_data = result;
     *stack_map_data = result + table_size;
-    *method_info_data = *stack_map_data + stack_map_size;
     FillRootTableLength(*roots_data, number_of_roots);
     return size;
   } else {
     *roots_data = nullptr;
     *stack_map_data = nullptr;
-    *method_info_data = nullptr;
     return 0;
   }
 }
