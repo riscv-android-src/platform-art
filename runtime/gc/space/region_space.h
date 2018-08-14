@@ -586,21 +586,26 @@ class RegionSpace FINAL : public ContinuousMemMapAllocSpace {
   Region* AllocateRegion(bool for_evac) REQUIRES(region_lock_);
 
   // Scan region range [`begin`, `end`) in increasing order to try to
-  // allocate a large region having a size of `num_regs` regions. If
-  // there is no space in the region space to allocate this large
-  // region, return null.
+  // allocate a large region having a size of `num_regs_in_large_region`
+  // regions. If there is no space in the region space to allocate this
+  // large region, return null.
   //
   // If argument `next_region` is not null, use `*next_region` to
   // return the index to the region next to the allocated large region
   // returned by this method.
   template<bool kForEvac>
-  mirror::Object* AllocLargeInRange(size_t num_regs,
-                                    size_t begin,
+  mirror::Object* AllocLargeInRange(size_t begin,
                                     size_t end,
+                                    size_t num_regs_in_large_region,
                                     /* out */ size_t* bytes_allocated,
                                     /* out */ size_t* usable_size,
                                     /* out */ size_t* bytes_tl_bulk_allocated,
                                     /* out */ size_t* next_region = nullptr) REQUIRES(region_lock_);
+
+  // Check that the value of `r->LiveBytes()` matches the number of
+  // (allocated) bytes used by live objects according to the live bits
+  // in the region space bitmap range corresponding to region `r`.
+  void CheckLiveBytesAgainstRegionBitmap(Region* r);
 
   // Poison memory areas used by dead objects within unevacuated
   // region `r`. This is meant to detect dangling references to dead
