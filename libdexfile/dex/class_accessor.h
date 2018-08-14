@@ -31,7 +31,7 @@ class ClassIteratorData;
 
 // Classes to access Dex data.
 class ClassAccessor {
- private:
+ public:
   class BaseItem {
    public:
     explicit BaseItem(const DexFile& dex_file,
@@ -65,6 +65,14 @@ class ClassAccessor {
       return ptr_pos_;
     }
 
+    bool MemberIsNative() const {
+      return GetRawAccessFlags() & kAccNative;
+    }
+
+    bool MemberIsFinal() const {
+      return GetRawAccessFlags() & kAccFinal;
+    }
+
    protected:
     // Internal data pointer for reading.
     const DexFile& dex_file_;
@@ -73,7 +81,6 @@ class ClassAccessor {
     uint32_t access_flags_ = 0u;
   };
 
- public:
   // A decoded version of the method of a class_data_item.
   class Method : public BaseItem {
    public:
@@ -348,6 +355,10 @@ class ClassAccessor {
 
   uint32_t GetClassDefIndex() const {
     return class_def_index_;
+  }
+
+  const DexFile::ClassDef& GetClassDef() const {
+    return dex_file_.GetClassDef(GetClassDefIndex());
   }
 
  protected:

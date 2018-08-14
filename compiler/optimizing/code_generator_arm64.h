@@ -92,6 +92,16 @@ const vixl::aarch64::CPURegList runtime_reserved_core_registers =
         ((kEmitCompilerReadBarrier && kUseBakerReadBarrier) ? mr : vixl::aarch64::NoCPUReg),
         vixl::aarch64::lr);
 
+// Some instructions have special requirements for a temporary, for example
+// LoadClass/kBssEntry and LoadString/kBssEntry for Baker read barrier require
+// temp that's not an R0 (to avoid an extra move) and Baker read barrier field
+// loads with large offsets need a fixed register to limit the number of link-time
+// thunks we generate. For these and similar cases, we want to reserve a specific
+// register that's neither callee-save nor an argument register. We choose x15.
+inline Location FixedTempLocation() {
+  return Location::RegisterLocation(vixl::aarch64::x15.GetCode());
+}
+
 // Callee-save registers AAPCS64, without x19 (Thread Register) (nor
 // x20 (Marking Register) when emitting Baker read barriers).
 const vixl::aarch64::CPURegList callee_saved_core_registers(
@@ -661,6 +671,18 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                uint32_t offset,
                                vixl::aarch64::Label* fixup_label,
                                ReadBarrierOption read_barrier_option);
+  // Generate MOV for the `old_value` in UnsafeCASObject and mark it with Baker read barrier.
+  void GenerateUnsafeCasOldValueMovWithBakerReadBarrier(vixl::aarch64::Register marked,
+                                                        vixl::aarch64::Register old_value);
+  // Fast path implementation of ReadBarrier::Barrier for a heap
+  // reference field load when Baker's read barriers are used.
+  // Overload suitable for Unsafe.getObject/-Volatile() intrinsic.
+  void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
+                                             Location ref,
+                                             vixl::aarch64::Register obj,
+                                             const vixl::aarch64::MemOperand& src,
+                                             bool needs_null_check,
+                                             bool use_load_acquire);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
   void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,
@@ -672,58 +694,12 @@ class CodeGeneratorARM64 : public CodeGenerator {
                                              bool use_load_acquire);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference array load when Baker's read barriers are used.
-  void GenerateArrayLoadWithBakerReadBarrier(HInstruction* instruction,
-                                             Location ref,
+  void GenerateArrayLoadWithBakerReadBarrier(Location ref,
                                              vixl::aarch64::Register obj,
                                              uint32_t data_offset,
                                              Location index,
                                              vixl::aarch64::Register temp,
                                              bool needs_null_check);
-  // Factored implementation, used by GenerateFieldLoadWithBakerReadBarrier,
-  // GenerateArrayLoadWithBakerReadBarrier and some intrinsics.
-  //
-  // Load the object reference located at the address
-  // `obj + offset + (index << scale_factor)`, held by object `obj`, into
-  // `ref`, and mark it if needed.
-  void GenerateReferenceLoadWithBakerReadBarrier(HInstruction* instruction,
-                                                 Location ref,
-                                                 vixl::aarch64::Register obj,
-                                                 uint32_t offset,
-                                                 Location index,
-                                                 size_t scale_factor,
-                                                 vixl::aarch64::Register temp,
-                                                 bool needs_null_check,
-                                                 bool use_load_acquire);
-
-  // Generate code checking whether the the reference field at the
-  // address `obj + field_offset`, held by object `obj`, needs to be
-  // marked, and if so, marking it and updating the field within `obj`
-  // with the marked value.
-  //
-  // This routine is used for the implementation of the
-  // UnsafeCASObject intrinsic with Baker read barriers.
-  //
-  // This method has a structure similar to
-  // GenerateReferenceLoadWithBakerReadBarrier, but note that argument
-  // `ref` is only as a temporary here, and thus its value should not
-  // be used afterwards.
-  void UpdateReferenceFieldWithBakerReadBarrier(HInstruction* instruction,
-                                                Location ref,
-                                                vixl::aarch64::Register obj,
-                                                Location field_offset,
-                                                vixl::aarch64::Register temp,
-                                                bool needs_null_check,
-                                                bool use_load_acquire);
-
-  // Generate a heap reference load (with no read barrier).
-  void GenerateRawReferenceLoad(HInstruction* instruction,
-                                Location ref,
-                                vixl::aarch64::Register obj,
-                                uint32_t offset,
-                                Location index,
-                                size_t scale_factor,
-                                bool needs_null_check,
-                                bool use_load_acquire);
 
   // Emit code checking the status of the Marking Register, and
   // aborting the program if MR does not match the value stored in the
@@ -798,9 +774,10 @@ class CodeGeneratorARM64 : public CodeGenerator {
   // Encoding of thunk type and data for link-time generated thunks for Baker read barriers.
 
   enum class BakerReadBarrierKind : uint8_t {
-    kField,   // Field get or array get with constant offset (i.e. constant index).
-    kArray,   // Array get with index in register.
-    kGcRoot,  // GC root load.
+    kField,     // Field get or array get with constant offset (i.e. constant index).
+    kAcquire,   // Volatile field get.
+    kArray,     // Array get with index in register.
+    kGcRoot,    // GC root load.
     kLast = kGcRoot
   };
 
@@ -829,6 +806,15 @@ class CodeGeneratorARM64 : public CodeGenerator {
     CheckValidReg(base_reg);
     CheckValidReg(holder_reg);
     return BakerReadBarrierKindField::Encode(BakerReadBarrierKind::kField) |
+           BakerReadBarrierFirstRegField::Encode(base_reg) |
+           BakerReadBarrierSecondRegField::Encode(holder_reg);
+  }
+
+  static inline uint32_t EncodeBakerReadBarrierAcquireData(uint32_t base_reg, uint32_t holder_reg) {
+    CheckValidReg(base_reg);
+    CheckValidReg(holder_reg);
+    DCHECK_NE(base_reg, holder_reg);
+    return BakerReadBarrierKindField::Encode(BakerReadBarrierKind::kAcquire) |
            BakerReadBarrierFirstRegField::Encode(base_reg) |
            BakerReadBarrierSecondRegField::Encode(holder_reg);
   }
