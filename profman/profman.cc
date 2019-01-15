@@ -35,6 +35,7 @@
 #include "base/logging.h"  // For InitLogging.
 #include "base/mem_map.h"
 #include "base/scoped_flock.h"
+#include "base/stl_util.h"
 #include "base/stringpiece.h"
 #include "base/time_utils.h"
 #include "base/unix_file/fd_file.h"
@@ -59,6 +60,7 @@ static char** original_argv;
 
 static std::string CommandLine() {
   std::vector<std::string> command;
+  command.reserve(original_argc);
   for (int i = 0; i < original_argc; ++i) {
     command.push_back(original_argv[i]);
   }
@@ -155,6 +157,9 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("      the file passed with --profile-fd(file) to the profile passed with");
   UsageError("      --reference-profile-fd(file) and update at the same time the profile-key");
   UsageError("      of entries corresponding to the apks passed with --apk(-fd).");
+  UsageError("  --store-aggregation-counters: if present, profman will compute and store");
+  UsageError("      the aggregation counters of classes and methods in the output profile.");
+  UsageError("      In this case the profile will have a different version.");
   UsageError("");
 
   exit(EXIT_FAILURE);
@@ -185,7 +190,7 @@ NO_RETURN static void Abort(const char* msg) {
 
 // TODO(calin): This class has grown too much from its initial design. Split the functionality
 // into smaller, more contained pieces.
-class ProfMan FINAL {
+class ProfMan final {
  public:
   ProfMan() :
       reference_profile_file_fd_(kInvalidFd),
@@ -198,7 +203,8 @@ class ProfMan FINAL {
       test_profile_class_percentage_(kDefaultTestProfileClassPercentage),
       test_profile_seed_(NanoTime()),
       start_ns_(NanoTime()),
-      copy_and_update_profile_key_(false) {}
+      copy_and_update_profile_key_(false),
+      store_aggregation_counters_(false) {}
 
   ~ProfMan() {
     LogCompletionTime();
@@ -285,6 +291,8 @@ class ProfMan FINAL {
         ParseUintOption(option, "--generate-test-profile-seed", &test_profile_seed_, Usage);
       } else if (option.starts_with("--copy-and-update-profile-key")) {
         copy_and_update_profile_key_ = true;
+      } else if (option.starts_with("--store-aggregation-counters")) {
+        store_aggregation_counters_ = true;
       } else {
         Usage("Unknown argument '%s'", option.data());
       }
@@ -361,12 +369,14 @@ class ProfMan FINAL {
       File file(reference_profile_file_fd_, false);
       result = ProfileAssistant::ProcessProfiles(profile_files_fd_,
                                                  reference_profile_file_fd_,
-                                                 filter_fn);
+                                                 filter_fn,
+                                                 store_aggregation_counters_);
       CloseAllFds(profile_files_fd_, "profile_files_fd_");
     } else {
       result = ProfileAssistant::ProcessProfiles(profile_files_,
                                                  reference_profile_file_,
-                                                 filter_fn);
+                                                 filter_fn,
+                                                 store_aggregation_counters_);
     }
     return result;
   }
@@ -426,7 +436,7 @@ class ProfMan FINAL {
       if (use_apk_fd_list) {
         if (dex_file_loader.OpenZip(apks_fd_[i],
                                     dex_locations_[i],
-                                    /* verify */ false,
+                                    /* verify= */ false,
                                     kVerifyChecksum,
                                     &error_msg,
                                     &dex_files_for_location)) {
@@ -437,7 +447,7 @@ class ProfMan FINAL {
       } else {
         if (dex_file_loader.Open(apk_files_[i].c_str(),
                                  dex_locations_[i],
-                                 /* verify */ false,
+                                 /* verify= */ false,
                                  kVerifyChecksum,
                                  &error_msg,
                                  &dex_files_for_location)) {
@@ -457,6 +467,10 @@ class ProfMan FINAL {
   // The methods reads the links from /proc/self/fd/ to find the original apk paths
   // and puts them in the dex_locations_ vector.
   bool ComputeDexLocationsFromApkFds() {
+#ifdef _WIN32
+    PLOG(ERROR) << "ComputeDexLocationsFromApkFds is unsupported on Windows.";
+    return false;
+#else
     // We can't use a char array of PATH_MAX size without exceeding the frame size.
     // So we use a vector as the buffer for the path.
     std::vector<char> buffer(PATH_MAX, 0);
@@ -472,11 +486,17 @@ class ProfMan FINAL {
       dex_locations_.push_back(buffer.data());
     }
     return true;
+#endif
   }
 
   std::unique_ptr<const ProfileCompilationInfo> LoadProfile(const std::string& filename, int fd) {
     if (!filename.empty()) {
-      fd = open(filename.c_str(), O_RDWR);
+#ifdef _WIN32
+      int flags = O_RDWR;
+#else
+      int flags = O_RDWR | O_CLOEXEC;
+#endif
+      fd = open(filename.c_str(), flags);
       if (fd < 0) {
         LOG(ERROR) << "Cannot open " << filename << strerror(errno);
         return nullptr;
@@ -500,7 +520,7 @@ class ProfMan FINAL {
       LOG(ERROR) << "Cannot load profile info from filename=" << filename << " fd=" << fd;
       return -1;
     }
-    *dump += banner + "\n" + info->DumpInfo(dex_files) + "\n";
+    *dump += banner + "\n" + info->DumpInfo(MakeNonOwningPointerVector(*dex_files)) + "\n";
     return 0;
   }
 
@@ -513,10 +533,23 @@ class ProfMan FINAL {
     static const char* kEmptyString = "";
     static const char* kOrdinaryProfile = "=== profile ===";
     static const char* kReferenceProfile = "=== reference profile ===";
+    static const char* kDexFiles = "=== Dex files  ===";
 
     std::vector<std::unique_ptr<const DexFile>> dex_files;
     OpenApkFilesFromLocations(&dex_files);
+
     std::string dump;
+
+    // Dump checkfiles and corresponding checksums.
+    dump += kDexFiles;
+    dump += "\n";
+    for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
+      std::ostringstream oss;
+      oss << dex_file->GetLocation()
+          << " [checksum=" << std::hex << dex_file->GetLocationChecksum() << "]\n";
+      dump += oss.str();
+    }
+
     // Dump individual profile files.
     if (!profile_files_fd_.empty()) {
       for (int profile_file_fd : profile_files_fd_) {
@@ -530,12 +563,10 @@ class ProfMan FINAL {
         }
       }
     }
-    if (!profile_files_.empty()) {
-      for (const std::string& profile_file : profile_files_) {
-        int ret = DumpOneProfile(kOrdinaryProfile, profile_file, kInvalidFd, &dex_files, &dump);
-        if (ret != 0) {
-          return ret;
-        }
+    for (const std::string& profile_file : profile_files_) {
+      int ret = DumpOneProfile(kOrdinaryProfile, profile_file, kInvalidFd, &dex_files, &dump);
+      if (ret != 0) {
+        return ret;
       }
     }
     // Dump reference profile file.
@@ -562,7 +593,7 @@ class ProfMan FINAL {
     if (!FdIsValid(dump_output_to_fd_)) {
       std::cout << dump;
     } else {
-      unix_file::FdFile out_fd(dump_output_to_fd_, false /*check_usage*/);
+      unix_file::FdFile out_fd(dump_output_to_fd_, /*check_usage=*/ false);
       if (!out_fd.WriteFully(dump.c_str(), dump.length())) {
         return -1;
       }
@@ -594,14 +625,14 @@ class ProfMan FINAL {
                                             &startup_methods,
                                             &post_startup_methods)) {
         for (const dex::TypeIndex& type_index : class_types) {
-          const DexFile::TypeId& type_id = dex_file->GetTypeId(type_index);
+          const dex::TypeId& type_id = dex_file->GetTypeId(type_index);
           out_lines->insert(std::string(dex_file->GetTypeDescriptor(type_id)));
         }
         combined_methods = hot_methods;
         combined_methods.insert(startup_methods.begin(), startup_methods.end());
         combined_methods.insert(post_startup_methods.begin(), post_startup_methods.end());
         for (uint16_t dex_method_idx : combined_methods) {
-          const DexFile::MethodId& id = dex_file->GetMethodId(dex_method_idx);
+          const dex::MethodId& id = dex_file->GetMethodId(dex_method_idx);
           std::string signature_string(dex_file->GetMethodSignature(id).ToString());
           std::string type_string(dex_file->GetTypeDescriptor(dex_file->GetTypeId(id.class_idx_)));
           std::string method_name(dex_file->GetMethodName(id));
@@ -629,7 +660,12 @@ class ProfMan FINAL {
   bool GetClassNamesAndMethods(const std::string& profile_file,
                                std::vector<std::unique_ptr<const DexFile>>* dex_files,
                                std::set<std::string>* out_lines) {
-    int fd = open(profile_file.c_str(), O_RDONLY);
+#ifdef _WIN32
+    int flags = O_RDONLY;
+#else
+    int flags = O_RDONLY | O_CLOEXEC;
+#endif
+    int fd = open(profile_file.c_str(), flags);
     if (!FdIsValid(fd)) {
       LOG(ERROR) << "Cannot open " << profile_file << strerror(errno);
       return false;
@@ -688,7 +724,7 @@ class ProfMan FINAL {
     if (!FdIsValid(dump_output_to_fd_)) {
       std::cout << dump;
     } else {
-      unix_file::FdFile out_fd(dump_output_to_fd_, false /*check_usage*/);
+      unix_file::FdFile out_fd(dump_output_to_fd_, /*check_usage=*/ false);
       if (!out_fd.WriteFully(dump.c_str(), dump.length())) {
         return -1;
       }
@@ -761,7 +797,7 @@ class ProfMan FINAL {
         }
       }
 
-      const DexFile::TypeId* type_id = dex_file->FindTypeId(klass_descriptor.c_str());
+      const dex::TypeId* type_id = dex_file->FindTypeId(klass_descriptor.c_str());
       if (type_id == nullptr) {
         continue;
       }
@@ -797,7 +833,7 @@ class ProfMan FINAL {
     const std::string& name = name_and_signature[0];
     const std::string& signature = kProfileParsingFirstCharInSignature + name_and_signature[1];
 
-    const DexFile::StringId* name_id = dex_file->FindStringId(name.c_str());
+    const dex::StringId* name_id = dex_file->FindStringId(name.c_str());
     if (name_id == nullptr) {
       LOG(WARNING) << "Could not find name: "  << name;
       return dex::kDexNoIndex;
@@ -808,12 +844,12 @@ class ProfMan FINAL {
       LOG(WARNING) << "Could not create type list" << signature;
       return dex::kDexNoIndex;
     }
-    const DexFile::ProtoId* proto_id = dex_file->FindProtoId(return_type_idx, param_type_idxs);
+    const dex::ProtoId* proto_id = dex_file->FindProtoId(return_type_idx, param_type_idxs);
     if (proto_id == nullptr) {
       LOG(WARNING) << "Could not find proto_id: " << name;
       return dex::kDexNoIndex;
     }
-    const DexFile::MethodId* method_id = dex_file->FindMethodId(
+    const dex::MethodId* method_id = dex_file->FindMethodId(
         dex_file->GetTypeId(class_ref.TypeIndex()), *name_id, *proto_id);
     if (method_id == nullptr) {
       LOG(WARNING) << "Could not find method_id: " << name;
@@ -836,7 +872,7 @@ class ProfMan FINAL {
     uint32_t offset = dex_file->FindCodeItemOffset(
         *dex_file->FindClassDef(class_ref.TypeIndex()),
         method_index);
-    const DexFile::CodeItem* code_item = dex_file->GetCodeItem(offset);
+    const dex::CodeItem* code_item = dex_file->GetCodeItem(offset);
 
     bool found_invoke = false;
     for (const DexInstructionPcPair& inst : CodeItemInstructionAccessor(*dex_file, code_item)) {
@@ -912,7 +948,7 @@ class ProfMan FINAL {
       flags |= ProfileCompilationInfo::MethodHotness::kFlagPostStartup;
     }
 
-    TypeReference class_ref(/* dex_file */ nullptr, dex::TypeIndex());
+    TypeReference class_ref(/* dex_file= */ nullptr, dex::TypeIndex());
     if (!FindClass(dex_files, klass, &class_ref)) {
       LOG(WARNING) << "Could not find class: " << klass;
       return false;
@@ -981,7 +1017,7 @@ class ProfMan FINAL {
         return false;
       }
       std::vector<TypeReference> classes(inline_cache_elems.size(),
-                                         TypeReference(/* dex_file */ nullptr, dex::TypeIndex()));
+                                         TypeReference(/* dex_file= */ nullptr, dex::TypeIndex()));
       size_t class_it = 0;
       for (const std::string& ic_class : inline_cache_elems) {
         if (!FindClass(dex_files, ic_class, &(classes[class_it++]))) {
@@ -1010,7 +1046,12 @@ class ProfMan FINAL {
     int fd = reference_profile_file_fd_;
     if (!FdIsValid(fd)) {
       CHECK(!reference_profile_file_.empty());
-      fd = open(reference_profile_file_.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+#ifdef _WIN32
+      int flags = O_CREAT | O_TRUNC | O_WRONLY;
+#else
+      int flags = O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC;
+#endif
+      fd = open(reference_profile_file_.c_str(), flags, 0644);
       if (fd < 0) {
         LOG(ERROR) << "Cannot open " << reference_profile_file_ << strerror(errno);
         return kInvalidFd;
@@ -1143,7 +1184,12 @@ class ProfMan FINAL {
       }
     }
     // ShouldGenerateTestProfile confirms !test_profile_.empty().
-    int profile_test_fd = open(test_profile_.c_str(), O_CREAT | O_TRUNC | O_WRONLY, 0644);
+#ifdef _WIN32
+    int flags = O_CREAT | O_TRUNC | O_WRONLY;
+#else
+    int flags = O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC;
+#endif
+    int profile_test_fd = open(test_profile_.c_str(), flags, 0644);
     if (profile_test_fd < 0) {
       LOG(ERROR) << "Cannot open " << test_profile_ << strerror(errno);
       return -1;
@@ -1201,7 +1247,7 @@ class ProfMan FINAL {
     // Do not clear if invalid. The input might be an archive.
     bool load_ok = use_fds
         ? profile.Load(profile_files_fd_[0])
-        : profile.Load(profile_files_[0], /*clear_if_invalid*/ false);
+        : profile.Load(profile_files_[0], /*clear_if_invalid=*/ false);
     if (load_ok) {
       // Open the dex files to look up classes and methods.
       std::vector<std::unique_ptr<const DexFile>> dex_files;
@@ -1211,7 +1257,7 @@ class ProfMan FINAL {
       }
       bool result = use_fds
           ? profile.Save(reference_profile_file_fd_)
-          : profile.Save(reference_profile_file_, /*bytes_written*/ nullptr);
+          : profile.Save(reference_profile_file_, /*bytes_written=*/ nullptr);
       return result ? 0 : kErrorFailedToSaveProfile;
     } else {
       return kErrorFailedToLoadProfile;
@@ -1264,6 +1310,7 @@ class ProfMan FINAL {
   uint32_t test_profile_seed_;
   uint64_t start_ns_;
   bool copy_and_update_profile_key_;
+  bool store_aggregation_counters_;
 };
 
 // See ProfileAssistant::ProcessingResult for return codes.

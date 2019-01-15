@@ -94,29 +94,29 @@ class ReferenceTypePropagation::RTPVisitor : public HGraphDelegateVisitor {
     worklist_.reserve(kDefaultWorklistSize);
   }
 
-  void VisitDeoptimize(HDeoptimize* deopt) OVERRIDE;
-  void VisitNewInstance(HNewInstance* new_instance) OVERRIDE;
-  void VisitLoadClass(HLoadClass* load_class) OVERRIDE;
-  void VisitInstanceOf(HInstanceOf* load_class) OVERRIDE;
-  void VisitClinitCheck(HClinitCheck* clinit_check) OVERRIDE;
-  void VisitLoadMethodHandle(HLoadMethodHandle* instr) OVERRIDE;
-  void VisitLoadMethodType(HLoadMethodType* instr) OVERRIDE;
-  void VisitLoadString(HLoadString* instr) OVERRIDE;
-  void VisitLoadException(HLoadException* instr) OVERRIDE;
-  void VisitNewArray(HNewArray* instr) OVERRIDE;
-  void VisitParameterValue(HParameterValue* instr) OVERRIDE;
-  void VisitInstanceFieldGet(HInstanceFieldGet* instr) OVERRIDE;
-  void VisitStaticFieldGet(HStaticFieldGet* instr) OVERRIDE;
-  void VisitUnresolvedInstanceFieldGet(HUnresolvedInstanceFieldGet* instr) OVERRIDE;
-  void VisitUnresolvedStaticFieldGet(HUnresolvedStaticFieldGet* instr) OVERRIDE;
-  void VisitInvoke(HInvoke* instr) OVERRIDE;
-  void VisitArrayGet(HArrayGet* instr) OVERRIDE;
-  void VisitCheckCast(HCheckCast* instr) OVERRIDE;
-  void VisitBoundType(HBoundType* instr) OVERRIDE;
-  void VisitNullCheck(HNullCheck* instr) OVERRIDE;
-  void VisitPhi(HPhi* phi);
+  void VisitDeoptimize(HDeoptimize* deopt) override;
+  void VisitNewInstance(HNewInstance* new_instance) override;
+  void VisitLoadClass(HLoadClass* load_class) override;
+  void VisitInstanceOf(HInstanceOf* load_class) override;
+  void VisitClinitCheck(HClinitCheck* clinit_check) override;
+  void VisitLoadMethodHandle(HLoadMethodHandle* instr) override;
+  void VisitLoadMethodType(HLoadMethodType* instr) override;
+  void VisitLoadString(HLoadString* instr) override;
+  void VisitLoadException(HLoadException* instr) override;
+  void VisitNewArray(HNewArray* instr) override;
+  void VisitParameterValue(HParameterValue* instr) override;
+  void VisitInstanceFieldGet(HInstanceFieldGet* instr) override;
+  void VisitStaticFieldGet(HStaticFieldGet* instr) override;
+  void VisitUnresolvedInstanceFieldGet(HUnresolvedInstanceFieldGet* instr) override;
+  void VisitUnresolvedStaticFieldGet(HUnresolvedStaticFieldGet* instr) override;
+  void VisitInvoke(HInvoke* instr) override;
+  void VisitArrayGet(HArrayGet* instr) override;
+  void VisitCheckCast(HCheckCast* instr) override;
+  void VisitBoundType(HBoundType* instr) override;
+  void VisitNullCheck(HNullCheck* instr) override;
+  void VisitPhi(HPhi* phi) override;
 
-  void VisitBasicBlock(HBasicBlock* block);
+  void VisitBasicBlock(HBasicBlock* block) override;
   void ProcessWorklist();
 
  private:
@@ -278,7 +278,7 @@ static void BoundTypeIn(HInstruction* receiver,
       if (ShouldCreateBoundType(
             insert_point, receiver, class_rti, start_instruction, start_block)) {
         bound_type = new (receiver->GetBlock()->GetGraph()->GetAllocator()) HBoundType(receiver);
-        bound_type->SetUpperBound(class_rti, /* bound_can_be_null */ false);
+        bound_type->SetUpperBound(class_rti, /* can_be_null= */ false);
         start_block->InsertInstructionBefore(bound_type, insert_point);
         // To comply with the RTP algorithm, don't type the bound type just yet, it will
         // be handled in RTPVisitor::VisitBoundType.
@@ -350,7 +350,7 @@ static void BoundTypeForClassCheck(HInstruction* check) {
     HBasicBlock* trueBlock = compare->IsEqual()
         ? check->AsIf()->IfTrueSuccessor()
         : check->AsIf()->IfFalseSuccessor();
-    BoundTypeIn(receiver, trueBlock, /* start_instruction */ nullptr, class_rti);
+    BoundTypeIn(receiver, trueBlock, /* start_instruction= */ nullptr, class_rti);
   } else {
     DCHECK(check->IsDeoptimize());
     if (compare->IsEqual() && check->AsDeoptimize()->GuardsAnInput()) {
@@ -427,9 +427,9 @@ void ReferenceTypePropagation::RTPVisitor::BoundTypeForIfNotNull(HBasicBlock* bl
       : ifInstruction->IfFalseSuccessor();
 
   ReferenceTypeInfo object_rti = ReferenceTypeInfo::Create(
-      handle_cache_->GetObjectClassHandle(), /* is_exact */ false);
+      handle_cache_->GetObjectClassHandle(), /* is_exact= */ false);
 
-  BoundTypeIn(obj, notNullBlock, /* start_instruction */ nullptr, object_rti);
+  BoundTypeIn(obj, notNullBlock, /* start_instruction= */ nullptr, object_rti);
 }
 
 // Returns true if one of the patterns below has been recognized. If so, the
@@ -538,10 +538,10 @@ void ReferenceTypePropagation::RTPVisitor::BoundTypeForIfInstanceOf(HBasicBlock*
   {
     ScopedObjectAccess soa(Thread::Current());
     if (!class_rti.GetTypeHandle()->CannotBeAssignedFromOtherTypes()) {
-      class_rti = ReferenceTypeInfo::Create(class_rti.GetTypeHandle(), /* is_exact */ false);
+      class_rti = ReferenceTypeInfo::Create(class_rti.GetTypeHandle(), /* is_exact= */ false);
     }
   }
-  BoundTypeIn(obj, instanceOfTrueBlock, /* start_instruction */ nullptr, class_rti);
+  BoundTypeIn(obj, instanceOfTrueBlock, /* start_instruction= */ nullptr, class_rti);
 }
 
 void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* instr,
@@ -561,7 +561,7 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
       // Use a null loader, the target method is in a boot classpath dex file.
       Handle<mirror::ClassLoader> loader(hs.NewHandle<mirror::ClassLoader>(nullptr));
       ArtMethod* method = cl->ResolveMethod<ClassLinker::ResolveMode::kNoChecks>(
-          dex_method_index, dex_cache, loader, /* referrer */ nullptr, kDirect);
+          dex_method_index, dex_cache, loader, /* referrer= */ nullptr, kDirect);
       DCHECK(method != nullptr);
       ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
       DCHECK(declaring_class != nullptr);
@@ -571,7 +571,7 @@ void ReferenceTypePropagation::RTPVisitor::SetClassAsTypeInfo(HInstruction* inst
           << "Expected String.<init>: " << method->PrettyMethod();
     }
     instr->SetReferenceTypeInfo(
-        ReferenceTypeInfo::Create(handle_cache_->GetStringClassHandle(), /* is_exact */ true));
+        ReferenceTypeInfo::Create(handle_cache_->GetStringClassHandle(), /* is_exact= */ true));
   } else if (IsAdmissible(klass)) {
     ReferenceTypeInfo::TypeHandle handle = handle_cache_->NewHandle(klass);
     is_exact = is_exact || handle->CannotBeAssignedFromOtherTypes();
@@ -600,12 +600,12 @@ void ReferenceTypePropagation::RTPVisitor::UpdateReferenceTypeInfo(HInstruction*
 
 void ReferenceTypePropagation::RTPVisitor::VisitNewInstance(HNewInstance* instr) {
   ScopedObjectAccess soa(Thread::Current());
-  SetClassAsTypeInfo(instr, instr->GetLoadClass()->GetClass().Get(), /* is_exact */ true);
+  SetClassAsTypeInfo(instr, instr->GetLoadClass()->GetClass().Get(), /* is_exact= */ true);
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitNewArray(HNewArray* instr) {
   ScopedObjectAccess soa(Thread::Current());
-  SetClassAsTypeInfo(instr, instr->GetLoadClass()->GetClass().Get(), /* is_exact */ true);
+  SetClassAsTypeInfo(instr, instr->GetLoadClass()->GetClass().Get(), /* is_exact= */ true);
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitParameterValue(HParameterValue* instr) {
@@ -614,7 +614,7 @@ void ReferenceTypePropagation::RTPVisitor::VisitParameterValue(HParameterValue* 
     UpdateReferenceTypeInfo(instr,
                             instr->GetTypeIndex(),
                             instr->GetDexFile(),
-                            /* is_exact */ false);
+                            /* is_exact= */ false);
   }
 }
 
@@ -632,7 +632,7 @@ void ReferenceTypePropagation::RTPVisitor::UpdateFieldAccessTypeInfo(HInstructio
     klass = info.GetField()->LookupResolvedType();
   }
 
-  SetClassAsTypeInfo(instr, klass, /* is_exact */ false);
+  SetClassAsTypeInfo(instr, klass, /* is_exact= */ false);
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitInstanceFieldGet(HInstanceFieldGet* instr) {
@@ -665,7 +665,7 @@ void ReferenceTypePropagation::RTPVisitor::VisitLoadClass(HLoadClass* instr) {
     instr->SetValidLoadedClassRTI();
   }
   instr->SetReferenceTypeInfo(
-      ReferenceTypeInfo::Create(handle_cache_->GetClassClassHandle(), /* is_exact */ true));
+      ReferenceTypeInfo::Create(handle_cache_->GetClassClassHandle(), /* is_exact= */ true));
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitInstanceOf(HInstanceOf* instr) {
@@ -682,31 +682,31 @@ void ReferenceTypePropagation::RTPVisitor::VisitClinitCheck(HClinitCheck* instr)
 void ReferenceTypePropagation::RTPVisitor::VisitLoadMethodHandle(HLoadMethodHandle* instr) {
   instr->SetReferenceTypeInfo(ReferenceTypeInfo::Create(
       handle_cache_->GetMethodHandleClassHandle(),
-      /* is_exact */ true));
+      /* is_exact= */ true));
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitLoadMethodType(HLoadMethodType* instr) {
   instr->SetReferenceTypeInfo(
-      ReferenceTypeInfo::Create(handle_cache_->GetMethodTypeClassHandle(), /* is_exact */ true));
+      ReferenceTypeInfo::Create(handle_cache_->GetMethodTypeClassHandle(), /* is_exact= */ true));
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitLoadString(HLoadString* instr) {
   instr->SetReferenceTypeInfo(
-      ReferenceTypeInfo::Create(handle_cache_->GetStringClassHandle(), /* is_exact */ true));
+      ReferenceTypeInfo::Create(handle_cache_->GetStringClassHandle(), /* is_exact= */ true));
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitLoadException(HLoadException* instr) {
   DCHECK(instr->GetBlock()->IsCatchBlock());
   TryCatchInformation* catch_info = instr->GetBlock()->GetTryCatchInformation();
 
-  if (catch_info->IsCatchAllTypeIndex()) {
-    instr->SetReferenceTypeInfo(
-        ReferenceTypeInfo::Create(handle_cache_->GetThrowableClassHandle(), /* is_exact */ false));
-  } else {
+  if (catch_info->IsValidTypeIndex()) {
     UpdateReferenceTypeInfo(instr,
                             catch_info->GetCatchTypeIndex(),
                             catch_info->GetCatchDexFile(),
-                            /* is_exact */ false);
+                            /* is_exact= */ false);
+  } else {
+    instr->SetReferenceTypeInfo(
+        ReferenceTypeInfo::Create(handle_cache_->GetThrowableClassHandle(), /* is_exact= */ false));
   }
 }
 
@@ -736,7 +736,7 @@ void ReferenceTypePropagation::RTPVisitor::VisitBoundType(HBoundType* instr) {
         // bound type is dead. To not confuse potential other optimizations, we mark
         // the bound as non-exact.
         instr->SetReferenceTypeInfo(
-            ReferenceTypeInfo::Create(class_rti.GetTypeHandle(), /* is_exact */ false));
+            ReferenceTypeInfo::Create(class_rti.GetTypeHandle(), /* is_exact= */ false));
       }
     } else {
       // Object not typed yet. Leave BoundType untyped for now rather than
@@ -914,7 +914,7 @@ void ReferenceTypePropagation::RTPVisitor::VisitInvoke(HInvoke* instr) {
   ScopedObjectAccess soa(Thread::Current());
   ArtMethod* method = instr->GetResolvedMethod();
   ObjPtr<mirror::Class> klass = (method == nullptr) ? nullptr : method->LookupResolvedReturnType();
-  SetClassAsTypeInfo(instr, klass, /* is_exact */ false);
+  SetClassAsTypeInfo(instr, klass, /* is_exact= */ false);
 }
 
 void ReferenceTypePropagation::RTPVisitor::VisitArrayGet(HArrayGet* instr) {
@@ -947,7 +947,7 @@ void ReferenceTypePropagation::RTPVisitor::UpdateBoundType(HBoundType* instr) {
     // bound type is dead. To not confuse potential other optimizations, we mark
     // the bound as non-exact.
     instr->SetReferenceTypeInfo(
-        ReferenceTypeInfo::Create(upper_bound_rti.GetTypeHandle(), /* is_exact */ false));
+        ReferenceTypeInfo::Create(upper_bound_rti.GetTypeHandle(), /* is_exact= */ false));
   }
 }
 

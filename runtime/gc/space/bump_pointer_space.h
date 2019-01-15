@@ -19,6 +19,8 @@
 
 #include "space.h"
 
+#include "base/mutex.h"
+
 namespace art {
 
 namespace mirror {
@@ -35,43 +37,43 @@ namespace space {
 
 // A bump pointer space allocates by incrementing a pointer, it doesn't provide a free
 // implementation as its intended to be evacuated.
-class BumpPointerSpace FINAL : public ContinuousMemMapAllocSpace {
+class BumpPointerSpace final : public ContinuousMemMapAllocSpace {
  public:
   typedef void(*WalkCallback)(void *start, void *end, size_t num_bytes, void* callback_arg);
 
-  SpaceType GetType() const OVERRIDE {
+  SpaceType GetType() const override {
     return kSpaceTypeBumpPointerSpace;
   }
 
   // Create a bump pointer space with the requested sizes. The requested base address is not
   // guaranteed to be granted, if it is required, the caller should call Begin on the returned
   // space to confirm the request was granted.
-  static BumpPointerSpace* Create(const std::string& name, size_t capacity, uint8_t* requested_begin);
-  static BumpPointerSpace* CreateFromMemMap(const std::string& name, MemMap* mem_map);
+  static BumpPointerSpace* Create(const std::string& name, size_t capacity);
+  static BumpPointerSpace* CreateFromMemMap(const std::string& name, MemMap&& mem_map);
 
   // Allocate num_bytes, returns null if the space is full.
   mirror::Object* Alloc(Thread* self, size_t num_bytes, size_t* bytes_allocated,
-                        size_t* usable_size, size_t* bytes_tl_bulk_allocated) OVERRIDE;
+                        size_t* usable_size, size_t* bytes_tl_bulk_allocated) override;
   // Thread-unsafe allocation for when mutators are suspended, used by the semispace collector.
   mirror::Object* AllocThreadUnsafe(Thread* self, size_t num_bytes, size_t* bytes_allocated,
                                     size_t* usable_size, size_t* bytes_tl_bulk_allocated)
-      OVERRIDE REQUIRES(Locks::mutator_lock_);
+      override REQUIRES(Locks::mutator_lock_);
 
   mirror::Object* AllocNonvirtual(size_t num_bytes);
   mirror::Object* AllocNonvirtualWithoutAccounting(size_t num_bytes);
 
   // Return the storage space required by obj.
-  size_t AllocationSize(mirror::Object* obj, size_t* usable_size) OVERRIDE
+  size_t AllocationSize(mirror::Object* obj, size_t* usable_size) override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     return AllocationSizeNonvirtual(obj, usable_size);
   }
 
   // NOPS unless we support free lists.
-  size_t Free(Thread*, mirror::Object*) OVERRIDE {
+  size_t Free(Thread*, mirror::Object*) override {
     return 0;
   }
 
-  size_t FreeList(Thread*, size_t, mirror::Object**) OVERRIDE {
+  size_t FreeList(Thread*, size_t, mirror::Object**) override {
     return 0;
   }
 
@@ -94,16 +96,16 @@ class BumpPointerSpace FINAL : public ContinuousMemMapAllocSpace {
     return GetMemMap()->Size();
   }
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
     return nullptr;
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return nullptr;
   }
 
   // Reset the space to empty.
-  void Clear() OVERRIDE REQUIRES(!block_lock_);
+  void Clear() override REQUIRES(!block_lock_);
 
   void Dump(std::ostream& os) const;
 
@@ -122,7 +124,7 @@ class BumpPointerSpace FINAL : public ContinuousMemMapAllocSpace {
     return Begin() == End();
   }
 
-  bool CanMoveObjects() const OVERRIDE {
+  bool CanMoveObjects() const override {
     return true;
   }
 
@@ -141,7 +143,7 @@ class BumpPointerSpace FINAL : public ContinuousMemMapAllocSpace {
   // Allocate a new TLAB, returns false if the allocation failed.
   bool AllocNewTlab(Thread* self, size_t bytes) REQUIRES(!block_lock_);
 
-  BumpPointerSpace* AsBumpPointerSpace() OVERRIDE {
+  BumpPointerSpace* AsBumpPointerSpace() override {
     return this;
   }
 
@@ -151,22 +153,22 @@ class BumpPointerSpace FINAL : public ContinuousMemMapAllocSpace {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!block_lock_);
 
-  accounting::ContinuousSpaceBitmap::SweepCallback* GetSweepCallback() OVERRIDE;
+  accounting::ContinuousSpaceBitmap::SweepCallback* GetSweepCallback() override;
 
   // Record objects / bytes freed.
   void RecordFree(int32_t objects, int32_t bytes) {
-    objects_allocated_.fetch_sub(objects, std::memory_order_seq_cst);
-    bytes_allocated_.fetch_sub(bytes, std::memory_order_seq_cst);
+    objects_allocated_.fetch_sub(objects, std::memory_order_relaxed);
+    bytes_allocated_.fetch_sub(bytes, std::memory_order_relaxed);
   }
 
-  void LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) OVERRIDE
+  void LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Object alignment within the space.
   static constexpr size_t kAlignment = 8;
 
  protected:
-  BumpPointerSpace(const std::string& name, MemMap* mem_map);
+  BumpPointerSpace(const std::string& name, MemMap&& mem_map);
 
   // Allocate a raw block of bytes.
   uint8_t* AllocBlock(size_t bytes) REQUIRES(block_lock_);

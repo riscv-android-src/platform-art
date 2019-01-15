@@ -20,7 +20,7 @@
 #include <android-base/logging.h>
 
 #include "art_method.h"
-#include "base/mutex.h"
+#include "base/locks.h"
 #include "monitor.h"
 #include "stack.h"
 #include "thread.h"
@@ -54,7 +54,7 @@ class MonitorObjectsStackVisitor : public StackVisitor {
     kEndStackWalk,
   };
 
-  bool VisitFrame() FINAL REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() final REQUIRES_SHARED(Locks::mutator_lock_) {
     ArtMethod* m = GetMethod();
     if (m->IsRuntimeMethod()) {
       return true;

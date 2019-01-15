@@ -139,6 +139,9 @@ void DeoptManager::FinishSetup() {
         // OnLoad since the runtime hasn't started up sufficiently. This is only expected to happen
         // on userdebug/eng builds.
         LOG(INFO) << "Attempting to start jit for openjdkjvmti plugin.";
+        // Note: use rwx allowed = true, because if this is the system server, we will not be
+        //       allowed to allocate any JIT code cache, anyways.
+        runtime->CreateJitCodeCache(/*rwx_memory_allowed=*/true);
         runtime->CreateJit();
         if (runtime->GetJit() == nullptr) {
           LOG(WARNING) << "Could not start jit for openjdkjvmti plugin. This process might be "
@@ -289,7 +292,7 @@ class ScopedDeoptimizationContext : public art::ValueObject {
     uninterruptible_cause_ = critical_section_.Enter(art::gc::kGcCauseInstrumentation,
                                                      art::gc::kCollectorTypeCriticalSection);
     art::Runtime::Current()->GetThreadList()->SuspendAll("JMVTI Deoptimizing methods",
-                                                         /*long_suspend*/ false);
+                                                         /*long_suspend=*/ false);
   }
 
   ~ScopedDeoptimizationContext()

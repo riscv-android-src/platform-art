@@ -28,9 +28,13 @@
 #endif
 #ifdef ART_ENABLE_CODEGEN_x86
 #include "pc_relative_fixups_x86.h"
+#include "instruction_simplifier_x86.h"
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
 #include "x86_memory_gen.h"
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
+#include "instruction_simplifier_x86_64.h"
 #endif
 
 #include "bounds_check_elimination.h"
@@ -84,14 +88,10 @@ const char* OptimizationPassName(OptimizationPass pass) {
       return HDeadCodeElimination::kDeadCodeEliminationPassName;
     case OptimizationPass::kInliner:
       return HInliner::kInlinerPassName;
-    case OptimizationPass::kSharpening:
-      return HSharpening::kSharpeningPassName;
     case OptimizationPass::kSelectGenerator:
       return HSelectGenerator::kSelectGeneratorPassName;
     case OptimizationPass::kInstructionSimplifier:
       return InstructionSimplifier::kInstructionSimplifierPassName;
-    case OptimizationPass::kIntrinsicsRecognizer:
-      return IntrinsicsRecognizer::kIntrinsicsRecognizerPassName;
     case OptimizationPass::kCHAGuardOptimization:
       return CHAGuardOptimization::kCHAGuardOptimizationPassName;
     case OptimizationPass::kCodeSinking:
@@ -117,6 +117,12 @@ const char* OptimizationPassName(OptimizationPass pass) {
 #ifdef ART_ENABLE_CODEGEN_x86
     case OptimizationPass::kPcRelativeFixupsX86:
       return x86::PcRelativeFixups::kPcRelativeFixupsX86PassName;
+    case OptimizationPass::kInstructionSimplifierX86:
+      return x86::InstructionSimplifierX86::kInstructionSimplifierX86PassName;
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
+    case OptimizationPass::kInstructionSimplifierX86_64:
+      return x86_64::InstructionSimplifierX86_64::kInstructionSimplifierX86_64PassName;
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
     case OptimizationPass::kX86MemoryOperandGeneration:
@@ -141,14 +147,12 @@ OptimizationPass OptimizationPassByName(const std::string& pass_name) {
   X(OptimizationPass::kInductionVarAnalysis);
   X(OptimizationPass::kInliner);
   X(OptimizationPass::kInstructionSimplifier);
-  X(OptimizationPass::kIntrinsicsRecognizer);
   X(OptimizationPass::kInvariantCodeMotion);
   X(OptimizationPass::kLoadStoreAnalysis);
   X(OptimizationPass::kLoadStoreElimination);
   X(OptimizationPass::kLoopOptimization);
   X(OptimizationPass::kScheduling);
   X(OptimizationPass::kSelectGenerator);
-  X(OptimizationPass::kSharpening);
   X(OptimizationPass::kSideEffectsAnalysis);
 #ifdef ART_ENABLE_CODEGEN_arm
   X(OptimizationPass::kInstructionSimplifierArm);
@@ -177,7 +181,6 @@ ArenaVector<HOptimization*> ConstructOptimizations(
     HGraph* graph,
     OptimizingCompilerStats* stats,
     CodeGenerator* codegen,
-    CompilerDriver* driver,
     const DexCompilationUnit& dex_compilation_unit,
     VariableSizedHandleScope* handles) {
   ArenaVector<HOptimization*> optimizations(allocator->Adapter());
@@ -254,27 +257,20 @@ ArenaVector<HOptimization*> ConstructOptimizations(
                                        codegen,
                                        dex_compilation_unit,    // outer_compilation_unit
                                        dex_compilation_unit,    // outermost_compilation_unit
-                                       driver,
                                        handles,
                                        stats,
                                        accessor.RegistersSize(),
-                                       /* total_number_of_instructions */ 0,
-                                       /* parent */ nullptr,
-                                       /* depth */ 0,
+                                       /* total_number_of_instructions= */ 0,
+                                       /* parent= */ nullptr,
+                                       /* depth= */ 0,
                                        pass_name);
         break;
       }
-      case OptimizationPass::kSharpening:
-        opt = new (allocator) HSharpening(graph, codegen, pass_name);
-        break;
       case OptimizationPass::kSelectGenerator:
         opt = new (allocator) HSelectGenerator(graph, handles, stats, pass_name);
         break;
       case OptimizationPass::kInstructionSimplifier:
         opt = new (allocator) InstructionSimplifier(graph, codegen, stats, pass_name);
-        break;
-      case OptimizationPass::kIntrinsicsRecognizer:
-        opt = new (allocator) IntrinsicsRecognizer(graph, stats, pass_name);
         break;
       case OptimizationPass::kCHAGuardOptimization:
         opt = new (allocator) CHAGuardOptimization(graph, pass_name);
@@ -322,6 +318,14 @@ ArenaVector<HOptimization*> ConstructOptimizations(
       case OptimizationPass::kX86MemoryOperandGeneration:
         DCHECK(alt_name == nullptr) << "arch-specific pass does not support alternative name";
         opt = new (allocator) x86::X86MemoryOperandGeneration(graph, codegen, stats);
+        break;
+      case OptimizationPass::kInstructionSimplifierX86:
+       opt = new (allocator) x86::InstructionSimplifierX86(graph, codegen, stats);
+       break;
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
+      case OptimizationPass::kInstructionSimplifierX86_64:
+        opt = new (allocator) x86_64::InstructionSimplifierX86_64(graph, codegen, stats);
         break;
 #endif
       case OptimizationPass::kNone:

@@ -77,14 +77,12 @@ enum class OptimizationPass {
   kInductionVarAnalysis,
   kInliner,
   kInstructionSimplifier,
-  kIntrinsicsRecognizer,
   kInvariantCodeMotion,
   kLoadStoreAnalysis,
   kLoadStoreElimination,
   kLoopOptimization,
   kScheduling,
   kSelectGenerator,
-  kSharpening,
   kSideEffectsAnalysis,
 #ifdef ART_ENABLE_CODEGEN_arm
   kInstructionSimplifierArm,
@@ -98,6 +96,10 @@ enum class OptimizationPass {
 #endif
 #ifdef ART_ENABLE_CODEGEN_x86
   kPcRelativeFixupsX86,
+  kInstructionSimplifierX86,
+#endif
+#ifdef ART_ENABLE_CODEGEN_x86_64
+  kInstructionSimplifierX86_64,
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
   kX86MemoryOperandGeneration,
@@ -145,7 +147,6 @@ ArenaVector<HOptimization*> ConstructOptimizations(
     HGraph* graph,
     OptimizingCompilerStats* stats,
     CodeGenerator* codegen,
-    CompilerDriver* driver,
     const DexCompilationUnit& dex_compilation_unit,
     VariableSizedHandleScope* handles);
 

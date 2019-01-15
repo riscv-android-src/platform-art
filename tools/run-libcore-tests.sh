@@ -46,6 +46,22 @@ function cparg {
   done
 }
 
+function boot_classpath_arg {
+  local dir="$1"
+  local suffix="$2"
+  shift 2
+  printf -- "--vm-arg -Xbootclasspath"
+  for var
+  do
+    printf -- ":${dir}/${var}${suffix}.jar";
+  done
+}
+
+# Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
+# because that's what we use for compiling the core.art image.
+# It may contain additional modules from TEST_CORE_JARS.
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
+
 DEPS="core-tests jsr166-tests mockito-target"
 
 for lib in $DEPS
@@ -109,7 +125,11 @@ device_mode=false
 while true; do
   if [[ "$1" == "--mode=device" ]]; then
     device_mode=true
+    # Remove the --mode=device from the arguments and replace it with --mode=device_testdex
+    vogar_args=${vogar_args/$1}
+    vogar_args="$vogar_args --mode=device_testdex"
     vogar_args="$vogar_args --vm-arg -Ximage:/data/art-test/core.art"
+    vogar_args="$vogar_args $(boot_classpath_arg /system/framework -testdex $BOOT_CLASSPATH_JARS)"
     shift
   elif [[ "$1" == "--mode=host" ]]; then
     # We explicitly give a wrong path for the image, to ensure vogar
@@ -157,7 +177,7 @@ fi
 # timeout when being asked to run packages, and some tests go above
 # the default timeout.
 if $gcstress && $debug && $device_mode; then
-  vogar_args="$vogar_args --timeout 960"
+  vogar_args="$vogar_args --timeout 1440"
 else
   vogar_args="$vogar_args --timeout 480"
 fi
@@ -195,4 +215,7 @@ esac
 # Run the tests using vogar.
 echo "Running tests for the following test packages:"
 echo ${working_packages[@]} | tr " " "\n"
-vogar $vogar_args $expectations $(cparg $DEPS) ${working_packages[@]}
+
+cmd="vogar $vogar_args $expectations $(cparg $DEPS) ${working_packages[@]}"
+echo "Running $cmd"
+eval $cmd

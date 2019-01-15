@@ -107,8 +107,8 @@ static std::unique_ptr<const DexFile> OpenDexFileBase64(const char* base64,
   bool success = dex_file_loader.OpenAll(dex_bytes.get(),
                                          length,
                                          location,
-                                         /* verify */ true,
-                                         /* verify_checksum */ true,
+                                         /* verify= */ true,
+                                         /* verify_checksum= */ true,
                                          &error_code,
                                          error_msg,
                                          &tmp);
@@ -153,7 +153,7 @@ TEST_F(DexFileVerifierTest, MethodId) {
       kGoodTestDex,
       "method_id_class_idx",
       [](DexFile* dex_file) {
-        DexFile::MethodId* method_id = const_cast<DexFile::MethodId*>(&dex_file->GetMethodId(0));
+        dex::MethodId* method_id = const_cast<dex::MethodId*>(&dex_file->GetMethodId(0));
         method_id->class_idx_ = dex::TypeIndex(0xFF);
       },
       "could not find declaring class for direct method index 0");
@@ -163,7 +163,7 @@ TEST_F(DexFileVerifierTest, MethodId) {
       kGoodTestDex,
       "method_id_proto_idx",
       [](DexFile* dex_file) {
-        DexFile::MethodId* method_id = const_cast<DexFile::MethodId*>(&dex_file->GetMethodId(0));
+        dex::MethodId* method_id = const_cast<dex::MethodId*>(&dex_file->GetMethodId(0));
         method_id->proto_idx_ = dex::ProtoIndex(0xFF);
       },
       "inter_method_id_item proto_idx");
@@ -173,7 +173,7 @@ TEST_F(DexFileVerifierTest, MethodId) {
       kGoodTestDex,
       "method_id_name_idx",
       [](DexFile* dex_file) {
-        DexFile::MethodId* method_id = const_cast<DexFile::MethodId*>(&dex_file->GetMethodId(0));
+        dex::MethodId* method_id = const_cast<dex::MethodId*>(&dex_file->GetMethodId(0));
         method_id->name_idx_ = dex::StringIndex(0xFF);
       },
       "Bad index for method flags verification");
@@ -244,7 +244,7 @@ static const uint8_t* FindMethodData(const DexFile* dex_file,
   for (const ClassAccessor::Method& method : accessor.GetMethods()) {
     uint32_t method_index = method.GetIndex();
     dex::StringIndex name_index = dex_file->GetMethodId(method_index).name_idx_;
-    const DexFile::StringId& string_id = dex_file->GetStringId(name_index);
+    const dex::StringId& string_id = dex_file->GetStringId(name_index);
     const char* str = dex_file->GetStringData(string_id);
     if (strcmp(name, str) == 0) {
       if (method_idx != nullptr) {
@@ -837,7 +837,7 @@ static const uint8_t* FindFieldData(const DexFile* dex_file, const char* name) {
   for (const ClassAccessor::Field& field : accessor.GetFields()) {
     uint32_t field_index = field.GetIndex();
     dex::StringIndex name_index = dex_file->GetFieldId(field_index).name_idx_;
-    const DexFile::StringId& string_id = dex_file->GetStringId(name_index);
+    const dex::StringId& string_id = dex_file->GetStringId(name_index);
     const char* str = dex_file->GetStringData(string_id);
     if (strcmp(name, str) == 0) {
       // Go to the back of the access flags.
@@ -1415,9 +1415,9 @@ TEST_F(DexFileVerifierTest, ProtoOrdering) {
                    dex_file->GetMethodId(method_idx + 1).proto_idx_.index_);
           // Their return types should be the same.
           dex::ProtoIndex proto1_idx = dex_file->GetMethodId(method_idx).proto_idx_;
-          const DexFile::ProtoId& proto1 = dex_file->GetProtoId(proto1_idx);
+          const dex::ProtoId& proto1 = dex_file->GetProtoId(proto1_idx);
           dex::ProtoIndex proto2_idx(proto1_idx.index_ + 1u);
-          const DexFile::ProtoId& proto2 = dex_file->GetProtoId(proto2_idx);
+          const dex::ProtoId& proto2 = dex_file->GetProtoId(proto2_idx);
           CHECK_EQ(proto1.return_type_idx_, proto2.return_type_idx_);
           // And the first should not have any parameters while the second should have some.
           CHECK(!DexFileParameterIterator(*dex_file, proto1).HasNext());
@@ -1621,13 +1621,13 @@ TEST_F(DexFileVerifierTest, Checksum) {
                                       dex_file->Begin(),
                                       dex_file->Size(),
                                        "good checksum, no verify",
-                                      /*verify_checksum*/ false,
+                                      /*verify_checksum=*/ false,
                                       &error_msg));
   EXPECT_TRUE(DexFileVerifier::Verify(dex_file.get(),
                                       dex_file->Begin(),
                                       dex_file->Size(),
                                       "good checksum, verify",
-                                      /*verify_checksum*/ true,
+                                      /*verify_checksum=*/ true,
                                       &error_msg));
 
   // Bad checksum: !verify_checksum passes verify_checksum fails.
@@ -1638,13 +1638,13 @@ TEST_F(DexFileVerifierTest, Checksum) {
                                       dex_file->Begin(),
                                       dex_file->Size(),
                                       "bad checksum, no verify",
-                                      /*verify_checksum*/ false,
+                                      /*verify_checksum=*/ false,
                                       &error_msg));
   EXPECT_FALSE(DexFileVerifier::Verify(dex_file.get(),
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad checksum, verify",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
   EXPECT_NE(error_msg.find("Bad checksum"), std::string::npos) << error_msg;
 }
@@ -1691,7 +1691,7 @@ TEST_F(DexFileVerifierTest, BadStaticMethodName) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad static method name",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -1735,7 +1735,7 @@ TEST_F(DexFileVerifierTest, BadVirtualMethodName) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad virtual method name",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -1779,7 +1779,7 @@ TEST_F(DexFileVerifierTest, BadClinitSignature) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad clinit signature",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -1823,7 +1823,7 @@ TEST_F(DexFileVerifierTest, BadClinitSignatureAgain) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad clinit signature",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -1860,7 +1860,7 @@ TEST_F(DexFileVerifierTest, BadInitSignature) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad init signature",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -2063,7 +2063,7 @@ TEST_F(DexFileVerifierTest, InvokeCustomDexSamples) {
                                         dex_file->Begin(),
                                         dex_file->Size(),
                                         "good checksum, verify",
-                                        /*verify_checksum*/ true,
+                                        /*verify_checksum=*/ true,
                                         &error_msg));
     // TODO(oth): Test corruptions (b/35308502)
   }
@@ -2110,7 +2110,7 @@ TEST_F(DexFileVerifierTest, BadStaticFieldInitialValuesArray) {
                                        dex_file->Begin(),
                                        dex_file->Size(),
                                        "bad static field initial values array",
-                                       /*verify_checksum*/ true,
+                                       /*verify_checksum=*/ true,
                                        &error_msg));
 }
 
@@ -2166,7 +2166,7 @@ TEST_F(DexFileVerifierTest, GoodStaticFieldInitialValuesArray) {
                                       dex_file->Begin(),
                                       dex_file->Size(),
                                       "good static field initial values array",
-                                      /*verify_checksum*/ true,
+                                      /*verify_checksum=*/ true,
                                       &error_msg));
 }
 

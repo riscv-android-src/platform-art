@@ -20,34 +20,38 @@
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/enums.h"
-#include "base/iteration_range.h"
 #include "base/stride_iterator.h"
-#include "base/utils.h"
 #include "class_flags.h"
 #include "class_status.h"
-#include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
 #include "gc/allocator_type.h"
-#include "imtable.h"
 #include "object.h"
 #include "object_array.h"
 #include "read_barrier_option.h"
-#include "thread.h"
 
 namespace art {
+
+namespace dex {
+struct ClassDef;
+class TypeList;
+}  // namespace dex
 
 class ArtField;
 class ArtMethod;
 struct ClassOffsets;
+class DexFile;
 template<class T> class Handle;
+class ImTable;
 enum InvokeType : uint32_t;
+template <typename Iter> class IterationRange;
 template<typename T> class LengthPrefixedArray;
 template<typename T> class ArraySlice;
 class Signature;
 class StringPiece;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
+class Thread;
 
 namespace mirror {
 
@@ -63,7 +67,7 @@ using StringDexCachePair = DexCachePair<String>;
 using StringDexCacheType = std::atomic<StringDexCachePair>;
 
 // C++ mirror of java.lang.Class
-class MANAGED Class FINAL : public Object {
+class MANAGED Class final : public Object {
  public:
   // A magic value for reference_instance_offsets_. Ignore the bits and walk the super chain when
   // this is the value.
@@ -89,7 +93,7 @@ class MANAGED Class FINAL : public Object {
   static void SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
-  static MemberOffset StatusOffset() {
+  static constexpr MemberOffset StatusOffset() {
     return MemberOffset(OFFSET_OF_OBJECT_MEMBER(Class, status_));
   }
 
@@ -173,7 +177,7 @@ class MANAGED Class FINAL : public Object {
     return GetField32<kVerifyFlags>(AccessFlagsOffset());
   }
 
-  static MemberOffset AccessFlagsOffset() {
+  static constexpr MemberOffset AccessFlagsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, access_flags_);
   }
 
@@ -191,8 +195,9 @@ class MANAGED Class FINAL : public Object {
   }
 
   // Returns true if the class is an interface.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsInterface() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccInterface) != 0;
+    return (GetAccessFlags<kVerifyFlags>() & kAccInterface) != 0;
   }
 
   // Returns true if the class is declared public.
@@ -210,49 +215,44 @@ class MANAGED Class FINAL : public Object {
   }
 
   ALWAYS_INLINE bool ShouldSkipHiddenApiChecks() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccSkipHiddenApiChecks) != 0;
+    return (GetAccessFlags() & kAccSkipHiddenapiChecks) != 0;
   }
 
   ALWAYS_INLINE void SetSkipHiddenApiChecks() REQUIRES_SHARED(Locks::mutator_lock_) {
     uint32_t flags = GetAccessFlags();
-    SetAccessFlags(flags | kAccSkipHiddenApiChecks);
+    SetAccessFlags(flags | kAccSkipHiddenapiChecks);
   }
 
-  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccRecursivelyInitialized);
-  }
+  ALWAYS_INLINE void SetRecursivelyInitialized() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK_EQ(GetLockOwnerThreadId(), Thread::Current()->GetThreadId());
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccHasDefaultMethod);
-  }
+  ALWAYS_INLINE void SetHasDefaultMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE void SetFinalizable() REQUIRES_SHARED(Locks::mutator_lock_) {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
     SetAccessFlags(flags | kAccClassIsFinalizable);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsStringClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetClassFlags() & kClassFlagString) != 0;
+    return (GetClassFlags<kVerifyFlags>() & kClassFlagString) != 0;
   }
 
   ALWAYS_INLINE void SetStringClass() REQUIRES_SHARED(Locks::mutator_lock_) {
     SetClassFlags(kClassFlagString | kClassFlagNoReferenceFields);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsClassLoaderClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetClassFlags() == kClassFlagClassLoader;
+    return GetClassFlags<kVerifyFlags>() == kClassFlagClassLoader;
   }
 
   ALWAYS_INLINE void SetClassLoaderClass() REQUIRES_SHARED(Locks::mutator_lock_) {
     SetClassFlags(kClassFlagClassLoader);
   }
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsDexCacheClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetClassFlags() & kClassFlagDexCache) != 0;
+    return (GetClassFlags<kVerifyFlags>() & kClassFlagDexCache) != 0;
   }
 
   ALWAYS_INLINE void SetDexCacheClass() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -260,8 +260,9 @@ class MANAGED Class FINAL : public Object {
   }
 
   // Returns true if the class is abstract.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsAbstract() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccAbstract) != 0;
+    return (GetAccessFlags<kVerifyFlags>() & kAccAbstract) != 0;
   }
 
   // Returns true if the class is an annotation.
@@ -324,11 +325,12 @@ class MANAGED Class FINAL : public Object {
 
   // Returns true if this class is the placeholder and should retire and
   // be replaced with a class with the right size for embedded imt/vtable.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsTemp() REQUIRES_SHARED(Locks::mutator_lock_) {
-    ClassStatus s = GetStatus();
+    ClassStatus s = GetStatus<kVerifyFlags>();
     return s < ClassStatus::kResolving &&
            s != ClassStatus::kErrorResolved &&
-           ShouldHaveEmbeddedVTable();
+           ShouldHaveEmbeddedVTable<kVerifyFlags>();
   }
 
   String* GetName() REQUIRES_SHARED(Locks::mutator_lock_);  // Returns the cached name.
@@ -346,7 +348,7 @@ class MANAGED Class FINAL : public Object {
     return (access_flags & kAccClassIsProxy) != 0;
   }
 
-  static MemberOffset PrimitiveTypeOffset() {
+  static constexpr MemberOffset PrimitiveTypeOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_);
   }
 
@@ -416,27 +418,18 @@ class MANAGED Class FINAL : public Object {
     return GetPrimitiveType<kVerifyFlags>() == Primitive::kPrimVoid;
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return IsArrayClass<kVerifyFlags>() &&
-        GetComponentType<static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis)>()->
-        IsPrimitive();
-  }
-
   // Depth of class from java.lang.Object
   uint32_t Depth() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsArrayClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsClassClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsThrowableClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset ComponentTypeOffset() {
+  static constexpr MemberOffset ComponentTypeOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, component_type_);
   }
 
@@ -462,37 +455,27 @@ class MANAGED Class FINAL : public Object {
   }
 
   bool IsObjectClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return !IsPrimitive() && GetSuperClass() == nullptr;
+    // No read barrier is needed for comparing with null.
+    return !IsPrimitive() && GetSuperClass<kDefaultVerifyFlags, kWithoutReadBarrier>() == nullptr;
   }
 
   bool IsInstantiableNonArray() REQUIRES_SHARED(Locks::mutator_lock_) {
     return !IsPrimitive() && !IsInterface() && !IsAbstract() && !IsArrayClass();
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsInstantiable() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (!IsPrimitive() && !IsInterface() && !IsAbstract()) ||
-        (IsAbstract() && IsArrayClass<kVerifyFlags, kReadBarrierOption>());
+    return (!IsPrimitive<kVerifyFlags>() &&
+            !IsInterface<kVerifyFlags>() &&
+            !IsAbstract<kVerifyFlags>()) ||
+        (IsAbstract<kVerifyFlags>() && IsArrayClass<kVerifyFlags>());
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsObjectArrayClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsIntArrayClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    constexpr auto kNewFlags = static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis);
-    auto* component_type = GetComponentType<kVerifyFlags>();
-    return component_type != nullptr && component_type->template IsPrimitiveInt<kNewFlags>();
-  }
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsLongArrayClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    constexpr auto kNewFlags = static_cast<VerifyObjectFlags>(kVerifyFlags & ~kVerifyThis);
-    auto* component_type = GetComponentType<kVerifyFlags>();
-    return component_type != nullptr && component_type->template IsPrimitiveLong<kNewFlags>();
-  }
+  bool IsPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Creates a raw object instance but does not invoke the default constructor.
   template<bool kIsInstrumented, bool kCheckAddFinalizer = true>
@@ -504,8 +487,7 @@ class MANAGED Class FINAL : public Object {
   ObjPtr<Object> AllocNonMovableObject(Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE bool IsVariableSize() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -544,13 +526,12 @@ class MANAGED Class FINAL : public Object {
     return ComputeClassSize(false, 0, 0, 0, 0, 0, 0, pointer_size);
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   uint32_t GetObjectSize() REQUIRES_SHARED(Locks::mutator_lock_);
-  static MemberOffset ObjectSizeOffset() {
+  static constexpr MemberOffset ObjectSizeOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, object_size_);
   }
-  static MemberOffset ObjectSizeAllocFastPathOffset() {
+  static constexpr MemberOffset ObjectSizeAllocFastPathOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, object_size_alloc_fast_path_);
   }
 
@@ -558,8 +539,7 @@ class MANAGED Class FINAL : public Object {
 
   void SetObjectSizeAllocFastPath(uint32_t new_object_size) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   uint32_t GetObjectSizeAllocFastPath() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetObjectSizeWithoutChecks(uint32_t new_object_size)
@@ -623,7 +603,7 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ALWAYS_INLINE Class* GetSuperClass() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE ObjPtr<Class> GetSuperClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get first common super class. It will never return null.
   // `This` and `klass` must be classes.
@@ -632,10 +612,11 @@ class MANAGED Class FINAL : public Object {
   void SetSuperClass(ObjPtr<Class> new_super_class) REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool HasSuperClass() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetSuperClass() != nullptr;
+    // No read barrier is needed for comparing with null.
+    return GetSuperClass<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr;
   }
 
-  static MemberOffset SuperClassOffset() {
+  static constexpr MemberOffset SuperClassOffset() {
     return MemberOffset(OFFSETOF_MEMBER(Class, super_class_));
   }
 
@@ -643,13 +624,14 @@ class MANAGED Class FINAL : public Object {
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ClassLoader* GetClassLoader() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template <bool kCheckTransaction = true>
   void SetClassLoader(ObjPtr<ClassLoader> new_cl) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset DexCacheOffset() {
+  static constexpr MemberOffset DexCacheOffset() {
     return MemberOffset(OFFSETOF_MEMBER(Class, dex_cache_));
   }
 
-  static MemberOffset IfTableOffset() {
+  static constexpr MemberOffset IfTableOffset() {
     return MemberOffset(OFFSETOF_MEMBER(Class, iftable_));
   }
 
@@ -674,7 +656,7 @@ class MANAGED Class FINAL : public Object {
   ALWAYS_INLINE LengthPrefixedArray<ArtMethod>* GetMethodsPtr()
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset MethodsOffset() {
+  static constexpr MemberOffset MethodsOffset() {
     return MemberOffset(OFFSETOF_MEMBER(Class, methods_));
   }
 
@@ -783,38 +765,35 @@ class MANAGED Class FINAL : public Object {
 
   void SetVTable(ObjPtr<PointerArray> new_vtable) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset VTableOffset() {
+  static constexpr MemberOffset VTableOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Class, vtable_);
   }
 
-  static MemberOffset EmbeddedVTableLengthOffset() {
+  static constexpr MemberOffset EmbeddedVTableLengthOffset() {
     return MemberOffset(sizeof(Class));
   }
 
-  static MemberOffset ImtPtrOffset(PointerSize pointer_size) {
+  static constexpr MemberOffset ImtPtrOffset(PointerSize pointer_size) {
     return MemberOffset(
         RoundUp(EmbeddedVTableLengthOffset().Uint32Value() + sizeof(uint32_t),
                 static_cast<size_t>(pointer_size)));
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool ShouldHaveImt() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return ShouldHaveEmbeddedVTable<kVerifyFlags, kReadBarrierOption>();
+    return ShouldHaveEmbeddedVTable<kVerifyFlags>();
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool ShouldHaveEmbeddedVTable() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return IsInstantiable<kVerifyFlags, kReadBarrierOption>();
+    return IsInstantiable<kVerifyFlags>();
   }
 
   bool HasVTable() REQUIRES_SHARED(Locks::mutator_lock_);
 
   static MemberOffset EmbeddedVTableEntryOffset(uint32_t i, PointerSize pointer_size);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   int32_t GetVTableLength() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -822,6 +801,7 @@ class MANAGED Class FINAL : public Object {
   ArtMethod* GetVTableEntry(uint32_t i, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   int32_t GetEmbeddedVTableLength() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetEmbeddedVTableLength(int32_t len) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -948,8 +928,7 @@ class MANAGED Class FINAL : public Object {
     return (GetAccessFlags() & kAccRecursivelyInitialized) != 0;
   }
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE int32_t GetIfTableCount() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -977,9 +956,10 @@ class MANAGED Class FINAL : public Object {
 
   // Returns the number of instance fields containing reference types. Does not count fields in any
   // super classes.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   uint32_t NumReferenceInstanceFields() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsResolved());
-    return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_instance_fields_));
+    DCHECK(IsResolved<kVerifyFlags>());
+    return GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_instance_fields_));
   }
 
   uint32_t NumReferenceInstanceFieldsDuringLinking() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1005,9 +985,10 @@ class MANAGED Class FINAL : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the number of static fields containing reference types.
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   uint32_t NumReferenceStaticFields() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsResolved());
-    return GetField32(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_static_fields_));
+    DCHECK(IsResolved<kVerifyFlags>());
+    return GetField32<kVerifyFlags>(OFFSET_OF_OBJECT_MEMBER(Class, num_reference_static_fields_));
   }
 
   uint32_t NumReferenceStaticFieldsDuringLinking() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1021,8 +1002,7 @@ class MANAGED Class FINAL : public Object {
   }
 
   // Get the offset of the first reference static field. Other reference static fields follow.
-  template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   MemberOffset GetFirstReferenceStaticFieldOffset(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1150,7 +1130,7 @@ class MANAGED Class FINAL : public Object {
 
   bool DescriptorEquals(const char* match) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::ClassDef* GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::ClassDef* GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE uint32_t NumDirectInterfaces() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1173,7 +1153,7 @@ class MANAGED Class FINAL : public Object {
 
   const DexFile& GetDexFile() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::TypeList* GetInterfaceTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::TypeList* GetInterfaceTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Asserts we are initialized or initializing in the given thread.
   void AssertInitializedOrInitializingInThread(Thread* self)
@@ -1215,7 +1195,8 @@ class MANAGED Class FINAL : public Object {
 
   // Returns true if the class loader is null, ie the class loader is the boot strap class loader.
   bool IsBootStrapClassLoaded() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetClassLoader() == nullptr;
+    // No read barrier is needed for comparing with null.
+    return GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>() == nullptr;
   }
 
   static size_t ImTableEntrySize(PointerSize pointer_size) {
@@ -1262,14 +1243,14 @@ class MANAGED Class FINAL : public Object {
   // the corresponding entry in dest if visitor(obj) != obj to prevent dirty memory. Dest should be
   // initialized to a copy of *this to prevent issues. Does not visit the ArtMethod and ArtField
   // roots.
-  template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-            ReadBarrierOption kReadBarrierOption = kWithReadBarrier,
-            typename Visitor>
+  template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, typename Visitor>
   void FixupNativePointers(Class* dest, PointerSize pointer_size, const Visitor& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
-  ALWAYS_INLINE void SetMethodsPtrInternal(LengthPrefixedArray<ArtMethod>* new_methods)
+  template <typename T, VerifyObjectFlags kVerifyFlags, typename Visitor>
+  void FixupNativePointer(
+      Class* dest, PointerSize pointer_size, const Visitor& visitor, MemberOffset member_offset)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE static ArraySlice<ArtMethod> GetMethodsSliceRangeUnchecked(
@@ -1321,6 +1302,8 @@ class MANAGED Class FINAL : public Object {
 
   template<VerifyObjectFlags kVerifyFlags>
   void GetAccessFlagsDCheck() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void SetAccessFlagsDCheck(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Check that the pointer size matches the one in the class linker.
   ALWAYS_INLINE static void CheckPointerSize(PointerSize pointer_size);
@@ -1426,6 +1409,7 @@ class MANAGED Class FINAL : public Object {
 
   // Tid used to check for recursive <clinit> invocation.
   pid_t clinit_thread_id_;
+  static_assert(sizeof(pid_t) == sizeof(int32_t), "java.lang.Class.clinitThreadId size check");
 
   // ClassDef index in dex file, -1 if no class definition such as an array.
   // TODO: really 16bits

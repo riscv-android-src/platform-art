@@ -267,7 +267,7 @@ class DexLayoutTest : public CommonRuntimeTest {
     ScratchFile dexlayout_output;
     const std::string& dexlayout_filename = dexlayout_output.GetFilename();
 
-    for (const std::string &dex_file : GetLibCoreDexFileNames()) {
+    for (const std::string& dex_file : GetLibCoreDexFileNames()) {
       std::vector<std::string> dexdump_exec_argv =
           { dexdump, "-d", "-f", "-h", "-l", "plain", "-o", dexdump_filename, dex_file };
       std::vector<std::string> dexlayout_args =
@@ -293,31 +293,33 @@ class DexLayoutTest : public CommonRuntimeTest {
     const std::string& tmp_name = tmp_file.GetFilename();
     size_t tmp_last_slash = tmp_name.rfind('/');
     std::string tmp_dir = tmp_name.substr(0, tmp_last_slash + 1);
+    std::string unzip_dir = tmp_dir + "unzip/";
 
-    for (const std::string &dex_file : GetLibCoreDexFileNames()) {
+    for (const std::string& dex_file : GetLibCoreDexFileNames()) {
       std::vector<std::string> dexlayout_args =
           { "-w", tmp_dir, "-o", tmp_name, dex_file };
-      if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option*/ false)) {
+      if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option=*/ false)) {
         return false;
       }
-      size_t dex_file_last_slash = dex_file.rfind('/');
-      std::string dex_file_name = dex_file.substr(dex_file_last_slash + 1);
+      std::string dex_file_name = "classes.dex";
       std::vector<std::string> unzip_exec_argv =
-          { "/usr/bin/unzip", dex_file, "classes.dex", "-d", tmp_dir};
+          { "/usr/bin/unzip", dex_file, "classes.dex", "-d", unzip_dir};
       if (!::art::Exec(unzip_exec_argv, error_msg)) {
         return false;
       }
       std::vector<std::string> diff_exec_argv =
-          { "/usr/bin/diff", tmp_dir + "classes.dex" , tmp_dir + dex_file_name };
+          { "/usr/bin/diff", tmp_dir + "classes.dex" , unzip_dir + dex_file_name };
       if (!::art::Exec(diff_exec_argv, error_msg)) {
         return false;
       }
-      if (!UnlinkFile(tmp_dir + "classes.dex")) {
+      if (!UnlinkFile(unzip_dir + "classes.dex")) {
         return false;
       }
       if (!UnlinkFile(tmp_dir + dex_file_name)) {
         return false;
       }
+      // Remove the unzip temp directory so that unlinking android_data doesn't fail.
+      EXPECT_EQ(rmdir(unzip_dir.c_str()), 0);
     }
     return true;
   }
@@ -331,8 +333,8 @@ class DexLayoutTest : public CommonRuntimeTest {
     const ArtDexFileLoader dex_file_loader;
     bool result = dex_file_loader.Open(input_dex.c_str(),
                                        input_dex,
-                                       /*verify*/ true,
-                                       /*verify_checksum*/ false,
+                                       /*verify=*/ true,
+                                       /*verify_checksum=*/ false,
                                        &error_msg,
                                        &dex_files);
 
@@ -357,7 +359,7 @@ class DexLayoutTest : public CommonRuntimeTest {
         pfi.AddMethodIndex(static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags),
                            dex_location,
                            dex_file->GetLocationChecksum(),
-                           /*dex_method_idx*/i,
+                           /*method_idx=*/i,
                            dex_file->NumMethodIds());
       }
       DexCacheResolvedClasses cur_classes(dex_location,
@@ -445,7 +447,7 @@ class DexLayoutTest : public CommonRuntimeTest {
     // -v makes sure that the layout did not corrupt the dex file.
     std::vector<std::string> dexlayout_args =
         { "-i", "-v", "-w", tmp_dir, "-o", tmp_name, "-p", profile_file, dex_file };
-    if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option*/ false)) {
+    if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option=*/ false)) {
       return false;
     }
 
@@ -457,7 +459,7 @@ class DexLayoutTest : public CommonRuntimeTest {
     // -i since the checksum won't match from the first layout.
     std::vector<std::string> second_dexlayout_args =
         { "-i", "-v", "-w", tmp_dir, "-o", tmp_name, "-p", profile_file, output_dex };
-    if (!DexLayoutExec(second_dexlayout_args, error_msg, /*pass_default_cdex_option*/ false)) {
+    if (!DexLayoutExec(second_dexlayout_args, error_msg, /*pass_default_cdex_option=*/ false)) {
       return false;
     }
 
@@ -491,7 +493,7 @@ class DexLayoutTest : public CommonRuntimeTest {
     std::string output_dex = tmp_dir + "classes.dex.new";
 
     std::vector<std::string> dexlayout_args = { "-w", tmp_dir, "-o", "/dev/null", input_dex };
-    if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option*/ false)) {
+    if (!DexLayoutExec(dexlayout_args, error_msg, /*pass_default_cdex_option=*/ false)) {
       return false;
     }
 
@@ -613,7 +615,7 @@ TEST_F(DexLayoutTest, DuplicateOffset) {
       { "-a", "-i", "-o", "/dev/null", temp_dex.GetFilename() };
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
                             kDexFileDuplicateOffset,
-                            nullptr /* profile_file */,
+                            /* profile_file= */ nullptr,
                             dexlayout_args));
 }
 
@@ -622,7 +624,7 @@ TEST_F(DexLayoutTest, NullSetRefListElement) {
   std::vector<std::string> dexlayout_args = { "-o", "/dev/null", temp_dex.GetFilename() };
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
                             kNullSetRefListElementInputDex,
-                            nullptr /* profile_file */,
+                            /* profile_file= */ nullptr,
                             dexlayout_args));
 }
 
@@ -664,7 +666,7 @@ TEST_F(DexLayoutTest, UnknownTypeDebugInfo) {
   std::vector<std::string> dexlayout_args = { "-o", "/dev/null", temp_dex.GetFilename() };
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
                             kUnknownTypeDebugInfoInputDex,
-                            nullptr /* profile_file */,
+                            /* profile_file= */ nullptr,
                             dexlayout_args));
 }
 
@@ -673,7 +675,7 @@ TEST_F(DexLayoutTest, DuplicateCodeItem) {
   std::vector<std::string> dexlayout_args = { "-o", "/dev/null", temp_dex.GetFilename() };
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
                             kDuplicateCodeItemInputDex,
-                            nullptr /* profile_file */,
+                            /* profile_file= */ nullptr,
                             dexlayout_args));
 }
 
@@ -685,7 +687,7 @@ TEST_F(DexLayoutTest, CodeItemOverrun) {
     // Change the dex instructions to make an opcode that spans past the end of the code item.
     for (ClassAccessor accessor : dex->GetClasses()) {
       for (const ClassAccessor::Method& method : accessor.GetMethods()) {
-        DexFile::CodeItem* item = const_cast<DexFile::CodeItem*>(method.GetCodeItem());
+        dex::CodeItem* item = const_cast<dex::CodeItem*>(method.GetCodeItem());
         if (item != nullptr) {
           CodeItemInstructionAccessor instructions(*dex, item);
           if (instructions.begin() != instructions.end()) {
@@ -732,7 +734,7 @@ TEST_F(DexLayoutTest, CodeItemOverrun) {
       };
   // -v makes sure that the layout did not corrupt the dex file.
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
-                            /*dex_filename*/ nullptr,
+                            /*dex_filename=*/ nullptr,
                             &profile_file,
                             dexlayout_args));
   ASSERT_TRUE(UnlinkFile(temp_dex.GetFilename() + ".new"));
@@ -770,7 +772,7 @@ TEST_F(DexLayoutTest, LinkData) {
       };
   // -v makes sure that the layout did not corrupt the dex file.
   ASSERT_TRUE(DexLayoutExec(&temp_dex,
-                            /*dex_filename*/ nullptr,
+                            /*dex_filename=*/ nullptr,
                             &profile_file,
                             dexlayout_args));
   ASSERT_TRUE(UnlinkFile(temp_dex.GetFilename() + ".new"));
@@ -783,29 +785,29 @@ TEST_F(DexLayoutTest, ClassFilter) {
   const std::string input_jar = GetTestDexFileName("ManyMethods");
   CHECK(dex_file_loader.Open(input_jar.c_str(),
                              input_jar.c_str(),
-                             /*verify*/ true,
-                             /*verify_checksum*/ true,
+                             /*verify=*/ true,
+                             /*verify_checksum=*/ true,
                              &error_msg,
                              &dex_files)) << error_msg;
   ASSERT_EQ(dex_files.size(), 1u);
   for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
     EXPECT_GT(dex_file->NumClassDefs(), 1u);
     for (uint32_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = dex_file->GetClassDef(i);
       LOG(INFO) << dex_file->GetClassDescriptor(class_def);
     }
     Options options;
     // Filter out all the classes other than the one below based on class descriptor.
     options.class_filter_.insert("LManyMethods$Strings;");
     DexLayout dexlayout(options,
-                        /*info*/ nullptr,
-                        /*out_file*/ nullptr,
-                        /*header*/ nullptr);
+                        /*info=*/ nullptr,
+                        /*out_file=*/ nullptr,
+                        /*header=*/ nullptr);
     std::unique_ptr<DexContainer> out;
     bool result = dexlayout.ProcessDexFile(
         dex_file->GetLocation().c_str(),
         dex_file.get(),
-        /*dex_file_index*/ 0,
+        /*dex_file_index=*/ 0,
         &out,
         &error_msg);
     ASSERT_TRUE(result) << "Failed to run dexlayout " << error_msg;
@@ -816,17 +818,17 @@ TEST_F(DexLayoutTest, ClassFilter) {
             out->GetDataSection()->Begin(),
             out->GetDataSection()->Size(),
             dex_file->GetLocation().c_str(),
-            /* checksum */ 0,
-            /*oat_dex_file*/ nullptr,
-            /* verify */ true,
-            /*verify_checksum*/ false,
+            /* location_checksum= */ 0,
+            /*oat_dex_file=*/ nullptr,
+            /* verify= */ true,
+            /*verify_checksum=*/ false,
             &error_msg));
     ASSERT_TRUE(output_dex_file != nullptr);
 
     ASSERT_EQ(output_dex_file->NumClassDefs(), options.class_filter_.size());
     for (uint32_t i = 0; i < output_dex_file->NumClassDefs(); ++i) {
       // Check that every class in the output dex file is in the filter.
-      const DexFile::ClassDef& class_def = output_dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = output_dex_file->GetClassDef(i);
       ASSERT_TRUE(options.class_filter_.find(output_dex_file->GetClassDescriptor(class_def)) !=
           options.class_filter_.end());
     }

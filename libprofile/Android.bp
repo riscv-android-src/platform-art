@@ -23,37 +23,85 @@ cc_defaults {
     ],
     target: {
         android: {
+            shared_libs: [
+                "libartbase",
+                "libdexfile",
+                "libartbase",
+	        // For atrace.
+                "libcutils",
+                "libbase",
+            ],
             static_libs: [
                 // ZipArchive support, the order matters here to get all symbols.
                 "libziparchive",
                 "libz",
             ],
-	    shared_libs: [
-	        // For android::FileMap used by libziparchive.
-                "libutils",
-	    ],
+            export_shared_lib_headers: ["libbase"],
         },
-        host: {
+        not_windows: {
             shared_libs: [
+                "libartbase",
+                "libdexfile",
+                "libartbase",
+	        // For atrace.
+                "libcutils",
                 "libziparchive",
                 "libz",
+                "libbase",
             ],
+            export_shared_lib_headers: ["libbase"],
+        },
+        windows: {
+	    cflags: ["-Wno-thread-safety"],
+            static_libs: [
+                "libartbase",
+                "libdexfile",
+                "libartbase",
+	        // For atrace.
+                "libcutils",
+                "libziparchive",
+                "libz",
+                "libbase",
+            ],
+            export_static_lib_headers: ["libbase"],
         },
     },
     //generated_sources: ["art_libartbase_operator_srcs"],
     cflags: ["-DBUILDING_LIBART=1"],
-    shared_libs: [
-        "libartbase",
-        "libdexfile",
-        "libartbase",
-	// For atrace.
-        "libcutils",
-    ],
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
     //       generically. dex2oat takes care of it itself.
-    export_shared_lib_headers: ["libbase"],
+}
+
+cc_defaults {
+    name: "libprofile_static_base_defaults",
+    static_libs: [
+        "libbase",
+        "libcutils",
+        "libz",
+        "libziparchive",
+    ],
+}
+
+cc_defaults {
+    name: "libprofile_static_defaults",
+    defaults: [
+        "libprofile_static_base_defaults",
+        "libartbase_static_defaults",
+        "libdexfile_static_defaults",
+    ],
+    static_libs: ["libprofile"],
+}
+
+cc_defaults {
+    name: "libprofiled_static_defaults",
+    defaults: [
+        "libprofile_static_base_defaults",
+        "libartbased_static_defaults",
+        "libdexfiled_static_defaults",
+    ],
+    static_libs: ["libprofiled"],
 }
 
 art_cc_library {
@@ -69,6 +117,14 @@ art_cc_library {
         "libziparchive",
     ],
     export_shared_lib_headers: ["libbase"],
+    target: {
+        windows: {
+	    enabled: true,
+	    shared: {
+	        enabled: false,
+	    },
+	},
+    }
 }
 
 art_cc_library {

@@ -59,7 +59,6 @@ static constexpr ReadBarrierOption kCompilerReadBarrierOption =
 
 class Assembler;
 class CodeGenerator;
-class CompilerDriver;
 class CompilerOptions;
 class StackMapStream;
 class ParallelMoveResolver;
@@ -350,14 +349,14 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   void AddSlowPath(SlowPathCode* slow_path);
 
-  ScopedArenaVector<uint8_t> BuildStackMaps(const DexFile::CodeItem* code_item_for_osr_check);
+  ScopedArenaVector<uint8_t> BuildStackMaps(const dex::CodeItem* code_item_for_osr_check);
   size_t GetNumberOfJitRoots() const;
 
   // Fills the `literals` array with literals collected during code generation.
   // Also emits literal patches.
   void EmitJitRoots(uint8_t* code,
-                    Handle<mirror::ObjectArray<mirror::Object>> roots,
-                    const uint8_t* roots_data)
+                    const uint8_t* roots_data,
+                    /*out*/std::vector<Handle<mirror::Object>>* roots)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsLeafMethod() const {
@@ -622,7 +621,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
   // otherwise return a fall-back info that should be used instead.
   virtual HInvokeStaticOrDirect::DispatchInfo GetSupportedInvokeStaticOrDirectDispatch(
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
-      HInvokeStaticOrDirect* invoke) = 0;
+      ArtMethod* method) = 0;
 
   // Generate a call to a static or direct method.
   virtual void GenerateStaticOrDirectCall(
@@ -636,7 +635,7 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
 
   virtual void GenerateNop() = 0;
 
-  static QuickEntrypointEnum GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass);
+  static QuickEntrypointEnum GetArrayAllocationEntrypoint(HNewArray* new_array);
 
  protected:
   // Patch info used for recording locations of required linker patches and their targets,

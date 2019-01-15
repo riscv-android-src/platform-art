@@ -18,6 +18,10 @@
 #define ART_RUNTIME_GC_SPACE_REGION_SPACE_INL_H_
 
 #include "region_space.h"
+
+#include "base/mutex-inl.h"
+#include "mirror/object-inl.h"
+#include "region_space.h"
 #include "thread-current-inl.h"
 
 namespace art {
@@ -60,7 +64,8 @@ inline mirror::Object* RegionSpace::AllocNonvirtual(size_t num_bytes,
       return obj;
     }
     MutexLock mu(Thread::Current(), region_lock_);
-    // Retry with current region since another thread may have updated it.
+    // Retry with current region since another thread may have updated
+    // current_region_ or evac_region_.  TODO: fix race.
     obj = (kForEvac ? evac_region_ : current_region_)->Alloc(num_bytes,
                                                              bytes_allocated,
                                                              usable_size,
@@ -188,6 +193,40 @@ inline uint64_t RegionSpace::GetObjectsAllocatedInternal() {
   return bytes;
 }
 
+template <typename Visitor>
+inline void RegionSpace::ScanUnevacFromSpace(accounting::ContinuousSpaceBitmap* bitmap,
+                                             Visitor&& visitor) {
+  const size_t iter_limit = kUseTableLookupReadBarrier
+      ? num_regions_ : std::min(num_regions_, non_free_region_index_limit_);
+  // Instead of region-wise scan, find contiguous blocks of un-evac regions and then
+  // visit them. Everything before visit_block_begin has been processed, while
+  // [visit_block_begin, visit_block_end) still needs to be visited.
+  uint8_t* visit_block_begin = nullptr;
+  uint8_t* visit_block_end = nullptr;
+  for (size_t i = 0; i < iter_limit; ++i) {
+    Region* r = &regions_[i];
+    if (r->IsInUnevacFromSpace()) {
+      // visit_block_begin set to nullptr means a new visit block needs to be stated.
+      if (visit_block_begin == nullptr) {
+        visit_block_begin = r->Begin();
+      }
+      visit_block_end = r->End();
+    } else if (visit_block_begin != nullptr) {
+      // Visit the block range as r is not adjacent to current visit block.
+      bitmap->VisitMarkedRange(reinterpret_cast<uintptr_t>(visit_block_begin),
+                               reinterpret_cast<uintptr_t>(visit_block_end),
+                               visitor);
+      visit_block_begin = nullptr;
+    }
+  }
+  // Visit last block, if not processed yet.
+  if (visit_block_begin != nullptr) {
+    bitmap->VisitMarkedRange(reinterpret_cast<uintptr_t>(visit_block_begin),
+                             reinterpret_cast<uintptr_t>(visit_block_end),
+                             visitor);
+  }
+}
+
 template<bool kToSpaceOnly, typename Visitor>
 inline void RegionSpace::WalkInternal(Visitor&& visitor) {
   // TODO: MutexLock on region_lock_ won't work due to lock order
@@ -200,39 +239,69 @@ inline void RegionSpace::WalkInternal(Visitor&& visitor) {
       continue;
     }
     if (r->IsLarge()) {
-      // Avoid visiting dead large objects since they may contain dangling pointers to the
-      // from-space.
-      DCHECK_GT(r->LiveBytes(), 0u) << "Visiting dead large object";
+      // We may visit a large object with live_bytes = 0 here. However, it is
+      // safe as it cannot contain dangling pointers because corresponding regions
+      // (and regions corresponding to dead referents) cannot be allocated for new
+      // allocations without first clearing regions' live_bytes and state.
       mirror::Object* obj = reinterpret_cast<mirror::Object*>(r->Begin());
       DCHECK(obj->GetClass() != nullptr);
       visitor(obj);
     } else if (r->IsLargeTail()) {
       // Do nothing.
     } else {
-      // For newly allocated and evacuated regions, live bytes will be -1.
-      uint8_t* pos = r->Begin();
-      uint8_t* top = r->Top();
-      const bool need_bitmap =
-          r->LiveBytes() != static_cast<size_t>(-1) &&
-          r->LiveBytes() != static_cast<size_t>(top - pos);
-      if (need_bitmap) {
-        GetLiveBitmap()->VisitMarkedRange(
-            reinterpret_cast<uintptr_t>(pos),
-            reinterpret_cast<uintptr_t>(top),
-            visitor);
+      WalkNonLargeRegion(visitor, r);
+    }
+  }
+}
+
+template<typename Visitor>
+inline void RegionSpace::WalkNonLargeRegion(Visitor&& visitor, const Region* r) {
+  DCHECK(!r->IsLarge() && !r->IsLargeTail());
+  // For newly allocated and evacuated regions, live bytes will be -1.
+  uint8_t* pos = r->Begin();
+  uint8_t* top = r->Top();
+  // We need the region space bitmap to iterate over a region's objects
+  // if
+  // - its live bytes count is invalid (i.e. -1); or
+  // - its live bytes count is lower than the allocated bytes count.
+  //
+  // In both of the previous cases, we do not have the guarantee that
+  // all allocated objects are "alive" (i.e. valid), so we depend on
+  // the region space bitmap to identify which ones to visit.
+  //
+  // On the other hand, when all allocated bytes are known to be alive,
+  // we know that they form a range of consecutive objects (modulo
+  // object alignment constraints) that can be visited iteratively: we
+  // can compute the next object's location by using the current
+  // object's address and size (and object alignment constraints).
+  const bool need_bitmap =
+      r->LiveBytes() != static_cast<size_t>(-1) &&
+      r->LiveBytes() != static_cast<size_t>(top - pos);
+  if (need_bitmap) {
+    GetLiveBitmap()->VisitMarkedRange(
+        reinterpret_cast<uintptr_t>(pos),
+        reinterpret_cast<uintptr_t>(top),
+        visitor);
+  } else {
+    while (pos < top) {
+      mirror::Object* obj = reinterpret_cast<mirror::Object*>(pos);
+      if (obj->GetClass<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr) {
+        visitor(obj);
+        pos = reinterpret_cast<uint8_t*>(GetNextObject(obj));
       } else {
-        while (pos < top) {
-          mirror::Object* obj = reinterpret_cast<mirror::Object*>(pos);
-          if (obj->GetClass<kDefaultVerifyFlags, kWithoutReadBarrier>() != nullptr) {
-            visitor(obj);
-            pos = reinterpret_cast<uint8_t*>(GetNextObject(obj));
-          } else {
-            break;
-          }
-        }
+        break;
       }
     }
   }
+}
+
+template <typename Visitor>
+inline void RegionSpace::Walk(Visitor&& visitor) {
+  WalkInternal</* kToSpaceOnly= */ false>(visitor);
+}
+template <typename Visitor>
+inline void RegionSpace::WalkToSpace(Visitor&& visitor) {
+  WalkInternal</* kToSpaceOnly= */ true>(visitor);
 }
 
 inline mirror::Object* RegionSpace::GetNextObject(mirror::Object* obj) {
@@ -355,6 +424,10 @@ inline mirror::Object* RegionSpace::AllocLargeInRange(size_t begin,
       // We make 'top' all usable bytes, as the caller of this
       // allocation may use all of 'usable_size' (see mirror::Array::Alloc).
       first_reg->SetTop(first_reg->Begin() + allocated);
+      if (!kForEvac) {
+        // Evac doesn't count as newly allocated.
+        first_reg->SetNewlyAllocated();
+      }
       for (size_t p = left + 1; p < right; ++p) {
         DCHECK_LT(p, num_regions_);
         DCHECK(regions_[p].IsFree());
@@ -363,6 +436,10 @@ inline mirror::Object* RegionSpace::AllocLargeInRange(size_t begin,
           ++num_evac_regions_;
         } else {
           ++num_non_free_regions_;
+        }
+        if (!kForEvac) {
+          // Evac doesn't count as newly allocated.
+          regions_[p].SetNewlyAllocated();
         }
       }
       *bytes_allocated = allocated;
@@ -400,14 +477,14 @@ inline void RegionSpace::FreeLarge(mirror::Object* large_obj, size_t bytes_alloc
     } else {
       DCHECK(reg->IsLargeTail());
     }
-    reg->Clear(/*zero_and_release_pages*/true);
+    reg->Clear(/*zero_and_release_pages=*/true);
     if (kForEvac) {
       --num_evac_regions_;
     } else {
       --num_non_free_regions_;
     }
   }
-  if (end_addr < Limit()) {
+  if (kIsDebugBuild && end_addr < Limit()) {
     // If we aren't at the end of the space, check that the next region is not a large tail.
     Region* following_reg = RefToRegionLocked(reinterpret_cast<mirror::Object*>(end_addr));
     DCHECK(!following_reg->IsLargeTail());

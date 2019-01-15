@@ -14,6 +14,7 @@
 
 cc_binary {
     name: "veridex",
+    defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
         "flow_analysis.cc",
@@ -29,7 +30,6 @@ cc_binary {
         "libartbase",
         "libbase",
         "liblog",
-        "libutils",
         "libz",
         "libziparchive",
     ],

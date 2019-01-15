@@ -14,6 +14,7 @@
  * limitations under the License.
  */
 
+#include "base/sdk_version.h"
 #include "class_linker.h"
 #include "dex/art_dex_file_loader.h"
 #include "hidden_api.h"
@@ -28,9 +29,10 @@ namespace Test674HiddenApi {
 
 extern "C" JNIEXPORT void JNICALL Java_Main_init(JNIEnv*, jclass) {
   Runtime* runtime = Runtime::Current();
-  runtime->SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kBlacklistOnly);
+  runtime->SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
+  runtime->SetTargetSdkVersion(
+      static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxO().GetMaxAllowedSdkVersion()));
   runtime->SetDedupeHiddenApiWarnings(false);
-  runtime->AlwaysSetHiddenApiWarningFlag();
 }
 
 extern "C" JNIEXPORT void JNICALL Java_Main_appendToBootClassLoader(
@@ -284,15 +286,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_JNI_canInvokeConstructorV(
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_Reflection_getHiddenApiAccessFlags(JNIEnv*, jclass) {
-  return static_cast<jint>(kAccHiddenApiBits);
-}
-
-extern "C" JNIEXPORT jboolean JNICALL Java_ChildClass_hasPendingWarning(JNIEnv*, jclass) {
-  return Runtime::Current()->HasPendingHiddenApiWarning();
-}
-
-extern "C" JNIEXPORT void JNICALL Java_ChildClass_clearWarning(JNIEnv*, jclass) {
-  Runtime::Current()->SetPendingHiddenApiWarning(false);
+  return static_cast<jint>(kAccHiddenapiBits);
 }
 
 }  // namespace Test674HiddenApi

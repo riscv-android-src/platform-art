@@ -20,7 +20,6 @@
 #include <jni.h>
 
 #include "dex/dex_file_types.h"
-#include "dex/hidden_api_access_flags.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
 #include "gc_root.h"
@@ -35,15 +34,18 @@ class ScopedObjectAccessAlreadyRunnable;
 
 namespace mirror {
 class Class;
+class ClassLoader;
 class DexCache;
 class Object;
 class String;
 }  // namespace mirror
 
-class ArtField FINAL {
+class ArtField final {
  public:
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<mirror::Class> GetDeclaringClass() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  mirror::ClassLoader* GetClassLoader() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetDeclaringClass(ObjPtr<mirror::Class> new_declaring_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -178,10 +180,6 @@ class ArtField FINAL {
 
   bool IsVolatile() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccVolatile) != 0;
-  }
-
-  HiddenApiAccessFlags::ApiList GetHiddenApiAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return HiddenApiAccessFlags::DecodeFromRuntime(GetAccessFlags());
   }
 
   // Returns an instance field with this offset in the given class or null if not found.

@@ -61,26 +61,45 @@ while true; do
 done
 
 # Allow to build successfully in master-art.
-extra_args=SOONG_ALLOW_MISSING_DEPENDENCIES=true
+extra_args="SOONG_ALLOW_MISSING_DEPENDENCIES=true TEMPORARY_DISABLE_PATH_RESTRICTIONS=true"
 
 if [[ $mode == "host" ]]; then
   make_command="make $j_arg $extra_args $showcommands build-art-host-tests $common_targets"
   make_command+=" dx-tests"
   mode_suffix="-host"
 elif [[ $mode == "target" ]]; then
-  if [[ -z "$TARGET_PRODUCT" ]]; then
-    echo 'TARGET_PRODUCT environment variable is empty; did you forget to run `lunch`?'
+  if [[ -z "${ANDROID_PRODUCT_OUT}" ]]; then
+    echo 'ANDROID_PRODUCT_OUT environment variable is empty; did you forget to run `lunch`?'
     exit 1
   fi
   make_command="make $j_arg $extra_args $showcommands build-art-target-tests $common_targets"
-  make_command+=" libjavacrypto-target libnetd_client-target linker toybox toolbox sh"
+  make_command+=" libjavacrypto-target libnetd_client-target linker toybox toolbox sh unzip"
   make_command+=" debuggerd su"
-  make_command+=" ${out_dir}/host/linux-x86/bin/adb libstdc++ "
-  make_command+=" ${out_dir}/target/product/${TARGET_PRODUCT}/system/etc/public.libraries.txt"
+  make_command+=" libstdc++ "
+  make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
   if [[ -n "$ART_TEST_CHROOT" ]]; then
     # These targets are needed for the chroot environment.
     make_command+=" crash_dump event-log-tags"
   fi
+  # Build the Debug Runtime APEX (which is a superset of the Release Runtime APEX).
+  make_command+=" com.android.runtime.debug"
+  # Build the bootstrap Bionic libraries (libc, libdl, libm). These are required
+  # as the "main" libc, libdl, and libm have moved to the Runtime APEX. This is
+  # a temporary change needed until both the ART Buildbot and Golem fully
+  # support the Runtime APEX.
+  #
+  # TODO(b/121117762): Remove this when the ART Buildbot and Golem have full
+  # support for the Runtime APEX.
+  make_command+=" libc.bootstrap libdl.bootstrap libm.bootstrap"
+  # Create a copy of the ICU .dat prebuilt files in /system/etc/icu on target,
+  # so that it can found even if the Runtime APEX is not available, by setting
+  # the environment variable `ART_TEST_ANDROID_RUNTIME_ROOT` to "/system" on
+  # device. This is a temporary change needed until both the ART Buildbot and
+  # Golem fully support the Runtime APEX.
+  #
+  # TODO(b/121117762): Remove this when the ART Buildbot and Golem have full
+  # support for the Runtime APEX.
+  make_command+=" icu-data-art-test"
   mode_suffix="-target"
 fi
 
@@ -92,4 +111,5 @@ done
 
 
 echo "Executing $make_command"
+# Disable path restrictions to enable luci builds using vpython.
 bash -c "$make_command"

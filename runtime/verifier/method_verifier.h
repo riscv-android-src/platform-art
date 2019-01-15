@@ -26,7 +26,6 @@
 #include "base/scoped_arena_containers.h"
 #include "base/value_object.h"
 #include "dex/code_item_accessors.h"
-#include "dex/dex_file.h"
 #include "dex/dex_file_types.h"
 #include "dex/method_reference.h"
 #include "handle.h"
@@ -39,10 +38,16 @@ namespace art {
 
 class ClassLinker;
 class CompilerCallbacks;
+class DexFile;
 class Instruction;
 struct ReferenceMap2Visitor;
 class Thread;
 class VariableIndentationOutputStream;
+
+namespace dex {
+struct ClassDef;
+struct CodeItem;
+}  // namespace dex
 
 namespace mirror {
 class DexCache;
@@ -100,16 +105,18 @@ class MethodVerifier {
                                  CompilerCallbacks* callbacks,
                                  bool allow_soft_failures,
                                  HardFailLogMode log_level,
+                                 uint32_t api_level,
                                  std::string* error)
       REQUIRES_SHARED(Locks::mutator_lock_);
   static FailureKind VerifyClass(Thread* self,
                                  const DexFile* dex_file,
                                  Handle<mirror::DexCache> dex_cache,
                                  Handle<mirror::ClassLoader> class_loader,
-                                 const DexFile::ClassDef& class_def,
+                                 const dex::ClassDef& class_def,
                                  CompilerCallbacks* callbacks,
                                  bool allow_soft_failures,
                                  HardFailLogMode log_level,
+                                 uint32_t api_level,
                                  std::string* error)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -119,9 +126,10 @@ class MethodVerifier {
                                              const DexFile* dex_file,
                                              Handle<mirror::DexCache> dex_cache,
                                              Handle<mirror::ClassLoader> class_loader,
-                                             const DexFile::ClassDef& class_def,
-                                             const DexFile::CodeItem* code_item, ArtMethod* method,
-                                             uint32_t method_access_flags)
+                                             const dex::ClassDef& class_def,
+                                             const dex::CodeItem* code_item, ArtMethod* method,
+                                             uint32_t method_access_flags,
+                                             uint32_t api_level)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   uint8_t EncodePcToReferenceMapData() const;
@@ -163,8 +171,10 @@ class MethodVerifier {
   // Fills 'monitor_enter_dex_pcs' with the dex pcs of the monitor-enter instructions corresponding
   // to the locks held at 'dex_pc' in method 'm'.
   // Note: this is the only situation where the verifier will visit quickened instructions.
-  static void FindLocksAtDexPc(ArtMethod* m, uint32_t dex_pc,
-                               std::vector<DexLockInfo>* monitor_enter_dex_pcs)
+  static void FindLocksAtDexPc(ArtMethod* m,
+                               uint32_t dex_pc,
+                               std::vector<DexLockInfo>* monitor_enter_dex_pcs,
+                               uint32_t api_level)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   static void Init() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -233,8 +243,8 @@ class MethodVerifier {
                  const DexFile* dex_file,
                  Handle<mirror::DexCache> dex_cache,
                  Handle<mirror::ClassLoader> class_loader,
-                 const DexFile::ClassDef& class_def,
-                 const DexFile::CodeItem* code_item,
+                 const dex::ClassDef& class_def,
+                 const dex::CodeItem* code_item,
                  uint32_t method_idx,
                  ArtMethod* method,
                  uint32_t access_flags,
@@ -242,7 +252,8 @@ class MethodVerifier {
                  bool allow_soft_failures,
                  bool need_precise_constants,
                  bool verify_to_dump,
-                 bool allow_thread_suspension)
+                 bool allow_thread_suspension,
+                 uint32_t api_level)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void UninstantiableError(const char* descriptor);
@@ -291,14 +302,15 @@ class MethodVerifier {
                                   const DexFile* dex_file,
                                   Handle<mirror::DexCache> dex_cache,
                                   Handle<mirror::ClassLoader> class_loader,
-                                  const DexFile::ClassDef& class_def_idx,
-                                  const DexFile::CodeItem* code_item,
+                                  const dex::ClassDef& class_def_idx,
+                                  const dex::CodeItem* code_item,
                                   ArtMethod* method,
                                   uint32_t method_access_flags,
                                   CompilerCallbacks* callbacks,
                                   bool allow_soft_failures,
                                   HardFailLogMode log_level,
                                   bool need_precise_constants,
+                                  uint32_t api_level,
                                   std::string* hard_failure_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -709,7 +721,7 @@ class MethodVerifier {
   Handle<mirror::DexCache> dex_cache_ GUARDED_BY(Locks::mutator_lock_);
   // The class loader for the declaring class of the method.
   Handle<mirror::ClassLoader> class_loader_ GUARDED_BY(Locks::mutator_lock_);
-  const DexFile::ClassDef& class_def_;  // The class def of the declaring class of the method.
+  const dex::ClassDef& class_def_;  // The class def of the declaring class of the method.
   const CodeItemDataAccessor code_item_accessor_;
   const RegType* declaring_class_;  // Lazily computed reg type of the method's declaring class.
   // Instruction widths and flags, one entry per code unit.
@@ -789,6 +801,10 @@ class MethodVerifier {
 
   // Link, for the method verifier root linked list.
   MethodVerifier* link_;
+
+  // API level, for dependent checks. Note: we do not use '0' for unset here, to simplify checks.
+  // Instead, unset level should correspond to max().
+  const uint32_t api_level_;
 
   friend class art::Thread;
   friend class VerifierDepsTest;

@@ -39,11 +39,25 @@ namespace verifier {
 class VerifierDepsTest;
 }  // namespace verifier
 
+namespace linker {
+class Arm64RelativePatcherTest;
+}  // namespace linker
+
 class DexFile;
 enum class InstructionSet;
 class InstructionSetFeatures;
+class ProfileCompilationInfo;
+class VerificationResults;
+class VerifiedMethod;
 
-class CompilerOptions FINAL {
+// Enum for CheckProfileMethodsCompiled. Outside CompilerOptions so it can be forward-declared.
+enum class ProfileMethodsCheck : uint8_t {
+  kNone,
+  kLog,
+  kAbort,
+};
+
+class CompilerOptions final {
  public:
   // Guide heuristics to determine whether to compile method if profile data not available.
   static const size_t kDefaultHugeMethodThreshold = 10000;
@@ -56,6 +70,12 @@ class CompilerOptions FINAL {
   static const bool kDefaultGenerateMiniDebugInfo = false;
   static const size_t kDefaultInlineMaxCodeUnits = 32;
   static constexpr size_t kUnsetInlineMaxCodeUnits = -1;
+
+  enum class ImageType : uint8_t {
+    kNone,                // JIT or AOT app compilation producing only an oat file but no image.
+    kBootImage,           // Creating boot image.
+    kAppImage,            // Creating app image.
+  };
 
   CompilerOptions();
   ~CompilerOptions();
@@ -190,28 +210,32 @@ class CompilerOptions FINAL {
 
   // Are we compiling a boot image?
   bool IsBootImage() const {
-    return boot_image_;
+    return image_type_ == ImageType::kBootImage;
   }
 
-  // Are we compiling a core image (small boot image only used for ART testing)?
-  bool IsCoreImage() const {
-    // Ensure that `core_image_` => `boot_image_`.
-    DCHECK(!core_image_ || boot_image_);
-    return core_image_;
+  bool IsBaseline() const {
+    return baseline_;
   }
 
   // Are we compiling an app image?
   bool IsAppImage() const {
-    return app_image_;
+    return image_type_ == ImageType::kAppImage;
   }
 
-  void DisableAppImage() {
-    app_image_ = false;
+  // Returns whether we are compiling against a "core" image, which
+  // is an indicative we are running tests. The compiler will use that
+  // information for checking invariants.
+  bool CompilingWithCoreImage() const {
+    return compiling_with_core_image_;
   }
 
   // Should the code be compiled as position independent?
   bool GetCompilePic() const {
     return compile_pic_;
+  }
+
+  const ProfileCompilationInfo* GetProfileCompilationInfo() const {
+    return profile_compilation_info_;
   }
 
   bool HasVerboseMethods() const {
@@ -261,6 +285,16 @@ class CompilerOptions FINAL {
 
   bool IsImageClass(const char* descriptor) const;
 
+  const VerificationResults* GetVerificationResults() const;
+
+  const VerifiedMethod* GetVerifiedMethod(const DexFile* dex_file, uint32_t method_idx) const;
+
+  // Checks if the specified method has been verified without failures. Returns
+  // false if the method is not in the verification results (GetVerificationResults).
+  bool IsMethodVerifiedWithoutFailures(uint32_t method_idx,
+                                       uint16_t class_def_idx,
+                                       const DexFile& dex_file) const;
+
   bool ParseCompilerOptions(const std::vector<std::string>& options,
                             bool ignore_unrecognized,
                             std::string* error_msg);
@@ -309,6 +343,22 @@ class CompilerOptions FINAL {
     return count_hotness_in_compiled_code_;
   }
 
+  bool ResolveStartupConstStrings() const {
+    return resolve_startup_const_strings_;
+  }
+
+  ProfileMethodsCheck CheckProfiledMethodsCompiled() const {
+    return check_profiled_methods_;
+  }
+
+  uint32_t MaxImageBlockSize() const {
+    return max_image_block_size_;
+  }
+
+  void SetMaxImageBlockSize(uint32_t size) {
+    max_image_block_size_ = size;
+  }
+
  private:
   bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
   void ParseDumpCfgPasses(const StringPiece& option, UsageFn Usage);
@@ -343,9 +393,12 @@ class CompilerOptions FINAL {
   // Must not be empty for real boot image, only for tests pretending to compile boot image.
   HashSet<std::string> image_classes_;
 
-  bool boot_image_;
-  bool core_image_;
-  bool app_image_;
+  // Results of AOT verification.
+  const VerificationResults* verification_results_;
+
+  ImageType image_type_;
+  bool compiling_with_core_image_;
+  bool baseline_;
   bool debuggable_;
   bool generate_debug_info_;
   bool generate_mini_debug_info_;
@@ -360,6 +413,9 @@ class CompilerOptions FINAL {
 
   // When using a profile file only the top K% of the profiled samples will be compiled.
   double top_k_profile_threshold_;
+
+  // Info for profile guided compilation.
+  const ProfileCompilationInfo* profile_compilation_info_;
 
   // Vector of methods to have verbose output enabled for.
   std::vector<std::string> verbose_methods_;
@@ -387,6 +443,17 @@ class CompilerOptions FINAL {
   // won't be atomic for performance reasons, so we accept races, just like in interpreter.
   bool count_hotness_in_compiled_code_;
 
+  // Whether we eagerly resolve all of the const strings that are loaded from startup methods in the
+  // profile.
+  bool resolve_startup_const_strings_;
+
+  // When running profile-guided compilation, check that methods intended to be compiled end
+  // up compiled and are not punted.
+  ProfileMethodsCheck check_profiled_methods_;
+
+  // Maximum solid block size in the generated image.
+  uint32_t max_image_block_size_;
+
   RegisterAllocator::Strategy register_allocation_strategy_;
 
   // If not null, specifies optimization passes which will be run instead of defaults.
@@ -402,6 +469,7 @@ class CompilerOptions FINAL {
   friend class CommonCompilerTest;
   friend class jit::JitCompiler;
   friend class verifier::VerifierDepsTest;
+  friend class linker::Arm64RelativePatcherTest;
 
   template <class Base>
   friend bool ReadCompilerOptions(Base& map, CompilerOptions* options, std::string* error_msg);

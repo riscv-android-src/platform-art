@@ -20,6 +20,7 @@
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
 #include "base/bit_vector-inl.h"
+#include "base/logging.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
 #include "class_root.h"
@@ -43,7 +44,7 @@ void HGraph::InitializeInexactObjectRTI(VariableSizedHandleScope* handles) {
   // Create the inexact Object reference type and store it in the HGraph.
   inexact_object_rti_ = ReferenceTypeInfo::Create(
       handles->NewHandle(GetClassRoot<mirror::Object>()),
-      /* is_exact */ false);
+      /* is_exact= */ false);
 }
 
 void HGraph::AddBlock(HBasicBlock* block) {
@@ -59,7 +60,7 @@ void HGraph::FindBackEdges(ArenaBitVector* visited) {
   ScopedArenaAllocator allocator(GetArenaStack());
   // Nodes that we're currently visiting, indexed by block id.
   ArenaBitVector visiting(
-      &allocator, blocks_.size(), /* expandable */ false, kArenaAllocGraphBuilder);
+      &allocator, blocks_.size(), /* expandable= */ false, kArenaAllocGraphBuilder);
   visiting.ClearAllBits();
   // Number of successors visited from a given node, indexed by block id.
   ScopedArenaVector<size_t> successors_visited(blocks_.size(),
@@ -688,7 +689,7 @@ HCurrentMethod* HGraph::GetCurrentMethod() {
 }
 
 const char* HGraph::GetMethodName() const {
-  const DexFile::MethodId& method_id = dex_file_.GetMethodId(method_idx_);
+  const dex::MethodId& method_id = dex_file_.GetMethodId(method_idx_);
   return dex_file_.GetMethodName(method_id);
 }
 
@@ -825,7 +826,7 @@ void HLoopInformation::Populate() {
     ScopedArenaAllocator allocator(graph->GetArenaStack());
     ArenaBitVector visited(&allocator,
                            graph->GetBlocks().size(),
-                           /* expandable */ false,
+                           /* expandable= */ false,
                            kArenaAllocGraphBuilder);
     visited.ClearAllBits();
     // Stop marking blocks at the loop header.
@@ -1230,7 +1231,7 @@ bool HInstructionList::FoundBefore(const HInstruction* instruction1,
     }
   }
   LOG(FATAL) << "Did not find an order between two instructions of the same block.";
-  return true;
+  UNREACHABLE();
 }
 
 bool HInstruction::StrictlyDominates(HInstruction* other_instruction) const {
@@ -1253,7 +1254,7 @@ bool HInstruction::StrictlyDominates(HInstruction* other_instruction) const {
       } else {
         // There is no order among phis.
         LOG(FATAL) << "There is no dominance between phis of a same block.";
-        return false;
+        UNREACHABLE();
       }
     } else {
       // `this` is not a phi.
@@ -2526,7 +2527,7 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
         current->SetGraph(outer_graph);
         outer_graph->AddBlock(current);
         outer_graph->reverse_post_order_[++index_of_at] = current;
-        UpdateLoopAndTryInformationOfNewBlock(current, at,  /* replace_if_back_edge */ false);
+        UpdateLoopAndTryInformationOfNewBlock(current, at,  /* replace_if_back_edge= */ false);
       }
     }
 
@@ -2536,7 +2537,7 @@ HInstruction* HGraph::InlineInto(HGraph* outer_graph, HInvoke* invoke) {
     outer_graph->reverse_post_order_[++index_of_at] = to;
     // Only `to` can become a back edge, as the inlined blocks
     // are predecessors of `to`.
-    UpdateLoopAndTryInformationOfNewBlock(to, at, /* replace_if_back_edge */ true);
+    UpdateLoopAndTryInformationOfNewBlock(to, at, /* replace_if_back_edge= */ true);
 
     // Update all predecessors of the exit block (now the `to` block)
     // to not `HReturn` but `HGoto` instead. Special case throwing blocks
@@ -2710,13 +2711,13 @@ void HGraph::TransformLoopHeaderForBCE(HBasicBlock* header) {
   DCHECK((old_pre_header->GetLoopInformation() == nullptr) ||
          !old_pre_header->GetLoopInformation()->IsBackEdge(*old_pre_header));
   UpdateLoopAndTryInformationOfNewBlock(
-      if_block, old_pre_header, /* replace_if_back_edge */ false);
+      if_block, old_pre_header, /* replace_if_back_edge= */ false);
   UpdateLoopAndTryInformationOfNewBlock(
-      true_block, old_pre_header, /* replace_if_back_edge */ false);
+      true_block, old_pre_header, /* replace_if_back_edge= */ false);
   UpdateLoopAndTryInformationOfNewBlock(
-      false_block, old_pre_header, /* replace_if_back_edge */ false);
+      false_block, old_pre_header, /* replace_if_back_edge= */ false);
   UpdateLoopAndTryInformationOfNewBlock(
-      new_pre_header, old_pre_header, /* replace_if_back_edge */ false);
+      new_pre_header, old_pre_header, /* replace_if_back_edge= */ false);
 }
 
 HBasicBlock* HGraph::TransformLoopForVectorization(HBasicBlock* header,
@@ -3178,6 +3179,79 @@ std::ostream& operator<<(std::ostream& os, const MemBarrierKind& kind) {
       LOG(FATAL) << "Unknown MemBarrierKind: " << static_cast<int>(kind);
       UNREACHABLE();
   }
+}
+
+// Check that intrinsic enum values fit within space set aside in ArtMethod modifier flags.
+#define CHECK_INTRINSICS_ENUM_VALUES(Name, InvokeType, _, SideEffects, Exceptions, ...) \
+  static_assert( \
+    static_cast<uint32_t>(Intrinsics::k ## Name) <= (kAccIntrinsicBits >> CTZ(kAccIntrinsicBits)), \
+    "Instrinsics enumeration space overflow.");
+#include "intrinsics_list.h"
+  INTRINSICS_LIST(CHECK_INTRINSICS_ENUM_VALUES)
+#undef INTRINSICS_LIST
+#undef CHECK_INTRINSICS_ENUM_VALUES
+
+// Function that returns whether an intrinsic needs an environment or not.
+static inline IntrinsicNeedsEnvironmentOrCache NeedsEnvironmentOrCacheIntrinsic(Intrinsics i) {
+  switch (i) {
+    case Intrinsics::kNone:
+      return kNeedsEnvironmentOrCache;  // Non-sensical for intrinsic.
+#define OPTIMIZING_INTRINSICS(Name, InvokeType, NeedsEnvOrCache, SideEffects, Exceptions, ...) \
+    case Intrinsics::k ## Name: \
+      return NeedsEnvOrCache;
+#include "intrinsics_list.h"
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+#undef INTRINSICS_LIST
+#undef OPTIMIZING_INTRINSICS
+  }
+  return kNeedsEnvironmentOrCache;
+}
+
+// Function that returns whether an intrinsic has side effects.
+static inline IntrinsicSideEffects GetSideEffectsIntrinsic(Intrinsics i) {
+  switch (i) {
+    case Intrinsics::kNone:
+      return kAllSideEffects;
+#define OPTIMIZING_INTRINSICS(Name, InvokeType, NeedsEnvOrCache, SideEffects, Exceptions, ...) \
+    case Intrinsics::k ## Name: \
+      return SideEffects;
+#include "intrinsics_list.h"
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+#undef INTRINSICS_LIST
+#undef OPTIMIZING_INTRINSICS
+  }
+  return kAllSideEffects;
+}
+
+// Function that returns whether an intrinsic can throw exceptions.
+static inline IntrinsicExceptions GetExceptionsIntrinsic(Intrinsics i) {
+  switch (i) {
+    case Intrinsics::kNone:
+      return kCanThrow;
+#define OPTIMIZING_INTRINSICS(Name, InvokeType, NeedsEnvOrCache, SideEffects, Exceptions, ...) \
+    case Intrinsics::k ## Name: \
+      return Exceptions;
+#include "intrinsics_list.h"
+      INTRINSICS_LIST(OPTIMIZING_INTRINSICS)
+#undef INTRINSICS_LIST
+#undef OPTIMIZING_INTRINSICS
+  }
+  return kCanThrow;
+}
+
+void HInvoke::SetResolvedMethod(ArtMethod* method) {
+  // TODO: b/65872996 The intent is that polymorphic signature methods should
+  // be compiler intrinsics. At present, they are only interpreter intrinsics.
+  if (method != nullptr &&
+      method->IsIntrinsic() &&
+      !method->IsPolymorphicSignature()) {
+    Intrinsics intrinsic = static_cast<Intrinsics>(method->GetIntrinsic());
+    SetIntrinsic(intrinsic,
+                 NeedsEnvironmentOrCacheIntrinsic(intrinsic),
+                 GetSideEffectsIntrinsic(intrinsic),
+                 GetExceptionsIntrinsic(intrinsic));
+  }
+  resolved_method_ = method;
 }
 
 }  // namespace art

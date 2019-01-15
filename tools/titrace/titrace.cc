@@ -54,7 +54,7 @@ struct TiMemory {
   }
 
   TiMemory(const TiMemory& other) = delete;
-  TiMemory(TiMemory&& other) {
+  TiMemory(TiMemory&& other) noexcept {
     env_ = other.env_;
     mem_ = other.mem_;
     size_ = other.size_;
@@ -66,7 +66,7 @@ struct TiMemory {
     }
   }
 
-  TiMemory& operator=(TiMemory&& other) {
+  TiMemory& operator=(TiMemory&& other) noexcept {
     if (mem_ != other.mem_) {
       TiMemory::~TiMemory();
     }
@@ -237,7 +237,7 @@ JNIEXPORT jint JNICALL Agent_OnLoad(JavaVM* jvm,
                                     void* /* reserved */) {
   using namespace titrace;  // NOLINT [build/namespaces] [5]
 
-  android::base::InitLogging(/* argv */nullptr);
+  android::base::InitLogging(/* argv= */nullptr);
 
   jvmtiEnv* jvmti = nullptr;
   {

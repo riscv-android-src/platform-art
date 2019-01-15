@@ -105,10 +105,10 @@ void ThrowAbstractMethodError(ArtMethod* method) {
 }
 
 void ThrowAbstractMethodError(uint32_t method_idx, const DexFile& dex_file) {
-  ThrowException("Ljava/lang/AbstractMethodError;", /* referrer */ nullptr,
+  ThrowException("Ljava/lang/AbstractMethodError;", /* referrer= */ nullptr,
                  StringPrintf("abstract method \"%s\"",
                               dex_file.PrettyMethod(method_idx,
-                                                    /* with_signature */ true).c_str()).c_str());
+                                                    /* with_signature= */ true).c_str()).c_str());
 }
 
 // ArithmeticException
@@ -324,7 +324,7 @@ void ThrowIncompatibleClassChangeError(ObjPtr<mirror::Class> referrer, const cha
 void ThrowIncompatibleClassChangeErrorForMethodConflict(ArtMethod* method) {
   DCHECK(method != nullptr);
   ThrowException("Ljava/lang/IncompatibleClassChangeError;",
-                 /*referrer*/nullptr,
+                 /*referrer=*/nullptr,
                  StringPrintf("Conflicting default method implementations %s",
                               ArtMethod::PrettyMethod(method).c_str()).c_str());
 }
@@ -436,20 +436,15 @@ static void ThrowNullPointerExceptionForMethodAccessImpl(uint32_t method_idx,
   ThrowException("Ljava/lang/NullPointerException;", nullptr, msg.str().c_str());
 }
 
-void ThrowNullPointerExceptionForMethodAccess(uint32_t method_idx,
-                                              InvokeType type) {
-  ObjPtr<mirror::DexCache> dex_cache =
-      Thread::Current()->GetCurrentMethod(nullptr)->GetDeclaringClass()->GetDexCache();
-  const DexFile& dex_file = *dex_cache->GetDexFile();
+void ThrowNullPointerExceptionForMethodAccess(uint32_t method_idx, InvokeType type) {
+  const DexFile& dex_file = *Thread::Current()->GetCurrentMethod(nullptr)->GetDexFile();
   ThrowNullPointerExceptionForMethodAccessImpl(method_idx, dex_file, type);
 }
 
-void ThrowNullPointerExceptionForMethodAccess(ArtMethod* method,
-                                              InvokeType type) {
-  ObjPtr<mirror::DexCache> dex_cache = method->GetDeclaringClass()->GetDexCache();
-  const DexFile& dex_file = *dex_cache->GetDexFile();
+void ThrowNullPointerExceptionForMethodAccess(ArtMethod* method, InvokeType type) {
   ThrowNullPointerExceptionForMethodAccessImpl(method->GetDexMethodIndex(),
-                                               dex_file, type);
+                                               *method->GetDexFile(),
+                                               type);
 }
 
 static bool IsValidReadBarrierImplicitCheck(uintptr_t addr) {
@@ -577,7 +572,7 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
   CHECK_LT(throw_dex_pc, accessor.InsnsSizeInCodeUnits());
   const Instruction& instr = accessor.InstructionAt(throw_dex_pc);
   if (check_address && !IsValidImplicitCheck(addr, instr)) {
-    const DexFile* dex_file = method->GetDeclaringClass()->GetDexCache()->GetDexFile();
+    const DexFile* dex_file = method->GetDexFile();
     LOG(FATAL) << "Invalid address for an implicit NullPointerException check: "
                << "0x" << std::hex << addr << std::dec
                << ", at "
@@ -633,7 +628,7 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
       ArtField* field =
           Runtime::Current()->GetClassLinker()->ResolveField(instr.VRegC_22c(), method, false);
       Thread::Current()->ClearException();  // Resolution may fail, ignore.
-      ThrowNullPointerExceptionForFieldAccess(field, true /* read */);
+      ThrowNullPointerExceptionForFieldAccess(field, /* is_read= */ true);
       break;
     }
     case Instruction::IGET_QUICK:
@@ -647,9 +642,9 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
       ArtField* field = nullptr;
       CHECK_NE(field_idx, DexFile::kDexNoIndex16);
       field = Runtime::Current()->GetClassLinker()->ResolveField(
-          field_idx, method, /* is_static */ false);
+          field_idx, method, /* is_static= */ false);
       Thread::Current()->ClearException();  // Resolution may fail, ignore.
-      ThrowNullPointerExceptionForFieldAccess(field, true /* read */);
+      ThrowNullPointerExceptionForFieldAccess(field, /* is_read= */ true);
       break;
     }
     case Instruction::IPUT:
@@ -660,9 +655,9 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
     case Instruction::IPUT_CHAR:
     case Instruction::IPUT_SHORT: {
       ArtField* field = Runtime::Current()->GetClassLinker()->ResolveField(
-          instr.VRegC_22c(), method, /* is_static */ false);
+          instr.VRegC_22c(), method, /* is_static= */ false);
       Thread::Current()->ClearException();  // Resolution may fail, ignore.
-      ThrowNullPointerExceptionForFieldAccess(field, false /* write */);
+      ThrowNullPointerExceptionForFieldAccess(field, /* is_read= */ false);
       break;
     }
     case Instruction::IPUT_QUICK:
@@ -676,9 +671,9 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
       ArtField* field = nullptr;
       CHECK_NE(field_idx, DexFile::kDexNoIndex16);
       field = Runtime::Current()->GetClassLinker()->ResolveField(
-          field_idx, method, /* is_static */ false);
+          field_idx, method, /* is_static= */ false);
       Thread::Current()->ClearException();  // Resolution may fail, ignore.
-      ThrowNullPointerExceptionForFieldAccess(field, false /* write */);
+      ThrowNullPointerExceptionForFieldAccess(field, /* is_read= */ false);
       break;
     }
     case Instruction::AGET:
@@ -717,13 +712,12 @@ void ThrowNullPointerExceptionFromDexPC(bool check_address, uintptr_t addr) {
       break;
     }
     default: {
-      const DexFile* dex_file =
-          method->GetDeclaringClass()->GetDexCache()->GetDexFile();
+      const DexFile* dex_file = method->GetDexFile();
       LOG(FATAL) << "NullPointerException at an unexpected instruction: "
                  << instr.DumpString(dex_file)
                  << " in "
                  << method->PrettyMethod();
-      break;
+      UNREACHABLE();
     }
   }
 }
@@ -771,13 +765,19 @@ void ThrowStackOverflowError(Thread* self) {
 
   // Avoid running Java code for exception initialization.
   // TODO: Checks to make this a bit less brittle.
+  //
+  // Note: this lambda ensures that the destruction of the ScopedLocalRefs will run in the extended
+  //       stack, which is important for modes with larger stack sizes (e.g., ASAN). Using a lambda
+  //       instead of a block simplifies the control flow.
+  auto create_and_throw = [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
+    // Allocate an uninitialized object.
+    ScopedLocalRef<jobject> exc(env,
+                                env->AllocObject(WellKnownClasses::java_lang_StackOverflowError));
+    if (exc == nullptr) {
+      LOG(WARNING) << "Could not allocate StackOverflowError object.";
+      return;
+    }
 
-  std::string error_msg;
-
-  // Allocate an uninitialized object.
-  ScopedLocalRef<jobject> exc(env,
-                              env->AllocObject(WellKnownClasses::java_lang_StackOverflowError));
-  if (exc.get() != nullptr) {
     // "Initialize".
     // StackOverflowError -> VirtualMachineError -> Error -> Throwable -> Object.
     // Only Throwable has "custom" fields:
@@ -793,57 +793,54 @@ void ThrowStackOverflowError(Thread* self) {
     // detailMessage.
     // TODO: Use String::FromModifiedUTF...?
     ScopedLocalRef<jstring> s(env, env->NewStringUTF(msg.c_str()));
-    if (s.get() != nullptr) {
-      env->SetObjectField(exc.get(), WellKnownClasses::java_lang_Throwable_detailMessage, s.get());
-
-      // cause.
-      env->SetObjectField(exc.get(), WellKnownClasses::java_lang_Throwable_cause, exc.get());
-
-      // suppressedExceptions.
-      ScopedLocalRef<jobject> emptylist(env, env->GetStaticObjectField(
-          WellKnownClasses::java_util_Collections,
-          WellKnownClasses::java_util_Collections_EMPTY_LIST));
-      CHECK(emptylist.get() != nullptr);
-      env->SetObjectField(exc.get(),
-                          WellKnownClasses::java_lang_Throwable_suppressedExceptions,
-                          emptylist.get());
-
-      // stackState is set as result of fillInStackTrace. fillInStackTrace calls
-      // nativeFillInStackTrace.
-      ScopedLocalRef<jobject> stack_state_val(env, nullptr);
-      {
-        ScopedObjectAccessUnchecked soa(env);
-        stack_state_val.reset(soa.Self()->CreateInternalStackTrace<false>(soa));
-      }
-      if (stack_state_val.get() != nullptr) {
-        env->SetObjectField(exc.get(),
-                            WellKnownClasses::java_lang_Throwable_stackState,
-                            stack_state_val.get());
-
-        // stackTrace.
-        ScopedLocalRef<jobject> stack_trace_elem(env, env->GetStaticObjectField(
-            WellKnownClasses::libcore_util_EmptyArray,
-            WellKnownClasses::libcore_util_EmptyArray_STACK_TRACE_ELEMENT));
-        env->SetObjectField(exc.get(),
-                            WellKnownClasses::java_lang_Throwable_stackTrace,
-                            stack_trace_elem.get());
-      } else {
-        error_msg = "Could not create stack trace.";
-      }
-      // Throw the exception.
-      self->SetException(self->DecodeJObject(exc.get())->AsThrowable());
-    } else {
-      // Could not allocate a string object.
-      error_msg = "Couldn't throw new StackOverflowError because JNI NewStringUTF failed.";
+    if (s == nullptr) {
+      LOG(WARNING) << "Could not throw new StackOverflowError because JNI NewStringUTF failed.";
+      return;
     }
-  } else {
-    error_msg = "Could not allocate StackOverflowError object.";
-  }
 
-  if (!error_msg.empty()) {
-    LOG(WARNING) << error_msg;
-    CHECK(self->IsExceptionPending());
-  }
+    env->SetObjectField(exc.get(), WellKnownClasses::java_lang_Throwable_detailMessage, s.get());
+
+    // cause.
+    env->SetObjectField(exc.get(), WellKnownClasses::java_lang_Throwable_cause, exc.get());
+
+    // suppressedExceptions.
+    ScopedLocalRef<jobject> emptylist(env, env->GetStaticObjectField(
+        WellKnownClasses::java_util_Collections,
+        WellKnownClasses::java_util_Collections_EMPTY_LIST));
+    CHECK(emptylist != nullptr);
+    env->SetObjectField(exc.get(),
+                        WellKnownClasses::java_lang_Throwable_suppressedExceptions,
+                        emptylist.get());
+
+    // stackState is set as result of fillInStackTrace. fillInStackTrace calls
+    // nativeFillInStackTrace.
+    ScopedLocalRef<jobject> stack_state_val(env, nullptr);
+    {
+      ScopedObjectAccessUnchecked soa(env);  // TODO: Is this necessary?
+      stack_state_val.reset(soa.Self()->CreateInternalStackTrace<false>(soa));
+    }
+    if (stack_state_val != nullptr) {
+      env->SetObjectField(exc.get(),
+                          WellKnownClasses::java_lang_Throwable_stackState,
+                          stack_state_val.get());
+
+      // stackTrace.
+      ScopedLocalRef<jobject> stack_trace_elem(env, env->GetStaticObjectField(
+          WellKnownClasses::libcore_util_EmptyArray,
+          WellKnownClasses::libcore_util_EmptyArray_STACK_TRACE_ELEMENT));
+      env->SetObjectField(exc.get(),
+                          WellKnownClasses::java_lang_Throwable_stackTrace,
+                          stack_trace_elem.get());
+    } else {
+      LOG(WARNING) << "Could not create stack trace.";
+      // Note: we'll create an exception without stack state, which is valid.
+    }
+
+    // Throw the exception.
+    self->SetException(self->DecodeJObject(exc.get())->AsThrowable());
+  };
+  create_and_throw();
+  CHECK(self->IsExceptionPending());
 
   bool explicit_overflow_check = Runtime::Current()->ExplicitStackOverflowChecks();
   self->ResetDefaultStackEnd();  // Return to default stack size.

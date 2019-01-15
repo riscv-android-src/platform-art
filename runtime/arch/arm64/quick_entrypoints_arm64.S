@@ -83,12 +83,10 @@
      * Runtime::CreateCalleeSaveMethod(kSaveAllCalleeSaves)
      */
 .macro SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    // art::Runtime** xIP0 = &art::Runtime::instance_
-    adrp xIP0, :got:_ZN3art7Runtime9instance_E
-    ldr xIP0, [xIP0, #:got_lo12:_ZN3art7Runtime9instance_E]
-
+    // art::Runtime* xIP0 = art::Runtime::instance_;
     // Our registers aren't intermixed - just spill in order.
-    ldr xIP0, [xIP0]  // art::Runtime* xIP0 = art::Runtime::instance_;
+    adrp xIP0, _ZN3art7Runtime9instance_E
+    ldr xIP0, [xIP0, #:lo12:_ZN3art7Runtime9instance_E]
 
     // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveAllCalleeSaves];
     ldr xIP0, [xIP0, RUNTIME_SAVE_ALL_CALLEE_SAVES_METHOD_OFFSET]
@@ -127,12 +125,10 @@
      * Runtime::CreateCalleeSaveMethod(kSaveRefsOnly).
      */
 .macro SETUP_SAVE_REFS_ONLY_FRAME
-    // art::Runtime** xIP0 = &art::Runtime::instance_
-    adrp xIP0, :got:_ZN3art7Runtime9instance_E
-    ldr xIP0, [xIP0, #:got_lo12:_ZN3art7Runtime9instance_E]
-
+    // art::Runtime* xIP0 = art::Runtime::instance_;
     // Our registers aren't intermixed - just spill in order.
-    ldr xIP0, [xIP0]  // art::Runtime* xIP0 = art::Runtime::instance_;
+    adrp xIP0, _ZN3art7Runtime9instance_E
+    ldr xIP0, [xIP0, #:lo12:_ZN3art7Runtime9instance_E]
 
     // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveRefOnly];
     ldr xIP0, [xIP0, RUNTIME_SAVE_REFS_ONLY_METHOD_OFFSET]
@@ -227,12 +223,10 @@
      * TODO This is probably too conservative - saving FP & LR.
      */
 .macro SETUP_SAVE_REFS_AND_ARGS_FRAME
-    // art::Runtime** xIP0 = &art::Runtime::instance_
-    adrp xIP0, :got:_ZN3art7Runtime9instance_E
-    ldr xIP0, [xIP0, #:got_lo12:_ZN3art7Runtime9instance_E]
-
+    // art::Runtime* xIP0 = art::Runtime::instance_;
     // Our registers aren't intermixed - just spill in order.
-    ldr xIP0, [xIP0]  // art::Runtime* xIP0 = art::Runtime::instance_;
+    adrp xIP0, _ZN3art7Runtime9instance_E
+    ldr xIP0, [xIP0, #:lo12:_ZN3art7Runtime9instance_E]
 
     // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveRefAndArgs];
     ldr xIP0, [xIP0, RUNTIME_SAVE_REFS_AND_ARGS_METHOD_OFFSET]
@@ -295,47 +289,42 @@
 #endif
 
     // Save FP registers.
-    // For better performance, store d0 and d31 separately, so that all STPs are 16-byte aligned.
-    str d0,       [sp, #8]
-    stp d1, d2,   [sp, #16]
-    stp d3, d4,   [sp, #32]
-    stp d5, d6,   [sp, #48]
-    stp d7, d8,   [sp, #64]
-    stp d9, d10,  [sp, #80]
-    stp d11, d12, [sp, #96]
-    stp d13, d14, [sp, #112]
-    stp d15, d16, [sp, #128]
-    stp d17, d18, [sp, #144]
-    stp d19, d20, [sp, #160]
-    stp d21, d22, [sp, #176]
-    stp d23, d24, [sp, #192]
-    stp d25, d26, [sp, #208]
-    stp d27, d28, [sp, #224]
-    stp d29, d30, [sp, #240]
-    str d31,      [sp, #256]
+    stp d0, d1,   [sp, #16]
+    stp d2, d3,   [sp, #32]
+    stp d4, d5,   [sp, #48]
+    stp d6, d7,   [sp, #64]
+    stp d8, d9,   [sp, #80]
+    stp d10, d11, [sp, #96]
+    stp d12, d13, [sp, #112]
+    stp d14, d15, [sp, #128]
+    stp d16, d17, [sp, #144]
+    stp d18, d19, [sp, #160]
+    stp d20, d21, [sp, #176]
+    stp d22, d23, [sp, #192]
+    stp d24, d25, [sp, #208]
+    stp d26, d27, [sp, #224]
+    stp d28, d29, [sp, #240]
+    stp d30, d31, [sp, #256]
 
     // Save core registers.
-    SAVE_REG            x0, 264
-    SAVE_TWO_REGS  x1,  x2, 272
-    SAVE_TWO_REGS  x3,  x4, 288
-    SAVE_TWO_REGS  x5,  x6, 304
-    SAVE_TWO_REGS  x7,  x8, 320
-    SAVE_TWO_REGS  x9, x10, 336
-    SAVE_TWO_REGS x11, x12, 352
-    SAVE_TWO_REGS x13, x14, 368
-    SAVE_TWO_REGS x15, x16, 384
-    SAVE_TWO_REGS x17, x18, 400
+    SAVE_TWO_REGS  x0,  x1, 272
+    SAVE_TWO_REGS  x2,  x3, 288
+    SAVE_TWO_REGS  x4,  x5, 304
+    SAVE_TWO_REGS  x6,  x7, 320
+    SAVE_TWO_REGS  x8,  x9, 336
+    SAVE_TWO_REGS x10, x11, 352
+    SAVE_TWO_REGS x12, x13, 368
+    SAVE_TWO_REGS x14, x15, 384
+    SAVE_TWO_REGS x16, x17, 400 // Do not save the platform register.
     SAVE_TWO_REGS x19, x20, 416
     SAVE_TWO_REGS x21, x22, 432
     SAVE_TWO_REGS x23, x24, 448
     SAVE_TWO_REGS x25, x26, 464
     SAVE_TWO_REGS x27, x28, 480
 
-    // art::Runtime** xIP0 = &art::Runtime::instance_
-    adrp xIP0, :got:_ZN3art7Runtime9instance_E
-    ldr xIP0, [xIP0, #:got_lo12:_ZN3art7Runtime9instance_E]
-
-    ldr xIP0, [xIP0]  // art::Runtime* xIP0 = art::Runtime::instance_;
+    // art::Runtime* xIP0 = art::Runtime::instance_;
+    adrp xIP0, _ZN3art7Runtime9instance_E
+    ldr xIP0, [xIP0, #:lo12:_ZN3art7Runtime9instance_E]
 
     // ArtMethod* xIP0 = Runtime::instance_->callee_save_methods_[kSaveEverything];
     ldr xIP0, [xIP0, \runtime_method_offset]
@@ -359,35 +348,33 @@
 
 .macro RESTORE_SAVE_EVERYTHING_FRAME_KEEP_X0
     // Restore FP registers.
-    // For better performance, load d0 and d31 separately, so that all LDPs are 16-byte aligned.
-    ldr d0,       [sp, #8]
-    ldp d1, d2,   [sp, #16]
-    ldp d3, d4,   [sp, #32]
-    ldp d5, d6,   [sp, #48]
-    ldp d7, d8,   [sp, #64]
-    ldp d9, d10,  [sp, #80]
-    ldp d11, d12, [sp, #96]
-    ldp d13, d14, [sp, #112]
-    ldp d15, d16, [sp, #128]
-    ldp d17, d18, [sp, #144]
-    ldp d19, d20, [sp, #160]
-    ldp d21, d22, [sp, #176]
-    ldp d23, d24, [sp, #192]
-    ldp d25, d26, [sp, #208]
-    ldp d27, d28, [sp, #224]
-    ldp d29, d30, [sp, #240]
-    ldr d31,      [sp, #256]
+    ldp d0, d1,   [sp, #16]
+    ldp d2, d3,   [sp, #32]
+    ldp d4, d5,   [sp, #48]
+    ldp d6, d7,   [sp, #64]
+    ldp d8, d9,   [sp, #80]
+    ldp d10, d11, [sp, #96]
+    ldp d12, d13, [sp, #112]
+    ldp d14, d15, [sp, #128]
+    ldp d16, d17, [sp, #144]
+    ldp d18, d19, [sp, #160]
+    ldp d20, d21, [sp, #176]
+    ldp d22, d23, [sp, #192]
+    ldp d24, d25, [sp, #208]
+    ldp d26, d27, [sp, #224]
+    ldp d28, d29, [sp, #240]
+    ldp d30, d31, [sp, #256]
 
     // Restore core registers, except x0.
-    RESTORE_TWO_REGS  x1,  x2, 272
-    RESTORE_TWO_REGS  x3,  x4, 288
-    RESTORE_TWO_REGS  x5,  x6, 304
-    RESTORE_TWO_REGS  x7,  x8, 320
-    RESTORE_TWO_REGS  x9, x10, 336
-    RESTORE_TWO_REGS x11, x12, 352
-    RESTORE_TWO_REGS x13, x14, 368
-    RESTORE_TWO_REGS x15, x16, 384
-    RESTORE_TWO_REGS x17, x18, 400
+    RESTORE_REG            x1, 280
+    RESTORE_TWO_REGS  x2,  x3, 288
+    RESTORE_TWO_REGS  x4,  x5, 304
+    RESTORE_TWO_REGS  x6,  x7, 320
+    RESTORE_TWO_REGS  x8,  x9, 336
+    RESTORE_TWO_REGS x10, x11, 352
+    RESTORE_TWO_REGS x12, x13, 368
+    RESTORE_TWO_REGS x14, x15, 384
+    RESTORE_TWO_REGS x16, x17, 400 // Do not restore the platform register.
     RESTORE_TWO_REGS x19, x20, 416
     RESTORE_TWO_REGS x21, x22, 432
     RESTORE_TWO_REGS x23, x24, 448
@@ -399,7 +386,7 @@
 .endm
 
 .macro RESTORE_SAVE_EVERYTHING_FRAME
-    RESTORE_REG  x0, 264
+    RESTORE_REG  x0, 272
     RESTORE_SAVE_EVERYTHING_FRAME_KEEP_X0
 .endm
 
@@ -1091,56 +1078,60 @@ SAVE_SIZE=14*8   // x3, x4, x19, x20, x21, x22, x23, x24, x25, x26, x27, x28, FP
 END art_quick_osr_stub
 
     /*
-     * On entry x0 is uintptr_t* gprs_ and x1 is uint64_t* fprs_
+     * On entry x0 is uintptr_t* gprs_ and x1 is uint64_t* fprs_.
+     * Both must reside on the stack, between current SP and target SP.
+     * IP0 and IP1 shall be clobbered rather than retrieved from gprs_.
      */
 
 ENTRY art_quick_do_long_jump
     // Load FPRs
-    ldp d0, d1, [x1], #16
-    ldp d2, d3, [x1], #16
-    ldp d4, d5, [x1], #16
-    ldp d6, d7, [x1], #16
-    ldp d8, d9, [x1], #16
-    ldp d10, d11, [x1], #16
-    ldp d12, d13, [x1], #16
-    ldp d14, d15, [x1], #16
-    ldp d16, d17, [x1], #16
-    ldp d18, d19, [x1], #16
-    ldp d20, d21, [x1], #16
-    ldp d22, d23, [x1], #16
-    ldp d24, d25, [x1], #16
-    ldp d26, d27, [x1], #16
-    ldp d28, d29, [x1], #16
-    ldp d30, d31, [x1]
+    ldp d0, d1, [x1, #0]
+    ldp d2, d3, [x1, #16]
+    ldp d4, d5, [x1, #32]
+    ldp d6, d7, [x1, #48]
+    ldp d8, d9, [x1, #64]
+    ldp d10, d11, [x1, #80]
+    ldp d12, d13, [x1, #96]
+    ldp d14, d15, [x1, #112]
+    ldp d16, d17, [x1, #128]
+    ldp d18, d19, [x1, #144]
+    ldp d20, d21, [x1, #160]
+    ldp d22, d23, [x1, #176]
+    ldp d24, d25, [x1, #192]
+    ldp d26, d27, [x1, #208]
+    ldp d28, d29, [x1, #224]
+    ldp d30, d31, [x1, #240]
 
-    // Load GPRs
-    // TODO: lots of those are smashed, could optimize.
-    add x0, x0, #30*8
-    ldp x30, x1, [x0], #-16          // LR & SP
-    ldp x28, x29, [x0], #-16
-    ldp x26, x27, [x0], #-16
-    ldp x24, x25, [x0], #-16
-    ldp x22, x23, [x0], #-16
-    ldp x20, x21, [x0], #-16
-    ldp x18, x19, [x0], #-16         // X18 & xSELF
-    ldp x16, x17, [x0], #-16
-    ldp x14, x15, [x0], #-16
-    ldp x12, x13, [x0], #-16
-    ldp x10, x11, [x0], #-16
-    ldp x8, x9, [x0], #-16
-    ldp x6, x7, [x0], #-16
-    ldp x4, x5, [x0], #-16
-    ldp x2, x3, [x0], #-16
-    mov sp, x1
+    // Load GPRs. Delay loading x0, x1 because x0 is used as gprs_.
+    ldp x2, x3, [x0, #16]
+    ldp x4, x5, [x0, #32]
+    ldp x6, x7, [x0, #48]
+    ldp x8, x9, [x0, #64]
+    ldp x10, x11, [x0, #80]
+    ldp x12, x13, [x0, #96]
+    ldp x14, x15, [x0, #112]
+    // Do not load IP0 (x16) and IP1 (x17), these shall be clobbered below.
+    // Don't load the platform register (x18) either.
+    ldr      x19, [x0, #152]      // xSELF.
+    ldp x20, x21, [x0, #160]      // For Baker RB, wMR (w20) is reloaded below.
+    ldp x22, x23, [x0, #176]
+    ldp x24, x25, [x0, #192]
+    ldp x26, x27, [x0, #208]
+    ldp x28, x29, [x0, #224]
+    ldp x30, xIP0, [x0, #240]     // LR and SP, load SP to IP0.
+
+    // Load PC to IP1, it's at the end (after the space for the unused XZR).
+    ldr xIP1, [x0, #33*8]
+
+    // Load x0, x1.
+    ldp x0, x1, [x0, #0]
+
+    // Set SP. Do not access fprs_ and gprs_ from now, they are below SP.
+    mov sp, xIP0
 
     REFRESH_MARKING_REGISTER
 
-    // Need to load PC, it's at the end (after the space for the unused XZR). Use x1.
-    ldr x1, [x0, #33*8]
-    // And the value of x0.
-    ldr x0, [x0]
-
-    br  x1
+    br  xIP1
 END art_quick_do_long_jump
 
     /*
@@ -2298,8 +2289,8 @@ ENTRY art_quick_instrumentation_exit
     mov   xLR, #0             // Clobber LR for later checks.
     SETUP_SAVE_EVERYTHING_FRAME
 
-    add   x3, sp, #8          // Pass floating-point result pointer, in kSaveEverything frame.
-    add   x2, sp, #264        // Pass integer result pointer, in kSaveEverything frame.
+    add   x3, sp, #16         // Pass floating-point result pointer, in kSaveEverything frame.
+    add   x2, sp, #272        // Pass integer result pointer, in kSaveEverything frame.
     mov   x1, sp              // Pass SP.
     mov   x0, xSELF           // Pass Thread.
     bl   artInstrumentationMethodExitFromCode    // (Thread*, SP, gpr_res*, fpr_res*)
@@ -2501,7 +2492,8 @@ ENTRY \name
 .Lslow_rb_\name:
     /*
      * Allocate 44 stack slots * 8 = 352 bytes:
-     * - 20 slots for core registers X0-15, X17-X19, LR
+     * - 19 slots for core registers X0-15, X17, X19, LR
+     * - 1 slot padding
      * - 24 slots for floating-point registers D0-D7 and D16-D31
      */
     // We must not clobber IP1 since code emitted for HLoadClass and HLoadString
@@ -2515,8 +2507,8 @@ ENTRY \name
     SAVE_TWO_REGS x10, x11, 80
     SAVE_TWO_REGS x12, x13, 96
     SAVE_TWO_REGS x14, x15, 112
-    SAVE_TWO_REGS x17, x18, 128  // Skip x16, i.e. IP0.
-    SAVE_TWO_REGS x19, xLR, 144  // Save also return address.
+    SAVE_TWO_REGS x17, x19, 128  // Skip x16, i.e. IP0, and x18, the platform register.
+    SAVE_REG      xLR,      144  // Save also return address.
     // Save all potentially live caller-save floating-point registers.
     stp   d0, d1,   [sp, #160]
     stp   d2, d3,   [sp, #176]
@@ -2549,8 +2541,8 @@ ENTRY \name
     POP_REGS_NE x10, x11, 80,  \xreg
     POP_REGS_NE x12, x13, 96,  \xreg
     POP_REGS_NE x14, x15, 112, \xreg
-    POP_REGS_NE x17, x18, 128, \xreg
-    POP_REGS_NE x19, xLR, 144, \xreg  // Restore also return address.
+    POP_REGS_NE x17, x19, 128, \xreg
+    POP_REG_NE  xLR,      144, \xreg  // Restore also return address.
     // Restore floating-point registers.
     ldp   d0, d1,   [sp, #160]
     ldp   d2, d3,   [sp, #176]
@@ -2593,7 +2585,7 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg14, w14, x14
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg15, w15, x15
 // READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg16, w16, x16 ip0 is blocked
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg17, w17, x17
-READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg18, w18, x18
+// READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg18, w18, x18 x18 is blocked
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg19, w19, x19
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg20, w20, x20
 READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg21, w21, x21
@@ -2634,7 +2626,7 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
     SELECT_X_OR_W_FOR_MACRO \macro_for_register, x15, w15, \xreg
     \macro_for_reserved_register  // IP0 is reserved
     \macro_for_reserved_register  // IP1 is reserved
-    SELECT_X_OR_W_FOR_MACRO \macro_for_register, x18, w18, \xreg
+    \macro_for_reserved_register  // x18 is reserved
     SELECT_X_OR_W_FOR_MACRO \macro_for_register, x19, w19, \xreg
     SELECT_X_OR_W_FOR_MACRO \macro_for_register, x20, w20, \xreg
     SELECT_X_OR_W_FOR_MACRO \macro_for_register, x21, w21, \xreg
@@ -2678,13 +2670,12 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
 
 .macro READ_BARRIER_MARK_INTROSPECTION_SLOW_PATH ldr_offset
     /*
-     * Allocate 44 stack slots * 8 = 352 bytes:
-     * - 19 slots for core registers X0-15, X18-X19, LR
-     * - 1 slot padding
+     * Allocate 42 stack slots * 8 = 336 bytes:
+     * - 18 slots for core registers X0-15, X19, LR
      * - 24 slots for floating-point registers D0-D7 and D16-D31
      */
     // Save all potentially live caller-save core registers.
-    SAVE_TWO_REGS_INCREASE_FRAME x0, x1, 352
+    SAVE_TWO_REGS_INCREASE_FRAME x0, x1, 336
     SAVE_TWO_REGS  x2,  x3, 16
     SAVE_TWO_REGS  x4,  x5, 32
     SAVE_TWO_REGS  x6,  x7, 48
@@ -2692,21 +2683,21 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
     SAVE_TWO_REGS x10, x11, 80
     SAVE_TWO_REGS x12, x13, 96
     SAVE_TWO_REGS x14, x15, 112
-    SAVE_TWO_REGS x18, x19, 128       // Skip x16, x17, i.e. IP0, IP1.
-    SAVE_REG      xLR,      144       // Save return address, skip padding at 152.
+    // Skip x16, x17, i.e. IP0, IP1, and x18, the platform register.
+    SAVE_TWO_REGS x19, xLR, 128       // Save return address.
     // Save all potentially live caller-save floating-point registers.
-    stp   d0, d1,   [sp, #160]
-    stp   d2, d3,   [sp, #176]
-    stp   d4, d5,   [sp, #192]
-    stp   d6, d7,   [sp, #208]
-    stp   d16, d17, [sp, #224]
-    stp   d18, d19, [sp, #240]
-    stp   d20, d21, [sp, #256]
-    stp   d22, d23, [sp, #272]
-    stp   d24, d25, [sp, #288]
-    stp   d26, d27, [sp, #304]
-    stp   d28, d29, [sp, #320]
-    stp   d30, d31, [sp, #336]
+    stp   d0, d1,   [sp, #144]
+    stp   d2, d3,   [sp, #160]
+    stp   d4, d5,   [sp, #176]
+    stp   d6, d7,   [sp, #192]
+    stp   d16, d17, [sp, #208]
+    stp   d18, d19, [sp, #224]
+    stp   d20, d21, [sp, #240]
+    stp   d22, d23, [sp, #256]
+    stp   d24, d25, [sp, #272]
+    stp   d26, d27, [sp, #288]
+    stp   d28, d29, [sp, #304]
+    stp   d30, d31, [sp, #320]
 
     mov   x0, xIP0
     bl    artReadBarrierMark          // artReadBarrierMark(obj)
@@ -2721,26 +2712,26 @@ READ_BARRIER_MARK_REG art_quick_read_barrier_mark_reg29, w29, x29
     RESTORE_TWO_REGS x10, x11, 80
     RESTORE_TWO_REGS x12, x13, 96
     RESTORE_TWO_REGS x14, x15, 112
-    RESTORE_TWO_REGS x18, x19, 128    // Skip x16, x17, i.e. IP0, IP1.
-    RESTORE_REG      xLR,      144    // Restore return address.
+    // Skip x16, x17, i.e. IP0, IP1, and x18, the platform register.
+    RESTORE_TWO_REGS x19, xLR, 128    // Restore return address.
     // Restore caller-save floating-point registers.
-    ldp   d0, d1,   [sp, #160]
-    ldp   d2, d3,   [sp, #176]
-    ldp   d4, d5,   [sp, #192]
-    ldp   d6, d7,   [sp, #208]
-    ldp   d16, d17, [sp, #224]
-    ldp   d18, d19, [sp, #240]
-    ldp   d20, d21, [sp, #256]
-    ldp   d22, d23, [sp, #272]
-    ldp   d24, d25, [sp, #288]
-    ldp   d26, d27, [sp, #304]
-    ldp   d28, d29, [sp, #320]
-    ldp   d30, d31, [sp, #336]
+    ldp   d0, d1,   [sp, #144]
+    ldp   d2, d3,   [sp, #160]
+    ldp   d4, d5,   [sp, #176]
+    ldp   d6, d7,   [sp, #192]
+    ldp   d16, d17, [sp, #208]
+    ldp   d18, d19, [sp, #224]
+    ldp   d20, d21, [sp, #240]
+    ldp   d22, d23, [sp, #256]
+    ldp   d24, d25, [sp, #272]
+    ldp   d26, d27, [sp, #288]
+    ldp   d28, d29, [sp, #304]
+    ldp   d30, d31, [sp, #320]
 
     ldr   x0, [lr, #\ldr_offset]      // Load the instruction.
     adr   xIP1, .Lmark_introspection_return_switch
     bfi   xIP1, x0, #3, #5            // Calculate switch case address.
-    RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 352
+    RESTORE_TWO_REGS_DECREASE_FRAME x0, x1, 336
     br    xIP1
 .endm
 

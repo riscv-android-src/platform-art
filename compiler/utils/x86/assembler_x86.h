@@ -306,7 +306,7 @@ class ConstantArea {
   ArenaVector<int32_t> buffer_;
 };
 
-class X86Assembler FINAL : public Assembler {
+class X86Assembler final : public Assembler {
  public:
   explicit X86Assembler(ArenaAllocator* allocator)
       : Assembler(allocator), constant_area_(allocator) {}
@@ -336,6 +336,10 @@ class X86Assembler FINAL : public Assembler {
   void movl(const Address& dst, Label* lbl);
 
   void movntl(const Address& dst, Register src);
+
+  void blsi(Register dst, Register src);  // no addr variant (for now)
+  void blsmsk(Register dst, Register src);  // no addr variant (for now)
+  void blsr(Register dst, Register src);  // no addr varianr (for now)
 
   void bswapl(Register dst);
 
@@ -500,6 +504,7 @@ class X86Assembler FINAL : public Assembler {
   void andps(XmmRegister dst, const Address& src);
   void pand(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
 
+  void andn(Register dst, Register src1, Register src2);  // no addr variant (for now)
   void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void andnps(XmmRegister dst, XmmRegister src);
   void pandn(XmmRegister dst, XmmRegister src);
@@ -758,8 +763,8 @@ class X86Assembler FINAL : public Assembler {
   //
   int PreferredLoopAlignment() { return 16; }
   void Align(int alignment, int offset);
-  void Bind(Label* label) OVERRIDE;
-  void Jump(Label* label) OVERRIDE {
+  void Bind(Label* label) override;
+  void Jump(Label* label) override {
     jmp(label);
   }
   void Bind(NearLabel* label);
@@ -836,6 +841,11 @@ class X86Assembler FINAL : public Assembler {
 
   void EmitGenericShift(int rm, const Operand& operand, const Immediate& imm);
   void EmitGenericShift(int rm, const Operand& operand, Register shifter);
+
+  // Emit a 3 byte VEX Prefix
+  uint8_t EmitVexByteZero(bool is_two_byte);
+  uint8_t EmitVexByte1(bool r, bool x, bool b, int mmmmm);
+  uint8_t EmitVexByte2(bool w , int l , X86ManagedRegister operand, int pp);
 
   ConstantArea constant_area_;
 

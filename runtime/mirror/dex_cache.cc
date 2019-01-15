@@ -17,7 +17,6 @@
 #include "dex_cache-inl.h"
 
 #include "art_method-inl.h"
-#include "base/globals.h"
 #include "class_linker.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/heap.h"
@@ -27,6 +26,7 @@
 #include "object.h"
 #include "object_array-inl.h"
 #include "runtime.h"
+#include "runtime_globals.h"
 #include "string.h"
 #include "thread.h"
 #include "utils/dex_cache_arrays_layout-inl.h"
@@ -170,6 +170,21 @@ void DexCache::InitializeDexCache(Thread* self,
                   num_method_types,
                   call_sites,
                   dex_file->NumCallSiteIds());
+}
+
+void DexCache::AddPreResolvedStringsArray() {
+  DCHECK_EQ(NumPreResolvedStrings(), 0u);
+  Thread* const self = Thread::Current();
+  LinearAlloc* linear_alloc = Runtime::Current()->GetLinearAlloc();
+  const size_t num_strings = GetDexFile()->NumStringIds();
+  SetField32<false>(NumPreResolvedStringsOffset(), num_strings);
+  GcRoot<mirror::String>* strings =
+      linear_alloc->AllocArray<GcRoot<mirror::String>>(self, num_strings);
+  CHECK(strings != nullptr);
+  SetPreResolvedStrings(strings);
+  for (size_t i = 0; i < GetDexFile()->NumStringIds(); ++i) {
+    CHECK(GetPreResolvedStrings()[i].Read() == nullptr);
+  }
 }
 
 void DexCache::Init(const DexFile* dex_file,

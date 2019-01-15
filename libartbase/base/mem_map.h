@@ -60,6 +60,37 @@ class MemMap {
  public:
   static constexpr bool kCanReplaceMapping = HAVE_MREMAP_SYSCALL;
 
+  // Creates an invalid mapping.
+  MemMap() {}
+
+  // Creates an invalid mapping. Used when we want to be more explicit than MemMap().
+  static MemMap Invalid() {
+    return MemMap();
+  }
+
+  MemMap(MemMap&& other) noexcept REQUIRES(!MemMap::mem_maps_lock_);
+  MemMap& operator=(MemMap&& other) noexcept REQUIRES(!MemMap::mem_maps_lock_) {
+    Reset();
+    swap(other);
+    return *this;
+  }
+
+  // Releases the memory mapping.
+  ~MemMap() REQUIRES(!MemMap::mem_maps_lock_);
+
+  // Swap two MemMaps.
+  void swap(MemMap& other);
+
+  void Reset() {
+    if (IsValid()) {
+      DoReset();
+    }
+  }
+
+  bool IsValid() const {
+    return base_size_ != 0u;
+  }
+
   // Replace the data in this memmmap with the data in the memmap pointed to by source. The caller
   // relinquishes ownership of the source mmap.
   //
@@ -74,85 +105,123 @@ class MemMap {
   //   * mremap must succeed when called on the mappings.
   //
   // If this call succeeds it will return true and:
-  //   * Deallocate *source
-  //   * Sets *source to nullptr
+  //   * Invalidate *source
   //   * The protection of this will remain the same.
   //   * The size of this will be the size of the source
   //   * The data in this will be the data from source.
   //
   // If this call fails it will return false and make no changes to *source or this. The ownership
   // of the source mmap is returned to the caller.
-  bool ReplaceWith(/*in-out*/MemMap** source, /*out*/std::string* error);
+  bool ReplaceWith(/*in-out*/MemMap* source, /*out*/std::string* error);
+
+  // Set a debug friendly name for a map. It will be prefixed with "dalvik-".
+  static void SetDebugName(void* map_ptr, const char* name, size_t size);
 
   // Request an anonymous region of length 'byte_count' and a requested base address.
   // Use null as the requested base address if you don't care.
-  // "reuse" allows re-mapping an address range from an existing mapping.
+  //
+  // `reuse` allows re-mapping an address range from an existing mapping which retains the
+  // ownership of the memory. Alternatively, `reservation` allows re-mapping the start of an
+  // existing reservation mapping, transferring the ownership of the memory to the new MemMap.
   //
   // The word "anonymous" in this context means "not backed by a file". The supplied
   // 'name' will be used -- on systems that support it -- to give the mapping
   // a name.
   //
-  // On success, returns returns a MemMap instance.  On failure, returns null.
-  static MemMap* MapAnonymous(const char* name,
-                              uint8_t* addr,
-                              size_t byte_count,
-                              int prot,
-                              bool low_4gb,
-                              bool reuse,
-                              std::string* error_msg,
-                              bool use_ashmem = true);
+  // On success, returns returns a valid MemMap.  On failure, returns an invalid MemMap.
+  static MemMap MapAnonymous(const char* name,
+                             uint8_t* addr,
+                             size_t byte_count,
+                             int prot,
+                             bool low_4gb,
+                             bool reuse,
+                             /*inout*/MemMap* reservation,
+                             /*out*/std::string* error_msg,
+                             bool use_debug_name = true);
+  static MemMap MapAnonymous(const char* name,
+                             size_t byte_count,
+                             int prot,
+                             bool low_4gb,
+                             /*out*/std::string* error_msg) {
+    return MapAnonymous(name,
+                        /*addr=*/ nullptr,
+                        byte_count,
+                        prot,
+                        low_4gb,
+                        /*reuse=*/ false,
+                        /*reservation=*/ nullptr,
+                        error_msg);
+  }
+  static MemMap MapAnonymous(const char* name,
+                             size_t byte_count,
+                             int prot,
+                             bool low_4gb,
+                             MemMap* reservation,
+                             /*out*/std::string* error_msg) {
+    return MapAnonymous(name,
+                        /*addr=*/ (reservation != nullptr) ? reservation->Begin() : nullptr,
+                        byte_count,
+                        prot,
+                        low_4gb,
+                        /*reuse=*/ false,
+                        reservation,
+                        error_msg);
+  }
 
   // Create placeholder for a region allocated by direct call to mmap.
   // This is useful when we do not have control over the code calling mmap,
   // but when we still want to keep track of it in the list.
   // The region is not considered to be owned and will not be unmmaped.
-  static MemMap* MapDummy(const char* name, uint8_t* addr, size_t byte_count);
+  static MemMap MapDummy(const char* name, uint8_t* addr, size_t byte_count);
 
   // Map part of a file, taking care of non-page aligned offsets.  The
   // "start" offset is absolute, not relative.
   //
-  // On success, returns returns a MemMap instance.  On failure, returns null.
-  static MemMap* MapFile(size_t byte_count,
-                         int prot,
-                         int flags,
-                         int fd,
-                         off_t start,
-                         bool low_4gb,
-                         const char* filename,
-                         std::string* error_msg) {
+  // On success, returns returns a valid MemMap.  On failure, returns an invalid MemMap.
+  static MemMap MapFile(size_t byte_count,
+                        int prot,
+                        int flags,
+                        int fd,
+                        off_t start,
+                        bool low_4gb,
+                        const char* filename,
+                        std::string* error_msg) {
     return MapFileAtAddress(nullptr,
                             byte_count,
                             prot,
                             flags,
                             fd,
                             start,
-                            /*low_4gb*/low_4gb,
-                            /*reuse*/false,
+                            /*low_4gb=*/ low_4gb,
                             filename,
+                            /*reuse=*/ false,
+                            /*reservation=*/ nullptr,
                             error_msg);
   }
 
   // Map part of a file, taking care of non-page aligned offsets.  The "start" offset is absolute,
   // not relative. This version allows requesting a specific address for the base of the mapping.
-  // "reuse" allows us to create a view into an existing mapping where we do not take ownership of
-  // the memory. If error_msg is null then we do not print /proc/maps to the log if
-  // MapFileAtAddress fails. This helps improve performance of the fail case since reading and
-  // printing /proc/maps takes several milliseconds in the worst case.
   //
-  // On success, returns returns a MemMap instance.  On failure, returns null.
-  static MemMap* MapFileAtAddress(uint8_t* addr,
-                                  size_t byte_count,
-                                  int prot,
-                                  int flags,
-                                  int fd,
-                                  off_t start,
-                                  bool low_4gb,
-                                  bool reuse,
-                                  const char* filename,
-                                  std::string* error_msg);
-
-  // Releases the memory mapping.
-  ~MemMap() REQUIRES(!MemMap::mem_maps_lock_);
+  // `reuse` allows re-mapping an address range from an existing mapping which retains the
+  // ownership of the memory. Alternatively, `reservation` allows re-mapping the start of an
+  // existing reservation mapping, transferring the ownership of the memory to the new MemMap.
+  //
+  // If error_msg is null then we do not print /proc/maps to the log if MapFileAtAddress fails.
+  // This helps improve performance of the fail case since reading and printing /proc/maps takes
+  // several milliseconds in the worst case.
+  //
+  // On success, returns returns a valid MemMap.  On failure, returns an invalid MemMap.
+  static MemMap MapFileAtAddress(uint8_t* addr,
+                                 size_t byte_count,
+                                 int prot,
+                                 int flags,
+                                 int fd,
+                                 off_t start,
+                                 bool low_4gb,
+                                 const char* filename,
+                                 bool reuse,
+                                 /*inout*/MemMap* reservation,
+                                 /*out*/std::string* error_msg);
 
   const std::string& GetName() const {
     return name_;
@@ -200,13 +269,31 @@ class MemMap {
   }
 
   // Unmap the pages at end and remap them to create another memory map.
-  MemMap* RemapAtEnd(uint8_t* new_end,
-                     const char* tail_name,
-                     int tail_prot,
-                     std::string* error_msg,
-                     bool use_ashmem = true);
+  MemMap RemapAtEnd(uint8_t* new_end,
+                    const char* tail_name,
+                    int tail_prot,
+                    std::string* error_msg,
+                    bool use_debug_name = true);
 
-  static bool CheckNoGaps(MemMap* begin_map, MemMap* end_map)
+  // Unmap the pages of a file at end and remap them to create another memory map.
+  MemMap RemapAtEnd(uint8_t* new_end,
+                    const char* tail_name,
+                    int tail_prot,
+                    int tail_flags,
+                    int fd,
+                    off_t offset,
+                    std::string* error_msg,
+                    bool use_debug_name = true);
+
+  // Take ownership of pages at the beginning of the mapping. The mapping must be an
+  // anonymous reservation mapping, owning entire pages. The `byte_count` must not
+  // exceed the size of this reservation.
+  //
+  // Returns a mapping owning `byte_count` bytes rounded up to entire pages
+  // with size set to the passed `byte_count`.
+  MemMap TakeReservedMemory(size_t byte_count);
+
+  static bool CheckNoGaps(MemMap& begin_map, MemMap& end_map)
       REQUIRES(!MemMap::mem_maps_lock_);
   static void DumpMaps(std::ostream& os, bool terse = false)
       REQUIRES(!MemMap::mem_maps_lock_);
@@ -240,9 +327,13 @@ class MemMap {
          bool reuse,
          size_t redzone_size = 0) REQUIRES(!MemMap::mem_maps_lock_);
 
+  void DoReset();
+  void Invalidate();
+  void SwapMembers(MemMap& other);
+
   static void DumpMapsLocked(std::ostream& os, bool terse)
       REQUIRES(MemMap::mem_maps_lock_);
-  static bool HasMemMap(MemMap* map)
+  static bool HasMemMap(MemMap& map)
       REQUIRES(MemMap::mem_maps_lock_);
   static MemMap* GetLargestMemMapAt(void* address)
       REQUIRES(MemMap::mem_maps_lock_);
@@ -265,29 +356,38 @@ class MemMap {
                                              off_t offset)
       REQUIRES(!MemMap::mem_maps_lock_);
 
+  // Release memory owned by a reservation mapping.
+  void ReleaseReservedMemory(size_t byte_count);
+
   // member function to access real_munmap
   static bool CheckMapRequest(uint8_t* expected_ptr,
                               void* actual_ptr,
                               size_t byte_count,
                               std::string* error_msg);
 
-  const std::string name_;
-  uint8_t* begin_;  // Start of data. May be changed by AlignBy.
-  size_t size_;  // Length of data.
+  static bool CheckReservation(uint8_t* expected_ptr,
+                               size_t byte_count,
+                               const char* name,
+                               const MemMap& reservation,
+                               /*out*/std::string* error_msg);
 
-  void* base_begin_;  // Page-aligned base address. May be changed by AlignBy.
-  size_t base_size_;  // Length of mapping. May be changed by RemapAtEnd (ie Zygote).
-  int prot_;  // Protection of the map.
+  std::string name_;
+  uint8_t* begin_ = nullptr;    // Start of data. May be changed by AlignBy.
+  size_t size_ = 0u;            // Length of data.
+
+  void* base_begin_ = nullptr;  // Page-aligned base address. May be changed by AlignBy.
+  size_t base_size_ = 0u;       // Length of mapping. May be changed by RemapAtEnd (ie Zygote).
+  int prot_ = 0;                // Protection of the map.
 
   // When reuse_ is true, this is just a view of an existing mapping
   // and we do not take ownership and are not responsible for
   // unmapping.
-  const bool reuse_;
+  bool reuse_ = false;
 
   // When already_unmapped_ is true the destructor will not call munmap.
-  bool already_unmapped_;
+  bool already_unmapped_ = false;
 
-  const size_t redzone_size_;
+  size_t redzone_size_ = 0u;
 
 #if USE_ART_LOW_4G_ALLOCATOR
   static uintptr_t next_mem_pos_;   // Next memory location to check for low_4g extent.
@@ -308,6 +408,10 @@ class MemMap {
 
   friend class MemMapTest;  // To allow access to base_begin_ and base_size_.
 };
+
+inline void swap(MemMap& lhs, MemMap& rhs) {
+  lhs.swap(rhs);
+}
 
 std::ostream& operator<<(std::ostream& os, const MemMap& mem_map);
 

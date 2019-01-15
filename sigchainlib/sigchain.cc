@@ -100,7 +100,7 @@ static decltype(&sigprocmask64) linked_sigprocmask64;
 
 template<typename T>
 static void lookup_next_symbol(T* output, T wrapper, const char* name) {
-  void* sym = dlsym(RTLD_NEXT, name);
+  void* sym = dlsym(RTLD_NEXT, name);  // NOLINT glibc triggers cert-dcl16-c with RTLD_NEXT.
   if (sym == nullptr) {
     sym = dlsym(RTLD_DEFAULT, name);
     if (sym == wrapper || sym == sigaction) {
@@ -490,8 +490,13 @@ extern "C" void EnsureFrontOfChain(int signal) {
   }
 
   // Read the current action without looking at the chain, it should be the expected action.
+#if defined(__BIONIC__)
+  struct sigaction64 current_action;
+  linked_sigaction64(signal, nullptr, &current_action);
+#else
   struct sigaction current_action;
   linked_sigaction(signal, nullptr, &current_action);
+#endif
 
   // If the sigactions don't match then we put the current action on the chain and make ourself as
   // the main action.

@@ -40,7 +40,7 @@ using Strategy = RegisterAllocator::Strategy;
 
 class RegisterAllocatorTest : public OptimizingUnitTest {
  protected:
-  void SetUp() OVERRIDE {
+  void SetUp() override {
     // This test is using the x86 ISA.
     OverrideInstructionSetFeatures(InstructionSet::kX86, "default");
     OptimizingUnitTest::SetUp();
@@ -68,11 +68,11 @@ class RegisterAllocatorTest : public OptimizingUnitTest {
   bool ValidateIntervals(const ScopedArenaVector<LiveInterval*>& intervals,
                          const CodeGenerator& codegen) {
     return RegisterAllocator::ValidateIntervals(ArrayRef<LiveInterval* const>(intervals),
-                                                /* number_of_spill_slots */ 0u,
-                                                /* number_of_out_slots */ 0u,
+                                                /* number_of_spill_slots= */ 0u,
+                                                /* number_of_out_slots= */ 0u,
                                                 codegen,
-                                                /* processing_core_registers */ true,
-                                                /* log_fatal_on_failure */ false);
+                                                /* processing_core_registers= */ true,
+                                                /* log_fatal_on_failure= */ false);
   }
 };
 
@@ -872,9 +872,9 @@ TEST_F(RegisterAllocatorTest, SpillInactive) {
   // Create an interval with lifetime holes.
   static constexpr size_t ranges1[][2] = {{0, 2}, {4, 6}, {8, 10}};
   LiveInterval* first = BuildInterval(ranges1, arraysize(ranges1), GetScopedAllocator(), -1, one);
-  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 8));
-  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 7));
-  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 6));
+  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 8));
+  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 7));
+  first->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 6));
 
   locations = new (GetAllocator()) LocationSummary(first->GetDefinedBy(), LocationSummary::kNoCall);
   locations->SetOut(Location::RequiresRegister());
@@ -895,9 +895,9 @@ TEST_F(RegisterAllocatorTest, SpillInactive) {
   // before lifetime position 6 yet.
   static constexpr size_t ranges3[][2] = {{2, 4}, {8, 10}};
   LiveInterval* third = BuildInterval(ranges3, arraysize(ranges3), GetScopedAllocator(), -1, three);
-  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 8));
-  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 4));
-  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, false, 3));
+  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 8));
+  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 4));
+  third->uses_.push_front(*new (GetScopedAllocator()) UsePosition(user, 0u, 3));
   locations = new (GetAllocator()) LocationSummary(third->GetDefinedBy(), LocationSummary::kNoCall);
   locations->SetOut(Location::RequiresRegister());
   third = third->SplitAt(3);

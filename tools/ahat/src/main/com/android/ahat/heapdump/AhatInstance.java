@@ -330,6 +330,25 @@ public abstract class AhatInstance implements Diffable<AhatInstance> {
   }
 
   /**
+   * Returns true if this is an instance of a (subclass of a) class with the
+   * given name.
+   *
+   * @param className the name of the class to check for
+   * @return true if this is an instance of a (subclass of a) class with the
+   *              given name
+   */
+  public boolean isInstanceOfClass(String className) {
+    AhatClassObj cls = getClassObj();
+    while (cls != null) {
+      if (className.equals(cls.getName())) {
+        return true;
+      }
+      cls = cls.getSuperClassObj();
+    }
+    return false;
+  }
+
+  /**
    * Returns true if the given instance is an array instance.
    *
    * @return true if the given instance is an array instance
@@ -467,6 +486,44 @@ public abstract class AhatInstance implements Diffable<AhatInstance> {
    * @return the dex location associated with this object
    */
   public String getDexCacheLocation(int maxChars) {
+    return null;
+  }
+
+  /**
+   * Returns the name of the Binder proxy interface associated with this object.
+   * Only applies to instances of android.os.BinderProxy. If this is an
+   * instance of BinderProxy, returns the fully qualified binder interface name,
+   * otherwise returns null.
+   *
+   * @return the name of the binder interface associated with this object
+   */
+  public String getBinderProxyInterfaceName() {
+    return null;
+  }
+
+  /**
+   * Returns the descriptor of the Binder token associated with this object.
+   * Only applies to instances of android.os.Binder. If this is an instance of
+   * android.os.Binder with a subclass of the name "descriptor$Stub", the
+   * object in question is a binder stub, and this function will return null.
+   * In that case, @see AhatInstance#getBinderStubInterfaceName
+   *
+   * @return the descriptor of this object, if it's a binder token
+   */
+  public String getBinderTokenDescriptor() {
+    return null;
+  }
+
+  /**
+   * Returns the name of the Binder stub interface associated with this object.
+   * Only applies to instances which are a subclass of android.os.Binder,
+   * and are an instance of class 'descriptor$Stub', where descriptor
+   * is the descriptor of the android.os.Binder object.
+   *
+   * @return the name of the binder interface associated with this object,
+   *         or null if this is not a binder stub interface.
+   */
+  public String getBinderStubInterfaceName() {
     return null;
   }
 

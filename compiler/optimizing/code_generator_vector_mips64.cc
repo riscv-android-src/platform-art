@@ -79,13 +79,13 @@ void InstructionCodeGeneratorMIPS64::VisitVecReplicateScalar(HVecReplicateScalar
       DCHECK_EQ(4u, instruction->GetVectorLength());
       __ ReplicateFPToVectorRegister(dst,
                                      locations->InAt(0).AsFpuRegister<FpuRegister>(),
-                                     /* is_double */ false);
+                                     /* is_double= */ false);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
       __ ReplicateFPToVectorRegister(dst,
                                      locations->InAt(0).AsFpuRegister<FpuRegister>(),
-                                     /* is_double */ true);
+                                     /* is_double= */ true);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -185,7 +185,7 @@ void InstructionCodeGeneratorMIPS64::VisitVecReduce(HVecReduce* instruction) {
   switch (instruction->GetPackedType()) {
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      switch (instruction->GetKind()) {
+      switch (instruction->GetReductionKind()) {
         case HVecReduce::kSum:
           __ Hadd_sD(tmp, src, src);
           __ IlvlD(dst, tmp, tmp);
@@ -207,7 +207,7 @@ void InstructionCodeGeneratorMIPS64::VisitVecReduce(HVecReduce* instruction) {
       break;
     case DataType::Type::kInt64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      switch (instruction->GetKind()) {
+      switch (instruction->GetReductionKind()) {
         case HVecReduce::kSum:
           __ IlvlD(dst, src, src);
           __ AddvD(dst, dst, src);
@@ -1272,6 +1272,14 @@ void InstructionCodeGeneratorMIPS64::VisitVecSADAccumulate(HVecSADAccumulate* in
   }
 }
 
+void LocationsBuilderMIPS64::VisitVecDotProd(HVecDotProd* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+}
+
+void InstructionCodeGeneratorMIPS64::VisitVecDotProd(HVecDotProd* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+}
+
 // Helper to set up locations for vector memory operations.
 static void CreateVecMemLocations(ArenaAllocator* allocator,
                                   HVecMemoryOperation* instruction,
@@ -1334,7 +1342,7 @@ int32_t InstructionCodeGeneratorMIPS64::VecAddress(LocationSummary* locations,
 }
 
 void LocationsBuilderMIPS64::VisitVecLoad(HVecLoad* instruction) {
-  CreateVecMemLocations(GetGraph()->GetAllocator(), instruction, /* is_load */ true);
+  CreateVecMemLocations(GetGraph()->GetAllocator(), instruction, /* is_load= */ true);
 }
 
 void InstructionCodeGeneratorMIPS64::VisitVecLoad(HVecLoad* instruction) {
@@ -1377,7 +1385,7 @@ void InstructionCodeGeneratorMIPS64::VisitVecLoad(HVecLoad* instruction) {
 }
 
 void LocationsBuilderMIPS64::VisitVecStore(HVecStore* instruction) {
-  CreateVecMemLocations(GetGraph()->GetAllocator(), instruction, /* is_load */ false);
+  CreateVecMemLocations(GetGraph()->GetAllocator(), instruction, /* is_load= */ false);
 }
 
 void InstructionCodeGeneratorMIPS64::VisitVecStore(HVecStore* instruction) {

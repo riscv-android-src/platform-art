@@ -19,6 +19,7 @@
 
 #include <stdint.h>
 #include <cstddef>
+#include <list>
 #include <memory>
 #include <vector>
 
@@ -177,7 +178,7 @@ class OatWriter {
                             bool verify,
                             bool update_input_vdex,
                             CopyOption copy_dex_files,
-                            /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+                            /*out*/ std::vector<MemMap>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
   // Initialize the writer with the given parameters.
   void Initialize(const CompilerDriver* compiler_driver,
@@ -198,10 +199,7 @@ class OatWriter {
   // Check the size of the written oat file.
   bool CheckOatSize(OutputStream* out, size_t file_offset, size_t relative_offset);
   // Write the oat header. This finalizes the oat file.
-  bool WriteHeader(OutputStream* out,
-                   uint32_t image_file_location_oat_checksum,
-                   uintptr_t image_file_location_oat_begin,
-                   int32_t image_patch_delta);
+  bool WriteHeader(OutputStream* out);
 
   // Returns whether the oat file has an associated image.
   bool HasImage() const {
@@ -259,6 +257,7 @@ class OatWriter {
   }
 
  private:
+  class ChecksumUpdatingOutputStream;
   class DexFileSource;
   class OatClassHeader;
   class OatClass;
@@ -315,7 +314,7 @@ class OatWriter {
                     bool update_input_vdex);
   bool OpenDexFiles(File* file,
                     bool verify,
-                    /*out*/ std::vector<std::unique_ptr<MemMap>>* opened_dex_files_map,
+                    /*out*/ std::vector<MemMap>* opened_dex_files_map,
                     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
 
   size_t InitOatHeader(uint32_t num_dex_files, SafeMap<std::string, std::string>* key_value_store);
@@ -402,6 +401,9 @@ class OatWriter {
 
   // Offset of section holding quickening info inside Vdex.
   size_t vdex_quickening_info_offset_;
+
+  // OAT checksum.
+  uint32_t oat_checksum_;
 
   // Size of the .text segment.
   size_t code_size_;

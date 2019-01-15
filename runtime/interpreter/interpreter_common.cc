@@ -18,6 +18,7 @@
 
 #include <cmath>
 
+#include "base/casts.h"
 #include "base/enums.h"
 #include "class_root.h"
 #include "debugger.h"
@@ -28,10 +29,13 @@
 #include "jvalue-inl.h"
 #include "method_handles-inl.h"
 #include "method_handles.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/array-inl.h"
 #include "mirror/class.h"
 #include "mirror/emulated_stack_frame.h"
 #include "mirror/method_handle_impl-inl.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "mirror/var_handle.h"
 #include "reflection-inl.h"
 #include "reflection.h"
@@ -47,6 +51,42 @@ namespace interpreter {
 
 void ThrowNullPointerExceptionFromInterpreter() {
   ThrowNullPointerExceptionFromDexPC();
+}
+
+bool CheckStackOverflow(Thread* self, size_t frame_size)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool implicit_check = !Runtime::Current()->ExplicitStackOverflowChecks();
+  uint8_t* stack_end = self->GetStackEndForInterpreter(implicit_check);
+  if (UNLIKELY(__builtin_frame_address(0) < stack_end + frame_size)) {
+    ThrowStackOverflowError(self);
+    return false;
+  }
+  return true;
+}
+
+bool UseFastInterpreterToInterpreterInvoke(ArtMethod* method) {
+  Runtime* runtime = Runtime::Current();
+  const void* quick_code = method->GetEntryPointFromQuickCompiledCode();
+  if (!runtime->GetClassLinker()->IsQuickToInterpreterBridge(quick_code)) {
+    return false;
+  }
+  if (!method->SkipAccessChecks() || method->IsNative() || method->IsProxyMethod()) {
+    return false;
+  }
+  if (method->IsIntrinsic()) {
+    return false;
+  }
+  if (method->GetDeclaringClass()->IsStringClass() && method->IsConstructor()) {
+    return false;
+  }
+  if (method->IsStatic() && !method->GetDeclaringClass()->IsInitialized()) {
+    return false;
+  }
+  ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
+  if ((profiling_info != nullptr) && (profiling_info->GetSavedEntryPoint() != nullptr)) {
+    return false;
+  }
+  return true;
 }
 
 template<FindFieldType find_type, Primitive::Type field_type, bool do_access_check,
@@ -371,6 +411,12 @@ bool DoIPutQuick(const ShadowFrame& shadow_frame, const Instruction* inst, uint1
     if (UNLIKELY(self->IsExceptionPending())) {
       return false;
     }
+    if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+      // Don't actually set the field. The next instruction will force us to pop.
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+      DCHECK(PrevFrameWillRetry(self, shadow_frame));
+      return true;
+    }
   }
   // Note: iput-x-quick instructions are only for non-volatile fields.
   switch (field_type) {
@@ -440,6 +486,11 @@ bool MoveToExceptionHandler(Thread* self,
       self->IsExceptionThrownByCurrentMethod(exception.Get())) {
     // See b/65049545 for why we don't need to check to see if the exception has changed.
     instrumentation->ExceptionThrownEvent(self, exception.Get());
+    if (shadow_frame.GetForcePopFrame()) {
+      // We will check in the caller for GetForcePopFrame again. We need to bail out early to
+      // prevent an ExceptionHandledEvent from also being sent before popping.
+      return true;
+    }
   }
   bool clear_exception = false;
   uint32_t found_dex_pc = shadow_frame.GetMethod()->FindCatchBlock(
@@ -584,10 +635,10 @@ void SetStringInitValueToAllAliases(ShadowFrame* shadow_frame,
   for (uint32_t i = 0, e = shadow_frame->NumberOfVRegs(); i < e; ++i) {
     if (shadow_frame->GetVRegReference(i) == existing) {
       DCHECK_EQ(shadow_frame->GetVRegReference(i),
-                reinterpret_cast<mirror::Object*>(shadow_frame->GetVReg(i)));
+                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
       shadow_frame->SetVRegReference(i, result.GetL());
       DCHECK_EQ(shadow_frame->GetVRegReference(i),
-                reinterpret_cast<mirror::Object*>(shadow_frame->GetVReg(i)));
+                reinterpret_cast32<mirror::Object*>(shadow_frame->GetVReg(i)));
     }
   }
 }
@@ -702,12 +753,12 @@ bool DoMethodHandleInvokeExact(Thread* self,
   if (inst->Opcode() == Instruction::INVOKE_POLYMORPHIC) {
     static const bool kIsRange = false;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, true /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ true, inst, inst_data, result);
   } else {
     DCHECK_EQ(inst->Opcode(), Instruction::INVOKE_POLYMORPHIC_RANGE);
     static const bool kIsRange = true;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, true /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ true, inst, inst_data, result);
   }
 }
 
@@ -719,12 +770,12 @@ bool DoMethodHandleInvoke(Thread* self,
   if (inst->Opcode() == Instruction::INVOKE_POLYMORPHIC) {
     static const bool kIsRange = false;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, false /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ false, inst, inst_data, result);
   } else {
     DCHECK_EQ(inst->Opcode(), Instruction::INVOKE_POLYMORPHIC_RANGE);
     static const bool kIsRange = true;
     return DoMethodHandleInvokeCommon<kIsRange>(
-        self, shadow_frame, false /* is_exact */, inst, inst_data, result);
+        self, shadow_frame, /* invoke_exact= */ false, inst, inst_data, result);
   }
 }
 
@@ -1059,7 +1110,7 @@ static bool PackCollectorArrayForBootstrapMethod(Thread* self,
   return true;
 
 #define COLLECT_REFERENCE_ARRAY(T, Type)                                \
-  Handle<mirror::ObjectArray<T>> array =                                \
+  Handle<mirror::ObjectArray<T>> array =                   /* NOLINT */ \
       hs.NewHandle(mirror::ObjectArray<T>::Alloc(self,                  \
                                                  array_type,            \
                                                  array_length));        \
@@ -1117,7 +1168,7 @@ static ObjPtr<mirror::MethodType> BuildCallSiteForBootstrapMethod(Thread* self,
                                                                   const DexFile* dex_file,
                                                                   uint32_t call_site_idx)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::CallSiteIdItem& csi = dex_file->GetCallSiteId(call_site_idx);
+  const dex::CallSiteIdItem& csi = dex_file->GetCallSiteId(call_site_idx);
   CallSiteArrayValueIterator it(*dex_file, csi);
   DCHECK_GE(it.Size(), 1u);
 
@@ -1172,7 +1223,7 @@ static ObjPtr<mirror::CallSite> InvokeBootstrapMethod(Thread* self,
   static constexpr size_t kMandatoryArgumentsCount = 3;
   ArtMethod* referrer = shadow_frame.GetMethod();
   const DexFile* dex_file = referrer->GetDexFile();
-  const DexFile::CallSiteIdItem& csi = dex_file->GetCallSiteId(call_site_idx);
+  const dex::CallSiteIdItem& csi = dex_file->GetCallSiteId(call_site_idx);
   CallSiteArrayValueIterator it(*dex_file, csi);
   if (it.Size() < kMandatoryArgumentsCount) {
     ThrowBootstrapMethodError("Truncated bootstrap arguments (%zu < %zu)",
@@ -1445,7 +1496,7 @@ static inline void AssignRegister(ShadowFrame* new_shadow_frame, const ShadowFra
   // If both register locations contains the same value, the register probably holds a reference.
   // Note: As an optimization, non-moving collectors leave a stale reference value
   // in the references array even after the original vreg was overwritten to a non-reference.
-  if (src_value == reinterpret_cast<uintptr_t>(o.Ptr())) {
+  if (src_value == reinterpret_cast32<uint32_t>(o.Ptr())) {
     new_shadow_frame->SetVRegReference(dest_reg, o);
   } else {
     new_shadow_frame->SetVReg(dest_reg, src_value);
@@ -1586,7 +1637,7 @@ static inline bool DoCallCommon(ArtMethod* called_method,
 
     // We need to do runtime check on reference assignment. We need to load the shorty
     // to get the exact type of each reference argument.
-    const DexFile::TypeList* params = method->GetParameterTypeList();
+    const dex::TypeList* params = method->GetParameterTypeList();
     uint32_t shorty_len = 0;
     const char* shorty = method->GetShorty(&shorty_len);
 
@@ -1825,7 +1876,7 @@ void RecordArrayElementsInTransaction(ObjPtr<mirror::Array> array, int32_t count
     default:
       LOG(FATAL) << "Unsupported primitive type " << primitive_component_type
                  << " in fill-array-data";
-      break;
+      UNREACHABLE();
   }
 }
 

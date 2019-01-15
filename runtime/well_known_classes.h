@@ -17,7 +17,7 @@
 #ifndef ART_RUNTIME_WELL_KNOWN_CLASSES_H_
 #define ART_RUNTIME_WELL_KNOWN_CLASSES_H_
 
-#include "base/mutex.h"
+#include "base/locks.h"
 #include "jni.h"
 #include "obj_ptr.h"
 
@@ -57,6 +57,7 @@ struct WellKnownClasses {
   static jclass dalvik_system_DexPathList;
   static jclass dalvik_system_DexPathList__Element;
   static jclass dalvik_system_EmulatedStackFrame;
+  static jclass dalvik_system_InMemoryDexClassLoader;
   static jclass dalvik_system_PathClassLoader;
   static jclass dalvik_system_VMRuntime;
   static jclass java_lang_annotation_Annotation__array;
@@ -126,17 +127,20 @@ struct WellKnownClasses {
   static jmethodID org_apache_harmony_dalvik_ddmc_DdmServer_dispatch;
 
   static jfieldID dalvik_system_BaseDexClassLoader_pathList;
+  static jfieldID dalvik_system_BaseDexClassLoader_sharedLibraryLoaders;
   static jfieldID dalvik_system_DexFile_cookie;
   static jfieldID dalvik_system_DexFile_fileName;
   static jfieldID dalvik_system_DexPathList_dexElements;
   static jfieldID dalvik_system_DexPathList__Element_dexFile;
   static jfieldID dalvik_system_VMRuntime_nonSdkApiUsageConsumer;
+  static jfieldID java_lang_Thread_parkBlocker;
   static jfieldID java_lang_Thread_daemon;
   static jfieldID java_lang_Thread_group;
   static jfieldID java_lang_Thread_lock;
   static jfieldID java_lang_Thread_name;
   static jfieldID java_lang_Thread_priority;
   static jfieldID java_lang_Thread_nativePeer;
+  static jfieldID java_lang_Thread_unparkedBeforeStart;
   static jfieldID java_lang_ThreadGroup_groups;
   static jfieldID java_lang_ThreadGroup_ngroups;
   static jfieldID java_lang_ThreadGroup_mainThreadGroup;

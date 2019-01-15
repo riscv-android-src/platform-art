@@ -27,37 +27,35 @@ TEST_ART_RUN_TEST_DEPENDENCIES := \
 
 # We need dex2oat and dalvikvm on the target as well as the core images (all images as we sync
 # only once).
-TEST_ART_TARGET_SYNC_DEPS += $(ART_TARGET_EXECUTABLES) $(TARGET_CORE_IMG_OUTS)
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES := $(ART_TARGET_EXECUTABLES) $(TARGET_CORE_IMG_OUTS)
 
 # Also need libartagent.
-TEST_ART_TARGET_SYNC_DEPS += libartagent-target libartagentd-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libartagent-target libartagentd-target
 
 # Also need libtiagent.
-TEST_ART_TARGET_SYNC_DEPS += libtiagent-target libtiagentd-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libtiagent-target libtiagentd-target
 
 # Also need libtistress.
-TEST_ART_TARGET_SYNC_DEPS += libtistress-target libtistressd-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libtistress-target libtistressd-target
 
 # Also need libarttest.
-TEST_ART_TARGET_SYNC_DEPS += libarttest-target libarttestd-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libarttest-target libarttestd-target
 
 # Also need libnativebridgetest.
-TEST_ART_TARGET_SYNC_DEPS += libnativebridgetest-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libnativebridgetest-target
 
 # Also need libopenjdkjvmti.
-TEST_ART_TARGET_SYNC_DEPS += libopenjdkjvmti-target libopenjdkjvmtid-target
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libopenjdkjvmti-target libopenjdkjvmtid-target
 
-TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/core-libart-testdex.jar
-TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/core-oj-testdex.jar
-TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/okhttp-testdex.jar
-TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/bouncycastle-testdex.jar
-TEST_ART_TARGET_SYNC_DEPS += $(TARGET_OUT_JAVA_LIBRARIES)/conscrypt-testdex.jar
+ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += \
+  $(foreach jar,$(TARGET_TEST_CORE_JARS),$(TARGET_OUT_JAVA_LIBRARIES)/$(jar).jar)
 
 # All tests require the host executables. The tests also depend on the core images, but on
 # specific version depending on the compiler.
 ART_TEST_HOST_RUN_TEST_DEPENDENCIES := \
   $(ART_HOST_EXECUTABLES) \
   $(HOST_OUT_EXECUTABLES)/hprof-conv \
+  $(HOST_OUT_EXECUTABLES)/timeout_dumper \
   $(OUT_DIR)/$(ART_TEST_LIST_host_$(ART_HOST_ARCH)_libtiagent) \
   $(OUT_DIR)/$(ART_TEST_LIST_host_$(ART_HOST_ARCH)_libtiagentd) \
   $(OUT_DIR)/$(ART_TEST_LIST_host_$(ART_HOST_ARCH)_libtistress) \
@@ -72,6 +70,7 @@ ART_TEST_HOST_RUN_TEST_DEPENDENCIES := \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$(ART_HOST_SHLIB_EXTENSION) \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkjvmti$(ART_HOST_SHLIB_EXTENSION) \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkjvmtid$(ART_HOST_SHLIB_EXTENSION) \
+  $(HOST_CORE_DEX_LOCATIONS) \
 
 ifneq ($(HOST_PREFER_32_BIT),true)
 ART_TEST_HOST_RUN_TEST_DEPENDENCIES += \

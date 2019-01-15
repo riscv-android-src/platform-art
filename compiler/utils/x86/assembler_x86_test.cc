@@ -44,26 +44,26 @@ class AssemblerX86Test : public AssemblerTest<x86::X86Assembler,
                                               x86::XmmRegister,
                                               x86::Immediate> {
  public:
-  typedef AssemblerTest<x86::X86Assembler,
-                        x86::Address,
-                        x86::Register,
-                        x86::XmmRegister,
-                        x86::Immediate> Base;
+  using Base = AssemblerTest<x86::X86Assembler,
+                             x86::Address,
+                             x86::Register,
+                             x86::XmmRegister,
+                             x86::Immediate>;
 
  protected:
-  std::string GetArchitectureString() OVERRIDE {
+  std::string GetArchitectureString() override {
     return "x86";
   }
 
-  std::string GetAssemblerParameters() OVERRIDE {
+  std::string GetAssemblerParameters() override {
     return " --32";
   }
 
-  std::string GetDisassembleParameters() OVERRIDE {
+  std::string GetDisassembleParameters() override {
     return " -D -bbinary -mi386 --no-show-raw-insn";
   }
 
-  void SetUpHelpers() OVERRIDE {
+  void SetUpHelpers() override {
     if (addresses_singleton_.size() == 0) {
       // One addressing mode to test the repeat drivers.
       addresses_singleton_.push_back(x86::Address(x86::EAX, x86::EBX, x86::TIMES_1, 2));
@@ -118,25 +118,25 @@ class AssemblerX86Test : public AssemblerTest<x86::X86Assembler,
     }
   }
 
-  void TearDown() OVERRIDE {
+  void TearDown() override {
     AssemblerTest::TearDown();
     STLDeleteElements(&registers_);
     STLDeleteElements(&fp_registers_);
   }
 
-  std::vector<x86::Address> GetAddresses() OVERRIDE {
+  std::vector<x86::Address> GetAddresses() override {
     return addresses_;
   }
 
-  std::vector<x86::Register*> GetRegisters() OVERRIDE {
+  std::vector<x86::Register*> GetRegisters() override {
     return registers_;
   }
 
-  std::vector<x86::XmmRegister*> GetFPRegisters() OVERRIDE {
+  std::vector<x86::XmmRegister*> GetFPRegisters() override {
     return fp_registers_;
   }
 
-  x86::Immediate CreateImmediate(int64_t imm_value) OVERRIDE {
+  x86::Immediate CreateImmediate(int64_t imm_value) override {
     return x86::Immediate(imm_value);
   }
 
@@ -347,6 +347,18 @@ TEST_F(AssemblerX86Test, RepMovsw) {
   GetAssembler()->rep_movsw();
   const char* expected = "rep movsw\n";
   DriverStr(expected, "rep_movsw");
+}
+
+TEST_F(AssemblerX86Test, Blsmask) {
+  DriverStr(RepeatRR(&x86::X86Assembler::blsmsk, "blsmsk %{reg2}, %{reg1}"), "blsmsk");
+}
+
+TEST_F(AssemblerX86Test, Blsi) {
+  DriverStr(RepeatRR(&x86::X86Assembler::blsi, "blsi %{reg2}, %{reg1}"), "blsi");
+}
+
+TEST_F(AssemblerX86Test, Blsr) {
+  DriverStr(RepeatRR(&x86::X86Assembler::blsr, "blsr %{reg2}, %{reg1}"), "blsr");
 }
 
 TEST_F(AssemblerX86Test, Bsfl) {
@@ -655,6 +667,10 @@ TEST_F(AssemblerX86Test, AndPS) {
 
 TEST_F(AssemblerX86Test, PAnd) {
   DriverStr(RepeatFF(&x86::X86Assembler::pand, "pand %{reg2}, %{reg1}"), "pand");
+}
+
+TEST_F(AssemblerX86Test, Andn) {
+  DriverStr(RepeatRRR(&x86::X86Assembler::andn, "andn %{reg3}, %{reg2}, %{reg1}"), "andn");
 }
 
 TEST_F(AssemblerX86Test, AndnPD) {

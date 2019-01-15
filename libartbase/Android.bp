@@ -24,20 +24,24 @@ cc_defaults {
         "base/arena_allocator.cc",
         "base/arena_bit_vector.cc",
         "base/bit_vector.cc",
+        "base/enums.cc",
         "base/file_magic.cc",
         "base/file_utils.cc",
         "base/hex_dump.cc",
+        "base/hiddenapi_flags.cc",
         "base/logging.cc",
         "base/malloc_arena_pool.cc",
+        "base/membarrier.cc",
+        "base/memfd.cc",
         "base/memory_region.cc",
         "base/mem_map.cc",
         // "base/mem_map_fuchsia.cc", put in target when fuchsia supported by soong
-        "base/mem_map_unix.cc",
         "base/os_linux.cc",
         "base/runtime_debug.cc",
         "base/safe_copy.cc",
         "base/scoped_arena_allocator.cc",
         "base/scoped_flock.cc",
+        "base/socket_peer_is_trusted.cc",
         "base/time_utils.cc",
         "base/unix_file/fd_file.cc",
         "base/unix_file/random_access_file_utils.cc",
@@ -46,37 +50,101 @@ cc_defaults {
     ],
     target: {
         android: {
+            srcs: [
+                "base/mem_map_unix.cc",
+            ],
             static_libs: [
                 // ZipArchive support, the order matters here to get all symbols.
                 "libziparchive",
                 "libz",
             ],
-	    shared_libs: [
-	        // For android::FileMap used by libziparchive.
-                "libutils",
-	    ],
+            shared_libs: [
+                "liblog",
+                // For ashmem.
+                "libcutils",
+                // For common macros.
+                "libbase",
+            ],
+            export_shared_lib_headers: ["libbase"],
+            // Exclude the version script from Darwin host since it's not
+            // supported by the linker there. That means ASan checks on Darwin
+            // might trigger ODR violations.
+            version_script: "libartbase.map",
         },
-        host: {
+        not_windows: {
+            srcs: [
+                "base/mem_map_unix.cc",
+            ],
             shared_libs: [
                 "libziparchive",
                 "libz",
+                "liblog",
+                // For ashmem.
+                "libcutils",
+                // For common macros.
+                "libbase",
             ],
+            export_shared_lib_headers: ["libbase"],
+        },
+        linux_glibc: {
+            version_script: "libartbase.map",
+        },
+        windows: {
+            version_script: "libartbase.map",
+            srcs: [
+                "base/mem_map_windows.cc",
+            ],
+            static_libs: [
+                "libziparchive",
+                "libz",
+                "liblog",
+                // For ashmem.
+                "libcutils",
+                // For common macros.
+                "libbase",
+            ],
+            export_static_lib_headers: ["libbase"],
+            cflags: ["-Wno-thread-safety"],
         },
     },
     generated_sources: ["art_libartbase_operator_srcs"],
     cflags: ["-DBUILDING_LIBART=1"],
-    shared_libs: [
-        "liblog",
-	// For ashmem.
-        "libcutils",
-        // For common macros.
-        "libbase",
+
+    // Utilities used by various ART libs and tools are linked in statically
+    // here to avoid shared lib dependencies outside the ART APEX. No target
+    // there should depend on these separately.
+    whole_static_libs: [
+        "liblz4",
+        "liblzma",
     ],
+
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
     //       generically. dex2oat takes care of it itself.
-    export_shared_lib_headers: ["libbase"],
+}
+
+cc_defaults {
+    name: "libartbase_static_base_defaults",
+    static_libs: [
+        "libbase",
+        "libcutils",
+        "liblog",
+        "libz",
+        "libziparchive",
+    ],
+}
+
+cc_defaults {
+    name: "libartbase_static_defaults",
+    defaults: ["libartbase_static_base_defaults"],
+    static_libs: ["libartbase"],
+}
+
+cc_defaults {
+    name: "libartbased_static_defaults",
+    defaults: ["libartbase_static_base_defaults"],
+    static_libs: ["libartbased"],
 }
 
 gensrcs {
@@ -86,7 +154,6 @@ gensrcs {
     srcs: [
         "arch/instruction_set.h",
         "base/allocator.h",
-        "base/callee_save_type.h",
         "base/unix_file/fd_file.h",
     ],
     output_extension: "operator_out.cc",
@@ -105,6 +172,14 @@ art_cc_library {
         "libziparchive",
     ],
     export_shared_lib_headers: ["libbase"],
+    target: {
+        windows: {
+            enabled: true,
+            shared: {
+                enabled: false,
+            },
+        },
+    },
 }
 
 art_cc_library {
@@ -118,6 +193,14 @@ art_cc_library {
         "libziparchive",
     ],
     export_shared_lib_headers: ["libbase"],
+    target: {
+        windows: {
+            enabled: true,
+            shared: {
+                enabled: false,
+            },
+        },
+    },
 }
 
 art_cc_library {
@@ -134,9 +217,6 @@ art_cc_library {
     ],
     header_libs: [
         "libnativehelper_header_only",
-    ],
-    include_dirs: [
-        "external/icu/icu4c/source/common",
     ],
 }
 
@@ -162,6 +242,8 @@ art_cc_test {
         "base/indenter_test.cc",
         "base/leb128_test.cc",
         "base/logging_test.cc",
+        "base/memfd_test.cc",
+        "base/membarrier_test.cc",
         "base/memory_region_test.cc",
         "base/mem_map_test.cc",
         "base/safe_copy_test.cc",

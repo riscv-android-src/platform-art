@@ -131,15 +131,15 @@ const RegisterValue& VeriFlowAnalysis::GetRegister(uint32_t dex_register) const 
 
 RegisterValue VeriFlowAnalysis::GetReturnType(uint32_t method_index) {
   const DexFile& dex_file = resolver_->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(method_index);
-  const DexFile::ProtoId& proto_id = dex_file.GetMethodPrototype(method_id);
+  const dex::MethodId& method_id = dex_file.GetMethodId(method_index);
+  const dex::ProtoId& proto_id = dex_file.GetMethodPrototype(method_id);
   VeriClass* cls = resolver_->GetVeriClass(proto_id.return_type_idx_);
   return RegisterValue(RegisterSource::kMethod, DexFileReference(&dex_file, method_index), cls);
 }
 
 RegisterValue VeriFlowAnalysis::GetFieldType(uint32_t field_index) {
   const DexFile& dex_file = resolver_->GetDexFile();
-  const DexFile::FieldId& field_id = dex_file.GetFieldId(field_index);
+  const dex::FieldId& field_id = dex_file.GetFieldId(field_index);
   VeriClass* cls = resolver_->GetVeriClass(field_id.type_idx_);
   return RegisterValue(RegisterSource::kField, DexFileReference(&dex_file, field_index), cls);
 }
@@ -162,7 +162,7 @@ int VeriFlowAnalysis::GetBranchFlags(const Instruction& instruction) const {
     case Instruction::IF_##cond##Z: { \
       RegisterValue val = GetRegister(instruction.VRegA()); \
       if (val.IsConstant()) { \
-        if (val.GetConstant() op 0) { \
+        if (val.GetConstant() op 0) {  /* NOLINT */ \
           return Instruction::kBranch; \
         } else { \
           return Instruction::kContinue; \
@@ -318,7 +318,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::INVOKE_STATIC:
     case Instruction::INVOKE_SUPER:
     case Instruction::INVOKE_VIRTUAL: {
-      last_result_ = AnalyzeInvoke(instruction, /* is_range */ false);
+      last_result_ = AnalyzeInvoke(instruction, /* is_range= */ false);
       break;
     }
 
@@ -327,7 +327,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::INVOKE_STATIC_RANGE:
     case Instruction::INVOKE_SUPER_RANGE:
     case Instruction::INVOKE_VIRTUAL_RANGE: {
-      last_result_ = AnalyzeInvoke(instruction, /* is_range */ true);
+      last_result_ = AnalyzeInvoke(instruction, /* is_range= */ true);
       break;
     }
 
@@ -495,7 +495,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::DIV_INT_LIT8:
     case Instruction::REM_INT_LIT8:
     case Instruction::SHL_INT_LIT8:
-    case Instruction::SHR_INT_LIT8: {
+    case Instruction::SHR_INT_LIT8:
     case Instruction::USHR_INT_LIT8: {
       UpdateRegister(instruction.VRegA(), VeriClass::integer_);
       break;
@@ -537,7 +537,7 @@ void VeriFlowAnalysis::ProcessDexInstruction(const Instruction& instruction) {
     case Instruction::CMPG_FLOAT:
     case Instruction::CMPG_DOUBLE:
     case Instruction::CMPL_FLOAT:
-    case Instruction::CMPL_DOUBLE:
+    case Instruction::CMPL_DOUBLE: {
       UpdateRegister(instruction.VRegA(), VeriClass::integer_);
       break;
     }
@@ -702,21 +702,21 @@ RegisterValue FlowAnalysisCollector::AnalyzeInvoke(const Instruction& instructio
     // second parameter for the field name.
     RegisterValue cls = GetRegister(GetParameterAt(instruction, is_range, args, 0));
     RegisterValue name = GetRegister(GetParameterAt(instruction, is_range, args, 1));
-    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method */ false));
+    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method= */ false));
     return GetReturnType(id);
   } else if (IsGetMethod(method)) {
     // Class.getMethod or Class.getDeclaredMethod. Fetch the first parameter for the class, and the
     // second parameter for the field name.
     RegisterValue cls = GetRegister(GetParameterAt(instruction, is_range, args, 0));
     RegisterValue name = GetRegister(GetParameterAt(instruction, is_range, args, 1));
-    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method */ true));
+    uses_.push_back(ReflectAccessInfo(cls, name, /* is_method= */ true));
     return GetReturnType(id);
   } else if (method == VeriClass::getClass_) {
     // Get the type of the first parameter.
     RegisterValue obj = GetRegister(GetParameterAt(instruction, is_range, args, 0));
     const VeriClass* cls = obj.GetType();
     if (cls != nullptr && cls->GetClassDef() != nullptr) {
-      const DexFile::ClassDef* def = cls->GetClassDef();
+      const dex::ClassDef* def = cls->GetClassDef();
       return RegisterValue(
           RegisterSource::kClass,
           DexFileReference(&resolver_->GetDexFileOf(*cls), def->class_idx_.index_),

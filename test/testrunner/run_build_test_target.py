@@ -62,12 +62,25 @@ custom_env['SOONG_ALLOW_MISSING_DEPENDENCIES'] = 'true'
 print(custom_env)
 os.environ.update(custom_env)
 
+# build is just a binary/script that is directly executed to build any artifacts needed for the
+# test.
+if 'build' in target:
+  build_command = target.get('build').format(
+      ANDROID_BUILD_TOP = env.ANDROID_BUILD_TOP,
+      MAKE_OPTIONS='DX=  -j{threads}'.format(threads = n_threads))
+  sys.stdout.write(str(build_command) + '\n')
+  sys.stdout.flush()
+  if subprocess.call(build_command.split()):
+    sys.exit(1)
+
+# make runs soong/kati to build the target listed in the entry.
 if 'make' in target:
-  build_command = 'make'
+  build_command = 'build/soong/soong_ui.bash --make-mode'
   build_command += ' DX='
   build_command += ' -j' + str(n_threads)
-  build_command += ' -C ' + env.ANDROID_BUILD_TOP
   build_command += ' ' + target.get('make')
+  if env.DIST_DIR:
+    build_command += ' dist'
   sys.stdout.write(str(build_command) + '\n')
   sys.stdout.flush()
   if subprocess.call(build_command.split()):
@@ -95,7 +108,7 @@ if 'run-test' in target:
   run_test_command = [os.path.join(env.ANDROID_BUILD_TOP,
                                    'art/test/testrunner/testrunner.py')]
   test_flags = target.get('run-test', [])
-  run_test_command += test_flags
+  run_test_command += list(map(lambda a: a.format(SOONG_OUT_DIR=env.SOONG_OUT_DIR), test_flags))
   # Let testrunner compute concurrency based on #cpus.
   # b/65822340
   # run_test_command += ['-j', str(n_threads)]
@@ -106,7 +119,8 @@ if 'run-test' in target:
     run_test_command += ['--host']
     run_test_command += ['--dex2oat-jobs']
     run_test_command += ['4']
-  run_test_command += ['-b']
+  if '--no-build-dependencies' not in test_flags:
+    run_test_command += ['-b']
   run_test_command += ['--verbose']
 
   sys.stdout.write(str(run_test_command) + '\n')

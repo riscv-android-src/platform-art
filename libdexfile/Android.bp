@@ -32,6 +32,7 @@ cc_defaults {
         "dex/dex_instruction.cc",
         "dex/modifiers.cc",
         "dex/primitive.cc",
+        "dex/signature.cc",
         "dex/standard_dex_file.cc",
         "dex/type_lookup_table.cc",
         "dex/utf.cc",
@@ -44,32 +45,86 @@ cc_defaults {
                 "libz",
             ],
             shared_libs: [
-                "libutils",
+                 // For MemMap.
+                 "libartbase",
+                 "liblog",
+                 // For atrace.
+                 "libcutils",
+                 // For common macros.
+                 "libbase",
+            ],
+            export_shared_lib_headers: [
+                "libartbase",
+                "libbase",
             ],
         },
-        host: {
+        not_windows: {
             shared_libs: [
                 "libziparchive",
                 "libz",
+                 // For MemMap.
+                 "libartbase",
+                 "liblog",
+                 // For atrace.
+                 "libcutils",
+                 // For common macros.
+                 "libbase",
             ],
+            export_shared_lib_headers: [
+                "libartbase",
+                "libbase",
+            ],
+        },
+        windows: {
+            static_libs: [
+                "libziparchive",
+                "libz",
+                 // For MemMap.
+                 "libartbase",
+                 "liblog",
+                 // For atrace.
+                 "libcutils",
+                 // For common macros.
+                 "libbase",
+            ],
+            export_static_lib_headers: [
+                "libartbase",
+                "libbase",
+            ],
+            cflags: ["-Wno-thread-safety"],
         },
     },
     generated_sources: ["dexfile_operator_srcs"],
-    shared_libs: [
-        // For MemMap.
-        "libartbase",
-        "liblog",
-        // For atrace.
-        "libcutils",
-        // For common macros.
-        "libbase",
-        "libz",
-    ],
     export_include_dirs: ["."],
-    export_shared_lib_headers: [
-        "libartbase",
+}
+
+cc_defaults {
+    name: "libdexfile_static_base_defaults",
+    static_libs: [
         "libbase",
+        "libcutils",
+        "liblog",
+        "libz",
+        "libziparchive",
     ],
+}
+
+cc_defaults {
+    name: "libdexfile_static_defaults",
+    defaults: [
+        "libartbase_static_defaults",
+        "libdexfile_static_base_defaults",
+    ],
+    static_libs: ["libdexfile"],
+}
+
+cc_defaults {
+    name: "libdexfiled_static_defaults",
+    defaults: [
+        "libartbased_static_defaults",
+        "libdexfile_static_base_defaults",
+    ],
+    static_libs: ["libdexfiled"],
 }
 
 gensrcs {
@@ -95,6 +150,14 @@ art_cc_library {
     strip: {
         keep_symbols: true,
     },
+    target: {
+        windows: {
+            enabled: true,
+            shared: {
+                enabled: false,
+            },
+        },
+    },
 }
 
 art_cc_library {
@@ -103,6 +166,14 @@ art_cc_library {
         "art_debug_defaults",
         "libdexfile_defaults",
     ],
+    target: {
+        windows: {
+            enabled: true,
+            shared: {
+                enabled: false,
+            },
+        },
+    },
 }
 
 art_cc_test {
@@ -132,5 +203,95 @@ art_cc_test {
     ],
     include_dirs: [
         "external/zlib",
+    ],
+}
+
+cc_library_headers {
+    name: "libdexfile_external_headers",
+    host_supported: true,
+    header_libs: ["libbase_headers"],
+    export_header_lib_headers: ["libbase_headers"],
+    export_include_dirs: ["external/include"],
+
+    target: {
+        windows: {
+            enabled: true,
+        },
+    },
+}
+
+cc_library {
+    name: "libdexfile_external",
+    host_supported: true,
+    srcs: [
+        "external/dex_file_ext.cc",
+    ],
+    header_libs: ["libdexfile_external_headers"],
+    shared_libs: [
+        "libbase",
+        "libdexfile",
+    ],
+
+    // TODO(b/120670568): Enable this when linking bug is fixed.
+    // stubs: {
+    //     symbol_file: "external/libdexfile_external.map.txt",
+    //     versions: ["1"],
+    // },
+
+    // Hide symbols using version scripts for targets that support it, i.e. all
+    // but Darwin.
+    // TODO(b/120670568): Clean this up when stubs above is enabled.
+    target: {
+        android: {
+            version_script: "external/libdexfile_external.map.txt",
+        },
+        linux_bionic: {
+            version_script: "external/libdexfile_external.map.txt",
+        },
+        linux_glibc: {
+            version_script: "external/libdexfile_external.map.txt",
+        },
+        windows: {
+            version_script: "external/libdexfile_external.map.txt",
+        },
+    },
+}
+
+art_cc_test {
+    name: "art_libdexfile_external_tests",
+    host_supported: true,
+    test_per_src: true,  // For consistency with other ART gtests.
+    srcs: [
+        "external/dex_file_ext_c_test.c",
+    ],
+    header_libs: ["libdexfile_external_headers"],
+}
+
+// Support library with a C++ API for accessing the libdexfile API for external
+// (non-ART) users. They should link to their own instance of this (either
+// statically or through linker namespaces).
+cc_library {
+    name: "libdexfile_support",
+    host_supported: true,
+    srcs: [
+        "external/dex_file_supp.cc",
+    ],
+    header_libs: ["libdexfile_external_headers"],
+    shared_libs: ["libdexfile_external"],
+    export_header_lib_headers: ["libdexfile_external_headers"],
+}
+
+art_cc_test {
+    name: "art_libdexfile_support_tests",
+    host_supported: true,
+    test_per_src: true,  // For consistency with other ART gtests.
+    srcs: [
+        "external/dex_file_supp_test.cc",
+    ],
+    shared_libs: [
+        "libartbase",
+        "libbase",
+        "libdexfile_external",
+        "libdexfile_support",
     ],
 }

@@ -58,13 +58,13 @@ struct JvmtiMethodInspectionCallback : public art::MethodInspectionCallback {
   explicit JvmtiMethodInspectionCallback(DeoptManager* manager) : manager_(manager) {}
 
   bool IsMethodBeingInspected(art::ArtMethod* method)
-      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
+      override REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool IsMethodSafeToJit(art::ArtMethod* method)
-      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
+      override REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   bool MethodNeedsDebugVersion(art::ArtMethod* method)
-      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_);
+      override REQUIRES_SHARED(art::Locks::mutator_lock_);
 
  private:
   DeoptManager* manager_;
@@ -107,7 +107,7 @@ class DeoptManager {
 
   void FinishSetup()
       REQUIRES(!deoptimization_status_lock_, !art::Roles::uninterruptible_)
-      REQUIRES_SHARED(art::Locks::mutator_lock_);
+      REQUIRES(art::Locks::mutator_lock_);
 
   static DeoptManager* Get();
 

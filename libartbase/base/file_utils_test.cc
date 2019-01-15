@@ -71,26 +71,30 @@ TEST_F(FileUtilsTest, GetAndroidRootSafe) {
   // Set ANDROID_ROOT to something else (but the directory must exist). So use dirname.
   UniqueCPtr<char> root_dup(strdup(android_root_env.c_str()));
   char* dir = dirname(root_dup.get());
-  ASSERT_EQ(0, setenv("ANDROID_ROOT", dir, 1 /* overwrite */));
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", dir, /* overwrite */ 1));
   std::string android_root2 = GetAndroidRootSafe(&error_msg);
   EXPECT_STREQ(dir, android_root2.c_str());
 
   // Set a bogus value for ANDROID_ROOT. This should be an error.
-  ASSERT_EQ(0, setenv("ANDROID_ROOT", "/this/is/obviously/bogus", 1 /* overwrite */));
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", "/this/is/obviously/bogus", /* overwrite */ 1));
   EXPECT_EQ(GetAndroidRootSafe(&error_msg), "");
 
   // Unset ANDROID_ROOT and see that it still returns something (as libart code is running).
   ASSERT_EQ(0, unsetenv("ANDROID_ROOT"));
   std::string android_root3 = GetAndroidRootSafe(&error_msg);
   // This should be the same as the other root (modulo realpath), otherwise the test setup is
-  // broken.
-  UniqueCPtr<char> real_root(realpath(android_root.c_str(), nullptr));
+  // broken. On non-bionic. On bionic we can be running with a different libart that lives outside
+  // of ANDROID_ROOT
   UniqueCPtr<char> real_root3(realpath(android_root3.c_str(), nullptr));
+#if !defined(__BIONIC__ ) || defined(__ANDROID__)
+  UniqueCPtr<char> real_root(realpath(android_root.c_str(), nullptr));
   EXPECT_STREQ(real_root.get(), real_root3.get());
-
+#else
+  EXPECT_STRNE(real_root3.get(), "");
+#endif
 
   // Reset ANDROID_ROOT, as other things may depend on it.
-  ASSERT_EQ(0, setenv("ANDROID_ROOT", android_root_env.c_str(), 1 /* overwrite */));
+  ASSERT_EQ(0, setenv("ANDROID_ROOT", android_root_env.c_str(), /* overwrite */ 1));
 }
 
 TEST_F(FileUtilsTest, ReplaceFileExtension) {

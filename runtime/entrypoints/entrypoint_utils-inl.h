@@ -22,6 +22,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/sdk_version.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex/dex_file.h"
@@ -32,7 +33,8 @@
 #include "imtable-inl.h"
 #include "indirect_reference_table.h"
 #include "jni/jni_internal.h"
-#include "mirror/array.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/throwable.h"
@@ -93,15 +95,18 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
       // even going back from boot image methods to the same oat file. However, this is
       // not currently implemented in the compiler. Therefore crossing dex file boundary
       // indicates that the inlined definition is not the same as the one used at runtime.
-      LOG(FATAL) << "Inlined method resolution crossed dex file boundary: from "
-                 << method->PrettyMethod()
-                 << " in " << method->GetDexFile()->GetLocation() << "/"
-                 << static_cast<const void*>(method->GetDexFile())
-                 << " to " << inlined_method->PrettyMethod()
-                 << " in " << inlined_method->GetDexFile()->GetLocation() << "/"
-                 << static_cast<const void*>(inlined_method->GetDexFile()) << ". "
-                 << "This must be due to duplicate classes or playing wrongly with class loaders";
-      UNREACHABLE();
+      bool target_sdk_at_least_p =
+          IsSdkVersionSetAndAtLeast(Runtime::Current()->GetTargetSdkVersion(), SdkVersion::kP);
+      LOG(target_sdk_at_least_p ? FATAL : WARNING)
+          << "Inlined method resolution crossed dex file boundary: from "
+          << method->PrettyMethod()
+          << " in " << method->GetDexFile()->GetLocation() << "/"
+          << static_cast<const void*>(method->GetDexFile())
+          << " to " << inlined_method->PrettyMethod()
+          << " in " << inlined_method->GetDexFile()->GetLocation() << "/"
+          << static_cast<const void*>(inlined_method->GetDexFile()) << ". "
+          << "This must be due to duplicate classes or playing wrongly with class loaders. "
+          << "The runtime is in an unsafe state.";
     }
     method = inlined_method;
   }
@@ -189,7 +194,7 @@ inline mirror::Object* AllocObjectFromCode(mirror::Class* klass,
       return nullptr;
     }
     // CheckObjectAlloc can cause thread suspension which means we may now be instrumented.
-    return klass->Alloc</*kInstrumented*/true>(
+    return klass->Alloc</*kInstrumented=*/true>(
         self,
         Runtime::Current()->GetHeap()->GetCurrentAllocator()).Ptr();
   }
@@ -214,7 +219,7 @@ inline mirror::Object* AllocObjectFromCodeResolved(mirror::Class* klass,
     // Pass in false since the object cannot be finalizable.
     // CheckClassInitializedForObjectAlloc can cause thread suspension which means we may now be
     // instrumented.
-    return klass->Alloc</*kInstrumented*/true, false>(self, heap->GetCurrentAllocator()).Ptr();
+    return klass->Alloc</*kInstrumented=*/true, false>(self, heap->GetCurrentAllocator()).Ptr();
   }
   // Pass in false since the object cannot be finalizable.
   return klass->Alloc<kInstrumented, false>(self, allocator_type).Ptr();
@@ -285,11 +290,11 @@ inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
     }
     gc::Heap* heap = Runtime::Current()->GetHeap();
     // CheckArrayAlloc can cause thread suspension which means we may now be instrumented.
-    return mirror::Array::Alloc</*kInstrumented*/true>(self,
-                                                       klass,
-                                                       component_count,
-                                                       klass->GetComponentSizeShift(),
-                                                       heap->GetCurrentAllocator());
+    return mirror::Array::Alloc</*kInstrumented=*/true>(self,
+                                                        klass,
+                                                        component_count,
+                                                        klass->GetComponentSizeShift(),
+                                                        heap->GetCurrentAllocator());
   }
   return mirror::Array::Alloc<kInstrumented>(self, klass, component_count,
                                              klass->GetComponentSizeShift(), allocator_type);
@@ -317,20 +322,9 @@ inline ArtField* FindFieldFromCode(uint32_t field_idx,
                                    ArtMethod* referrer,
                                    Thread* self,
                                    size_t expected_size) {
-  bool is_primitive;
-  bool is_set;
-  bool is_static;
-  switch (type) {
-    case InstanceObjectRead:     is_primitive = false; is_set = false; is_static = false; break;
-    case InstanceObjectWrite:    is_primitive = false; is_set = true;  is_static = false; break;
-    case InstancePrimitiveRead:  is_primitive = true;  is_set = false; is_static = false; break;
-    case InstancePrimitiveWrite: is_primitive = true;  is_set = true;  is_static = false; break;
-    case StaticObjectRead:       is_primitive = false; is_set = false; is_static = true;  break;
-    case StaticObjectWrite:      is_primitive = false; is_set = true;  is_static = true;  break;
-    case StaticPrimitiveRead:    is_primitive = true;  is_set = false; is_static = true;  break;
-    case StaticPrimitiveWrite:   // Keep GCC happy by having a default handler, fall-through.
-    default:                     is_primitive = true;  is_set = true;  is_static = true;  break;
-  }
+  constexpr bool is_primitive = (type & FindFieldFlags::PrimitiveBit) != 0;
+  constexpr bool is_set = (type & FindFieldFlags::WriteBit) != 0;
+  constexpr bool is_static = (type & FindFieldFlags::StaticBit) != 0;
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
 
   ArtField* resolved_field;
@@ -431,28 +425,17 @@ EXPLICIT_FIND_FIELD_FROM_CODE_TYPED_TEMPLATE_DECL(StaticPrimitiveWrite);
 #undef EXPLICIT_FIND_FIELD_FROM_CODE_TYPED_TEMPLATE_DECL
 #undef EXPLICIT_FIND_FIELD_FROM_CODE_TEMPLATE_DECL
 
+// Follow virtual/interface indirections if applicable.
+// Will throw null-pointer exception the if the object is null.
 template<InvokeType type, bool access_check>
-inline ArtMethod* FindMethodFromCode(uint32_t method_idx,
-                                     ObjPtr<mirror::Object>* this_object,
-                                     ArtMethod* referrer,
-                                     Thread* self) {
+ALWAYS_INLINE ArtMethod* FindMethodToCall(uint32_t method_idx,
+                                          ArtMethod* resolved_method,
+                                          ObjPtr<mirror::Object>* this_object,
+                                          ArtMethod* referrer,
+                                          Thread* self)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
-  constexpr ClassLinker::ResolveMode resolve_mode =
-      access_check ? ClassLinker::ResolveMode::kCheckICCEAndIAE
-                   : ClassLinker::ResolveMode::kNoChecks;
-  ArtMethod* resolved_method;
-  if (type == kStatic) {
-    resolved_method = class_linker->ResolveMethod<resolve_mode>(self, method_idx, referrer, type);
-  } else {
-    StackHandleScope<1> hs(self);
-    HandleWrapperObjPtr<mirror::Object> h_this(hs.NewHandleWrapper(this_object));
-    resolved_method = class_linker->ResolveMethod<resolve_mode>(self, method_idx, referrer, type);
-  }
-  if (UNLIKELY(resolved_method == nullptr)) {
-    DCHECK(self->IsExceptionPending());  // Throw exception and unwind.
-    return nullptr;  // Failure.
-  }
-  // Next, null pointer check.
+  // Null pointer check.
   if (UNLIKELY(*this_object == nullptr && type != kStatic)) {
     if (UNLIKELY(resolved_method->GetDeclaringClass()->IsStringClass() &&
                  resolved_method->IsConstructor())) {
@@ -550,7 +533,7 @@ inline ArtMethod* FindMethodFromCode(uint32_t method_idx,
       UNREACHABLE();
     }
     case kInterface: {
-      uint32_t imt_index = ImTable::GetImtIndex(resolved_method);
+      size_t imt_index = resolved_method->GetImtIndex();
       PointerSize pointer_size = class_linker->GetImagePointerSize();
       ObjPtr<mirror::Class> klass = (*this_object)->GetClass();
       ArtMethod* imt_method = klass->GetImt(pointer_size)->Get(imt_index, pointer_size);
@@ -579,6 +562,31 @@ inline ArtMethod* FindMethodFromCode(uint32_t method_idx,
       LOG(FATAL) << "Unknown invoke type " << type;
       return nullptr;  // Failure.
   }
+}
+
+template<InvokeType type, bool access_check>
+inline ArtMethod* FindMethodFromCode(uint32_t method_idx,
+                                     ObjPtr<mirror::Object>* this_object,
+                                     ArtMethod* referrer,
+                                     Thread* self) {
+  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+  constexpr ClassLinker::ResolveMode resolve_mode =
+      access_check ? ClassLinker::ResolveMode::kCheckICCEAndIAE
+                   : ClassLinker::ResolveMode::kNoChecks;
+  ArtMethod* resolved_method;
+  if (type == kStatic) {
+    resolved_method = class_linker->ResolveMethod<resolve_mode>(self, method_idx, referrer, type);
+  } else {
+    StackHandleScope<1> hs(self);
+    HandleWrapperObjPtr<mirror::Object> h_this(hs.NewHandleWrapper(this_object));
+    resolved_method = class_linker->ResolveMethod<resolve_mode>(self, method_idx, referrer, type);
+  }
+  if (UNLIKELY(resolved_method == nullptr)) {
+    DCHECK(self->IsExceptionPending());  // Throw exception and unwind.
+    return nullptr;  // Failure.
+  }
+  return FindMethodToCall<type, access_check>(
+      method_idx, resolved_method, this_object, referrer, self);
 }
 
 // Explicit template declarations of FindMethodFromCode for all invoke types.
@@ -611,22 +619,9 @@ inline ArtField* FindFieldFast(uint32_t field_idx, ArtMethod* referrer, FindFiel
     return nullptr;
   }
   // Check for incompatible class change.
-  bool is_primitive;
-  bool is_set;
-  bool is_static;
-  switch (type) {
-    case InstanceObjectRead:     is_primitive = false; is_set = false; is_static = false; break;
-    case InstanceObjectWrite:    is_primitive = false; is_set = true;  is_static = false; break;
-    case InstancePrimitiveRead:  is_primitive = true;  is_set = false; is_static = false; break;
-    case InstancePrimitiveWrite: is_primitive = true;  is_set = true;  is_static = false; break;
-    case StaticObjectRead:       is_primitive = false; is_set = false; is_static = true;  break;
-    case StaticObjectWrite:      is_primitive = false; is_set = true;  is_static = true;  break;
-    case StaticPrimitiveRead:    is_primitive = true;  is_set = false; is_static = true;  break;
-    case StaticPrimitiveWrite:   is_primitive = true;  is_set = true;  is_static = true;  break;
-    default:
-      LOG(FATAL) << "UNREACHABLE";
-      UNREACHABLE();
-  }
+  const bool is_primitive = (type & FindFieldFlags::PrimitiveBit) != 0;
+  const bool is_set = (type & FindFieldFlags::WriteBit) != 0;
+  const bool is_static = (type & FindFieldFlags::StaticBit) != 0;
   if (UNLIKELY(resolved_field->IsStatic() != is_static)) {
     // Incompatible class change.
     return nullptr;

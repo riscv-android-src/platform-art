@@ -20,19 +20,20 @@
 #include <cstddef>
 
 #include <android-base/logging.h>
+#include <jni.h>
 
 #include "base/array_ref.h"
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "base/enums.h"
-#include "base/iteration_range.h"
 #include "base/macros.h"
 #include "base/runtime_debug.h"
 #include "dex/code_item_accessors.h"
-#include "dex/dex_file.h"
+#include "dex/dex_file_structs.h"
 #include "dex/dex_instruction_iterator.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
+#include "dex/signature.h"
 #include "gc_root.h"
 #include "obj_ptr.h"
 #include "offsets.h"
@@ -40,6 +41,7 @@
 
 namespace art {
 
+class DexFile;
 template<class T> class Handle;
 class ImtConflictTable;
 enum InvokeType : uint32_t;
@@ -66,7 +68,7 @@ using MethodDexCachePair = NativeDexCachePair<ArtMethod>;
 using MethodDexCacheType = std::atomic<MethodDexCachePair>;
 }  // namespace mirror
 
-class ArtMethod FINAL {
+class ArtMethod final {
  public:
   // Should the class state be checked on sensitive operations?
   DECLARE_RUNTIME_DEBUG_FLAG(kCheckDeclaringClassState);
@@ -103,7 +105,7 @@ class ArtMethod FINAL {
   bool CASDeclaringClass(ObjPtr<mirror::Class> expected_class, ObjPtr<mirror::Class> desired_class)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset DeclaringClassOffset() {
+  static constexpr MemberOffset DeclaringClassOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, declaring_class_));
   }
 
@@ -118,7 +120,7 @@ class ArtMethod FINAL {
     access_flags_.store(new_access_flags, std::memory_order_relaxed);
   }
 
-  static MemberOffset AccessFlagsOffset() {
+  static constexpr MemberOffset AccessFlagsOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, access_flags_));
   }
 
@@ -285,6 +287,23 @@ class ArtMethod FINAL {
 
   bool IsPolymorphicSignature() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  bool UseFastInterpreterToInterpreterInvoke() {
+    // The bit is applicable only if the method is not intrinsic.
+    constexpr uint32_t mask = kAccFastInterpreterToInterpreterInvoke | kAccIntrinsic;
+    return (GetAccessFlags() & mask) == kAccFastInterpreterToInterpreterInvoke;
+  }
+
+  void SetFastInterpreterToInterpreterInvokeFlag() {
+    DCHECK(!IsIntrinsic());
+    AddAccessFlags(kAccFastInterpreterToInterpreterInvoke);
+  }
+
+  void ClearFastInterpreterToInterpreterInvokeFlag() {
+    if (!IsIntrinsic()) {
+      ClearAccessFlags(kAccFastInterpreterToInterpreterInvoke);
+    }
+  }
+
   bool SkipAccessChecks() {
     // The kAccSkipAccessChecks flag value is used with a different meaning for native methods,
     // so we need to check the kAccNative flag as well.
@@ -326,8 +345,6 @@ class ArtMethod FINAL {
     AddAccessFlags(kAccMustCountLocks);
   }
 
-  HiddenApiAccessFlags::ApiList GetHiddenApiAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Returns true if this method could be overridden by a default method.
   bool IsOverridableByDefaultMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -351,11 +368,11 @@ class ArtMethod FINAL {
     method_index_ = new_method_index;
   }
 
-  static MemberOffset DexMethodIndexOffset() {
+  static constexpr MemberOffset DexMethodIndexOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, dex_method_index_));
   }
 
-  static MemberOffset MethodIndexOffset() {
+  static constexpr MemberOffset MethodIndexOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, method_index_));
   }
 
@@ -422,6 +439,8 @@ class ArtMethod FINAL {
     SetNativePointer(EntryPointFromQuickCompiledCodeOffset(pointer_size),
                      entry_point_from_quick_compiled_code,
                      pointer_size);
+    // We might want to invoke compiled code, so don't use the fast path.
+    ClearFastInterpreterToInterpreterInvokeFlag();
   }
 
   // Registers the native method and returns the new entry point. NB The returned entry point might
@@ -431,16 +450,16 @@ class ArtMethod FINAL {
 
   void UnregisterNative() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset DataOffset(PointerSize pointer_size) {
+  static constexpr MemberOffset DataOffset(PointerSize pointer_size) {
     return MemberOffset(PtrSizedFieldsOffset(pointer_size) + OFFSETOF_MEMBER(
         PtrSizedFields, data_) / sizeof(void*) * static_cast<size_t>(pointer_size));
   }
 
-  static MemberOffset EntryPointFromJniOffset(PointerSize pointer_size) {
+  static constexpr MemberOffset EntryPointFromJniOffset(PointerSize pointer_size) {
     return DataOffset(pointer_size);
   }
 
-  static MemberOffset EntryPointFromQuickCompiledCodeOffset(PointerSize pointer_size) {
+  static constexpr MemberOffset EntryPointFromQuickCompiledCodeOffset(PointerSize pointer_size) {
     return MemberOffset(PtrSizedFieldsOffset(pointer_size) + OFFSETOF_MEMBER(
         PtrSizedFields, entry_point_from_quick_compiled_code_) / sizeof(void*)
             * static_cast<size_t>(pointer_size));
@@ -457,7 +476,7 @@ class ArtMethod FINAL {
   }
 
   ProfilingInfo* GetProfilingInfo(PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (UNLIKELY(IsNative()) || UNLIKELY(IsProxyMethod())) {
+    if (UNLIKELY(IsNative() || IsProxyMethod() || !IsInvokable())) {
       return nullptr;
     }
     return reinterpret_cast<ProfilingInfo*>(GetDataPtrSize(pointer_size));
@@ -569,21 +588,21 @@ class ArtMethod FINAL {
 
   ObjPtr<mirror::String> ResolveNameString() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::CodeItem* GetCodeItem() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::CodeItem* GetCodeItem() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsResolvedTypeIdx(dex::TypeIndex type_idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
   int32_t GetLineNumFromDexPC(uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::ProtoId& GetPrototype() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::ProtoId& GetPrototype() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::TypeList* GetParameterTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::TypeList* GetParameterTypeList() REQUIRES_SHARED(Locks::mutator_lock_);
 
   const char* GetDeclaringClassSourceFile() REQUIRES_SHARED(Locks::mutator_lock_);
 
   uint16_t GetClassDefIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  const DexFile::ClassDef& GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
+  const dex::ClassDef& GetClassDef() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE size_t GetNumberOfParameters() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -633,26 +652,15 @@ class ArtMethod FINAL {
   void CopyFrom(ArtMethod* src, PointerSize image_pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Note, hotness_counter_ updates are non-atomic but it doesn't need to be precise.  Also,
-  // given that the counter is only 16 bits wide we can expect wrap-around in some
-  // situations.  Consumers of hotness_count_ must be able to deal with that.
-  uint16_t IncrementCounter() {
-    return ++hotness_count_;
-  }
+  ALWAYS_INLINE void SetCounter(int16_t hotness_count) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void ClearCounter() {
-    hotness_count_ = 0;
-  }
+  ALWAYS_INLINE uint16_t GetCounter() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetCounter(int16_t hotness_count) {
-    hotness_count_ = hotness_count;
-  }
+  ALWAYS_INLINE uint32_t GetImtIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  uint16_t GetCounter() const {
-    return hotness_count_;
-  }
+  void CalculateAndSetImtIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static MemberOffset HotnessCountOffset() {
+  static constexpr MemberOffset HotnessCountOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, hotness_count_));
   }
 
@@ -725,6 +733,10 @@ class ArtMethod FINAL {
   ALWAYS_INLINE CodeItemDebugInfoAccessor DexInstructionDebugInfo()
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  GcRoot<mirror::Class>& DeclaringClassRoot() {
+    return declaring_class_;
+  }
+
  protected:
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
   // The class we are a part of.
@@ -751,9 +763,14 @@ class ArtMethod FINAL {
   // ifTable.
   uint16_t method_index_;
 
-  // The hotness we measure for this method. Not atomic, as we allow
-  // missing increments: if the method is hot, we will see it eventually.
-  uint16_t hotness_count_;
+  union {
+    // Non-abstract methods: The hotness we measure for this method. Not atomic,
+    // as we allow missing increments: if the method is hot, we will see it eventually.
+    uint16_t hotness_count_;
+    // Abstract methods: IMT index (bitwise negated) or zero if it was not cached.
+    // The negation is needed to distinguish zero index and missing cached entry.
+    uint16_t imt_index_;
+  };
 
   // Fake padding field gets inserted here.
 

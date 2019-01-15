@@ -27,7 +27,7 @@
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
-#include "gc/heap.h"
+#include "gc/heap-inl.h"
 #include "handle_scope-inl.h"
 #include "iftable-inl.h"
 #include "monitor.h"
@@ -225,11 +225,10 @@ int32_t Object::IdentityHashCode() {
       }
       default: {
         LOG(FATAL) << "Invalid state during hashcode " << lw.GetState();
-        break;
+        UNREACHABLE();
       }
     }
   }
-  UNREACHABLE();
 }
 
 void Object::CheckFieldAssignmentImpl(MemberOffset field_offset, ObjPtr<Object> new_value) {

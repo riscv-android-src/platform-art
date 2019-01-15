@@ -36,6 +36,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "art_jvmti.h"
@@ -57,6 +58,7 @@
 #include "nativehelper/scoped_local_ref.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
+#include "ti_logging.h"
 #include "ti_thread.h"
 #include "thread-current-inl.h"
 #include "thread_list.h"
@@ -77,9 +79,9 @@ struct GetStackTraceVisitor : public art::StackVisitor {
         start(start_),
         stop(stop_) {}
   GetStackTraceVisitor(const GetStackTraceVisitor&) = default;
-  GetStackTraceVisitor(GetStackTraceVisitor&&) = default;
+  GetStackTraceVisitor(GetStackTraceVisitor&&) noexcept = default;
 
-  bool VisitFrame() REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     art::ArtMethod* m = GetMethod();
     if (m->IsRuntimeMethod()) {
       return true;
@@ -112,6 +114,23 @@ struct GetStackTraceVisitor : public art::StackVisitor {
   size_t stop;
 };
 
+art::ShadowFrame* FindFrameAtDepthVisitor::GetOrCreateShadowFrame(bool* created_frame) {
+  art::ShadowFrame* cur = GetCurrentShadowFrame();
+  if (cur == nullptr) {
+    *created_frame = true;
+    art::ArtMethod* method = GetMethod();
+    const uint16_t num_regs = method->DexInstructionData().RegistersSize();
+    cur = GetThread()->FindOrCreateDebuggerShadowFrame(GetFrameId(),
+                                                       num_regs,
+                                                       method,
+                                                       GetDexPc());
+    DCHECK(cur != nullptr);
+  } else {
+    *created_frame = false;
+  }
+  return cur;
+}
+
 template <typename FrameFn>
 GetStackTraceVisitor<FrameFn> MakeStackTraceVisitor(art::Thread* thread_in,
                                                     size_t start,
@@ -128,12 +147,12 @@ struct GetStackTraceVectorClosure : public art::Closure {
         start_result(0),
         stop_result(0) {}
 
-  void Run(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void Run(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     auto frames_fn = [&](jvmtiFrameInfo info) {
       frames.push_back(info);
     };
     auto visitor = MakeStackTraceVisitor(self, start_input, stop_input, frames_fn);
-    visitor.WalkStack(/* include_transitions */ false);
+    visitor.WalkStack(/* include_transitions= */ false);
 
     start_result = visitor.start;
     stop_result = visitor.stop;
@@ -195,13 +214,13 @@ struct GetStackTraceDirectClosure : public art::Closure {
     DCHECK_GE(start_input, 0u);
   }
 
-  void Run(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void Run(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     auto frames_fn = [&](jvmtiFrameInfo info) {
       frame_buffer[index] = info;
       ++index;
     };
     auto visitor = MakeStackTraceVisitor(self, start_input, stop_input, frames_fn);
-    visitor.WalkStack(/* include_transitions */ false);
+    visitor.WalkStack(/* include_transitions= */ false);
   }
 
   jvmtiFrameInfo* frame_buffer;
@@ -287,7 +306,7 @@ struct GetAllStackTracesVectorClosure : public art::Closure {
   GetAllStackTracesVectorClosure(size_t stop, Data* data_)
       : barrier(0), stop_input(stop), data(data_) {}
 
-  void Run(art::Thread* thread) OVERRIDE
+  void Run(art::Thread* thread) override
       REQUIRES_SHARED(art::Locks::mutator_lock_)
       REQUIRES(!data->mutex) {
     art::Thread* self = art::Thread::Current();
@@ -313,7 +332,7 @@ struct GetAllStackTracesVectorClosure : public art::Closure {
       thread_frames->push_back(info);
     };
     auto visitor = MakeStackTraceVisitor(thread, 0u, stop_input, frames_fn);
-    visitor.WalkStack(/* include_transitions */ false);
+    visitor.WalkStack(/* include_transitions= */ false);
   }
 
   art::Barrier barrier;
@@ -655,34 +674,24 @@ jvmtiError StackUtil::GetThreadListStackTraces(jvmtiEnv* env,
   return ERR(NONE);
 }
 
-// Walks up the stack counting Java frames. This is not StackVisitor::ComputeNumFrames, as
-// runtime methods and transitions must not be counted.
-struct GetFrameCountVisitor : public art::StackVisitor {
-  explicit GetFrameCountVisitor(art::Thread* thread)
-      : art::StackVisitor(thread, nullptr, art::StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        count(0) {}
-
-  bool VisitFrame() REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    art::ArtMethod* m = GetMethod();
-    const bool do_count = !(m == nullptr || m->IsRuntimeMethod());
-    if (do_count) {
-      count++;
-    }
-    return true;
-  }
-
-  size_t count;
-};
-
 struct GetFrameCountClosure : public art::Closure {
  public:
   GetFrameCountClosure() : count(0) {}
 
-  void Run(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    GetFrameCountVisitor visitor(self);
-    visitor.WalkStack(false);
-
-    count = visitor.count;
+  void Run(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    // This is not StackVisitor::ComputeNumFrames, as runtime methods and transitions must not be
+    // counted.
+    art::StackVisitor::WalkStack(
+        [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+          art::ArtMethod* m = stack_visitor->GetMethod();
+          if (m != nullptr && !m->IsRuntimeMethod()) {
+            count++;
+          }
+          return true;
+        },
+        self,
+        /* context= */ nullptr,
+        art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
   }
 
   size_t count;
@@ -725,46 +734,30 @@ jvmtiError StackUtil::GetFrameCount(jvmtiEnv* env ATTRIBUTE_UNUSED,
   return ERR(NONE);
 }
 
-// Walks up the stack 'n' callers, when used with Thread::WalkStack.
-struct GetLocationVisitor : public art::StackVisitor {
-  GetLocationVisitor(art::Thread* thread, size_t n_in)
-      : art::StackVisitor(thread, nullptr, art::StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        n(n_in),
-        count(0),
-        caller(nullptr),
-        caller_dex_pc(0) {}
-
-  bool VisitFrame() REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    art::ArtMethod* m = GetMethod();
-    const bool do_count = !(m == nullptr || m->IsRuntimeMethod());
-    if (do_count) {
-      DCHECK(caller == nullptr);
-      if (count == n) {
-        caller = m;
-        caller_dex_pc = GetDexPc(false);
-        return false;
-      }
-      count++;
-    }
-    return true;
-  }
-
-  const size_t n;
-  size_t count;
-  art::ArtMethod* caller;
-  uint32_t caller_dex_pc;
-};
-
 struct GetLocationClosure : public art::Closure {
  public:
   explicit GetLocationClosure(size_t n_in) : n(n_in), method(nullptr), dex_pc(0) {}
 
-  void Run(art::Thread* self) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
-    GetLocationVisitor visitor(self, n);
-    visitor.WalkStack(false);
-
-    method = visitor.caller;
-    dex_pc = visitor.caller_dex_pc;
+  void Run(art::Thread* self) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    // Walks up the stack 'n' callers.
+    size_t count = 0u;
+    art::StackVisitor::WalkStack(
+        [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+          art::ArtMethod* m = stack_visitor->GetMethod();
+          if (m != nullptr && !m->IsRuntimeMethod()) {
+            DCHECK(method == nullptr);
+            if (count == n) {
+              method = m;
+              dex_pc = stack_visitor->GetDexPc(/*abort_on_failure=*/false);
+              return false;
+            }
+            count++;
+          }
+          return true;
+        },
+        self,
+        /* context= */ nullptr,
+        art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
   }
 
   const size_t n;
@@ -842,7 +835,7 @@ struct MonitorVisitor : public art::StackVisitor, public art::SingleRootVisitor 
     delete context_;
   }
 
-  bool VisitFrame() OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     art::Locks::mutator_lock_->AssertSharedHeld(art::Thread::Current());
     if (!GetMethod()->IsRuntimeMethod()) {
       art::Monitor::VisitLocks(this, AppendOwnedMonitors, this);
@@ -867,7 +860,7 @@ struct MonitorVisitor : public art::StackVisitor, public art::SingleRootVisitor 
   }
 
   void VisitRoot(art::mirror::Object* obj, const art::RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+      override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     for (const art::Handle<art::mirror::Object>& m : monitors) {
       if (m.Get() == obj) {
         return;
@@ -889,11 +882,11 @@ struct MonitorInfoClosure : public art::Closure {
   explicit MonitorInfoClosure(Fn handle_results)
       : err_(OK), handle_results_(handle_results) {}
 
-  void Run(art::Thread* target) OVERRIDE REQUIRES_SHARED(art::Locks::mutator_lock_) {
+  void Run(art::Thread* target) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     art::Locks::mutator_lock_->AssertSharedHeld(art::Thread::Current());
     // Find the monitors on the stack.
     MonitorVisitor visitor(target);
-    visitor.WalkStack(/* include_transitions */ false);
+    visitor.WalkStack(/* include_transitions= */ false);
     // Find any other monitors, including ones acquired in native code.
     art::RootInfo root_info(art::kRootVMInternal);
     target->GetJniEnv()->VisitMonitorRoots(&visitor, root_info);
@@ -1065,16 +1058,7 @@ jvmtiError StackUtil::NotifyFramePop(jvmtiEnv* env, jthread thread, jint depth) 
     // From here we are sure to succeed.
     bool needs_instrument = false;
     // Get/create a shadow frame
-    art::ShadowFrame* shadow_frame = visitor.GetCurrentShadowFrame();
-    if (shadow_frame == nullptr) {
-      needs_instrument = true;
-      const size_t frame_id = visitor.GetFrameId();
-      const uint16_t num_regs = method->DexInstructionData().RegistersSize();
-      shadow_frame = target->FindOrCreateDebuggerShadowFrame(frame_id,
-                                                             num_regs,
-                                                             method,
-                                                             visitor.GetDexPc());
-    }
+    art::ShadowFrame* shadow_frame = visitor.GetOrCreateShadowFrame(&needs_instrument);
     {
       art::WriterMutexLock lk(self, tienv->event_info_mutex_);
       // Mark shadow frame as needs_notify_pop_
@@ -1084,6 +1068,91 @@ jvmtiError StackUtil::NotifyFramePop(jvmtiEnv* env, jthread thread, jint depth) 
     // Make sure can we will go to the interpreter and use the shadow frames.
     if (needs_instrument) {
       art::Runtime::Current()->GetInstrumentation()->InstrumentThreadStack(target);
+    }
+    return OK;
+  } while (true);
+}
+
+jvmtiError StackUtil::PopFrame(jvmtiEnv* env, jthread thread) {
+  art::Thread* self = art::Thread::Current();
+  art::Thread* target;
+  do {
+    ThreadUtil::SuspendCheck(self);
+    art::MutexLock ucsl_mu(self, *art::Locks::user_code_suspension_lock_);
+    // Make sure we won't be suspended in the middle of holding the thread_suspend_count_lock_ by a
+    // user-code suspension. We retry and do another SuspendCheck to clear this.
+    if (ThreadUtil::WouldSuspendForUserCodeLocked(self)) {
+      continue;
+    }
+    // From now on we know we cannot get suspended by user-code.
+    // NB This does a SuspendCheck (during thread state change) so we need to make sure we don't
+    // have the 'suspend_lock' locked here.
+    art::ScopedObjectAccess soa(self);
+    art::MutexLock tll_mu(self, *art::Locks::thread_list_lock_);
+    jvmtiError err = ERR(INTERNAL);
+    if (!ThreadUtil::GetAliveNativeThread(thread, soa, &target, &err)) {
+      return err;
+    }
+    {
+      art::MutexLock tscl_mu(self, *art::Locks::thread_suspend_count_lock_);
+      if (target == self || target->GetUserCodeSuspendCount() == 0) {
+        // We cannot be the current thread for this function.
+        return ERR(THREAD_NOT_SUSPENDED);
+      }
+    }
+    JvmtiGlobalTLSData* tls_data = ThreadUtil::GetGlobalTLSData(target);
+    constexpr art::StackVisitor::StackWalkKind kWalkKind =
+        art::StackVisitor::StackWalkKind::kIncludeInlinedFrames;
+    if (tls_data != nullptr &&
+        tls_data->disable_pop_frame_depth != JvmtiGlobalTLSData::kNoDisallowedPopFrame &&
+        tls_data->disable_pop_frame_depth == art::StackVisitor::ComputeNumFrames(target,
+                                                                                 kWalkKind)) {
+      JVMTI_LOG(WARNING, env) << "Disallowing frame pop due to in-progress class-load/prepare. "
+                              << "Frame at depth " << tls_data->disable_pop_frame_depth << " was "
+                              << "marked as un-poppable by the jvmti plugin. See b/117615146 for "
+                              << "more information.";
+      return ERR(OPAQUE_FRAME);
+    }
+    // We hold the user_code_suspension_lock_ so the target thread is staying suspended until we are
+    // done.
+    std::unique_ptr<art::Context> context(art::Context::Create());
+    FindFrameAtDepthVisitor final_frame(target, context.get(), 0);
+    FindFrameAtDepthVisitor penultimate_frame(target, context.get(), 1);
+    final_frame.WalkStack();
+    penultimate_frame.WalkStack();
+
+    if (!final_frame.FoundFrame() || !penultimate_frame.FoundFrame()) {
+      // Cannot do it if there is only one frame!
+      return ERR(NO_MORE_FRAMES);
+    }
+
+    art::ArtMethod* called_method = final_frame.GetMethod();
+    art::ArtMethod* calling_method = penultimate_frame.GetMethod();
+    if (calling_method->IsNative() || called_method->IsNative()) {
+      return ERR(OPAQUE_FRAME);
+    }
+    // From here we are sure to succeed.
+
+    // Get/create a shadow frame
+    bool created_final_frame = false;
+    bool created_penultimate_frame = false;
+    art::ShadowFrame* called_shadow_frame =
+        final_frame.GetOrCreateShadowFrame(&created_final_frame);
+    art::ShadowFrame* calling_shadow_frame =
+        penultimate_frame.GetOrCreateShadowFrame(&created_penultimate_frame);
+
+    CHECK_NE(called_shadow_frame, calling_shadow_frame)
+        << "Frames at different depths not different!";
+
+    // Tell the shadow-frame to return immediately and skip all exit events.
+    called_shadow_frame->SetForcePopFrame(true);
+    calling_shadow_frame->SetForceRetryInstruction(true);
+
+    // Make sure can we will go to the interpreter and use the shadow frames. The early return for
+    // the final frame will force everything to the interpreter so we only need to instrument if it
+    // was not present.
+    if (created_final_frame) {
+      DeoptManager::Get()->DeoptimizeThread(target);
     }
     return OK;
   } while (true);

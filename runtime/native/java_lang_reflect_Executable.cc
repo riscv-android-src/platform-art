@@ -24,9 +24,11 @@
 #include "dex/dex_file_annotations.h"
 #include "handle.h"
 #include "jni/jni_internal.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "native_util.h"
 #include "reflection.h"
@@ -273,8 +275,8 @@ static jint Executable_compareMethodParametersInternal(JNIEnv* env,
   this_method = this_method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
   other_method = other_method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
 
-  const DexFile::TypeList* this_list = this_method->GetParameterTypeList();
-  const DexFile::TypeList* other_list = other_method->GetParameterTypeList();
+  const dex::TypeList* this_list = this_method->GetParameterTypeList();
+  const dex::TypeList* other_list = other_method->GetParameterTypeList();
 
   if (this_list == other_list) {
     return 0;
@@ -296,9 +298,9 @@ static jint Executable_compareMethodParametersInternal(JNIEnv* env,
   }
 
   for (int32_t i = 0; i < this_size; ++i) {
-    const DexFile::TypeId& lhs = this_method->GetDexFile()->GetTypeId(
+    const dex::TypeId& lhs = this_method->GetDexFile()->GetTypeId(
         this_list->GetTypeItem(i).type_idx_);
-    const DexFile::TypeId& rhs = other_method->GetDexFile()->GetTypeId(
+    const dex::TypeId& rhs = other_method->GetDexFile()->GetTypeId(
         other_list->GetTypeItem(i).type_idx_);
 
     uint32_t lhs_len, rhs_len;
@@ -341,7 +343,7 @@ static jobjectArray Executable_getParameterTypesInternal(JNIEnv* env, jobject ja
   ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);
   method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
 
-  const DexFile::TypeList* params = method->GetParameterTypeList();
+  const dex::TypeList* params = method->GetParameterTypeList();
   if (params == nullptr) {
     return nullptr;
   }
@@ -376,7 +378,7 @@ static jint Executable_getParameterCountInternal(JNIEnv* env, jobject javaMethod
   ArtMethod* method = ArtMethod::FromReflectedMethod(soa, javaMethod);
   method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
 
-  const DexFile::TypeList* params = method->GetParameterTypeList();
+  const dex::TypeList* params = method->GetParameterTypeList();
   return (params == nullptr) ? 0 : params->Size();
 }
 

@@ -18,6 +18,7 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/logging.h"
 #include "builder.h"
 #include "class_linker.h"
 #include "class_root.h"
@@ -27,7 +28,6 @@
 #include "dex/inline_method_analyser.h"
 #include "dex/verification_results.h"
 #include "dex/verified_method.h"
-#include "driver/compiler_driver-inl.h"
 #include "driver/compiler_options.h"
 #include "driver/dex_compilation_unit.h"
 #include "instruction_simplifier.h"
@@ -36,8 +36,9 @@
 #include "jit/jit_code_cache.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "nodes.h"
-#include "optimizing_compiler.h"
 #include "reference_type_propagation.h"
 #include "register_allocator_linear_scan.h"
 #include "scoped_thread_state_change-inl.h"
@@ -149,13 +150,13 @@ bool HInliner::Run() {
 
   // If we're compiling with a core image (which is only used for
   // test purposes), honor inlining directives in method names:
-  // - if a method's name contains the substring "$inline$", ensure
-  //   that this method is actually inlined;
   // - if a method's name contains the substring "$noinline$", do not
-  //   inline that method.
+  //   inline that method;
+  // - if a method's name contains the substring "$inline$", ensure
+  //   that this method is actually inlined.
   // We limit the latter to AOT compilation, as the JIT may or may not inline
   // depending on the state of classes at runtime.
-  const bool honor_noinline_directives = IsCompilingWithCoreImage();
+  const bool honor_noinline_directives = codegen_->GetCompilerOptions().CompilingWithCoreImage();
   const bool honor_inline_directives =
       honor_noinline_directives && Runtime::Current()->IsAotCompiler();
 
@@ -174,7 +175,7 @@ bool HInliner::Run() {
         if (honor_noinline_directives) {
           // Debugging case: directives in method names control or assert on inlining.
           std::string callee_name = outer_compilation_unit_.GetDexFile()->PrettyMethod(
-              call->GetDexMethodIndex(), /* with_signature */ false);
+              call->GetDexMethodIndex(), /* with_signature= */ false);
           // Tests prevent inlining by having $noinline$ in their method names.
           if (callee_name.find("$noinline$") == std::string::npos) {
             if (TryInline(call)) {
@@ -406,7 +407,7 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
   return single_impl;
 }
 
-static bool IsMethodUnverified(CompilerDriver* const compiler_driver, ArtMethod* method)
+static bool IsMethodUnverified(const CompilerOptions& compiler_options, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (!method->GetDeclaringClass()->IsVerified()) {
     if (Runtime::Current()->UseJitCompilation()) {
@@ -415,8 +416,9 @@ static bool IsMethodUnverified(CompilerDriver* const compiler_driver, ArtMethod*
       return true;
     }
     uint16_t class_def_idx = method->GetDeclaringClass()->GetDexClassDefIndex();
-    if (!compiler_driver->IsMethodVerifiedWithoutFailures(
-        method->GetDexMethodIndex(), class_def_idx, *method->GetDexFile())) {
+    if (!compiler_options.IsMethodVerifiedWithoutFailures(method->GetDexMethodIndex(),
+                                                          class_def_idx,
+                                                          *method->GetDexFile())) {
       // Method has soft or hard failures, don't analyze.
       return true;
     }
@@ -424,11 +426,11 @@ static bool IsMethodUnverified(CompilerDriver* const compiler_driver, ArtMethod*
   return false;
 }
 
-static bool AlwaysThrows(CompilerDriver* const compiler_driver, ArtMethod* method)
+static bool AlwaysThrows(const CompilerOptions& compiler_options, ArtMethod* method)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(method != nullptr);
   // Skip non-compilable and unverified methods.
-  if (!method->IsCompilable() || IsMethodUnverified(compiler_driver, method)) {
+  if (!method->IsCompilable() || IsMethodUnverified(compiler_options, method)) {
     return false;
   }
   // Skip native methods, methods with try blocks, and methods that are too large.
@@ -502,7 +504,7 @@ bool HInliner::TryInline(HInvoke* invoke_instruction) {
     bool result = TryInlineAndReplace(invoke_instruction,
                                       actual_method,
                                       ReferenceTypeInfo::CreateInvalid(),
-                                      /* do_rtp */ true,
+                                      /* do_rtp= */ true,
                                       cha_devirtualize);
     if (result) {
       // Successfully inlined.
@@ -516,7 +518,7 @@ bool HInliner::TryInline(HInvoke* invoke_instruction) {
           MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
         }
       }
-    } else if (!cha_devirtualize && AlwaysThrows(compiler_driver_, actual_method)) {
+    } else if (!cha_devirtualize && AlwaysThrows(codegen_->GetCompilerOptions(), actual_method)) {
       // Set always throws property for non-inlined method call with single target
       // (unless it was obtained through CHA, because that would imply we have
       // to add the CHA dependency, which seems not worth it).
@@ -678,7 +680,7 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
     /*out*/Handle<mirror::ObjectArray<mirror::Class>>* inline_cache)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(Runtime::Current()->IsAotCompiler());
-  const ProfileCompilationInfo* pci = compiler_driver_->GetProfileCompilationInfo();
+  const ProfileCompilationInfo* pci = codegen_->GetCompilerOptions().GetProfileCompilationInfo();
   if (pci == nullptr) {
     return kInlineCacheNoData;
   }
@@ -856,9 +858,9 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
   HBasicBlock* bb_cursor = invoke_instruction->GetBlock();
   if (!TryInlineAndReplace(invoke_instruction,
                            resolved_method,
-                           ReferenceTypeInfo::Create(monomorphic_type, /* is_exact */ true),
-                           /* do_rtp */ false,
-                           /* cha_devirtualize */ false)) {
+                           ReferenceTypeInfo::Create(monomorphic_type, /* is_exact= */ true),
+                           /* do_rtp= */ false,
+                           /* cha_devirtualize= */ false)) {
     return false;
   }
 
@@ -869,7 +871,7 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
                class_index,
                monomorphic_type,
                invoke_instruction,
-               /* with_deoptimization */ true);
+               /* with_deoptimization= */ true);
 
   // Run type propagation to get the guard typed, and eventually propagate the
   // type of the receiver.
@@ -877,7 +879,7 @@ bool HInliner::TryInlineMonomorphicCall(HInvoke* invoke_instruction,
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
                                      handles_,
-                                     /* is_first_run */ false);
+                                     /* is_first_run= */ false);
   rtp_fixup.Run();
 
   MaybeRecordStat(stats_, MethodCompilationStat::kInlinedMonomorphicCall);
@@ -947,7 +949,7 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
                                                                    klass,
                                                                    is_referrer,
                                                                    invoke_instruction->GetDexPc(),
-                                                                   /* needs_access_check */ false);
+                                                                   /* needs_access_check= */ false);
   HLoadClass::LoadKind kind = HSharpening::ComputeLoadClassKind(
       load_class, codegen_, caller_compilation_unit_);
   DCHECK(kind != HLoadClass::LoadKind::kInvalid)
@@ -1025,7 +1027,7 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
     if (!class_index.IsValid() ||
         !TryBuildAndInline(invoke_instruction,
                            method,
-                           ReferenceTypeInfo::Create(handle, /* is_exact */ true),
+                           ReferenceTypeInfo::Create(handle, /* is_exact= */ true),
                            &return_replacement)) {
       all_targets_inlined = false;
     } else {
@@ -1077,7 +1079,7 @@ bool HInliner::TryInlinePolymorphicCall(HInvoke* invoke_instruction,
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
                                      handles_,
-                                     /* is_first_run */ false);
+                                     /* is_first_run= */ false);
   rtp_fixup.Run();
   return true;
 }
@@ -1148,14 +1150,14 @@ void HInliner::CreateDiamondPatternForPolymorphicInline(HInstruction* compare,
 
 
   graph_->UpdateLoopAndTryInformationOfNewBlock(
-      then, original_invoke_block, /* replace_if_back_edge */ false);
+      then, original_invoke_block, /* replace_if_back_edge= */ false);
   graph_->UpdateLoopAndTryInformationOfNewBlock(
-      otherwise, original_invoke_block, /* replace_if_back_edge */ false);
+      otherwise, original_invoke_block, /* replace_if_back_edge= */ false);
 
   // In case the original invoke location was a back edge, we need to update
   // the loop to now have the merge block as a back edge.
   graph_->UpdateLoopAndTryInformationOfNewBlock(
-      merge, original_invoke_block, /* replace_if_back_edge */ true);
+      merge, original_invoke_block, /* replace_if_back_edge= */ true);
 }
 
 bool HInliner::TryInlinePolymorphicCallToSameTarget(
@@ -1273,7 +1275,7 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
                                      outer_compilation_unit_.GetClassLoader(),
                                      outer_compilation_unit_.GetDexCache(),
                                      handles_,
-                                     /* is_first_run */ false);
+                                     /* is_first_run= */ false);
   rtp_fixup.Run();
 
   MaybeRecordStat(stats_, MethodCompilationStat::kInlinedPolymorphicCall);
@@ -1296,9 +1298,7 @@ bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
 
   // If invoke_instruction is devirtualized to a different method, give intrinsics
   // another chance before we try to inline it.
-  bool wrong_invoke_type = false;
-  if (invoke_instruction->GetResolvedMethod() != method &&
-      IntrinsicsRecognizer::Recognize(invoke_instruction, method, &wrong_invoke_type)) {
+  if (invoke_instruction->GetResolvedMethod() != method && method->IsIntrinsic()) {
     MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
     if (invoke_instruction->IsInvokeInterface()) {
       // We don't intrinsify an invoke-interface directly.
@@ -1311,6 +1311,7 @@ bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
           invoke_instruction->GetDexMethodIndex(),  // Use interface method's dex method index.
           method,
           method->GetMethodIndex());
+      DCHECK_NE(new_invoke->GetIntrinsic(), Intrinsics::kNone);
       HInputsRef inputs = invoke_instruction->GetInputs();
       for (size_t index = 0; index != inputs.size(); ++index) {
         new_invoke->SetArgumentAt(index, inputs[index]);
@@ -1320,14 +1321,11 @@ bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
       if (invoke_instruction->GetType() == DataType::Type::kReference) {
         new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
       }
-      // Run intrinsic recognizer again to set new_invoke's intrinsic.
-      IntrinsicsRecognizer::Recognize(new_invoke, method, &wrong_invoke_type);
-      DCHECK_NE(new_invoke->GetIntrinsic(), Intrinsics::kNone);
       return_replacement = new_invoke;
       // invoke_instruction is replaced with new_invoke.
       should_remove_invoke_instruction = true;
     } else {
-      // invoke_instruction is intrinsified and stays.
+      invoke_instruction->SetResolvedMethod(method);
     }
   } else if (!TryBuildAndInline(invoke_instruction, method, receiver_type, &return_replacement)) {
     if (invoke_instruction->IsInvokeInterface()) {
@@ -1401,7 +1399,7 @@ bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
                              outer_compilation_unit_.GetClassLoader(),
                              outer_compilation_unit_.GetDexCache(),
                              handles_,
-                             /* is_first_run */ false).Run();
+                             /* is_first_run= */ false).Run();
   }
   return true;
 }
@@ -1421,10 +1419,6 @@ size_t HInliner::CountRecursiveCallsOf(ArtMethod* method) const {
 static inline bool MayInline(const CompilerOptions& compiler_options,
                              const DexFile& inlined_from,
                              const DexFile& inlined_into) {
-  if (kIsTargetBuild) {
-    return true;
-  }
-
   // We're not allowed to inline across dex files if we're the no-inline-from dex file.
   if (!IsSameDexFile(inlined_from, inlined_into) &&
       ContainsElement(compiler_options.GetNoInlineFromDexFile(), &inlined_from)) {
@@ -1506,7 +1500,7 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
     return false;
   }
 
-  if (IsMethodUnverified(compiler_driver_, method)) {
+  if (IsMethodUnverified(codegen_->GetCompilerOptions(), method)) {
     LOG_FAIL(stats_, MethodCompilationStat::kNotInlinedNotVerified)
         << "Method " << method->PrettyMethod()
         << " couldn't be verified, so it cannot be inlined";
@@ -1631,7 +1625,8 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
                                  [](uint16_t index) { return index != DexFile::kDexNoIndex16; }));
 
       // Create HInstanceFieldSet for each IPUT that stores non-zero data.
-      HInstruction* obj = GetInvokeInputForArgVRegIndex(invoke_instruction, /* this */ 0u);
+      HInstruction* obj = GetInvokeInputForArgVRegIndex(invoke_instruction,
+                                                        /* arg_vreg_index= */ 0u);
       bool needs_constructor_barrier = false;
       for (size_t i = 0; i != number_of_iputs; ++i) {
         HInstruction* value = GetInvokeInputForArgVRegIndex(invoke_instruction, iput_args[i]);
@@ -1649,7 +1644,7 @@ bool HInliner::TryPatternSubstitution(HInvoke* invoke_instruction,
         }
       }
       if (needs_constructor_barrier) {
-        // See CompilerDriver::RequiresConstructorBarrier for more details.
+        // See DexCompilationUnit::RequiresConstructorBarrier for more details.
         DCHECK(obj != nullptr) << "only non-static methods can have a constructor fence";
 
         HConstructorFence* constructor_fence =
@@ -1673,7 +1668,7 @@ HInstanceFieldGet* HInliner::CreateInstanceFieldGet(uint32_t field_index,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ArtField* resolved_field =
-      class_linker->LookupResolvedField(field_index, referrer, /* is_static */ false);
+      class_linker->LookupResolvedField(field_index, referrer, /* is_static= */ false);
   DCHECK(resolved_field != nullptr);
   HInstanceFieldGet* iget = new (graph_->GetAllocator()) HInstanceFieldGet(
       obj,
@@ -1686,7 +1681,7 @@ HInstanceFieldGet* HInliner::CreateInstanceFieldGet(uint32_t field_index,
       *referrer->GetDexFile(),
       // Read barrier generates a runtime call in slow path and we need a valid
       // dex pc for the associated stack map. 0 is bogus but valid. Bug: 26854537.
-      /* dex_pc */ 0);
+      /* dex_pc= */ 0);
   if (iget->GetType() == DataType::Type::kReference) {
     // Use the same dex_cache that we used for field lookup as the hint_dex_cache.
     Handle<mirror::DexCache> dex_cache = handles_->NewHandle(referrer->GetDexCache());
@@ -1694,7 +1689,7 @@ HInstanceFieldGet* HInliner::CreateInstanceFieldGet(uint32_t field_index,
                                  outer_compilation_unit_.GetClassLoader(),
                                  dex_cache,
                                  handles_,
-                                 /* is_first_run */ false);
+                                 /* is_first_run= */ false);
     rtp.Visit(iget);
   }
   return iget;
@@ -1708,7 +1703,7 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(uint32_t field_index,
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   ArtField* resolved_field =
-      class_linker->LookupResolvedField(field_index, referrer, /* is_static */ false);
+      class_linker->LookupResolvedField(field_index, referrer, /* is_static= */ false);
   DCHECK(resolved_field != nullptr);
   if (is_final != nullptr) {
     // This information is needed only for constructors.
@@ -1727,7 +1722,7 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(uint32_t field_index,
       *referrer->GetDexFile(),
       // Read barrier generates a runtime call in slow path and we need a valid
       // dex pc for the associated stack map. 0 is bogus but valid. Bug: 26854537.
-      /* dex_pc */ 0);
+      /* dex_pc= */ 0);
   return iput;
 }
 
@@ -1739,6 +1734,21 @@ static inline Handle<T> NewHandleIfDifferent(T* object,
   return (object != hint.Get()) ? handles->NewHandle(object) : hint;
 }
 
+static bool CanEncodeInlinedMethodInStackMap(const DexFile& caller_dex_file, ArtMethod* callee)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!Runtime::Current()->IsAotCompiler()) {
+    // JIT can always encode methods in stack maps.
+    return true;
+  }
+  if (IsSameDexFile(caller_dex_file, *callee->GetDexFile())) {
+    return true;
+  }
+  // TODO(ngeoffray): Support more AOT cases for inlining:
+  // - methods in multidex
+  // - methods in boot image for on-device non-PIC compilation.
+  return false;
+}
+
 bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                                        ArtMethod* resolved_method,
                                        ReferenceTypeInfo receiver_type,
@@ -1746,7 +1756,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                                        HInstruction** return_replacement) {
   DCHECK(!(resolved_method->IsStatic() && receiver_type.IsValid()));
   ScopedObjectAccess soa(Thread::Current());
-  const DexFile::CodeItem* code_item = resolved_method->GetCodeItem();
+  const dex::CodeItem* code_item = resolved_method->GetCodeItem();
   const DexFile& callee_dex_file = *resolved_method->GetDexFile();
   uint32_t method_index = resolved_method->GetDexMethodIndex();
   CodeItemDebugInfoAccessor code_item_accessor(resolved_method->DexInstructionDebugInfo());
@@ -1759,6 +1769,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                            caller_compilation_unit_.GetClassLoader(),
                            handles_);
 
+  Handle<mirror::Class> compiling_class = handles_->NewHandle(resolved_method->GetDeclaringClass());
   DexCompilationUnit dex_compilation_unit(
       class_loader,
       class_linker,
@@ -1767,8 +1778,9 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       resolved_method->GetDeclaringClass()->GetDexClassDefIndex(),
       method_index,
       resolved_method->GetAccessFlags(),
-      /* verified_method */ nullptr,
-      dex_cache);
+      /* verified_method= */ nullptr,
+      dex_cache,
+      compiling_class);
 
   InvokeType invoke_type = invoke_instruction->GetInvokeType();
   if (invoke_type == kInterface) {
@@ -1786,7 +1798,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       codegen_->GetCompilerOptions().GetInstructionSet(),
       invoke_type,
       graph_->IsDebuggable(),
-      /* osr */ false,
+      /* osr= */ false,
       caller_instruction_counter);
   callee_graph->SetArtMethod(resolved_method);
 
@@ -1807,7 +1819,6 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                         code_item_accessor,
                         &dex_compilation_unit,
                         &outer_compilation_unit_,
-                        compiler_driver_,
                         codegen_,
                         inline_stats_,
                         resolved_method->GetQuickenedInfo(),
@@ -1868,7 +1879,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
                              outer_compilation_unit_.GetClassLoader(),
                              dex_compilation_unit.GetDexCache(),
                              handles_,
-                             /* is_first_run */ false).Run();
+                             /* is_first_run= */ false).Run();
   }
 
   RunOptimizations(callee_graph, code_item, dex_compilation_unit);
@@ -2016,19 +2027,15 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
 }
 
 void HInliner::RunOptimizations(HGraph* callee_graph,
-                                const DexFile::CodeItem* code_item,
+                                const dex::CodeItem* code_item,
                                 const DexCompilationUnit& dex_compilation_unit) {
   // Note: if the outermost_graph_ is being compiled OSR, we should not run any
   // optimization that could lead to a HDeoptimize. The following optimizations do not.
   HDeadCodeElimination dce(callee_graph, inline_stats_, "dead_code_elimination$inliner");
   HConstantFolding fold(callee_graph, "constant_folding$inliner");
-  HSharpening sharpening(callee_graph, codegen_);
   InstructionSimplifier simplify(callee_graph, codegen_, inline_stats_);
-  IntrinsicsRecognizer intrinsics(callee_graph, inline_stats_);
 
   HOptimization* optimizations[] = {
-    &intrinsics,
-    &sharpening,
     &simplify,
     &fold,
     &dce,
@@ -2063,7 +2070,6 @@ void HInliner::RunOptimizations(HGraph* callee_graph,
                    codegen_,
                    outer_compilation_unit_,
                    dex_compilation_unit,
-                   compiler_driver_,
                    handles_,
                    inline_stats_,
                    total_number_of_dex_registers_ + accessor.RegistersSize(),
@@ -2097,7 +2103,7 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
   // is more specific than the class which declares the method.
   if (!resolved_method->IsStatic()) {
     if (IsReferenceTypeRefinement(GetClassRTI(resolved_method->GetDeclaringClass()),
-                                  /* declared_can_be_null */ false,
+                                  /* declared_can_be_null= */ false,
                                   invoke_instruction->InputAt(0u))) {
       return true;
     }
@@ -2106,7 +2112,7 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
   // Iterate over the list of parameter types and test whether any of the
   // actual inputs has a more specific reference type than the type declared in
   // the signature.
-  const DexFile::TypeList* param_list = resolved_method->GetParameterTypeList();
+  const dex::TypeList* param_list = resolved_method->GetParameterTypeList();
   for (size_t param_idx = 0,
               input_idx = resolved_method->IsStatic() ? 0 : 1,
               e = (param_list == nullptr ? 0 : param_list->Size());
@@ -2117,7 +2123,7 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
       ObjPtr<mirror::Class> param_cls = resolved_method->LookupResolvedClassFromTypeIndex(
           param_list->GetTypeItem(param_idx).type_idx_);
       if (IsReferenceTypeRefinement(GetClassRTI(param_cls),
-                                    /* declared_can_be_null */ true,
+                                    /* declared_can_be_null= */ true,
                                     input)) {
         return true;
       }
@@ -2134,7 +2140,7 @@ bool HInliner::ReturnTypeMoreSpecific(HInvoke* invoke_instruction,
     if (return_replacement->GetType() == DataType::Type::kReference) {
       // Test if the return type is a refinement of the declared return type.
       if (IsReferenceTypeRefinement(invoke_instruction->GetReferenceTypeInfo(),
-                                    /* declared_can_be_null */ true,
+                                    /* declared_can_be_null= */ true,
                                     return_replacement)) {
         return true;
       } else if (return_replacement->IsInstanceFieldGet()) {

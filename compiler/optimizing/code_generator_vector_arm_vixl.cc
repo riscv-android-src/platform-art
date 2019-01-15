@@ -138,7 +138,7 @@ void InstructionCodeGeneratorARMVIXL::VisitVecReduce(HVecReduce* instruction) {
   switch (instruction->GetPackedType()) {
     case DataType::Type::kInt32:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      switch (instruction->GetKind()) {
+      switch (instruction->GetReductionKind()) {
         case HVecReduce::kSum:
           __ Vpadd(DataTypeValue::I32, dst, src, src);
           break;
@@ -852,6 +852,14 @@ void InstructionCodeGeneratorARMVIXL::VisitVecSADAccumulate(HVecSADAccumulate* i
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
       UNREACHABLE();
   }
+}
+
+void LocationsBuilderARMVIXL::VisitVecDotProd(HVecDotProd* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+}
+
+void InstructionCodeGeneratorARMVIXL::VisitVecDotProd(HVecDotProd* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
 }
 
 // Return whether the vector memory access operation is guaranteed to be word-aligned (ARM word

@@ -17,6 +17,7 @@
 #include "prepare_for_register_allocation.h"
 
 #include "dex/dex_file_types.h"
+#include "driver/compiler_options.h"
 #include "jni/jni_internal.h"
 #include "optimizing_compiler_stats.h"
 #include "well_known_classes.h"
@@ -27,7 +28,7 @@ void PrepareForRegisterAllocation::Run() {
   // Order does not matter.
   for (HBasicBlock* block : GetGraph()->GetReversePostOrder()) {
     // No need to visit the phis.
-    for (HInstructionIterator inst_it(block->GetInstructions()); !inst_it.Done();
+    for (HInstructionIteratorHandleChanges inst_it(block->GetInstructions()); !inst_it.Done();
          inst_it.Advance()) {
       inst_it.Current()->Accept(this);
     }
@@ -50,6 +51,19 @@ void PrepareForRegisterAllocation::VisitInstanceOf(HInstanceOf* instance_of) {
 
 void PrepareForRegisterAllocation::VisitNullCheck(HNullCheck* check) {
   check->ReplaceWith(check->InputAt(0));
+  if (compiler_options_.GetImplicitNullChecks()) {
+    HInstruction* next = check->GetNext();
+
+    // The `PrepareForRegisterAllocation` pass removes `HBoundType` from the graph,
+    // so do it ourselves now to not prevent optimizations.
+    while (next->IsBoundType()) {
+      next = next->GetNext();
+      VisitBoundType(next->GetPrevious()->AsBoundType());
+    }
+    if (next->CanDoImplicitNullCheckOn(check->InputAt(0))) {
+      check->MarkEmittedAtUseSite();
+    }
+  }
 }
 
 void PrepareForRegisterAllocation::VisitDivZeroCheck(HDivZeroCheck* check) {
@@ -73,9 +87,9 @@ void PrepareForRegisterAllocation::VisitBoundsCheck(HBoundsCheck* check) {
     if (GetGraph()->GetArtMethod() != char_at_method) {
       ArenaAllocator* allocator = GetGraph()->GetAllocator();
       HEnvironment* environment = new (allocator) HEnvironment(allocator,
-                                                               /* number_of_vregs */ 0u,
+                                                               /* number_of_vregs= */ 0u,
                                                                char_at_method,
-                                                               /* dex_pc */ dex::kDexNoIndex,
+                                                               /* dex_pc= */ dex::kDexNoIndex,
                                                                check);
       check->InsertRawEnvironment(environment);
     }
@@ -288,6 +302,15 @@ bool PrepareForRegisterAllocation::CanMoveClinitCheck(HInstruction* input,
     }
   }
   return true;
+}
+
+void PrepareForRegisterAllocation::VisitTypeConversion(HTypeConversion* instruction) {
+  // For simplicity, our code generators don't handle implicit type conversion, so ensure
+  // there are none before hitting codegen.
+  if (instruction->IsImplicitConversion()) {
+    instruction->ReplaceWith(instruction->GetInput());
+    instruction->GetBlock()->RemoveInstruction(instruction);
+  }
 }
 
 }  // namespace art

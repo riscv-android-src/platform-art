@@ -30,8 +30,10 @@
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
+#include "dex/signature-inl.h"
 #include "dex_cache.h"
 #include "gc/accounting/card_table-inl.h"
+#include "gc/heap-inl.h"
 #include "handle_scope-inl.h"
 #include "subtype_check.h"
 #include "method.h"
@@ -83,7 +85,7 @@ ObjPtr<mirror::Class> Class::GetPrimitiveClass(ObjPtr<mirror::String> name) {
     Thread* self = Thread::Current();
     if (name == nullptr) {
       // Note: ThrowNullPointerException() requires a message which we deliberately want to omit.
-      self->ThrowNewException("Ljava/lang/NullPointerException;", /* msg */ nullptr);
+      self->ThrowNewException("Ljava/lang/NullPointerException;", /* msg= */ nullptr);
     } else {
       self->ThrowNewException("Ljava/lang/ClassNotFoundException;", name->ToModifiedUtf8().c_str());
     }
@@ -203,6 +205,10 @@ void Class::SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self
     if (!h_this->IsFinalizable()) {
       h_this->SetObjectSizeAllocFastPath(RoundUp(h_this->GetObjectSize(), kObjectAlignment));
     }
+  }
+
+  if (kIsDebugBuild && new_status >= ClassStatus::kInitialized) {
+    CHECK(h_this->WasVerificationAttempted()) << h_this->PrettyClassAndClassLoader();
   }
 
   if (!class_linker_initialized) {
@@ -426,14 +432,6 @@ bool Class::IsThrowableClass() {
   return GetClassRoot<mirror::Throwable>()->IsAssignableFrom(this);
 }
 
-void Class::SetClassLoader(ObjPtr<ClassLoader> new_class_loader) {
-  if (Runtime::Current()->IsActiveTransaction()) {
-    SetFieldObject<true>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
-  } else {
-    SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(Class, class_loader_), new_class_loader);
-  }
-}
-
 template <typename SignatureType>
 static inline ArtMethod* FindInterfaceMethodWithSignature(ObjPtr<Class> klass,
                                                           const StringPiece& name,
@@ -496,7 +494,7 @@ ArtMethod* Class::FindInterfaceMethod(ObjPtr<DexCache> dex_cache,
                                       PointerSize pointer_size) {
   // We always search by name and signature, ignoring the type index in the MethodId.
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
   StringPiece name = dex_file.StringDataByIdx(method_id.name_idx_);
   const Signature signature = dex_file.GetMethodSignature(method_id);
   return FindInterfaceMethod(name, signature, pointer_size);
@@ -623,15 +621,20 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
   }
   // If not found, we need to search by name and signature.
   const DexFile& dex_file = *dex_cache->GetDexFile();
-  const DexFile::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
+  const dex::MethodId& method_id = dex_file.GetMethodId(dex_method_idx);
   const Signature signature = dex_file.GetMethodSignature(method_id);
   StringPiece name;  // Delay strlen() until actually needed.
   // If we do not have a dex_cache match, try to find the declared method in this class now.
   if (this_dex_cache != dex_cache && !GetDeclaredMethodsSlice(pointer_size).empty()) {
     DCHECK(name.empty());
-    name = dex_file.StringDataByIdx(method_id.name_idx_);
+    // Avoid string comparisons by comparing the respective unicode lengths first.
+    uint32_t length, other_length;  // UTF16 length.
+    name = dex_file.GetMethodName(method_id, &length);
     for (ArtMethod& method : GetDeclaredMethodsSlice(pointer_size)) {
-      if (method.GetName() == name && method.GetSignature() == signature) {
+      DCHECK_NE(method.GetDexMethodIndex(), dex::kDexNoIndex);
+      const char* other_name = method.GetDexFile()->GetMethodName(
+          method.GetDexMethodIndex(), &other_length);
+      if (length == other_length && name == other_name && signature == method.GetSignature()) {
         return &method;
       }
     }
@@ -649,7 +652,7 @@ ArtMethod* Class::FindClassMethod(ObjPtr<DexCache> dex_cache,
       // Matching dex_cache. We cannot compare the `dex_method_idx` anymore because
       // the type index differs, so compare the name index and proto index.
       for (ArtMethod& method : declared_methods) {
-        const DexFile::MethodId& cmp_method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
+        const dex::MethodId& cmp_method_id = dex_file.GetMethodId(method.GetDexMethodIndex());
         if (cmp_method_id.name_idx_ == method_id.name_idx_ &&
             cmp_method_id.proto_idx_ == method_id.proto_idx_) {
           candidate_method = &method;
@@ -1003,7 +1006,7 @@ const char* Class::GetDescriptor(std::string* storage) {
     return storage->c_str();
   } else {
     const DexFile& dex_file = GetDexFile();
-    const DexFile::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
+    const dex::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
     return dex_file.GetTypeDescriptor(type_id);
   }
 }
@@ -1016,7 +1019,7 @@ const char* Class::GetArrayDescriptor(std::string* storage) {
   return storage->c_str();
 }
 
-const DexFile::ClassDef* Class::GetClassDef() {
+const dex::ClassDef* Class::GetClassDef() {
   uint16_t class_def_idx = GetDexClassDefIndex();
   if (class_def_idx == DexFile::kDexNoIndex16) {
     return nullptr;
@@ -1084,7 +1087,7 @@ ObjPtr<Class> Class::GetCommonSuperClass(Handle<Class> klass) {
 
 const char* Class::GetSourceFile() {
   const DexFile& dex_file = GetDexFile();
-  const DexFile::ClassDef* dex_class_def = GetClassDef();
+  const dex::ClassDef* dex_class_def = GetClassDef();
   if (dex_class_def == nullptr) {
     // Generated classes have no class def.
     return nullptr;
@@ -1101,8 +1104,8 @@ std::string Class::GetLocation() {
   return "generated class";
 }
 
-const DexFile::TypeList* Class::GetInterfaceTypeList() {
-  const DexFile::ClassDef* class_def = GetClassDef();
+const dex::TypeList* Class::GetInterfaceTypeList() {
+  const dex::ClassDef* class_def = GetClassDef();
   if (class_def == nullptr) {
     return nullptr;
   }
@@ -1245,7 +1248,7 @@ uint32_t Class::Depth() {
 
 dex::TypeIndex Class::FindTypeIndexInOtherDexFile(const DexFile& dex_file) {
   std::string temp;
-  const DexFile::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
+  const dex::TypeId* type_id = dex_file.FindTypeId(GetDescriptor(&temp));
   return (type_id == nullptr) ? dex::TypeIndex() : dex_file.GetIndexForTypeId(*type_id);
 }
 
@@ -1462,6 +1465,13 @@ template void Class::GetAccessFlagsDCheck<kVerifyThis>();
 template void Class::GetAccessFlagsDCheck<kVerifyReads>();
 template void Class::GetAccessFlagsDCheck<kVerifyWrites>();
 template void Class::GetAccessFlagsDCheck<kVerifyAll>();
+
+void Class::SetAccessFlagsDCheck(uint32_t new_access_flags) {
+  uint32_t old_access_flags = GetField32<kVerifyNone>(AccessFlagsOffset());
+  // kAccVerificationAttempted is retained.
+  CHECK((old_access_flags & kAccVerificationAttempted) == 0 ||
+        (new_access_flags & kAccVerificationAttempted) != 0);
+}
 
 }  // namespace mirror
 }  // namespace art

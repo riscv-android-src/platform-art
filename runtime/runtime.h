@@ -27,9 +27,9 @@
 #include <memory>
 #include <vector>
 
-#include "arch/instruction_set.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
+#include "base/mem_map.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
@@ -55,6 +55,7 @@ enum class EnforcementPolicy;
 
 namespace jit {
 class Jit;
+class JitCodeCache;
 class JitOptions;
 }  // namespace jit
 
@@ -82,11 +83,11 @@ enum class CalleeSaveType: uint32_t;
 class ClassLinker;
 class CompilerCallbacks;
 class DexFile;
+enum class InstructionSet;
 class InternTable;
 class IsMarkedVisitor;
 class JavaVMExt;
 class LinearAlloc;
-class MemMap;
 class MonitorList;
 class MonitorPool;
 class NullPointerHandler;
@@ -98,6 +99,7 @@ class SignalCatcher;
 class StackOverflowHandler;
 class SuspensionHandler;
 class ThreadList;
+class ThreadPool;
 class Trace;
 struct TraceConfig;
 class Transaction;
@@ -142,10 +144,6 @@ class Runtime {
     return must_relocate_;
   }
 
-  bool IsDex2OatEnabled() const {
-    return dex2oat_enabled_ && IsImageDex2OatEnabled();
-  }
-
   bool IsImageDex2OatEnabled() const {
     return image_dex2oat_enabled_;
   }
@@ -168,7 +166,6 @@ class Runtime {
   }
 
   std::string GetCompilerExecutable() const;
-  std::string GetPatchoatExecutable() const;
 
   const std::vector<std::string>& GetCompilerOptions() const {
     return compiler_options_;
@@ -246,8 +243,14 @@ class Runtime {
 
   ~Runtime();
 
-  const std::string& GetBootClassPathString() const {
-    return boot_class_path_string_;
+  const std::vector<std::string>& GetBootClassPath() const {
+    return boot_class_path_;
+  }
+
+  const std::vector<std::string>& GetBootClassPathLocations() const {
+    DCHECK(boot_class_path_locations_.empty() ||
+           boot_class_path_locations_.size() == boot_class_path_.size());
+    return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
   }
 
   const std::string& GetClassPathString() const {
@@ -404,7 +407,7 @@ class Runtime {
   QuickMethodFrameInfo GetRuntimeMethodFrameInfo(ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static size_t GetCalleeSaveMethodOffset(CalleeSaveType type) {
+  static constexpr size_t GetCalleeSaveMethodOffset(CalleeSaveType type) {
     return OFFSETOF_MEMBER(Runtime, callee_save_methods_[static_cast<size_t>(type)]);
   }
 
@@ -448,6 +451,7 @@ class Runtime {
   bool UseJitCompilation() const;
 
   void PreZygoteFork();
+  void PostZygoteFork();
   void InitNonZygoteOrPostFork(
       JNIEnv* env,
       bool is_system_server,
@@ -514,12 +518,7 @@ class Runtime {
   void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SetFaultMessage(const std::string& message) REQUIRES(!fault_message_lock_);
-  // Only read by the signal handler, NO_THREAD_SAFETY_ANALYSIS to prevent lock order violations
-  // with the unexpected_signal_lock_.
-  const std::string& GetFaultMessage() NO_THREAD_SAFETY_ANALYSIS {
-    return fault_message_;
-  }
+  void SetFaultMessage(const std::string& message);
 
   void AddCurrentRuntimeFeaturesAsDex2OatArguments(std::vector<std::string>* arg_vector) const;
 
@@ -539,10 +538,6 @@ class Runtime {
     return hidden_api_policy_;
   }
 
-  void SetPendingHiddenApiWarning(bool value) {
-    pending_hidden_api_warning_ = value;
-  }
-
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
     hidden_api_exemptions_ = exemptions;
   }
@@ -551,24 +546,12 @@ class Runtime {
     return hidden_api_exemptions_;
   }
 
-  bool HasPendingHiddenApiWarning() const {
-    return pending_hidden_api_warning_;
-  }
-
   void SetDedupeHiddenApiWarnings(bool value) {
     dedupe_hidden_api_warnings_ = value;
   }
 
   bool ShouldDedupeHiddenApiWarnings() {
     return dedupe_hidden_api_warnings_;
-  }
-
-  void AlwaysSetHiddenApiWarningFlag() {
-    always_set_hidden_api_warning_flag_ = true;
-  }
-
-  bool ShouldAlwaysSetHiddenApiWarningFlag() const {
-    return always_set_hidden_api_warning_flag_;
   }
 
   void SetHiddenApiEventLogSampleRate(uint32_t rate) {
@@ -603,11 +586,11 @@ class Runtime {
     return is_running_on_memory_tool_;
   }
 
-  void SetTargetSdkVersion(int32_t version) {
+  void SetTargetSdkVersion(uint32_t version) {
     target_sdk_version_ = version;
   }
 
-  int32_t GetTargetSdkVersion() const {
+  uint32_t GetTargetSdkVersion() const {
     return target_sdk_version_;
   }
 
@@ -618,6 +601,8 @@ class Runtime {
   bool AreExperimentalFlagsEnabled(ExperimentalFlags flags) {
     return (experimental_flags_ & flags) != ExperimentalFlags::kNone;
   }
+
+  void CreateJitCodeCache(bool rwx_memory_allowed);
 
   // Create the JIT and instrumentation and code cache.
   void CreateJit();
@@ -649,7 +634,7 @@ class Runtime {
   void SetJavaDebuggable(bool value);
 
   // Deoptimize the boot image, called for Java debuggable apps.
-  void DeoptimizeBootImage();
+  void DeoptimizeBootImage() REQUIRES(Locks::mutator_lock_);
 
   bool IsNativeDebuggable() const {
     return is_native_debuggable_;
@@ -659,13 +644,32 @@ class Runtime {
     is_native_debuggable_ = value;
   }
 
+  bool AreNonStandardExitsEnabled() const {
+    return non_standard_exits_enabled_;
+  }
+
+  void SetNonStandardExitsEnabled() {
+    DoAndMaybeSwitchInterpreter([=](){ non_standard_exits_enabled_ = true; });
+  }
+
   bool AreAsyncExceptionsThrown() const {
     return async_exceptions_thrown_;
   }
 
   void SetAsyncExceptionsThrown() {
-    async_exceptions_thrown_ = true;
+    DoAndMaybeSwitchInterpreter([=](){ async_exceptions_thrown_ = true; });
   }
+
+  // Change state and re-check which interpreter should be used.
+  //
+  // This must be called whenever there is an event that forces
+  // us to use different interpreter (e.g. debugger is attached).
+  //
+  // Changing the state using the lamda gives us some multihreading safety.
+  // It ensures that two calls do not interfere with each other and
+  // it makes it possible to DCHECK that thread local flag is correct.
+  template<typename Action>
+  static void DoAndMaybeSwitchInterpreter(Action lamda);
 
   // Returns the build fingerprint, if set. Otherwise an empty string is returned.
   std::string GetFingerprint() {
@@ -674,6 +678,9 @@ class Runtime {
 
   // Called from class linker.
   void SetSentinel(mirror::Object* sentinel) REQUIRES_SHARED(Locks::mutator_lock_);
+  // For testing purpose only.
+  // TODO: Remove this when this is no longer needed (b/116087961).
+  GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
@@ -685,6 +692,10 @@ class Runtime {
 
   double GetHashTableMinLoadFactor() const;
   double GetHashTableMaxLoadFactor() const;
+
+  bool IsSafeMode() const {
+    return safe_mode_;
+  }
 
   void SetSafeMode(bool mode) {
     safe_mode_ = mode;
@@ -777,11 +788,31 @@ class Runtime {
     return jdwp_provider_;
   }
 
-  static constexpr int32_t kUnsetSdkVersion = 0u;
-
   uint32_t GetVerifierLoggingThresholdMs() const {
     return verifier_logging_threshold_ms_;
   }
+
+  // Atomically delete the thread pool if the reference count is 0.
+  bool DeleteThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Wait for all the thread workers to be attached.
+  void WaitForThreadPoolWorkersToStart() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Scoped usage of the runtime thread pool. Prevents the pool from being
+  // deleted. Note that the thread pool is only for startup and gets deleted after.
+  class ScopedThreadPoolUsage {
+   public:
+    ScopedThreadPoolUsage();
+    ~ScopedThreadPoolUsage();
+
+    // Return the thread pool.
+    ThreadPool* GetThreadPool() const {
+      return thread_pool_;
+    }
+
+   private:
+    ThreadPool* const thread_pool_;
+  };
 
  private:
   static void InitPlatformSignalHandlers();
@@ -812,6 +843,15 @@ class Runtime {
   // need to be visited once per GC cycle.
   void VisitConstantRoots(RootVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Note: To be lock-free, GetFaultMessage temporarily replaces the lock message with null.
+  //       As such, there is a window where a call will return an empty string. In general,
+  //       only aborting code should retrieve this data (via GetFaultMessageForAbortLogging
+  //       friend).
+  std::string GetFaultMessage();
+
+  ThreadPool* AcquireThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+  void ReleaseThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
 
   // A pointer to the active runtime or null.
   static Runtime* instance_;
@@ -846,16 +886,15 @@ class Runtime {
   bool must_relocate_;
   bool is_concurrent_gc_enabled_;
   bool is_explicit_gc_disabled_;
-  bool dex2oat_enabled_;
   bool image_dex2oat_enabled_;
 
   std::string compiler_executable_;
-  std::string patchoat_executable_;
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
 
-  std::string boot_class_path_string_;
+  std::vector<std::string> boot_class_path_;
+  std::vector<std::string> boot_class_path_locations_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
@@ -894,11 +933,16 @@ class Runtime {
   std::unique_ptr<JavaVMExt> java_vm_;
 
   std::unique_ptr<jit::Jit> jit_;
+  std::unique_ptr<jit::JitCodeCache> jit_code_cache_;
   std::unique_ptr<jit::JitOptions> jit_options_;
 
-  // Fault message, printed when we get a SIGSEGV.
-  Mutex fault_message_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;
-  std::string fault_message_ GUARDED_BY(fault_message_lock_);
+  // Runtime thread pool. The pool is only for startup and gets deleted after.
+  std::unique_ptr<ThreadPool> thread_pool_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+  size_t thread_pool_ref_count_ GUARDED_BY(Locks::runtime_thread_pool_lock_);
+
+  // Fault message, printed when we get a SIGSEGV. Stored as a native-heap object and accessed
+  // lock-free, so needs to be atomic.
+  std::atomic<std::string*> fault_message_;
 
   // A non-zero value indicates that a thread has been created but not yet initialized. Guarded by
   // the shutdown lock so that threads aren't born while we're shutting down.
@@ -960,7 +1004,7 @@ class Runtime {
   std::vector<std::string> cpu_abilist_;
 
   // Specifies target SDK version to allow workarounds for certain API levels.
-  int32_t target_sdk_version_;
+  uint32_t target_sdk_version_;
 
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
@@ -968,7 +1012,7 @@ class Runtime {
   bool implicit_suspend_checks_;    // Thread suspension checks are implicit.
 
   // Whether or not the sig chain (and implicitly the fault handler) should be
-  // disabled. Tools like dex2oat or patchoat don't need them. This enables
+  // disabled. Tools like dex2oat don't need them. This enables
   // building a statically link version of dex2oat.
   bool no_sig_chain_;
 
@@ -992,6 +1036,10 @@ class Runtime {
   // whether or not any async exceptions have ever been thrown. This is used to speed up the
   // MterpShouldSwitchInterpreters function.
   bool async_exceptions_thrown_;
+
+  // Whether anything is going to be using the shadow-frame APIs to force a function to return
+  // early. Doing this requires that (1) we be debuggable and (2) that mterp is exited.
+  bool non_standard_exits_enabled_;
 
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
@@ -1090,9 +1138,13 @@ class Runtime {
   std::atomic<uint32_t> deoptimization_counts_[
       static_cast<uint32_t>(DeoptimizationKind::kLast) + 1];
 
-  std::unique_ptr<MemMap> protected_fault_page_;
+  MemMap protected_fault_page_;
 
   uint32_t verifier_logging_threshold_ms_;
+
+  // Note: See comments on GetFaultMessage.
+  friend std::string GetFaultMessageForAbortLogging();
+  friend class ScopedThreadPoolUsage;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

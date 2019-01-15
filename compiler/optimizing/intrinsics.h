@@ -24,7 +24,6 @@
 
 namespace art {
 
-class CompilerDriver;
 class DexFile;
 
 // Positive floating-point infinities.
@@ -33,28 +32,6 @@ static constexpr uint64_t kPositiveInfinityDouble = UINT64_C(0x7ff0000000000000)
 
 static constexpr uint32_t kNanFloat = 0x7fc00000U;
 static constexpr uint64_t kNanDouble = 0x7ff8000000000000;
-
-// Recognize intrinsics from HInvoke nodes.
-class IntrinsicsRecognizer : public HOptimization {
- public:
-  IntrinsicsRecognizer(HGraph* graph,
-                       OptimizingCompilerStats* stats,
-                       const char* name = kIntrinsicsRecognizerPassName)
-      : HOptimization(graph, name, stats) {}
-
-  bool Run() OVERRIDE;
-
-  // Static helper that recognizes intrinsic call. Returns true on success.
-  // If it fails due to invoke type mismatch, wrong_invoke_type is set.
-  // Useful to recognize intrinsics on individual calls outside this full pass.
-  static bool Recognize(HInvoke* invoke, ArtMethod* method, /*out*/ bool* wrong_invoke_type)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static constexpr const char* kIntrinsicsRecognizerPassName = "intrinsics_recognition";
-
- private:
-  DISALLOW_COPY_AND_ASSIGN(IntrinsicsRecognizer);
-};
 
 class IntrinsicVisitor : public ValueObject {
  public:
@@ -219,7 +196,6 @@ class StringEqualsOptimizations : public IntrinsicOptimizations {
 
   INTRINSIC_OPTIMIZATION(ArgumentNotNull, 0);
   INTRINSIC_OPTIMIZATION(ArgumentIsString, 1);
-  INTRINSIC_OPTIMIZATION(NoReadBarrierForStringClass, 2);
 
  private:
   DISALLOW_COPY_AND_ASSIGN(StringEqualsOptimizations);
@@ -263,11 +239,15 @@ void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke ATTRIBUTE_UNU
 
 // Defines a list of unreached intrinsics: that is, method calls that are recognized as
 // an intrinsic, and then always converted into HIR instructions before they reach any
-// architecture-specific intrinsics code generator.
+// architecture-specific intrinsics code generator. This only applies to non-baseline
+// compilation.
 #define UNREACHABLE_INTRINSIC(Arch, Name)                                \
 void IntrinsicLocationsBuilder ## Arch::Visit ## Name(HInvoke* invoke) { \
-  LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()      \
-             << " should have been converted to HIR";                    \
+  if (Runtime::Current()->IsAotCompiler() &&                             \
+      !codegen_->GetCompilerOptions().IsBaseline()) {                    \
+    LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()    \
+               << " should have been converted to HIR";                  \
+  }                                                                      \
 }                                                                        \
 void IntrinsicCodeGenerator ## Arch::Visit ## Name(HInvoke* invoke) {    \
   LOG(FATAL) << "Unreachable: intrinsic " << invoke->GetIntrinsic()      \

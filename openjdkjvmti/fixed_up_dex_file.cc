@@ -51,17 +51,6 @@ static void RecomputeDexChecksum(art::DexFile* dex_file) {
       dex_file->CalculateChecksum();
 }
 
-static void UnhideApis(const art::DexFile& target_dex_file) {
-  for (art::ClassAccessor accessor : target_dex_file.GetClasses()) {
-    for (const art::ClassAccessor::Field& field : accessor.GetFields()) {
-      field.UnHideAccessFlags();
-    }
-    for (const art::ClassAccessor::Method& method : accessor.GetMethods()) {
-      method.UnHideAccessFlags();
-    }
-  }
-}
-
 static const art::VdexFile* GetVdex(const art::DexFile& original_dex_file) {
   const art::OatDexFile* oat_dex = original_dex_file.GetOatDexFile();
   if (oat_dex == nullptr) {
@@ -78,11 +67,9 @@ static void DoDexUnquicken(const art::DexFile& new_dex_file,
                            const art::DexFile& original_dex_file) {
   const art::VdexFile* vdex = GetVdex(original_dex_file);
   if (vdex != nullptr) {
-    vdex->UnquickenDexFile(new_dex_file, original_dex_file, /* decompile_return_instruction */true);
-  } else {
-    // The dex file isn't quickened since it is being used directly. We might still have hiddenapis
-    // so we need to get rid of those.
-    UnhideApis(new_dex_file);
+    vdex->UnquickenDexFile(new_dex_file,
+                           original_dex_file,
+                           /* decompile_return_instruction= */ true);
   }
 }
 
@@ -93,7 +80,7 @@ static void DCheckVerifyDexFile(const art::DexFile& dex) {
                                       dex.Begin(),
                                       dex.Size(),
                                       "FixedUpDexFile_Verification.dex",
-                                      /*verify_checksum*/ true,
+                                      /*verify_checksum=*/ true,
                                       &error)) {
       LOG(FATAL) << "Failed to verify de-quickened dex file: " << error;
     }
@@ -118,18 +105,15 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
     // this before unquickening.
     art::Options options;
     options.compact_dex_level_ = art::CompactDexLevel::kCompactDexLevelNone;
-    // Never verify the output since hidden API flags may cause the dex file verifier to fail.
-    // See b/74063493
-    options.verify_output_ = false;
     // Add a filter to only include the class that has the matching descriptor.
     static constexpr bool kFilterByDescriptor = true;
     if (kFilterByDescriptor) {
       options.class_filter_.insert(descriptor);
     }
     art::DexLayout dex_layout(options,
-                              /*info*/ nullptr,
-                              /*out_file*/ nullptr,
-                              /*header*/ nullptr);
+                              /*info=*/ nullptr,
+                              /*out_file=*/ nullptr,
+                              /*header=*/ nullptr);
     std::unique_ptr<art::DexContainer> dex_container;
     bool result = dex_layout.ProcessDexFile(
         original.GetLocation().c_str(),
@@ -150,11 +134,11 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
   new_dex_file = dex_file_loader.Open(
       data.data(),
       data.size(),
-      /*location*/"Unquickening_dexfile.dex",
-      /*location_checksum*/0,
-      /*oat_dex_file*/nullptr,
-      /*verify*/false,
-      /*verify_checksum*/false,
+      /*location=*/"Unquickening_dexfile.dex",
+      /*location_checksum=*/0,
+      /*oat_dex_file=*/nullptr,
+      /*verify=*/false,
+      /*verify_checksum=*/false,
       &error);
 
   if (new_dex_file  == nullptr) {

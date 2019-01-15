@@ -20,11 +20,13 @@
 #include <stdio.h>
 #include <memory>
 
+#include "array-alloc-inl.h"
 #include "array-inl.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "asm_support.h"
 #include "base/enums.h"
+#include "class-alloc-inl.h"
 #include "class-inl.h"
 #include "class_linker-inl.h"
 #include "class_linker.h"
@@ -38,6 +40,7 @@
 #include "iftable-inl.h"
 #include "obj_ptr.h"
 #include "object-inl.h"
+#include "object_array-alloc-inl.h"
 #include "object_array-inl.h"
 #include "scoped_thread_state_change-inl.h"
 #include "string-inl.h"
@@ -204,7 +207,7 @@ TEST_F(ObjectTest, AllocArray_FillUsable) {
 template<typename ArrayT>
 void TestPrimitiveArray(ClassLinker* cl) {
   ScopedObjectAccess soa(Thread::Current());
-  typedef typename ArrayT::ElementType T;
+  using T = typename ArrayT::ElementType;
 
   StackHandleScope<2> hs(soa.Self());
   Handle<ArrayT> a = hs.NewHandle(ArrayT::Alloc(soa.Self(), 2));
@@ -252,9 +255,9 @@ TEST_F(ObjectTest, PrimitiveArray_Short_Alloc) {
 }
 
 TEST_F(ObjectTest, PrimitiveArray_Double_Alloc) {
-  typedef DoubleArray ArrayT;
+  using ArrayT = DoubleArray;
   ScopedObjectAccess soa(Thread::Current());
-  typedef typename ArrayT::ElementType T;
+  using T = typename ArrayT::ElementType;
 
   StackHandleScope<2> hs(soa.Self());
   Handle<ArrayT> a = hs.NewHandle(ArrayT::Alloc(soa.Self(), 2));
@@ -283,9 +286,9 @@ TEST_F(ObjectTest, PrimitiveArray_Double_Alloc) {
 }
 
 TEST_F(ObjectTest, PrimitiveArray_Float_Alloc) {
-  typedef FloatArray ArrayT;
+  using ArrayT = FloatArray;
   ScopedObjectAccess soa(Thread::Current());
-  typedef typename ArrayT::ElementType T;
+  using T = typename ArrayT::ElementType;
 
   StackHandleScope<2> hs(soa.Self());
   Handle<ArrayT> a = hs.NewHandle(ArrayT::Alloc(soa.Self(), 2));
@@ -361,16 +364,16 @@ TEST_F(ObjectTest, StaticFieldFromCode) {
   Handle<Class> klass =
       hs.NewHandle(class_linker_->FindClass(soa.Self(), "LStaticsFromCode;", loader));
   ArtMethod* clinit = klass->FindClassInitializer(kRuntimePointerSize);
-  const DexFile::TypeId* klass_type_id = dex_file->FindTypeId("LStaticsFromCode;");
+  const dex::TypeId* klass_type_id = dex_file->FindTypeId("LStaticsFromCode;");
   ASSERT_TRUE(klass_type_id != nullptr);
 
-  const DexFile::TypeId* type_type_id = dex_file->FindTypeId("Ljava/lang/Object;");
+  const dex::TypeId* type_type_id = dex_file->FindTypeId("Ljava/lang/Object;");
   ASSERT_TRUE(type_type_id != nullptr);
 
-  const DexFile::StringId* name_str_id = dex_file->FindStringId("s0");
+  const dex::StringId* name_str_id = dex_file->FindStringId("s0");
   ASSERT_TRUE(name_str_id != nullptr);
 
-  const DexFile::FieldId* field_id = dex_file->FindFieldId(
+  const dex::FieldId* field_id = dex_file->FindFieldId(
       *klass_type_id, *name_str_id, *type_type_id);
   ASSERT_TRUE(field_id != nullptr);
   uint32_t field_idx = dex_file->GetIndexForFieldId(*field_id);

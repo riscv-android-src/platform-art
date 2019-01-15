@@ -17,7 +17,8 @@
 #ifndef ART_RUNTIME_CLASS_ROOT_H_
 #define ART_RUNTIME_CLASS_ROOT_H_
 
-#include "class_linker.h"
+#include "class_linker-inl.h"
+#include "gc_root-inl.h"
 #include "mirror/class.h"
 #include "mirror/object_array-inl.h"
 #include "obj_ptr-inl.h"
@@ -100,6 +101,7 @@ class VarHandle;
   M(kLongArrayClass,                        "[J",                                         mirror::PrimitiveArray<int64_t>)                          \
   M(kShortArrayClass,                       "[S",                                         mirror::PrimitiveArray<int16_t>)                          \
   M(kJavaLangStackTraceElementArrayClass,   "[Ljava/lang/StackTraceElement;",             mirror::ObjectArray<mirror::StackTraceElement>)           \
+  M(kJavaLangClassLoaderArrayClass,         "[Ljava/lang/ClassLoader;",                   mirror::ObjectArray<mirror::ClassLoader>)                 \
   M(kDalvikSystemClassExt,                  "Ldalvik/system/ClassExt;",                   mirror::ClassExt)
 
 // Well known mirror::Class roots accessed via ClassLinker::GetClassRoots().
@@ -165,18 +167,19 @@ CLASS_ROOT_LIST(SPECIALIZE_CLASS_ROOT_SELECTOR)
 template <class MirrorType, ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
 inline ObjPtr<mirror::Class> GetClassRoot(ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return GetClassRoot<kWithReadBarrier>(detail::ClassRootSelector<MirrorType>::value, class_roots);
+  return GetClassRoot<kReadBarrierOption>(detail::ClassRootSelector<MirrorType>::value,
+                                          class_roots);
 }
 
 template <class MirrorType, ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
 inline ObjPtr<mirror::Class> GetClassRoot(ClassLinker* linker)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return GetClassRoot<kWithReadBarrier>(detail::ClassRootSelector<MirrorType>::value, linker);
+  return GetClassRoot<kReadBarrierOption>(detail::ClassRootSelector<MirrorType>::value, linker);
 }
 
 template <class MirrorType, ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
 inline ObjPtr<mirror::Class> GetClassRoot() REQUIRES_SHARED(Locks::mutator_lock_) {
-  return GetClassRoot<kWithReadBarrier>(detail::ClassRootSelector<MirrorType>::value);
+  return GetClassRoot<kReadBarrierOption>(detail::ClassRootSelector<MirrorType>::value);
 }
 
 }  // namespace art

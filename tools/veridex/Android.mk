@@ -30,14 +30,10 @@ $(oahl_stub_dex): PRIVATE_MIN_SDK_VERSION := 1000
 $(oahl_stub_dex): $(call get-prebuilt-sdk-dir,current)/org.apache.http.legacy.jar | $(ZIP2ZIP) $(DX)
 	$(transform-classes.jar-to-dex)
 
-app_compat_lists := \
-  $(INTERNAL_PLATFORM_HIDDENAPI_LIGHT_GREYLIST) \
-  $(INTERNAL_PLATFORM_HIDDENAPI_DARK_GREYLIST) \
-  $(INTERNAL_PLATFORM_HIDDENAPI_BLACKLIST)
-
 # Phony rule to create all dependencies of the appcompat.sh script.
 .PHONY: appcompat
-appcompat: $(system_stub_dex) $(oahl_stub_dex) $(HOST_OUT_EXECUTABLES)/veridex $(app_compat_lists)
+appcompat: $(system_stub_dex) $(oahl_stub_dex) $(HOST_OUT_EXECUTABLES)/veridex \
+    $(INTERNAL_PLATFORM_HIDDENAPI_FLAGS)
 
 VERIDEX_FILES_PATH := \
     $(call intermediates-dir-for,PACKAGING,veridex,HOST)/veridex.zip
@@ -45,23 +41,31 @@ VERIDEX_FILES_PATH := \
 VERIDEX_FILES := $(LOCAL_PATH)/appcompat.sh
 
 $(VERIDEX_FILES_PATH): PRIVATE_VERIDEX_FILES := $(VERIDEX_FILES)
-$(VERIDEX_FILES_PATH): PRIVATE_APP_COMPAT_LISTS := $(app_compat_lists)
+$(VERIDEX_FILES_PATH): PRIVATE_SYSTEM_STUBS_DEX_DIR := $(dir $(system_stub_dex))
 $(VERIDEX_FILES_PATH): PRIVATE_SYSTEM_STUBS_ZIP := $(dir $(VERIDEX_FILES_PATH))/system-stubs.zip
+$(VERIDEX_FILES_PATH): PRIVATE_OAHL_STUBS_DEX_DIR := $(dir $(oahl_stub_dex))
 $(VERIDEX_FILES_PATH): PRIVATE_OAHL_STUBS_ZIP := $(dir $(VERIDEX_FILES_PATH))/org.apache.http.legacy-stubs.zip
-$(VERIDEX_FILES_PATH) : $(SOONG_ZIP) $(VERIDEX_FILES) $(app_compat_lists) $(HOST_OUT_EXECUTABLES)/veridex $(system_stub_dex) $(oahl_stub_dex)
-	$(hide) rm -f $(PRIVATE_SYSTEM_STUBS_ZIP) $(PRIVATE_OAHL_STUBS_ZIP)
-	$(hide) zip -j $(PRIVATE_SYSTEM_STUBS_ZIP) $(dir $(system_stub_dex))/classes*.dex
-	$(hide) zip -j $(PRIVATE_OAHL_STUBS_ZIP) $(dir $(oahl_stub_dex))/classes*.dex
-	$(hide) $(SOONG_ZIP) -o $@ -C art/tools/veridex -f $(PRIVATE_VERIDEX_FILES) \
-                             -C $(dir $(lastword $(PRIVATE_APP_COMPAT_LISTS))) $(addprefix -f , $(PRIVATE_APP_COMPAT_LISTS)) \
-                             -C $(HOST_OUT_EXECUTABLES) -f $(HOST_OUT_EXECUTABLES)/veridex \
-                             -C $(dir $(PRIVATE_SYSTEM_STUBS_ZIP)) -f $(PRIVATE_SYSTEM_STUBS_ZIP) \
-                             -C $(dir $(PRIVATE_OAHL_STUBS_ZIP)) -f $(PRIVATE_OAHL_STUBS_ZIP)
-	$(hide) rm -f $(PRIVATE_SYSTEM_STUBS_ZIP)
-	$(hide) rm -f $(PRIVATE_OAHL_STUBS_ZIP)
+$(VERIDEX_FILES_PATH) : $(SOONG_ZIP) $(VERIDEX_FILES) $(INTERNAL_PLATFORM_HIDDENAPI_FLAGS) \
+    $(HOST_OUT_EXECUTABLES)/veridex $(system_stub_dex) $(oahl_stub_dex)
+	rm -rf $(dir $@)/*
+	ls -1 $(PRIVATE_SYSTEM_STUBS_DEX_DIR)/classes*.dex | sort >$(PRIVATE_SYSTEM_STUBS_ZIP).list
+	$(SOONG_ZIP) -o $(PRIVATE_SYSTEM_STUBS_ZIP) -C $(PRIVATE_SYSTEM_STUBS_DEX_DIR) -l $(PRIVATE_SYSTEM_STUBS_ZIP).list
+	rm $(PRIVATE_SYSTEM_STUBS_ZIP).list
+	ls -1 $(PRIVATE_OAHL_STUBS_DEX_DIR)/classes*.dex | sort >$(PRIVATE_OAHL_STUBS_ZIP).list
+	$(SOONG_ZIP) -o $(PRIVATE_OAHL_STUBS_ZIP) -C $(PRIVATE_OAHL_STUBS_DEX_DIR) -l $(PRIVATE_OAHL_STUBS_ZIP).list
+	rm $(PRIVATE_OAHL_STUBS_ZIP).list
+	$(SOONG_ZIP) -o $@ -C art/tools/veridex -f $(PRIVATE_VERIDEX_FILES) \
+	                    -C $(dir $(INTERNAL_PLATFORM_HIDDENAPI_FLAGS)) \
+	                        -f $(INTERNAL_PLATFORM_HIDDENAPI_FLAGS) \
+	                   -C $(HOST_OUT_EXECUTABLES) -f $(HOST_OUT_EXECUTABLES)/veridex \
+	                   -C $(dir $(PRIVATE_SYSTEM_STUBS_ZIP)) -f $(PRIVATE_SYSTEM_STUBS_ZIP) \
+	                   -C $(dir $(PRIVATE_OAHL_STUBS_ZIP)) -f $(PRIVATE_OAHL_STUBS_ZIP)
+	rm -f $(PRIVATE_SYSTEM_STUBS_ZIP)
+	rm -f $(PRIVATE_OAHL_STUBS_ZIP)
 
 # Make the zip file available for prebuilts.
 $(call dist-for-goals,sdk,$(VERIDEX_FILES_PATH))
 
 VERIDEX_FILES :=
-app_compat_lists :=
+system_stub_dex :=
+oahl_stub_dex :=

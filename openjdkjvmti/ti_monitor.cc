@@ -38,6 +38,7 @@
 
 #include "art_jvmti.h"
 #include "gc_root-inl.h"
+#include "mirror/object-inl.h"
 #include "monitor.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
@@ -190,7 +191,7 @@ class JvmtiMonitor {
 
     // Reaquire the mutex/monitor, also go to sleep if we were suspended.
     // TODO Give an extension to wait without suspension as well.
-    MonitorEnter(self, /*suspend*/ true);
+    MonitorEnter(self, /*suspend=*/ true);
     CHECK(owner_.load(std::memory_order_relaxed) == self);
     DCHECK_EQ(1u, count_);
     // Reset the count.
@@ -260,7 +261,7 @@ jvmtiError MonitorUtil::RawMonitorEnterNoSuspend(jvmtiEnv* env ATTRIBUTE_UNUSED,
   JvmtiMonitor* monitor = DecodeMonitor(id);
   art::Thread* self = art::Thread::Current();
 
-  monitor->MonitorEnter(self, /*suspend*/false);
+  monitor->MonitorEnter(self, /*suspend=*/false);
 
   return ERR(NONE);
 }
@@ -273,7 +274,7 @@ jvmtiError MonitorUtil::RawMonitorEnter(jvmtiEnv* env ATTRIBUTE_UNUSED, jrawMoni
   JvmtiMonitor* monitor = DecodeMonitor(id);
   art::Thread* self = art::Thread::Current();
 
-  monitor->MonitorEnter(self, /*suspend*/true);
+  monitor->MonitorEnter(self, /*suspend=*/true);
 
   return ERR(NONE);
 }
@@ -370,7 +371,7 @@ jvmtiError MonitorUtil::GetCurrentContendedMonitor(jvmtiEnv* env ATTRIBUTE_UNUSE
    public:
     GetContendedMonitorClosure() : out_(nullptr) {}
 
-    void Run(art::Thread* target_thread) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    void Run(art::Thread* target_thread) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
       art::ScopedAssertNoThreadSuspension sants("GetContendedMonitorClosure::Run");
       switch (target_thread->GetState()) {
         // These three we are actually currently waiting on a monitor and have sent the appropriate

@@ -33,6 +33,7 @@
 #include "nth_caller_visitor.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack_reference.h"
+#include "thread-inl.h"
 #include "well_known_classes.h"
 
 namespace art {
@@ -226,7 +227,7 @@ class ArgArray {
                                     ArtMethod* m,
                                     Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    const DexFile::TypeList* classes = m->GetParameterTypeList();
+    const dex::TypeList* classes = m->GetParameterTypeList();
     // Set receiver if non-null (method is not static)
     if (receiver != nullptr) {
       Append(receiver);
@@ -367,7 +368,7 @@ class ArgArray {
 
 void CheckMethodArguments(JavaVMExt* vm, ArtMethod* m, uint32_t* args)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::TypeList* params = m->GetParameterTypeList();
+  const dex::TypeList* params = m->GetParameterTypeList();
   if (params == nullptr) {
     return;  // No arguments so nothing to check.
   }
@@ -461,7 +462,7 @@ ALWAYS_INLINE
 bool CheckArgsForInvokeMethod(ArtMethod* np_method,
                               ObjPtr<mirror::ObjectArray<mirror::Object>> objects)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const DexFile::TypeList* classes = np_method->GetParameterTypeList();
+  const dex::TypeList* classes = np_method->GetParameterTypeList();
   uint32_t classes_size = (classes == nullptr) ? 0 : classes->Size();
   uint32_t arg_count = (objects == nullptr) ? 0 : objects->GetLength();
   if (UNLIKELY(arg_count != classes_size)) {
@@ -886,32 +887,31 @@ static bool UnboxPrimitive(ObjPtr<mirror::Object> o,
 
   JValue boxed_value;
   ObjPtr<mirror::Class> klass = o->GetClass();
-  ObjPtr<mirror::Class> src_class = nullptr;
-  ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+  Primitive::Type primitive_type;
   ArtField* primitive_field = &klass->GetIFieldsPtr()->At(0);
   if (klass->DescriptorEquals("Ljava/lang/Boolean;")) {
-    src_class = class_linker->FindPrimitiveClass('Z');
+    primitive_type = Primitive::kPrimBoolean;
     boxed_value.SetZ(primitive_field->GetBoolean(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Byte;")) {
-    src_class = class_linker->FindPrimitiveClass('B');
+    primitive_type = Primitive::kPrimByte;
     boxed_value.SetB(primitive_field->GetByte(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Character;")) {
-    src_class = class_linker->FindPrimitiveClass('C');
+    primitive_type = Primitive::kPrimChar;
     boxed_value.SetC(primitive_field->GetChar(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Float;")) {
-    src_class = class_linker->FindPrimitiveClass('F');
+    primitive_type = Primitive::kPrimFloat;
     boxed_value.SetF(primitive_field->GetFloat(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Double;")) {
-    src_class = class_linker->FindPrimitiveClass('D');
+    primitive_type = Primitive::kPrimDouble;
     boxed_value.SetD(primitive_field->GetDouble(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Integer;")) {
-    src_class = class_linker->FindPrimitiveClass('I');
+    primitive_type = Primitive::kPrimInt;
     boxed_value.SetI(primitive_field->GetInt(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Long;")) {
-    src_class = class_linker->FindPrimitiveClass('J');
+    primitive_type = Primitive::kPrimLong;
     boxed_value.SetJ(primitive_field->GetLong(o));
   } else if (klass->DescriptorEquals("Ljava/lang/Short;")) {
-    src_class = class_linker->FindPrimitiveClass('S');
+    primitive_type = Primitive::kPrimShort;
     boxed_value.SetS(primitive_field->GetShort(o));
   } else {
     std::string temp;
@@ -923,7 +923,8 @@ static bool UnboxPrimitive(ObjPtr<mirror::Object> o,
   }
 
   return ConvertPrimitiveValue(unbox_for_result,
-                               src_class->GetPrimitiveType(), dst_class->GetPrimitiveType(),
+                               primitive_type,
+                               dst_class->GetPrimitiveType(),
                                boxed_value, unboxed_value);
 }
 

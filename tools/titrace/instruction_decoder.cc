@@ -32,7 +32,7 @@ class ClassInstructionDecoder : public InstructionDecoder {
     return Bytecode::ToString(op);
   }
 
-  virtual size_t LocationToOffset(size_t j_location) {
+  size_t LocationToOffset(size_t j_location) override {
     return j_location;
   }
 
@@ -456,9 +456,10 @@ class ClassInstructionDecoder : public InstructionDecoder {
         case kBreakpoint: return "breakpoint";
         case kImpdep1: return "impdep1";
         case kImpdep2: return "impdep2";
-        default: LOG(FATAL) << "Unknown opcode " << op;
+        default:
+          LOG(FATAL) << "Unknown opcode " << op;
+          __builtin_unreachable();
        }
-       return "";
      }
   };
 };
@@ -474,7 +475,7 @@ class DexInstructionDecoder : public InstructionDecoder {
     return Bytecode::ToString(op);
   }
 
-  virtual size_t LocationToOffset(size_t j_location) {
+  size_t LocationToOffset(size_t j_location) override {
     // dex pc is uint16_t*, but offset needs to be in bytes.
     return j_location * (sizeof(uint16_t) / sizeof(uint8_t));
   }
@@ -484,7 +485,7 @@ class DexInstructionDecoder : public InstructionDecoder {
    public:
     enum Opcode {
 #define MAKE_ENUM_DEFINITION(opcode, instruction_code, name, format, index, flags, extended_flags, verifier_flags) \
-      instruction_code = opcode,
+      instruction_code = opcode,  /* NOLINT */
 DEX_INSTRUCTION_LIST(MAKE_ENUM_DEFINITION)
 #undef MAKE_ENUM_DEFINITION
     };
@@ -500,7 +501,7 @@ DEX_INSTRUCTION_LIST(MAKE_ENUM_DEFINITION)
 #undef MAKE_ENUM_DEFINITION
         default: LOG(FATAL) << "Unknown opcode " << op;
       }
-      return "";
+      __builtin_unreachable();
     }
   };
 };

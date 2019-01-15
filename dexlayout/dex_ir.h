@@ -21,11 +21,11 @@
 
 #include <stdint.h>
 
-#include <map>
 #include <vector>
 
 #include "base/iteration_range.h"
 #include "base/leb128.h"
+#include "base/safe_map.h"
 #include "base/stl_util.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_types.h"
@@ -50,6 +50,7 @@ class EncodedValue;
 class FieldId;
 class FieldItem;
 class Header;
+class HiddenapiClassData;
 class MapList;
 class MapItem;
 class MethodHandleItem;
@@ -101,6 +102,7 @@ class AbstractDispatcher {
   virtual void Dispatch(AnnotationSetItem* annotation_set_item) = 0;
   virtual void Dispatch(AnnotationSetRefList* annotation_set_ref_list) = 0;
   virtual void Dispatch(AnnotationsDirectoryItem* annotations_directory_item) = 0;
+  virtual void Dispatch(HiddenapiClassData* hiddenapi_class_data) = 0;
   virtual void Dispatch(MapList* map_list) = 0;
   virtual void Dispatch(MapItem* map_item) = 0;
 
@@ -215,7 +217,8 @@ class CollectionBase {
 
   uint32_t GetOffset() const { return offset_; }
   void SetOffset(uint32_t new_offset) { offset_ = new_offset; }
-  virtual uint32_t Size() const { return 0U; }
+  virtual uint32_t Size() const = 0;
+  bool Empty() const { return Size() == 0u; }
 
  private:
   // Start out unassigned.
@@ -233,7 +236,7 @@ template<class T> class CollectionVector : public CollectionBase {
     // Preallocate so that assignment does not invalidate pointers into the vector.
     collection_.reserve(size);
   }
-  virtual ~CollectionVector() OVERRIDE { }
+  ~CollectionVector() override { }
 
   template<class... Args>
   T* CreateAndAddItem(Args&&... args) {
@@ -242,7 +245,7 @@ template<class T> class CollectionVector : public CollectionBase {
     return object;
   }
 
-  virtual uint32_t Size() const OVERRIDE { return collection_.size(); }
+  uint32_t Size() const override { return collection_.size(); }
 
   Iterator<ElementType> begin() const { return Iterator<ElementType>(collection_, 0U, Size()); }
   Iterator<ElementType> end() const { return Iterator<ElementType>(collection_, Size(), Size()); }
@@ -406,7 +409,7 @@ class Header : public Item {
                       data_size,
                       data_offset);
   }
-  ~Header() OVERRIDE { }
+  ~Header() override { }
 
   static size_t ItemSize() { return kHeaderItemSize; }
 
@@ -475,6 +478,12 @@ class Header : public Item {
   }
   const CollectionVector<AnnotationsDirectoryItem>& AnnotationsDirectoryItems() const {
     return annotations_directory_items_;
+  }
+  IndexedCollectionVector<HiddenapiClassData>& HiddenapiClassDatas() {
+    return hiddenapi_class_datas_;
+  }
+  const IndexedCollectionVector<HiddenapiClassData>& HiddenapiClassDatas() const {
+    return hiddenapi_class_datas_;
   }
   CollectionVector<DebugInfoItem>& DebugInfoItems() { return debug_info_items_; }
   const CollectionVector<DebugInfoItem>& DebugInfoItems() const { return debug_info_items_; }
@@ -553,6 +562,7 @@ class Header : public Item {
   IndexedCollectionVector<AnnotationSetItem> annotation_set_items_;
   IndexedCollectionVector<AnnotationSetRefList> annotation_set_ref_lists_;
   IndexedCollectionVector<AnnotationsDirectoryItem> annotations_directory_items_;
+  IndexedCollectionVector<HiddenapiClassData> hiddenapi_class_datas_;
   // The order of the vectors controls the layout of the output file by index order, to change the
   // layout just sort the vector. Note that you may only change the order of the non indexed vectors
   // below. Indexed vectors are accessed by indices in other places, changing the sorting order will
@@ -590,7 +600,7 @@ class StringId : public IndexedItem {
   explicit StringId(StringData* string_data) : string_data_(string_data) {
     size_ = kStringIdItemSize;
   }
-  ~StringId() OVERRIDE { }
+  ~StringId() override { }
 
   static size_t ItemSize() { return kStringIdItemSize; }
 
@@ -608,7 +618,7 @@ class StringId : public IndexedItem {
 class TypeId : public IndexedItem {
  public:
   explicit TypeId(StringId* string_id) : string_id_(string_id) { size_ = kTypeIdItemSize; }
-  ~TypeId() OVERRIDE { }
+  ~TypeId() override { }
 
   static size_t ItemSize() { return kTypeIdItemSize; }
 
@@ -629,7 +639,7 @@ class TypeList : public Item {
   explicit TypeList(TypeIdVector* type_list) : type_list_(type_list) {
     size_ = sizeof(uint32_t) + (type_list->size() * sizeof(uint16_t));
   }
-  ~TypeList() OVERRIDE { }
+  ~TypeList() override { }
 
   const TypeIdVector* GetTypeList() const { return type_list_.get(); }
 
@@ -644,7 +654,7 @@ class ProtoId : public IndexedItem {
   ProtoId(const StringId* shorty, const TypeId* return_type, TypeList* parameters)
       : shorty_(shorty), return_type_(return_type), parameters_(parameters)
       { size_ = kProtoIdItemSize; }
-  ~ProtoId() OVERRIDE { }
+  ~ProtoId() override { }
 
   static size_t ItemSize() { return kProtoIdItemSize; }
 
@@ -666,7 +676,7 @@ class FieldId : public IndexedItem {
  public:
   FieldId(const TypeId* klass, const TypeId* type, const StringId* name)
       : class_(klass), type_(type), name_(name) { size_ = kFieldIdItemSize; }
-  ~FieldId() OVERRIDE { }
+  ~FieldId() override { }
 
   static size_t ItemSize() { return kFieldIdItemSize; }
 
@@ -688,7 +698,7 @@ class MethodId : public IndexedItem {
  public:
   MethodId(const TypeId* klass, const ProtoId* proto, const StringId* name)
       : class_(klass), proto_(proto), name_(name) { size_ = kMethodIdItemSize; }
-  ~MethodId() OVERRIDE { }
+  ~MethodId() override { }
 
   static size_t ItemSize() { return kMethodIdItemSize; }
 
@@ -710,7 +720,7 @@ class FieldItem : public Item {
  public:
   FieldItem(uint32_t access_flags, const FieldId* field_id)
       : access_flags_(access_flags), field_id_(field_id) { }
-  ~FieldItem() OVERRIDE { }
+  ~FieldItem() override { }
 
   FieldItem(FieldItem&&) = default;
 
@@ -732,7 +742,7 @@ class MethodItem : public Item {
  public:
   MethodItem(uint32_t access_flags, const MethodId* method_id, CodeItem* code)
       : access_flags_(access_flags), method_id_(method_id), code_(code) { }
-  ~MethodItem() OVERRIDE { }
+  ~MethodItem() override { }
 
   MethodItem(MethodItem&&) = default;
 
@@ -876,7 +886,7 @@ class ClassData : public Item {
         direct_methods_(direct_methods),
         virtual_methods_(virtual_methods) { }
 
-  ~ClassData() OVERRIDE = default;
+  ~ClassData() override = default;
   FieldItemVector* StaticFields() { return static_fields_.get(); }
   FieldItemVector* InstanceFields() { return instance_fields_.get(); }
   MethodItemVector* DirectMethods() { return direct_methods_.get(); }
@@ -912,7 +922,7 @@ class ClassDef : public IndexedItem {
         class_data_(class_data),
         static_values_(static_values) { size_ = kClassDefItemSize; }
 
-  ~ClassDef() OVERRIDE { }
+  ~ClassDef() override { }
 
   static size_t ItemSize() { return kClassDefItemSize; }
 
@@ -980,7 +990,7 @@ class TryItem : public Item {
  public:
   TryItem(uint32_t start_addr, uint16_t insn_count, const CatchHandler* handlers)
       : start_addr_(start_addr), insn_count_(insn_count), handlers_(handlers) { }
-  ~TryItem() OVERRIDE { }
+  ~TryItem() override { }
 
   uint32_t StartAddr() const { return start_addr_; }
   uint16_t InsnCount() const { return insn_count_; }
@@ -1042,7 +1052,7 @@ class CodeItem : public Item {
         tries_(tries),
         handlers_(handlers) { }
 
-  ~CodeItem() OVERRIDE { }
+  ~CodeItem() override { }
 
   uint16_t RegistersSize() const { return registers_size_; }
   uint16_t InsSize() const { return ins_size_; }
@@ -1115,7 +1125,7 @@ class AnnotationSetItem : public Item {
   explicit AnnotationSetItem(std::vector<AnnotationItem*>* items) : items_(items) {
     size_ = sizeof(uint32_t) + items->size() * sizeof(uint32_t);
   }
-  ~AnnotationSetItem() OVERRIDE { }
+  ~AnnotationSetItem() override { }
 
   std::vector<AnnotationItem*>* GetItems() { return items_.get(); }
 
@@ -1132,7 +1142,7 @@ class AnnotationSetRefList : public Item {
   explicit AnnotationSetRefList(std::vector<AnnotationSetItem*>* items) : items_(items) {
     size_ = sizeof(uint32_t) + items->size() * sizeof(uint32_t);
   }
-  ~AnnotationSetRefList() OVERRIDE { }
+  ~AnnotationSetRefList() override { }
 
   std::vector<AnnotationSetItem*>* GetItems() { return items_.get(); }
 
@@ -1227,7 +1237,7 @@ class CallSiteId : public IndexedItem {
   explicit CallSiteId(EncodedArrayItem* call_site_item) : call_site_item_(call_site_item) {
     size_ = kCallSiteIdItemSize;
   }
-  ~CallSiteId() OVERRIDE { }
+  ~CallSiteId() override { }
 
   static size_t ItemSize() { return kCallSiteIdItemSize; }
 
@@ -1248,7 +1258,7 @@ class MethodHandleItem : public IndexedItem {
         field_or_method_id_(field_or_method_id) {
     size_ = kMethodHandleItemSize;
   }
-  ~MethodHandleItem() OVERRIDE { }
+  ~MethodHandleItem() override { }
 
   static size_t ItemSize() { return kMethodHandleItemSize; }
 
@@ -1262,6 +1272,49 @@ class MethodHandleItem : public IndexedItem {
   IndexedItem* field_or_method_id_;
 
   DISALLOW_COPY_AND_ASSIGN(MethodHandleItem);
+};
+
+using HiddenapiFlagsMap = SafeMap<const Item*, uint32_t>;
+
+class HiddenapiClassData : public IndexedItem {
+ public:
+  HiddenapiClassData(const ClassDef* class_def, std::unique_ptr<HiddenapiFlagsMap> flags)
+      : class_def_(class_def), flags_(std::move(flags)) { }
+  ~HiddenapiClassData() override { }
+
+  const ClassDef* GetClassDef() const { return class_def_; }
+
+  uint32_t GetFlags(const Item* field_or_method_item) const {
+    return (flags_ == nullptr) ? 0u : flags_->Get(field_or_method_item);
+  }
+
+  static uint32_t GetFlags(Header* header, ClassDef* class_def, const Item* field_or_method_item) {
+    DCHECK(header != nullptr);
+    DCHECK(class_def != nullptr);
+    return (header->HiddenapiClassDatas().Empty())
+        ? 0u
+        : header->HiddenapiClassDatas()[class_def->GetIndex()]->GetFlags(field_or_method_item);
+  }
+
+  uint32_t ItemSize() const {
+    uint32_t size = 0u;
+    bool has_non_zero_entries = false;
+    if (flags_ != nullptr) {
+      for (const auto& entry : *flags_) {
+        size += UnsignedLeb128Size(entry.second);
+        has_non_zero_entries |= (entry.second != 0u);
+      }
+    }
+    return has_non_zero_entries ? size : 0u;
+  }
+
+  void Accept(AbstractDispatcher* dispatch) { dispatch->Dispatch(this); }
+
+ private:
+  const ClassDef* class_def_;
+  std::unique_ptr<HiddenapiFlagsMap> flags_;
+
+  DISALLOW_COPY_AND_ASSIGN(HiddenapiClassData);
 };
 
 // TODO(sehr): implement MapList.

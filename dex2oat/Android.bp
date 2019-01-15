@@ -66,17 +66,19 @@ art_cc_defaults {
         android: {
             // For atrace.
             shared_libs: ["libcutils"],
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
         },
     },
     generated_sources: ["art_dex2oat_operator_srcs"],
     shared_libs: [
         "libbase",
-        "liblz4",
-        "liblzma",
-    ],
-    include_dirs: [
-        "external/lz4/lib",
-        "external/zlib",
     ],
     export_include_dirs: ["."],
 
@@ -89,6 +91,19 @@ art_cc_defaults {
     },
 }
 
+cc_defaults {
+    name: "libart-dex2oat_static_base_defaults",
+    target: {
+        android: {
+            static_libs: ["libcutils"],
+        },
+    },
+    static_libs: [
+        "libbase",
+        "libz",
+    ],
+}
+
 gensrcs {
     name: "art_dex2oat_operator_srcs",
     cmd: "$(location generate_operator_out) art/dex2oat $(in) > $(out)",
@@ -99,7 +114,7 @@ gensrcs {
     output_extension: "operator_out.cc",
 }
 
-art_cc_static_library {
+art_cc_library_static {
     name: "libart-dex2oat",
     defaults: ["libart-dex2oat-defaults"],
     shared_libs: [
@@ -110,7 +125,21 @@ art_cc_static_library {
     ],
 }
 
-art_cc_static_library {
+cc_defaults {
+    name: "libart-dex2oat_static_defaults",
+    defaults: [
+        "libart-dex2oat_static_base_defaults",
+        "libart_static_defaults",
+        "libprofile_static_defaults",
+    ],
+    static_libs: [
+        "libart-compiler",
+        "libart-dexlayout",
+        "libart-dex2oat",
+    ],
+}
+
+art_cc_library_static {
     name: "libartd-dex2oat",
     defaults: [
         "art_debug_defaults",
@@ -121,6 +150,20 @@ art_cc_static_library {
         "libartd-dexlayout",
         "libartd",
         "libprofiled",
+    ],
+}
+
+cc_defaults {
+    name: "libartd-dex2oat_static_defaults",
+    defaults: [
+        "libart-dex2oat_static_base_defaults",
+        "libartd_static_defaults",
+        "libprofiled_static_defaults",
+    ],
+    static_libs: [
+        "libartd-compiler",
+        "libartd-dexlayout",
+        "libartd-dex2oat",
     ],
 }
 
@@ -141,7 +184,7 @@ cc_defaults {
 
     target: {
         android: {
-            // Use the 32-bit version of dex2oat on devices
+            // Use the 32-bit version of dex2oat on devices.
             compile_multilib: "prefer32",
         },
     },
@@ -205,7 +248,6 @@ art_cc_binary {
         "libdexfile",
         "libartbase",
         "libbase",
-        "liblz4",
         "libsigchain",
     ],
     static_libs: [
@@ -225,6 +267,14 @@ art_cc_binary {
             lto: {
                  thin: true,
             },
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
         },
     },
 }
@@ -243,19 +293,32 @@ art_cc_binary {
         "libdexfiled",
         "libartbased",
         "libbase",
-        "liblz4",
         "libsigchain",
     ],
     static_libs: [
         "libartd-dex2oat",
     ],
+    target: {
+        android: {
+            static_libs: [
+                "libz",
+            ],
+        },
+        host: {
+            shared_libs: [
+                "libz",
+            ],
+        },
+    },
 }
 
 cc_defaults {
     name: "dex2oats-defaults",
     device_supported: false,
     static_executable: true,
-    defaults: ["dex2oat-defaults"],
+    defaults: [
+        "dex2oat-defaults",
+    ],
     target: {
         darwin: {
             enabled: false,
@@ -269,22 +332,24 @@ cc_defaults {
         // Try to get rid of it.
         "-z muldefs",
     ],
-    static_libs: art_static_dependencies,
+    static_libs: [
+        "libbase",
+        "libsigchain_dummy",
+        "libz",
+    ],
 }
 
 art_cc_binary {
     name: "dex2oats",
-    defaults: ["dex2oats-defaults"],
-    static_libs: [
-        "libart-dex2oat",
-        "libart-compiler",
-        "libart-dexlayout",
-        "libart",
-        "libartbase",
-        "libdexfile",
-        "libprofile",
-        "libvixl-arm",
-        "libvixl-arm64",
+    defaults: [
+        "dex2oats-defaults",
+        "libart_static_defaults",
+        "libart-compiler_static_defaults",
+        "libart-dexlayout_static_defaults",
+        "libartbase_static_defaults",
+        "libdexfile_static_defaults",
+        "libprofile_static_defaults",
+        "libart-dex2oat_static_defaults",
     ],
 }
 
@@ -293,6 +358,13 @@ art_cc_binary {
     defaults: [
         "art_debug_defaults",
         "dex2oats-defaults",
+        "libartd_static_defaults",
+        "libartd-compiler_static_defaults",
+        "libartd-dexlayout_static_defaults",
+        "libartbased_static_defaults",
+        "libdexfiled_static_defaults",
+        "libprofiled_static_defaults",
+        "libartd-dex2oat_static_defaults",
     ],
     target: {
         linux_glibc_x86_64: {
@@ -301,17 +373,6 @@ art_cc_binary {
     },
     // b/79417743, oatdump 32-bit tests failed with clang lld
     use_clang_lld: false,
-    static_libs: [
-        "libartd-dex2oat",
-        "libartd-compiler",
-        "libartd-dexlayout",
-        "libartd",
-        "libartbased",
-        "libprofiled",
-        "libdexfiled",
-        "libvixld-arm",
-        "libvixld-arm64",
-    ],
 }
 
 art_cc_test {
@@ -369,11 +430,11 @@ art_cc_test {
         "external/zlib",
     ],
     shared_libs: [
-        "libprofiled",
+        "libartbased",
         "libartd-compiler",
         "libartd-dexlayout",
         "libbase",
-        "liblz4",
+        "libprofiled",
         "libsigchain",
         "libziparchive",
     ],
