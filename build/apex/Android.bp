@@ -1,0 +1,199 @@
+// Android Runtime APEX module.
+
+// Modules listed in LOCAL_REQUIRED_MODULES for module art-runtime in art/Android.mk.
+// - Base requirements (binaries for which both 32- and 64-bit versions are built, if relevant).
+art_runtime_base_binaries_both = [
+    "dalvikvm",
+]
+// - Base requirements (binaries for which a 32-bit version is preferred).
+art_runtime_base_binaries_prefer32 = [
+    "dex2oat",
+    "dexoptanalyzer",
+    "profman",
+]
+// - Base requirements (libraries).
+art_runtime_base_native_shared_libs = [
+    "libart",
+    "libart-compiler",
+    "libopenjdkjvm",
+    "libopenjdkjvmti",
+    "libadbconnection",
+    "libjavacrypto",
+]
+bionic_native_shared_libs = [
+    "libc",
+    "libm",
+    "libdl",
+]
+bionic_binaries_both = [
+    "linker",
+]
+// - Debug variants (binaries for which a 32-bit version is preferred).
+art_runtime_debug_binaries_prefer32 = [
+    "dex2oatd",
+    "dexoptanalyzerd",
+    "profmand",
+]
+// - Debug variants (libraries).
+art_runtime_debug_native_shared_libs = [
+    "libartd",
+    "libartd-compiler",
+    "libopenjdkjvmd",
+    "libopenjdkjvmtid",
+    "libadbconnectiond",
+]
+libcore_debug_native_shared_libs = [
+    "libopenjdkd",
+]
+
+// Data files associated with bionic / managed core library APIs.
+art_runtime_data_file_prebuilts = [
+    "apex_tz_version",
+    "apex_tzdata",
+    "apex_tzlookup.xml",
+    "apex_icu.dat",
+]
+
+// Modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
+art_tools_common_binaries = [
+    "dexdiag",
+    "dexdump",
+    "dexlist",
+]
+
+// Device-only modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
+art_tools_device_only_binaries = [
+    // oatdump cannot link with host linux_bionic due to not using clang lld;
+    // TODO: Make it work with clang lld.
+    "oatdump",
+]
+
+// Host-only modules listed in LOCAL_REQUIRED_MODULES for module art-tools in art/Android.mk.
+art_tools_host_only_binaries = [
+    // FIXME: Does not work as-is, because `ahat` is defined in tools/ahat/Android.mk
+    // (same issue as for `libart_fake` above).
+    //"ahat",
+    "hprof-conv",
+    // ...
+]
+
+art_tools_device_binaries = art_tools_common_binaries + art_tools_device_only_binaries
+art_tools_host_binaries = art_tools_common_binaries + art_tools_host_only_binaries
+
+// (Some) Libcore native libraries.
+libcore_native_shared_libs = [
+    "libopenjdk",
+]
+
+apex_key {
+    name: "com.android.runtime.key",
+    public_key: "com.android.runtime.avbpubkey",
+    private_key: "com.android.runtime.pem",
+}
+
+prebuilt_etc {
+    name: "com.android.runtime.ld.config.txt",
+    src: "ld.config.txt",
+    filename: "ld.config.txt",
+    installable: false,
+}
+
+// TODO: Introduce `apex_defaults` to factor common parts of `apex`
+// module definitions below?
+
+// Release version of the Runtime APEX module (not containing debug
+// variants nor tools), included in user builds. Also used for
+// storage-constrained devices in userdebug and eng builds.
+apex {
+    name: "com.android.runtime.release",
+    compile_multilib: "both",
+    manifest: "manifest.json",
+    native_shared_libs: art_runtime_base_native_shared_libs
+        + bionic_native_shared_libs
+        + libcore_native_shared_libs,
+    multilib: {
+        both: {
+            // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
+            // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
+            binaries: art_runtime_base_binaries_both
+                + bionic_binaries_both,
+        },
+        prefer32: {
+            binaries: art_runtime_base_binaries_prefer32,
+        },
+        first: {
+            binaries: [],
+        }
+    },
+    prebuilts: art_runtime_data_file_prebuilts
+        + ["com.android.runtime.ld.config.txt"],
+    key: "com.android.runtime.key",
+}
+
+// "Debug" version of the Runtime APEX module (containing both release and
+// debug variants, as well as additional tools), included in userdebug and
+// eng build.
+apex {
+    name: "com.android.runtime.debug",
+    compile_multilib: "both",
+    manifest: "manifest.json",
+    native_shared_libs: art_runtime_base_native_shared_libs
+        + art_runtime_debug_native_shared_libs
+        + bionic_native_shared_libs
+        + libcore_native_shared_libs
+        + libcore_debug_native_shared_libs,
+    multilib: {
+        both: {
+            // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
+            // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
+            binaries: art_runtime_base_binaries_both
+                + bionic_binaries_both,
+        },
+        prefer32: {
+            binaries: art_runtime_base_binaries_prefer32
+                + art_runtime_debug_binaries_prefer32,
+        },
+        first: {
+            binaries: art_tools_device_binaries,
+        }
+    },
+    prebuilts: art_runtime_data_file_prebuilts
+        + ["com.android.runtime.ld.config.txt"],
+    key: "com.android.runtime.key",
+}
+
+// TODO: Do this better. art_apex will disable host builds when
+// HOST_PREFER_32_BIT is set. We cannot simply use com.android.runtime.debug
+// because binaries have different multilib classes and 'multilib: {}' isn't
+// supported by target: { ... }.
+// See b/120617876 for more information.
+art_apex {
+    name: "com.android.runtime.host",
+    compile_multilib: "both",
+    payload_type: "zip",
+    host_supported: true,
+    device_supported: false,
+    manifest: "manifest.json",
+    native_shared_libs: art_runtime_base_native_shared_libs
+        + art_runtime_debug_native_shared_libs
+        + libcore_native_shared_libs
+        + libcore_debug_native_shared_libs,
+    multilib: {
+        both: {
+            // TODO: Add logic to create a `dalvikvm` symlink to `dalvikvm32` or `dalvikvm64`
+            // (see `symlink_preferred_arch` in art/dalvikvm/Android.bp).
+            binaries: art_runtime_base_binaries_both,
+        },
+        first: {
+            binaries: art_tools_host_binaries
+                + art_runtime_base_binaries_prefer32
+                + art_runtime_debug_binaries_prefer32,
+        }
+    },
+    key: "com.android.runtime.key",
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
+}

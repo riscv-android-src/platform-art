@@ -22,9 +22,10 @@
 #include <string>
 #include <type_traits>
 
+#include <android-base/logging.h>
+
 #include "base/atomic.h"
 #include "base/globals.h"
-#include "base/logging.h"  // For VLOG_IS_ON.
 
 namespace art {
 
@@ -59,6 +60,7 @@ enum class MethodCompilationStat {
   kNotCompiledUnsupportedIsa,
   kNotCompiledVerificationError,
   kNotCompiledVerifyAtRuntime,
+  kNotCompiledIrreducibleLoopAndStringInit,
   kInlinedMonomorphicCall,
   kInlinedPolymorphicCall,
   kMonomorphicCall,

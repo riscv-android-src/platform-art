@@ -351,7 +351,7 @@ class NearLabel : private Label {
 };
 
 
-class X86_64Assembler FINAL : public Assembler {
+class X86_64Assembler final : public Assembler {
  public:
   explicit X86_64Assembler(ArenaAllocator* allocator)
       : Assembler(allocator), constant_area_(allocator) {}
@@ -543,6 +543,7 @@ class X86_64Assembler FINAL : public Assembler {
   void andps(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void pand(XmmRegister dst, XmmRegister src);
 
+  void andn(CpuRegister dst, CpuRegister src1, CpuRegister src2);
   void andnpd(XmmRegister dst, XmmRegister src);  // no addr variant (for now)
   void andnps(XmmRegister dst, XmmRegister src);
   void pandn(XmmRegister dst, XmmRegister src);
@@ -796,6 +797,10 @@ class X86_64Assembler FINAL : public Assembler {
   void bsfq(CpuRegister dst, CpuRegister src);
   void bsfq(CpuRegister dst, const Address& src);
 
+  void blsi(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+  void blsmsk(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+  void blsr(CpuRegister dst, CpuRegister src);  // no addr variant (for now)
+
   void bsrl(CpuRegister dst, CpuRegister src);
   void bsrl(CpuRegister dst, const Address& src);
   void bsrq(CpuRegister dst, CpuRegister src);
@@ -844,8 +849,8 @@ class X86_64Assembler FINAL : public Assembler {
   //
   int PreferredLoopAlignment() { return 16; }
   void Align(int alignment, int offset);
-  void Bind(Label* label) OVERRIDE;
-  void Jump(Label* label) OVERRIDE {
+  void Bind(Label* label) override;
+  void Jump(Label* label) override {
     jmp(label);
   }
   void Bind(NearLabel* label);
@@ -950,6 +955,11 @@ class X86_64Assembler FINAL : public Assembler {
   // Emit a REX prefix to normalize byte registers plus necessary register bit encodings.
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, CpuRegister src);
   void EmitOptionalByteRegNormalizingRex32(CpuRegister dst, const Operand& operand);
+
+  // Emit a 3 byte VEX Prefix
+  uint8_t EmitVexByteZero(bool is_two_byte);
+  uint8_t EmitVexByte1(bool r, bool x, bool b, int mmmmm);
+  uint8_t EmitVexByte2(bool w , int l , X86_64ManagedRegister operand, int pp);
 
   ConstantArea constant_area_;
 

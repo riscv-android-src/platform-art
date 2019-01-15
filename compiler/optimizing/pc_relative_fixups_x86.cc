@@ -17,7 +17,6 @@
 #include "pc_relative_fixups_x86.h"
 #include "code_generator_x86.h"
 #include "intrinsics_x86.h"
-#include "runtime.h"
 
 namespace art {
 namespace x86 {
@@ -42,53 +41,53 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
   }
 
  private:
-  void VisitAdd(HAdd* add) OVERRIDE {
+  void VisitAdd(HAdd* add) override {
     BinaryFP(add);
   }
 
-  void VisitSub(HSub* sub) OVERRIDE {
+  void VisitSub(HSub* sub) override {
     BinaryFP(sub);
   }
 
-  void VisitMul(HMul* mul) OVERRIDE {
+  void VisitMul(HMul* mul) override {
     BinaryFP(mul);
   }
 
-  void VisitDiv(HDiv* div) OVERRIDE {
+  void VisitDiv(HDiv* div) override {
     BinaryFP(div);
   }
 
-  void VisitCompare(HCompare* compare) OVERRIDE {
+  void VisitCompare(HCompare* compare) override {
     BinaryFP(compare);
   }
 
-  void VisitReturn(HReturn* ret) OVERRIDE {
+  void VisitReturn(HReturn* ret) override {
     HConstant* value = ret->InputAt(0)->AsConstant();
     if ((value != nullptr && DataType::IsFloatingPointType(value->GetType()))) {
       ReplaceInput(ret, value, 0, true);
     }
   }
 
-  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) OVERRIDE {
+  void VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invoke) override {
     HandleInvoke(invoke);
   }
 
-  void VisitInvokeVirtual(HInvokeVirtual* invoke) OVERRIDE {
+  void VisitInvokeVirtual(HInvokeVirtual* invoke) override {
     HandleInvoke(invoke);
   }
 
-  void VisitInvokeInterface(HInvokeInterface* invoke) OVERRIDE {
+  void VisitInvokeInterface(HInvokeInterface* invoke) override {
     HandleInvoke(invoke);
   }
 
-  void VisitLoadClass(HLoadClass* load_class) OVERRIDE {
+  void VisitLoadClass(HLoadClass* load_class) override {
     if (load_class->HasPcRelativeLoadKind()) {
       HX86ComputeBaseMethodAddress* method_address = GetPCRelativeBasePointer(load_class);
       load_class->AddSpecialInput(method_address);
     }
   }
 
-  void VisitLoadString(HLoadString* load_string) OVERRIDE {
+  void VisitLoadString(HLoadString* load_string) override {
     if (load_string->HasPcRelativeLoadKind()) {
       HX86ComputeBaseMethodAddress* method_address = GetPCRelativeBasePointer(load_string);
       load_string->AddSpecialInput(method_address);
@@ -102,31 +101,31 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
   }
 
-  void VisitEqual(HEqual* cond) OVERRIDE {
+  void VisitEqual(HEqual* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitNotEqual(HNotEqual* cond) OVERRIDE {
+  void VisitNotEqual(HNotEqual* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitLessThan(HLessThan* cond) OVERRIDE {
+  void VisitLessThan(HLessThan* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitLessThanOrEqual(HLessThanOrEqual* cond) OVERRIDE {
+  void VisitLessThanOrEqual(HLessThanOrEqual* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitGreaterThan(HGreaterThan* cond) OVERRIDE {
+  void VisitGreaterThan(HGreaterThan* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitGreaterThanOrEqual(HGreaterThanOrEqual* cond) OVERRIDE {
+  void VisitGreaterThanOrEqual(HGreaterThanOrEqual* cond) override {
     BinaryFP(cond);
   }
 
-  void VisitNeg(HNeg* neg) OVERRIDE {
+  void VisitNeg(HNeg* neg) override {
     if (DataType::IsFloatingPointType(neg->GetType())) {
       // We need to replace the HNeg with a HX86FPNeg in order to address the constant area.
       HX86ComputeBaseMethodAddress* method_address = GetPCRelativeBasePointer(neg);
@@ -141,7 +140,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
     }
   }
 
-  void VisitPackedSwitch(HPackedSwitch* switch_insn) OVERRIDE {
+  void VisitPackedSwitch(HPackedSwitch* switch_insn) override {
     if (switch_insn->GetNumEntries() <=
         InstructionCodeGeneratorX86::kPackedSwitchJumpTableThreshold) {
       return;
@@ -239,7 +238,7 @@ class PCRelativeHandlerVisitor : public HGraphVisitor {
       case Intrinsics::kIntegerValueOf:
         // This intrinsic can be call free if it loads the address of the boot image object.
         // If we're compiling PIC, we need the address base for loading from .data.bimg.rel.ro.
-        if (Runtime::Current()->UseJitCompilation()) {
+        if (!codegen_->GetCompilerOptions().GetCompilePic()) {
           break;
         }
         FALLTHROUGH_INTENDED;

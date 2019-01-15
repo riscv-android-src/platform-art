@@ -20,12 +20,15 @@
 #include <vector>
 
 #include "base/array_ref.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
-#include "dex/dex_file.h"
 #include "handle.h"
 
 namespace art {
+
+namespace dex {
+struct ClassDef;
+}  // namespace dex
 
 namespace mirror {
 class Class;
@@ -35,6 +38,7 @@ class Object;
 
 class ArtMethod;
 class ClassLoadCallback;
+class DexFile;
 class Thread;
 class MethodCallback;
 class Monitor;
@@ -115,6 +119,19 @@ class MonitorCallback {
   virtual ~MonitorCallback() {}
 };
 
+class ParkCallback {
+ public:
+  // Called on entry to the Unsafe.#park method
+  virtual void ThreadParkStart(bool is_absolute, int64_t millis_timeout)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+
+  // Called just after the thread has woken up from going to sleep for a park(). This will only be
+  // called for Unsafe.park() calls where the thread did (or at least could have) gone to sleep.
+  virtual void ThreadParkFinished(bool timed_out) REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+
+  virtual ~ParkCallback() {}
+};
+
 // A callback to let parts of the runtime note that they are currently relying on a particular
 // method remaining in it's current state. Users should not rely on always being called. If multiple
 // callbacks are added the runtime will short-circuit when the first one returns 'true'.
@@ -170,9 +187,9 @@ class RuntimeCallbacks {
                       Handle<mirror::Class> temp_class,
                       Handle<mirror::ClassLoader> loader,
                       const DexFile& initial_dex_file,
-                      const DexFile::ClassDef& initial_class_def,
+                      const dex::ClassDef& initial_class_def,
                       /*out*/DexFile const** final_dex_file,
-                      /*out*/DexFile::ClassDef const** final_class_def)
+                      /*out*/dex::ClassDef const** final_class_def)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void AddMethodCallback(MethodCallback* cb) REQUIRES(Locks::mutator_lock_);
@@ -192,6 +209,11 @@ class RuntimeCallbacks {
 
   void AddMonitorCallback(MonitorCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
   void RemoveMonitorCallback(MonitorCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void ThreadParkStart(bool is_absolute, int64_t timeout) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ThreadParkFinished(bool timed_out) REQUIRES_SHARED(Locks::mutator_lock_);
+  void AddParkCallback(ParkCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
+  void RemoveParkCallback(ParkCallback* cb) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns true if some MethodInspectionCallback indicates the method is being inspected/depended
   // on by some code.
@@ -242,6 +264,8 @@ class RuntimeCallbacks {
   std::vector<MethodCallback*> method_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
   std::vector<MonitorCallback*> monitor_callbacks_
+      GUARDED_BY(Locks::mutator_lock_);
+  std::vector<ParkCallback*> park_callbacks_
       GUARDED_BY(Locks::mutator_lock_);
   std::vector<MethodInspectionCallback*> method_inspection_callbacks_
       GUARDED_BY(Locks::mutator_lock_);

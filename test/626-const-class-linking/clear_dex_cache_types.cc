@@ -15,6 +15,7 @@
  */
 
 #include "jni.h"
+#include "handle_scope-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
@@ -40,6 +41,7 @@ extern "C" JNIEXPORT void JNICALL Java_Main_nativeSkipVerification(JNIEnv*, jcla
   if (status == ClassStatus::kResolved) {
     ObjectLock<mirror::Class> lock(soa.Self(), klass);
     klass->SetStatus(klass, ClassStatus::kVerified, soa.Self());
+    klass->SetVerificationAttempted();
   } else {
     LOG(ERROR) << klass->PrettyClass() << " has unexpected status: " << status;
   }

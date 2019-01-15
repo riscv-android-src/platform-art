@@ -76,10 +76,19 @@ if [ -z "$ANDROID_BUILD_TOP" ]; then
     export ANDROID_BUILD_TOP=$oldwd
 fi
 
+# OUT_DIR defaults to out, and may be relative to $ANDROID_BUILD_TOP.
+# Convert it to an absolute path, since we cd into the tmp_dir to run the tests.
+export OUT_DIR=${OUT_DIR:-out}
+if [[ "$OUT_DIR" != /* ]]; then
+    export OUT_DIR=$ANDROID_BUILD_TOP/$OUT_DIR
+fi
+
 # ANDROID_HOST_OUT is not set in a build environment.
 if [ -z "$ANDROID_HOST_OUT" ]; then
-    export ANDROID_HOST_OUT=${OUT_DIR:-$ANDROID_BUILD_TOP/out}/host/linux-x86
+    export ANDROID_HOST_OUT=${OUT_DIR}/host/linux-x86
 fi
+
+host_lib_root=${ANDROID_HOST_OUT}
 
 # Allow changing DESUGAR script to something else, or to disable it with DESUGAR=false.
 if [ -z "$DESUGAR" ]; then
@@ -148,16 +157,21 @@ jvmti_redefine_stress="false"
 strace="false"
 always_clean="no"
 never_clean="no"
-have_dex2oat="yes"
-have_patchoat="yes"
 have_image="yes"
-multi_image_suffix=""
 android_root="/system"
 bisection_search="no"
 suspend_timeout="500000"
-# By default we will use optimizing.
-image_args=""
 image_suffix=""
+run_optimizing="false"
+
+# To cause tests to fail fast, limit the file sizes created by dx, dex2oat and
+# ART output to approximately 128MB. This should be more than sufficient
+# for any test while still catching cases of runaway output.
+# Set a hard limit to encourage ART developers to increase the ulimit here if
+# needed to support a test case rather than resetting the limit in the run
+# script for the particular test in question. Adjust this if needed for
+# particular configurations.
+file_ulimit=128000
 
 while true; do
     if [ "x$1" = "x--host" ]; then
@@ -181,7 +195,6 @@ while true; do
         target_mode="no"
         DEX_LOCATION="$tmp_dir"
         runtime="jvm"
-        image_args=""
         prebuild_mode="no"
         NEED_DEX="false"
         run_args="${run_args} --jvm"
@@ -195,20 +208,8 @@ while true; do
         lib="libdvm.so"
         runtime="dalvik"
         shift
-    elif [ "x$1" = "x--no-dex2oat" ]; then
-        have_dex2oat="no"
-        shift
-    elif [ "x$1" = "x--no-patchoat" ]; then
-        have_patchoat="no"
-        shift
     elif [ "x$1" = "x--no-image" ]; then
         have_image="no"
-        shift
-    elif [ "x$1" = "x--multi-image" ]; then
-        multi_image_suffix="-multi"
-        shift
-    elif [ "x$1" = "x--pic-test" ]; then
-        run_args="${run_args} --pic-test"
         shift
     elif [ "x$1" = "x--relocate" ]; then
         relocate="yes"
@@ -317,17 +318,20 @@ while true; do
         image_suffix="-interpreter"
         shift
     elif [ "x$1" = "x--jit" ]; then
-        image_args="--jit"
+        run_args="${run_args} --jit"
         image_suffix="-interpreter"
         shift
+    elif [ "x$1" = "x--baseline" ]; then
+        run_args="${run_args} --baseline"
+        shift
     elif [ "x$1" = "x--optimizing" ]; then
-        image_args="-Xcompiler-option --compiler-backend=Optimizing"
+        run_optimizing="true"
         shift
     elif [ "x$1" = "x--no-verify" ]; then
         run_args="${run_args} --no-verify"
         shift
     elif [ "x$1" = "x--verify-soft-fail" ]; then
-        image_args="--verify-soft-fail"
+        run_args="${run_args} --verify-soft-fail"
         image_suffix="-interp-ac"
         shift
     elif [ "x$1" = "x--no-optimize" ]; then
@@ -382,6 +386,15 @@ while true; do
         android_root="$1"
         run_args="${run_args} --android-root $1"
         shift
+    elif [ "x$1" = "x--android-runtime-root" ]; then
+        shift
+        if [ "x$1" = "x" ]; then
+            echo "$0 missing argument to --android-runtime-root" 1>&2
+            usage="yes"
+            break
+        fi
+        run_args="${run_args} --android-runtime-root $1"
+        shift
     elif [ "x$1" = "x--update" ]; then
         update_mode="yes"
         shift
@@ -391,6 +404,26 @@ while true; do
     elif [ "x$1" = "x--64" ]; then
         run_args="${run_args} --64"
         suffix64="64"
+        shift
+    elif [ "x$1" = "x--bionic" ]; then
+        # soong linux_bionic builds are 64bit only.
+        run_args="${run_args} --bionic --host --64"
+        suffix64="64"
+        target_mode="no"
+        DEX_LOCATION=$tmp_dir
+        host_lib_root=$OUT_DIR/soong/host/linux_bionic-x86
+        shift
+    elif [ "x$1" = "x--runtime-zipapex" ]; then
+        shift
+        # TODO Should we allow the java.library.path to search the zipapex too?
+        # Not needed at the moment and adding it will be complicated so for now
+        # we'll ignore this.
+        run_args="${run_args} --host --runtime-zipapex $1"
+        target_mode="no"
+        DEX_LOCATION=$tmp_dir
+        # apex_payload.zip is quite large we need a high enough ulimit to
+        # extract it. 512mb should be good enough.
+        file_ulimit=512000
         shift
     elif [ "x$1" = "x--trace" ]; then
         trace="true"
@@ -449,7 +482,6 @@ fi
 # The DEX_LOCATION with the chroot prefix, if any.
 chroot_dex_location="$chroot$DEX_LOCATION"
 
-run_args="${run_args} ${image_args}"
 # Allocate file descriptor real_stderr and redirect it to the shell's error
 # output (fd 2).
 if [ ${BASH_VERSINFO[1]} -ge 4 ] && [ ${BASH_VERSINFO[2]} -ge 1 ]; then
@@ -576,14 +608,6 @@ if [ "$target_mode" = "no" ]; then
     fi
 fi
 
-if [ "$have_patchoat" = "no" ]; then
-  run_args="${run_args} --no-patchoat"
-fi
-
-if [ "$have_dex2oat" = "no" ]; then
-  run_args="${run_args} --no-dex2oat"
-fi
-
 if [ ! "$runtime" = "jvm" ]; then
   run_args="${run_args} --lib $lib"
 fi
@@ -599,12 +623,12 @@ if [ "$runtime" = "dalvik" ]; then
 elif [ "$runtime" = "art" ]; then
     if [ "$target_mode" = "no" ]; then
         guess_host_arch_name
-        run_args="${run_args} --boot ${ANDROID_HOST_OUT}/framework/core${image_suffix}${multi_image_suffix}.art"
-        run_args="${run_args} --runtime-option -Djava.library.path=${ANDROID_HOST_OUT}/lib${suffix64}:${ANDROID_HOST_OUT}/nativetest${suffix64}"
+        run_args="${run_args} --boot ${ANDROID_HOST_OUT}/framework/core${image_suffix}.art"
+        run_args="${run_args} --runtime-option -Djava.library.path=${host_lib_root}/lib${suffix64}:${host_lib_root}/nativetest${suffix64}"
     else
         guess_target_arch_name
         run_args="${run_args} --runtime-option -Djava.library.path=/data/nativetest${suffix64}/art/${target_arch_name}"
-        run_args="${run_args} --boot /data/art-test/core${image_suffix}${multi_image_suffix}.art"
+        run_args="${run_args} --boot /data/art-test/core${image_suffix}.art"
     fi
     if [ "$relocate" = "yes" ]; then
       run_args="${run_args} --relocate"
@@ -636,16 +660,6 @@ fi
 
 if [ "$bisection_search" = "yes" -a "$prebuild_mode" = "yes" ]; then
     err_echo "--bisection-search and --prebuild are mutually exclusive"
-    usage="yes"
-fi
-
-if [ "$bisection_search" = "yes" -a "$have_dex2oat" = "no" ]; then
-    err_echo "--bisection-search and --no-dex2oat are mutually exclusive"
-    usage="yes"
-fi
-
-if [ "$bisection_search" = "yes" -a "$have_patchoat" = "no" ]; then
-    err_echo "--bisection-search and --no-patchoat are mutually exclusive"
     usage="yes"
 fi
 
@@ -717,7 +731,6 @@ if [ "$usage" = "yes" ]; then
              "If used, then the"
         echo "                          other runtime options are ignored."
         echo "    --no-dex2oat          Run as though dex2oat was failing."
-        echo "    --no-patchoat         Run as though patchoat was failing."
         echo "    --prebuild            Run dex2oat on the files before starting test. (default)"
         echo "    --no-prebuild         Do not run dex2oat on the files before starting"
         echo "                          the test."
@@ -738,6 +751,9 @@ if [ "$usage" = "yes" ]; then
         echo "    --output-path [path]  Location where to store the build" \
              "files."
         echo "    --64                  Run the test in 64-bit mode"
+        echo "    --bionic              Use the (host, 64-bit only) linux_bionic libc runtime"
+        echo "    --runtime-zipapex [file]"
+        echo "                          Use the given zipapex file to provide runtime binaries"
         echo "    --trace               Run with method tracing"
         echo "    --strace              Run with syscall tracing from strace."
         echo "    --stream              Run method tracing in streaming mode (requires --trace)"
@@ -751,12 +767,12 @@ if [ "$usage" = "yes" ]; then
         echo "    --never-clean         Keep the test files even if the test succeeds."
         echo "    --chroot [newroot]    Run with root directory set to newroot."
         echo "    --android-root [path] The path on target for the android root. (/system by default)."
+        echo "    --android-runtime-root [path]"
+        echo "                          The path on target for the Android Runtime root."
+        echo "                          (/apex/com.android.runtime by default)."
         echo "    --dex2oat-swap        Use a dex2oat swap file."
         echo "    --instruction-set-features [string]"
         echo "                          Set instruction-set-features for compilation."
-        echo "    --multi-image         Use a set of images compiled with dex2oat multi-image for"
-        echo "                          the boot class path."
-        echo "    --pic-test            Compile the test code position independent."
         echo "    --quiet               Don't print anything except failure messages"
         echo "    --bisection-search    Perform bisection bug search."
         echo "    --vdex                Test using vdex as in input to dex2oat. Only works with --prebuild."
@@ -787,7 +803,7 @@ fi
 echo "${test_dir}: building..." 1>&2
 
 rm -rf "$tmp_dir"
-cp -Rp "$test_dir" "$tmp_dir"
+cp -LRp "$test_dir" "$tmp_dir"
 cd "$tmp_dir"
 
 if [ '!' -r "$build" ]; then
@@ -817,7 +833,7 @@ export TEST_NAME=`basename ${test_dir}`
 # Tests named '<number>-checker-*' will also have their CFGs verified with
 # Checker when compiled with Optimizing on host.
 if [[ "$TEST_NAME" =~ ^[0-9]+-checker- ]]; then
-  if [ "$runtime" = "art" -a "$image_suffix" = "" ]; then
+  if [ "$runtime" = "art" -a "$image_suffix" = "" -a "$run_optimizing" = "true" ]; then
     # In no-prebuild or no-image mode, the compiler only quickens so disable the checker.
     if [ "$prebuild_mode" = "yes" -a "$have_image" = "yes" ]; then
       run_checker="yes"
@@ -840,15 +856,9 @@ if [[ "$TEST_NAME" =~ ^[0-9]+-checker- ]]; then
   fi
 fi
 
-  run_args="${run_args} --testlib ${testlib}"
+run_args="${run_args} --testlib ${testlib}"
 
-# To cause tests to fail fast, limit the file sizes created by dx, dex2oat and
-# ART output to approximately 128MB. This should be more than sufficient
-# for any test while still catching cases of runaway output.
-# Set a hard limit to encourage ART developers to increase the ulimit here if
-# needed to support a test case rather than resetting the limit in the run
-# script for the particular test in question.
-if ! ulimit -f 128000; then
+if ! ulimit -f ${file_ulimit}; then
   err_echo "ulimit file size setting failed"
 fi
 

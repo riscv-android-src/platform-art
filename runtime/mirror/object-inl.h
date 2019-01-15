@@ -80,11 +80,11 @@ inline uint32_t Object::GetLockOwnerThreadId() {
 }
 
 inline mirror::Object* Object::MonitorEnter(Thread* self) {
-  return Monitor::MonitorEnter(self, this, /*trylock*/false);
+  return Monitor::MonitorEnter(self, this, /*trylock=*/false);
 }
 
 inline mirror::Object* Object::MonitorTryEnter(Thread* self) {
-  return Monitor::MonitorEnter(self, this, /*trylock*/true);
+  return Monitor::MonitorEnter(self, this, /*trylock=*/true);
 }
 
 inline bool Object::MonitorExit(Thread* self) {
@@ -137,38 +137,42 @@ inline bool Object::InstanceOf(ObjPtr<Class> klass) {
   return klass->IsAssignableFrom(GetClass<kVerifyFlags>());
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsClass() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  Class* java_lang_Class = GetClass<kVerifyFlags, kReadBarrierOption>()->
-      template GetClass<kVerifyFlags, kReadBarrierOption>();
-  return GetClass<kNewFlags, kReadBarrierOption>() == java_lang_Class;
+  // OK to look at from-space copies since java.lang.Class.class is not movable.
+  // See b/114413743
+  ObjPtr<Class> klass = GetClass<kVerifyFlags, kWithoutReadBarrier>();
+  ObjPtr<Class> java_lang_Class = klass->GetClass<kVerifyFlags, kWithoutReadBarrier>();
+  return klass == java_lang_Class;
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline Class* Object::AsClass() {
-  DCHECK((IsClass<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsClass<kVerifyFlags>()));
   return down_cast<Class*>(this);
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsObjectArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  return IsArrayInstance<kVerifyFlags, kReadBarrierOption>() &&
-      !GetClass<kNewFlags, kReadBarrierOption>()->
-          template GetComponentType<kNewFlags, kReadBarrierOption>()->IsPrimitive();
+  // We do not need a read barrier here as the primitive type is constant,
+  // both from-space and to-space component type classes shall yield the same result.
+  constexpr VerifyObjectFlags kNewFlags = RemoveThisFlags(kVerifyFlags);
+  return IsArrayInstance<kVerifyFlags>() &&
+      !GetClass<kNewFlags, kWithoutReadBarrier>()->
+          template GetComponentType<kNewFlags, kWithoutReadBarrier>()->IsPrimitive();
 }
 
-template<class T, VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<class T, VerifyObjectFlags kVerifyFlags>
 inline ObjectArray<T>* Object::AsObjectArray() {
-  DCHECK((IsObjectArray<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsObjectArray<kVerifyFlags>()));
   return down_cast<ObjectArray<T>*>(this);
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsArrayInstance() {
-  return GetClass<kVerifyFlags, kReadBarrierOption>()->
-      template IsArrayClass<kVerifyFlags, kReadBarrierOption>();
+  // We do not need a read barrier here, both from-space and to-space version of the class
+  // shall return the same result from IsArrayClass().
+  return GetClass<kVerifyFlags, kWithoutReadBarrier>()->template IsArrayClass<kVerifyFlags>();
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -182,119 +186,108 @@ inline Reference* Object::AsReference() {
   return down_cast<Reference*>(this);
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline Array* Object::AsArray() {
-  DCHECK((IsArrayInstance<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsArrayInstance<kVerifyFlags>()));
   return down_cast<Array*>(this);
+}
+
+template<VerifyObjectFlags kVerifyFlags, Primitive::Type kType>
+ALWAYS_INLINE bool Object::IsSpecificPrimitiveArray() {
+  // We do not need a read barrier here as the primitive type is constant,
+  // both from-space and to-space component type classes shall yield the same result.
+  ObjPtr<Class> klass = GetClass<kVerifyFlags, kWithoutReadBarrier>();
+  constexpr VerifyObjectFlags kNewFlags = RemoveThisFlags(kVerifyFlags);
+  ObjPtr<Class> const component_type = klass->GetComponentType<kNewFlags, kWithoutReadBarrier>();
+  return component_type != nullptr &&
+         component_type->GetPrimitiveType<kNewFlags>() == kType;
+}
+
+template<VerifyObjectFlags kVerifyFlags>
+inline bool Object::IsBooleanArray() {
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimBoolean>();
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline BooleanArray* Object::AsBooleanArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->GetComponentType()->IsPrimitiveBoolean());
+  DCHECK(IsBooleanArray<kVerifyFlags>());
   return down_cast<BooleanArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
+inline bool Object::IsByteArray() {
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimByte>();
+}
+
+template<VerifyObjectFlags kVerifyFlags>
 inline ByteArray* Object::AsByteArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveByte());
+  DCHECK(IsByteArray<kVerifyFlags>());
   return down_cast<ByteArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
-inline ByteArray* Object::AsByteSizedArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveByte() ||
-         GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveBoolean());
-  return down_cast<ByteArray*>(this);
+inline bool Object::IsCharArray() {
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimChar>();
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline CharArray* Object::AsCharArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveChar());
+  DCHECK(IsCharArray<kVerifyFlags>());
   return down_cast<CharArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
+inline bool Object::IsShortArray() {
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimShort>();
+}
+
+template<VerifyObjectFlags kVerifyFlags>
 inline ShortArray* Object::AsShortArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveShort());
+  DCHECK(IsShortArray<kVerifyFlags>());
   return down_cast<ShortArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
-inline ShortArray* Object::AsShortSizedArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveShort() ||
-         GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveChar());
-  return down_cast<ShortArray*>(this);
-}
-
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline bool Object::IsIntArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  ObjPtr<Class> klass = GetClass<kVerifyFlags, kReadBarrierOption>();
-  ObjPtr<Class> component_type = klass->GetComponentType<kVerifyFlags, kReadBarrierOption>();
-  return component_type != nullptr && component_type->template IsPrimitiveInt<kNewFlags>();
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimInt>();
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline IntArray* Object::AsIntArray() {
-  DCHECK((IsIntArray<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsIntArray<kVerifyFlags>()));
   return down_cast<IntArray*>(this);
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsLongArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  ObjPtr<Class> klass = GetClass<kVerifyFlags, kReadBarrierOption>();
-  ObjPtr<Class> component_type = klass->GetComponentType<kVerifyFlags, kReadBarrierOption>();
-  return component_type != nullptr && component_type->template IsPrimitiveLong<kNewFlags>();
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimLong>();
 }
 
-template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
+template<VerifyObjectFlags kVerifyFlags>
 inline LongArray* Object::AsLongArray() {
-  DCHECK((IsLongArray<kVerifyFlags, kReadBarrierOption>()));
+  DCHECK((IsLongArray<kVerifyFlags>()));
   return down_cast<LongArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsFloatArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  auto* component_type = GetClass<kVerifyFlags>()->GetComponentType();
-  return component_type != nullptr && component_type->template IsPrimitiveFloat<kNewFlags>();
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimFloat>();
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline FloatArray* Object::AsFloatArray() {
   DCHECK(IsFloatArray<kVerifyFlags>());
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveFloat());
   return down_cast<FloatArray*>(this);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline bool Object::IsDoubleArray() {
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  auto* component_type = GetClass<kVerifyFlags>()->GetComponentType();
-  return component_type != nullptr && component_type->template IsPrimitiveDouble<kNewFlags>();
+  return IsSpecificPrimitiveArray<kVerifyFlags, Primitive::kPrimDouble>();
 }
 
 template<VerifyObjectFlags kVerifyFlags>
 inline DoubleArray* Object::AsDoubleArray() {
   DCHECK(IsDoubleArray<kVerifyFlags>());
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  DCHECK(GetClass<kVerifyFlags>()->IsArrayClass());
-  DCHECK(GetClass<kNewFlags>()->template GetComponentType<kNewFlags>()->IsPrimitiveDouble());
   return down_cast<DoubleArray*>(this);
 }
 
@@ -347,15 +340,15 @@ inline size_t Object::SizeOf() {
   // values is OK because of that.
   static constexpr ReadBarrierOption kRBO = kWithoutReadBarrier;
   size_t result;
-  constexpr auto kNewFlags = RemoveThisFlags(kVerifyFlags);
-  if (IsArrayInstance<kVerifyFlags, kRBO>()) {
-    result = AsArray<kNewFlags, kRBO>()->template SizeOf<kNewFlags, kRBO>();
-  } else if (IsClass<kNewFlags, kRBO>()) {
-    result = AsClass<kNewFlags, kRBO>()->template SizeOf<kNewFlags, kRBO>();
+  constexpr VerifyObjectFlags kNewFlags = RemoveThisFlags(kVerifyFlags);
+  if (IsArrayInstance<kVerifyFlags>()) {
+    result = AsArray<kNewFlags>()->template SizeOf<kNewFlags, kRBO>();
+  } else if (IsClass<kNewFlags>()) {
+    result = AsClass<kNewFlags>()->template SizeOf<kNewFlags, kRBO>();
   } else if (GetClass<kNewFlags, kRBO>()->IsStringClass()) {
     result = AsString<kNewFlags, kRBO>()->template SizeOf<kNewFlags>();
   } else {
-    result = GetClass<kNewFlags, kRBO>()->template GetObjectSize<kNewFlags, kRBO>();
+    result = GetClass<kNewFlags, kRBO>()->template GetObjectSize<kNewFlags>();
   }
   DCHECK_GE(result, sizeof(Object)) << " class=" << Class::PrettyClass(GetClass<kNewFlags, kRBO>());
   return result;
@@ -364,7 +357,7 @@ inline size_t Object::SizeOf() {
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline int8_t Object::GetFieldByte(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<int8_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<int8_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -391,7 +384,7 @@ inline void Object::SetFieldBoolean(MemberOffset field_offset, uint8_t new_value
         kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<uint8_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<uint8_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive,
@@ -407,7 +400,7 @@ inline void Object::SetFieldByte(MemberOffset field_offset, int8_t new_value) {
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int8_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int8_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -425,13 +418,13 @@ inline void Object::SetFieldByteVolatile(MemberOffset field_offset, int8_t new_v
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline uint16_t Object::GetFieldChar(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<uint16_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<uint16_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags, bool kIsVolatile>
 inline int16_t Object::GetFieldShort(MemberOffset field_offset) {
   Verify<kVerifyFlags>();
-  return GetField<int16_t, kIsVolatile>(field_offset);
+  return GetFieldPrimitive<int16_t, kIsVolatile>(field_offset);
 }
 
 template<VerifyObjectFlags kVerifyFlags>
@@ -457,7 +450,7 @@ inline void Object::SetFieldChar(MemberOffset field_offset, uint16_t new_value) 
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<uint16_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<uint16_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive,
@@ -473,7 +466,7 @@ inline void Object::SetFieldShort(MemberOffset field_offset, int16_t new_value) 
                                              kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int16_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int16_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -501,7 +494,7 @@ inline void Object::SetField32(MemberOffset field_offset, int32_t new_value) {
                                            kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int32_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int32_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -531,7 +524,7 @@ inline void Object::SetField64(MemberOffset field_offset, int64_t new_value) {
                                            kIsVolatile);
   }
   Verify<kVerifyFlags>();
-  SetField<int64_t, kIsVolatile>(field_offset, new_value);
+  SetFieldPrimitive<int64_t, kIsVolatile>(field_offset, new_value);
 }
 
 template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVerifyFlags>
@@ -584,6 +577,10 @@ inline bool Object::CasFieldStrongSequentiallyConsistent64(MemberOffset field_of
   return atomic_addr->CompareAndSetStrongSequentiallyConsistent(old_value, new_value);
 }
 
+/*
+ * Returns a pointer to an object representing what the field points to, not an
+ * object representing the field.
+ */
 template<class T,
          VerifyObjectFlags kVerifyFlags,
          ReadBarrierOption kReadBarrierOption,
@@ -730,7 +727,7 @@ template<bool kTransactionActive, bool kCheckTransaction, VerifyObjectFlags kVer
 inline ObjPtr<Object> Object::ExchangeFieldObject(MemberOffset field_offset,
                                                   ObjPtr<Object> new_value) {
   VerifyTransaction<kTransactionActive, kCheckTransaction>();
-  VerifyCAS<kVerifyFlags>(new_value, /*old_value*/ nullptr);
+  VerifyCAS<kVerifyFlags>(new_value, /*old_value=*/ nullptr);
 
   uint32_t new_ref(PtrCompression<kPoisonHeapReferences, Object>::Compress(new_value));
   uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
@@ -867,7 +864,7 @@ inline void Object::VisitFieldsReferences(uint32_t ref_offsets, const Visitor& v
     // inheritance hierarchy and find reference offsets the hard way. In the static case, just
     // consider this class.
     for (ObjPtr<Class> klass = kIsStatic
-            ? AsClass<kVerifyFlags, kReadBarrierOption>()
+            ? AsClass<kVerifyFlags>()
             : GetClass<kVerifyFlags, kReadBarrierOption>();
         klass != nullptr;
         klass = kIsStatic ? nullptr : klass->GetSuperClass<kVerifyFlags, kReadBarrierOption>()) {
@@ -879,7 +876,7 @@ inline void Object::VisitFieldsReferences(uint32_t ref_offsets, const Visitor& v
       // Presumably GC can happen when we are cross compiling, it should not cause performance
       // problems to do pointer size logic.
       MemberOffset field_offset = kIsStatic
-          ? klass->GetFirstReferenceStaticFieldOffset<kVerifyFlags, kReadBarrierOption>(
+          ? klass->GetFirstReferenceStaticFieldOffset<kVerifyFlags>(
               Runtime::Current()->GetClassLinker()->GetImagePointerSize())
           : klass->GetFirstReferenceInstanceFieldOffset<kVerifyFlags, kReadBarrierOption>();
       for (size_t i = 0u; i < num_reference_fields; ++i) {
@@ -902,13 +899,13 @@ inline void Object::VisitInstanceFieldsReferences(ObjPtr<Class> klass, const Vis
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption, typename Visitor>
 inline void Object::VisitStaticFieldsReferences(ObjPtr<Class> klass, const Visitor& visitor) {
-  DCHECK(!klass->IsTemp());
+  DCHECK(!klass->IsTemp<kVerifyFlags>());
   klass->VisitFieldsReferences<true, kVerifyFlags, kReadBarrierOption>(0, visitor);
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline bool Object::IsClassLoader() {
-  return GetClass<kVerifyFlags, kReadBarrierOption>()->IsClassLoaderClass();
+  return GetClass<kVerifyFlags, kReadBarrierOption>()->template IsClassLoaderClass<kVerifyFlags>();
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
@@ -919,7 +916,7 @@ inline mirror::ClassLoader* Object::AsClassLoader() {
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
 inline bool Object::IsDexCache() {
-  return GetClass<kVerifyFlags, kReadBarrierOption>()->IsDexCacheClass();
+  return GetClass<kVerifyFlags, kReadBarrierOption>()->template IsDexCacheClass<kVerifyFlags>();
 }
 
 template<VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>

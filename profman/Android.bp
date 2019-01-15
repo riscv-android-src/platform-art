@@ -26,6 +26,7 @@ cc_defaults {
 
     target: {
         android: {
+            // Use the 32-bit version of profman on devices.
             compile_multilib: "prefer32",
         },
     },
@@ -39,7 +40,6 @@ art_cc_binary {
     name: "profman",
     defaults: ["profman-defaults"],
     shared_libs: [
-        "libart",
         "libprofile",
         "libdexfile",
         "libartbase",
@@ -53,11 +53,31 @@ art_cc_binary {
         "profman-defaults",
     ],
     shared_libs: [
-        "libartd",
         "libprofiled",
         "libdexfiled",
         "libartbased",
     ],
+}
+
+art_cc_binary {
+    name: "profmans",
+    defaults: [
+        "profman-defaults",
+        "libprofile_static_defaults",
+        "libdexfile_static_defaults",
+        "libartbase_static_defaults",
+    ],
+    host_supported: true,
+    device_supported: false,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+        windows: {
+            enabled: true,
+	    cflags: ["-Wno-thread-safety"],
+        },
+    },
 }
 
 art_cc_test {

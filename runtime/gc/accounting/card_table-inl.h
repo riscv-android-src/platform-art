@@ -127,14 +127,6 @@ inline size_t CardTable::Scan(ContinuousSpaceBitmap* bitmap,
   return cards_scanned;
 }
 
-/*
- * Visitor is expected to take in a card and return the new value. When a value is modified, the
- * modify visitor is called.
- * visitor: The visitor which modifies the cards. Returns the new value for a card given an old
- * value.
- * modified: Whenever the visitor modifies a card, this visitor is called on the card. Enables
- * us to know which cards got cleared.
- */
 template <typename Visitor, typename ModifiedVisitor>
 inline void CardTable::ModifyCardsAtomic(uint8_t* scan_begin,
                                          uint8_t* scan_end,
@@ -144,6 +136,7 @@ inline void CardTable::ModifyCardsAtomic(uint8_t* scan_begin,
   uint8_t* card_end = CardFromAddr(AlignUp(scan_end, kCardSize));
   CheckCardValid(card_cur);
   CheckCardValid(card_end);
+  DCHECK(visitor(kCardClean) == kCardClean);
 
   // Handle any unaligned cards at the start.
   while (!IsAligned<sizeof(intptr_t)>(card_cur) && card_cur < card_end) {
@@ -188,7 +181,8 @@ inline void CardTable::ModifyCardsAtomic(uint8_t* scan_begin,
   while (word_cur < word_end) {
     while (true) {
       expected_word = *word_cur;
-      if (LIKELY(expected_word == 0)) {
+      static_assert(kCardClean == 0);
+      if (LIKELY(expected_word == 0 /* All kCardClean */ )) {
         break;
       }
       for (size_t i = 0; i < sizeof(uintptr_t); ++i) {
@@ -213,8 +207,8 @@ inline void CardTable::ModifyCardsAtomic(uint8_t* scan_begin,
 inline void* CardTable::AddrFromCard(const uint8_t *card_addr) const {
   DCHECK(IsValidCard(card_addr))
     << " card_addr: " << reinterpret_cast<const void*>(card_addr)
-    << " begin: " << reinterpret_cast<void*>(mem_map_->Begin() + offset_)
-    << " end: " << reinterpret_cast<void*>(mem_map_->End());
+    << " begin: " << reinterpret_cast<void*>(mem_map_.Begin() + offset_)
+    << " end: " << reinterpret_cast<void*>(mem_map_.End());
   uintptr_t offset = card_addr - biased_begin_;
   return reinterpret_cast<void*>(offset << kCardShift);
 }
@@ -228,16 +222,16 @@ inline uint8_t* CardTable::CardFromAddr(const void *addr) const {
 }
 
 inline bool CardTable::IsValidCard(const uint8_t* card_addr) const {
-  uint8_t* begin = mem_map_->Begin() + offset_;
-  uint8_t* end = mem_map_->End();
+  uint8_t* begin = mem_map_.Begin() + offset_;
+  uint8_t* end = mem_map_.End();
   return card_addr >= begin && card_addr < end;
 }
 
 inline void CardTable::CheckCardValid(uint8_t* card) const {
   DCHECK(IsValidCard(card))
       << " card_addr: " << reinterpret_cast<const void*>(card)
-      << " begin: " << reinterpret_cast<void*>(mem_map_->Begin() + offset_)
-      << " end: " << reinterpret_cast<void*>(mem_map_->End());
+      << " begin: " << reinterpret_cast<void*>(mem_map_.Begin() + offset_)
+      << " end: " << reinterpret_cast<void*>(mem_map_.End());
 }
 
 }  // namespace accounting

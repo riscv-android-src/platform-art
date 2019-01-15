@@ -54,9 +54,9 @@ class ScratchFile {
 
   ScratchFile(const ScratchFile& other, const char* suffix);
 
-  ScratchFile(ScratchFile&& other);
+  ScratchFile(ScratchFile&& other) noexcept;
 
-  ScratchFile& operator=(ScratchFile&& other);
+  ScratchFile& operator=(ScratchFile&& other) noexcept;
 
   explicit ScratchFile(File* file);
 
@@ -85,16 +85,25 @@ class CommonArtTestImpl {
   CommonArtTestImpl() = default;
   virtual ~CommonArtTestImpl() = default;
 
-  static void SetUpAndroidRoot();
+  // Set up ANDROID_BUILD_TOP, ANDROID_HOST_OUT, ANDROID_ROOT and ANDROID_RUNTIME_ROOT
+  // environment variables using sensible defaults if not already set.
+  static void SetUpAndroidRootEnvVars();
 
+  // Set up the ANDROID_DATA environment variable, creating the directory if required.
   // Note: setting up ANDROID_DATA may create a temporary directory. If this is used in a
   // non-derived class, be sure to also call the corresponding tear-down below.
-  static void SetUpAndroidData(std::string& android_data);
+  static void SetUpAndroidDataDir(std::string& android_data);
 
-  static void TearDownAndroidData(const std::string& android_data, bool fail_on_error);
+  static void TearDownAndroidDataDir(const std::string& android_data, bool fail_on_error);
 
   // Gets the paths of the libcore dex files.
   static std::vector<std::string> GetLibCoreDexFileNames();
+
+  // Gets the locations of the libcore dex files.
+  static std::vector<std::string> GetLibCoreDexLocations();
+
+  static std::string GetClassPathOption(const char* option,
+                                        const std::vector<std::string>& class_path);
 
   // Returns bin directory which contains host's prebuild tools.
   static std::string GetAndroidHostToolsDir();
@@ -209,11 +218,11 @@ class CommonArtTestBase : public TestType, public CommonArtTestImpl {
   virtual ~CommonArtTestBase() {}
 
  protected:
-  virtual void SetUp() OVERRIDE {
+  void SetUp() override {
     CommonArtTestImpl::SetUp();
   }
 
-  virtual void TearDown() OVERRIDE {
+  void TearDown() override {
     CommonArtTestImpl::TearDown();
   }
 };

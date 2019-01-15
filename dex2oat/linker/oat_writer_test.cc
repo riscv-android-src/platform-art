@@ -19,6 +19,7 @@
 #include "arch/instruction_set_features.h"
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/file_utils.h"
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
@@ -87,7 +88,7 @@ class OatTest : public CommonCompilerTest {
   void SetupCompiler(const std::vector<std::string>& compiler_options) {
     std::string error_msg;
     if (!compiler_options_->ParseCompilerOptions(compiler_options,
-                                                 false /* ignore_unrecognized */,
+                                                 /*ignore_unrecognized=*/ false,
                                                  &error_msg)) {
       LOG(FATAL) << error_msg;
       UNREACHABLE();
@@ -118,7 +119,8 @@ class OatTest : public CommonCompilerTest {
         return false;
       }
     }
-    return DoWriteElf(vdex_file, oat_file, oat_writer, key_value_store, verify);
+    return DoWriteElf(
+        vdex_file, oat_file, oat_writer, key_value_store, verify, CopyOption::kOnlyIfCompressed);
   }
 
   bool WriteElf(File* vdex_file,
@@ -126,6 +128,7 @@ class OatTest : public CommonCompilerTest {
                 const std::vector<const char*>& dex_filenames,
                 SafeMap<std::string, std::string>& key_value_store,
                 bool verify,
+                CopyOption copy,
                 ProfileCompilationInfo* profile_compilation_info) {
     TimingLogger timings("WriteElf", false, false);
     ClearBootImageOption();
@@ -138,7 +141,7 @@ class OatTest : public CommonCompilerTest {
         return false;
       }
     }
-    return DoWriteElf(vdex_file, oat_file, oat_writer, key_value_store, verify);
+    return DoWriteElf(vdex_file, oat_file, oat_writer, key_value_store, verify, copy);
   }
 
   bool WriteElf(File* vdex_file,
@@ -146,7 +149,8 @@ class OatTest : public CommonCompilerTest {
                 File&& zip_fd,
                 const char* location,
                 SafeMap<std::string, std::string>& key_value_store,
-                bool verify) {
+                bool verify,
+                CopyOption copy) {
     TimingLogger timings("WriteElf", false, false);
     ClearBootImageOption();
     OatWriter oat_writer(*compiler_options_,
@@ -156,28 +160,29 @@ class OatTest : public CommonCompilerTest {
     if (!oat_writer.AddZippedDexFilesSource(std::move(zip_fd), location)) {
       return false;
     }
-    return DoWriteElf(vdex_file, oat_file, oat_writer, key_value_store, verify);
+    return DoWriteElf(vdex_file, oat_file, oat_writer, key_value_store, verify, copy);
   }
 
   bool DoWriteElf(File* vdex_file,
                   File* oat_file,
                   OatWriter& oat_writer,
                   SafeMap<std::string, std::string>& key_value_store,
-                  bool verify) {
+                  bool verify,
+                  CopyOption copy) {
     std::unique_ptr<ElfWriter> elf_writer = CreateElfWriterQuick(
         compiler_driver_->GetCompilerOptions(),
         oat_file);
     elf_writer->Start();
     OutputStream* oat_rodata = elf_writer->StartRoData();
-    std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps;
+    std::vector<MemMap> opened_dex_files_maps;
     std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
     if (!oat_writer.WriteAndOpenDexFiles(
         vdex_file,
         oat_rodata,
         &key_value_store,
         verify,
-        /* update_input_vdex */ false,
-        CopyOption::kOnlyIfCompressed,
+        /*update_input_vdex=*/ false,
+        copy,
         &opened_dex_files_maps,
         &opened_dex_files)) {
       return false;
@@ -235,7 +240,7 @@ class OatTest : public CommonCompilerTest {
       elf_writer->EndDataBimgRelRo(data_bimg_rel_ro);
     }
 
-    if (!oat_writer.WriteHeader(elf_writer->GetStream(), 42U, 4096U, 0)) {
+    if (!oat_writer.WriteHeader(elf_writer->GetStream())) {
       return false;
     }
 
@@ -246,7 +251,7 @@ class OatTest : public CommonCompilerTest {
       return false;
     }
 
-    for (std::unique_ptr<MemMap>& map : opened_dex_files_maps) {
+    for (MemMap& map : opened_dex_files_maps) {
       opened_dex_files_maps_.emplace_back(std::move(map));
     }
     for (std::unique_ptr<const DexFile>& dex_file : opened_dex_files) {
@@ -256,12 +261,12 @@ class OatTest : public CommonCompilerTest {
   }
 
   void TestDexFileInput(bool verify, bool low_4gb, bool use_profile);
-  void TestZipFileInput(bool verify);
+  void TestZipFileInput(bool verify, CopyOption copy);
   void TestZipFileInputWithEmptyDex();
 
   std::unique_ptr<QuickCompilerCallbacks> callbacks_;
 
-  std::vector<std::unique_ptr<MemMap>> opened_dex_files_maps_;
+  std::vector<MemMap> opened_dex_files_maps_;
   std::vector<std::unique_ptr<const DexFile>> opened_dex_files_;
 };
 
@@ -386,13 +391,12 @@ TEST_F(OatTest, WriteRead) {
   jobject class_loader = nullptr;
   if (kCompile) {
     TimingLogger timings2("OatTest::WriteRead", false, false);
-    SetDexFilesForOatFile(class_linker->GetBootClassPath());
-    compiler_driver_->CompileAll(class_loader, class_linker->GetBootClassPath(), &timings2);
+    CompileAll(class_loader, class_linker->GetBootClassPath(), &timings2);
   }
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "lue.art");
+  key_value_store.Put(OatHeader::kBootClassPathChecksumsKey, "testkey");
   bool success = WriteElf(tmp_vdex.GetFile(),
                           tmp_oat.GetFile(),
                           class_linker->GetBootClassPath(),
@@ -401,24 +405,22 @@ TEST_F(OatTest, WriteRead) {
   ASSERT_TRUE(success);
 
   if (kCompile) {  // OatWriter strips the code, regenerate to compare
-    compiler_driver_->CompileAll(class_loader, class_linker->GetBootClassPath(), &timings);
+    CompileAll(class_loader, class_linker->GetBootClassPath(), &timings);
   }
-  std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+  std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                   tmp_oat.GetFilename(),
                                                   tmp_oat.GetFilename(),
-                                                  nullptr,
-                                                  nullptr,
-                                                  false,
-                                                  /*low_4gb*/true,
-                                                  nullptr,
+                                                  /*executable=*/ false,
+                                                  /*low_4gb=*/ true,
+                                                  /*abs_dex_location=*/ nullptr,
+                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file.get() != nullptr) << error_msg;
   const OatHeader& oat_header = oat_file->GetOatHeader();
   ASSERT_TRUE(oat_header.IsValid());
   ASSERT_EQ(class_linker->GetBootClassPath().size(), oat_header.GetDexFileCount());  // core
-  ASSERT_EQ(42U, oat_header.GetImageFileLocationOatChecksum());
-  ASSERT_EQ(4096U, oat_header.GetImageFileLocationOatDataBegin());
-  ASSERT_EQ("lue.art", std::string(oat_header.GetStoreValueByKey(OatHeader::kImageLocationKey)));
+  ASSERT_TRUE(oat_header.GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey) != nullptr);
+  ASSERT_STREQ("testkey", oat_header.GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey));
 
   ASSERT_TRUE(java_lang_dex_file_ != nullptr);
   const DexFile& dex_file = *java_lang_dex_file_;
@@ -464,7 +466,7 @@ TEST_F(OatTest, WriteRead) {
 TEST_F(OatTest, OatHeaderSizeCheck) {
   // If this test is failing and you have to update these constants,
   // it is time to update OatHeader::kOatVersion
-  EXPECT_EQ(76U, sizeof(OatHeader));
+  EXPECT_EQ(64U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
   EXPECT_EQ(166 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
@@ -512,28 +514,25 @@ TEST_F(OatTest, EmptyTextSection) {
     ScopedObjectAccess soa(Thread::Current());
     class_linker->RegisterDexFile(*dex_file, soa.Decode<mirror::ClassLoader>(class_loader));
   }
-  SetDexFilesForOatFile(dex_files);
-  compiler_driver_->CompileAll(class_loader, dex_files, &timings);
+  CompileAll(class_loader, dex_files, &timings);
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   bool success = WriteElf(tmp_vdex.GetFile(),
                           tmp_oat.GetFile(),
                           dex_files,
                           key_value_store,
-                          /* verify */ false);
+                          /*verify=*/ false);
   ASSERT_TRUE(success);
 
   std::string error_msg;
-  std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+  std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                   tmp_oat.GetFilename(),
                                                   tmp_oat.GetFilename(),
-                                                  nullptr,
-                                                  nullptr,
-                                                  false,
-                                                  /*low_4gb*/false,
-                                                  nullptr,
+                                                  /*executable=*/ false,
+                                                  /*low_4gb=*/ false,
+                                                  /*abs_dex_location=*/ nullptr,
+                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file != nullptr);
   EXPECT_LT(static_cast<size_t>(oat_file->Size()),
@@ -585,7 +584,6 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
 
   ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   std::unique_ptr<ProfileCompilationInfo>
       profile_compilation_info(use_profile ? new ProfileCompilationInfo() : nullptr);
   success = WriteElf(tmp_vdex.GetFile(),
@@ -593,6 +591,7 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
                      input_filenames,
                      key_value_store,
                      verify,
+                     CopyOption::kOnlyIfCompressed,
                      profile_compilation_info.get());
 
   // In verify mode, we expect failure.
@@ -604,14 +603,13 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
   ASSERT_TRUE(success);
 
   std::string error_msg;
-  std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/* zip_fd */ -1,
+  std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                          tmp_oat.GetFilename(),
                                                          tmp_oat.GetFilename(),
-                                                         nullptr,
-                                                         nullptr,
-                                                         false,
+                                                         /*executable=*/ false,
                                                          low_4gb,
-                                                         nullptr,
+                                                         /*abs_dex_location=*/ nullptr,
+                                                         /*reservation=*/ nullptr,
                                                          &error_msg));
   ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
   if (low_4gb) {
@@ -670,7 +668,7 @@ TEST_F(OatTest, DexFileFailsVerifierWithLayout) {
   TestDexFileInput(/*verify*/true, /*low_4gb*/false, /*use_profile*/true);
 }
 
-void OatTest::TestZipFileInput(bool verify) {
+void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
   TimingLogger timings("OatTest::DexFileInput", false, false);
 
   ScratchFile zip_file;
@@ -716,7 +714,6 @@ void OatTest::TestZipFileInput(bool verify) {
   ASSERT_TRUE(success) << strerror(errno);
 
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   {
     // Test using the AddDexFileSource() interface with the zip file.
     std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
@@ -727,7 +724,8 @@ void OatTest::TestZipFileInput(bool verify) {
                        input_filenames,
                        key_value_store,
                        verify,
-                       /* profile_compilation_info */ nullptr);
+                       copy,
+                       /*profile_compilation_info=*/ nullptr);
 
     if (verify) {
       ASSERT_FALSE(success);
@@ -735,14 +733,13 @@ void OatTest::TestZipFileInput(bool verify) {
       ASSERT_TRUE(success);
 
       std::string error_msg;
-      std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/* zip_fd */ -1,
+      std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                              tmp_oat.GetFilename(),
                                                              tmp_oat.GetFilename(),
-                                                             nullptr,
-                                                             nullptr,
-                                                             false,
-                                                             /*low_4gb*/false,
-                                                             nullptr,
+                                                             /*executable=*/ false,
+                                                             /*low_4gb=*/ false,
+                                                             /*abs_dex_location=*/ nullptr,
+                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());
@@ -769,7 +766,7 @@ void OatTest::TestZipFileInput(bool verify) {
 
   {
     // Test using the AddZipDexFileSource() interface with the zip file handle.
-    File zip_fd(dup(zip_file.GetFd()), /* check_usage */ false);
+    File zip_fd(DupCloexec(zip_file.GetFd()), /*check_usage=*/ false);
     ASSERT_NE(-1, zip_fd.Fd());
 
     ScratchFile tmp_base, tmp_oat(tmp_base, ".oat"), tmp_vdex(tmp_base, ".vdex");
@@ -778,21 +775,21 @@ void OatTest::TestZipFileInput(bool verify) {
                        std::move(zip_fd),
                        zip_file.GetFilename().c_str(),
                        key_value_store,
-                       verify);
+                       verify,
+                       copy);
     if (verify) {
       ASSERT_FALSE(success);
     } else {
       ASSERT_TRUE(success);
 
       std::string error_msg;
-      std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/* zip_fd */ -1,
+      std::unique_ptr<OatFile> opened_oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                              tmp_oat.GetFilename(),
                                                              tmp_oat.GetFilename(),
-                                                             nullptr,
-                                                             nullptr,
-                                                             false,
-                                                             /*low_4gb*/false,
-                                                             nullptr,
+                                                             /*executable=*/ false,
+                                                             /*low_4gb=*/ false,
+                                                             /*abs_dex_location=*/ nullptr,
+                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());
@@ -819,11 +816,15 @@ void OatTest::TestZipFileInput(bool verify) {
 }
 
 TEST_F(OatTest, ZipFileInputCheckOutput) {
-  TestZipFileInput(false);
+  TestZipFileInput(false, CopyOption::kOnlyIfCompressed);
+}
+
+TEST_F(OatTest, ZipFileInputCheckOutputWithoutCopy) {
+  TestZipFileInput(false, CopyOption::kNever);
 }
 
 TEST_F(OatTest, ZipFileInputCheckVerifier) {
-  TestZipFileInput(true);
+  TestZipFileInput(true, CopyOption::kOnlyIfCompressed);
 }
 
 void OatTest::TestZipFileInputWithEmptyDex() {
@@ -835,7 +836,6 @@ void OatTest::TestZipFileInputWithEmptyDex() {
   ASSERT_TRUE(success) << strerror(errno);
 
   SafeMap<std::string, std::string> key_value_store;
-  key_value_store.Put(OatHeader::kImageLocationKey, "test.art");
   std::vector<const char*> input_filenames = { zip_file.GetFilename().c_str() };
   ScratchFile oat_file, vdex_file(oat_file, ".vdex");
   std::unique_ptr<ProfileCompilationInfo> profile_compilation_info(new ProfileCompilationInfo());
@@ -843,37 +843,14 @@ void OatTest::TestZipFileInputWithEmptyDex() {
                      oat_file.GetFile(),
                      input_filenames,
                      key_value_store,
-                     /* verify */ false,
+                     /*verify=*/ false,
+                     CopyOption::kOnlyIfCompressed,
                      profile_compilation_info.get());
   ASSERT_FALSE(success);
 }
 
 TEST_F(OatTest, ZipFileInputWithEmptyDex) {
   TestZipFileInputWithEmptyDex();
-}
-
-TEST_F(OatTest, UpdateChecksum) {
-  InstructionSet insn_set = InstructionSet::kX86;
-  std::string error_msg;
-  std::unique_ptr<const InstructionSetFeatures> insn_features(
-    InstructionSetFeatures::FromVariant(insn_set, "default", &error_msg));
-  ASSERT_TRUE(insn_features.get() != nullptr) << error_msg;
-  std::unique_ptr<OatHeader> oat_header(OatHeader::Create(insn_set,
-                                                          insn_features.get(),
-                                                          0u,
-                                                          nullptr));
-  // The starting adler32 value is 1.
-  EXPECT_EQ(1U, oat_header->GetChecksum());
-
-  oat_header->UpdateChecksum(OatHeader::kOatMagic, sizeof(OatHeader::kOatMagic));
-  EXPECT_EQ(64291151U, oat_header->GetChecksum());
-
-  // Make sure that null data does not reset the checksum.
-  oat_header->UpdateChecksum(nullptr, 0);
-  EXPECT_EQ(64291151U, oat_header->GetChecksum());
-
-  oat_header->UpdateChecksum(OatHeader::kOatMagic, sizeof(OatHeader::kOatMagic));
-  EXPECT_EQ(216138397U, oat_header->GetChecksum());
 }
 
 }  // namespace linker

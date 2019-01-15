@@ -35,7 +35,7 @@ void HiddenApiFinder::CheckMethod(uint32_t method_id,
   // Note: we always query whether a method is in a list, as the app
   // might define blacklisted APIs (which won't be used at runtime).
   std::string name = HiddenApi::GetApiMethodName(resolver->GetDexFile(), method_id);
-  if (hidden_api_.IsInRestrictionList(name)) {
+  if (hidden_api_.IsInAnyList(name)) {
     method_locations_[name].push_back(ref);
   }
 }
@@ -46,7 +46,7 @@ void HiddenApiFinder::CheckField(uint32_t field_id,
   // Note: we always query whether a field is in a list, as the app
   // might define blacklisted APIs (which won't be used at runtime).
   std::string name = HiddenApi::GetApiFieldName(resolver->GetDexFile(), field_id);
-  if (hidden_api_.IsInRestrictionList(name)) {
+  if (hidden_api_.IsInAnyList(name)) {
     field_locations_[name].push_back(ref);
   }
 }
@@ -57,7 +57,7 @@ void HiddenApiFinder::CollectAccesses(VeridexResolver* resolver) {
   // types can lead to being used through reflection.
   for (uint32_t i = 0; i < dex_file.NumTypeIds(); ++i) {
     std::string name(dex_file.StringByTypeIdx(dex::TypeIndex(i)));
-    if (hidden_api_.IsInRestrictionList(name)) {
+    if (hidden_api_.IsInAnyList(name)) {
       classes_.insert(name);
     }
   }
@@ -81,9 +81,9 @@ void HiddenApiFinder::CollectAccesses(VeridexResolver* resolver) {
               // private methods and fields in them.
               // We don't add class names to the `strings_` set as we know method/field names
               // don't have '.' or '/'. All hidden API class names have a '/'.
-              if (hidden_api_.IsInRestrictionList(str)) {
+              if (hidden_api_.IsInAnyList(str)) {
                 classes_.insert(str);
-              } else if (hidden_api_.IsInRestrictionList(name)) {
+              } else if (hidden_api_.IsInAnyList(name)) {
                 // Could be something passed to JNI.
                 classes_.insert(name);
               } else {
@@ -174,30 +174,27 @@ void HiddenApiFinder::Run(const std::vector<std::unique_ptr<VeridexResolver>>& r
 void HiddenApiFinder::Dump(std::ostream& os,
                            HiddenApiStats* stats,
                            bool dump_reflection) {
-  static const char* kPrefix = "       ";
   stats->linking_count = method_locations_.size() + field_locations_.size();
 
   // Dump methods from hidden APIs linked against.
-  for (const std::pair<std::string, std::vector<MethodReference>>& pair : method_locations_) {
-    HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(pair.first);
-    stats->api_counts[api_list]++;
+  for (const std::pair<const std::string,
+                       std::vector<MethodReference>>& pair : method_locations_) {
+    hiddenapi::ApiList api_list = hidden_api_.GetApiList(pair.first);
+    stats->api_counts[api_list.GetIntValue()]++;
     os << "#" << ++stats->count << ": Linking " << api_list << " " << pair.first << " use(s):";
     os << std::endl;
-    for (const MethodReference& ref : pair.second) {
-      os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
-    }
+    HiddenApiFinder::DumpReferences(os, pair.second);
     os << std::endl;
   }
 
   // Dump fields from hidden APIs linked against.
-  for (const std::pair<std::string, std::vector<MethodReference>>& pair : field_locations_) {
-    HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(pair.first);
-    stats->api_counts[api_list]++;
+  for (const std::pair<const std::string,
+                       std::vector<MethodReference>>& pair : field_locations_) {
+    hiddenapi::ApiList api_list = hidden_api_.GetApiList(pair.first);
+    stats->api_counts[api_list.GetIntValue()]++;
     os << "#" << ++stats->count << ": Linking " << api_list << " " << pair.first << " use(s):";
     os << std::endl;
-    for (const MethodReference& ref : pair.second) {
-      os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
-    }
+    HiddenApiFinder::DumpReferences(os, pair.second);
     os << std::endl;
   }
 
@@ -206,20 +203,41 @@ void HiddenApiFinder::Dump(std::ostream& os,
     for (const std::string& cls : classes_) {
       for (const std::string& name : strings_) {
         std::string full_name = cls + "->" + name;
-        HiddenApiAccessFlags::ApiList api_list = hidden_api_.GetApiList(full_name);
-        stats->api_counts[api_list]++;
-        if (api_list != HiddenApiAccessFlags::kWhitelist) {
+        hiddenapi::ApiList api_list = hidden_api_.GetApiList(full_name);
+        if (api_list.IsValid()) {
+          stats->api_counts[api_list.GetIntValue()]++;
           stats->reflection_count++;
           os << "#" << ++stats->count << ": Reflection " << api_list << " " << full_name
              << " potential use(s):";
           os << std::endl;
-          for (const MethodReference& ref : reflection_locations_[name]) {
-            os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
-          }
+          HiddenApiFinder::DumpReferences(os, reflection_locations_[name]);
           os << std::endl;
         }
       }
     }
+  }
+}
+
+void HiddenApiFinder::DumpReferences(std::ostream& os,
+                                     const std::vector<MethodReference>& references) {
+  static const char* kPrefix = "       ";
+
+  // Count number of occurrences of each reference, to make the output clearer.
+  std::map<std::string, size_t> counts;
+  for (const MethodReference& ref : references) {
+    std::string ref_string = HiddenApi::GetApiMethodName(ref);
+    if (!counts.count(ref_string)) {
+      counts[ref_string] = 0;
+    }
+    counts[ref_string]++;
+  }
+
+  for (const std::pair<const std::string, size_t>& pair : counts) {
+    os << kPrefix << pair.first;
+    if (pair.second > 1) {
+       os << " (" << pair.second << " occurrences)";
+    }
+    os << std::endl;
   }
 }
 

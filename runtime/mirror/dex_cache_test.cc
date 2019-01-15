@@ -34,7 +34,7 @@ class DexCacheTest : public CommonRuntimeTest {};
 
 class DexCacheMethodHandlesTest : public DexCacheTest {
  protected:
-  virtual void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonRuntimeTest::SetUpRuntimeOptions(options);
   }
 };
@@ -108,7 +108,7 @@ TEST_F(DexCacheTest, TestResolvedFieldAccess) {
   EXPECT_NE(klass1->NumStaticFields(), 0u);
   for (ArtField& field : klass2->GetSFields()) {
     EXPECT_FALSE(
-        klass1->ResolvedFieldAccessTest</*throw_on_failure*/ false>(
+        klass1->ResolvedFieldAccessTest</*throw_on_failure=*/ false>(
             klass2.Get(),
             &field,
             klass1->GetDexCache(),
@@ -146,8 +146,8 @@ TEST_F(DexCacheMethodHandlesTest, TestResolvedMethodTypes) {
   Handle<mirror::DexCache> dex_cache = hs.NewHandle(
       class_linker_->FindDexCache(Thread::Current(), dex_file));
 
-  const DexFile::MethodId& method1_id = dex_file.GetMethodId(method1->GetDexMethodIndex());
-  const DexFile::MethodId& method2_id = dex_file.GetMethodId(method2->GetDexMethodIndex());
+  const dex::MethodId& method1_id = dex_file.GetMethodId(method1->GetDexMethodIndex());
+  const dex::MethodId& method2_id = dex_file.GetMethodId(method2->GetDexMethodIndex());
   Handle<mirror::MethodType> method1_type = hs.NewHandle(
       class_linker_->ResolveMethodType(soa.Self(),
                                        method1_id.proto_idx_,

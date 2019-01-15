@@ -181,7 +181,7 @@ class VarArgs {
     }
   }
 
-  VarArgs(VarArgs&& other) {
+  VarArgs(VarArgs&& other) noexcept {
     m_ = other.m_;
     cnt_ = other.cnt_;
     type_ = other.type_;
@@ -286,7 +286,7 @@ bool CheckAttachedThread(const char* function_name) {
     // to get reasonable stacks and environment, rather than relying on
     // tombstoned.
     JNIEnv* env;
-    Runtime::Current()->GetJavaVM()->AttachCurrentThread(&env, /* thread_args */ nullptr);
+    Runtime::Current()->GetJavaVM()->AttachCurrentThread(&env, /* thr_args= */ nullptr);
 
     std::string tmp = android::base::StringPrintf(
         "a thread (tid %" PRId64 " is making JNI calls without being attached",
@@ -880,7 +880,7 @@ class ScopedCheck {
       break;
     case kDirectByteBuffer:
       UNIMPLEMENTED(FATAL);
-      break;
+      UNREACHABLE();
     case kString:
       okay = obj->GetClass()->IsStringClass();
       break;
@@ -2945,7 +2945,7 @@ class CheckJNI {
           break;
         case Primitive::kPrimVoid:
           LOG(FATAL) << "Unexpected type: " << type;
-          break;
+          UNREACHABLE();
       }
       if (sc.Check(soa, false, result_check, &result)) {
         return result;
@@ -3031,7 +3031,7 @@ class CheckJNI {
           break;
         case Primitive::kPrimVoid:
           LOG(FATAL) << "Unexpected type: " << type;
-          break;
+          UNREACHABLE();
       }
       JniValueType result;
       result.V = nullptr;

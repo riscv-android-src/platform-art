@@ -42,7 +42,7 @@ class MethodVerifierTest : public CommonRuntimeTest {
     // Verify the class
     std::string error_msg;
     FailureKind failure = MethodVerifier::VerifyClass(
-        self, klass, nullptr, true, HardFailLogMode::kLogWarning, &error_msg);
+        self, klass, nullptr, true, HardFailLogMode::kLogWarning, /* api_level= */ 0u, &error_msg);
 
     if (android::base::StartsWith(descriptor, "Ljava/lang/invoke")) {
       ASSERT_TRUE(failure == FailureKind::kSoftFailure ||
@@ -57,7 +57,7 @@ class MethodVerifierTest : public CommonRuntimeTest {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     // Verify all the classes defined in this file
     for (size_t i = 0; i < dex.NumClassDefs(); i++) {
-      const DexFile::ClassDef& class_def = dex.GetClassDef(i);
+      const dex::ClassDef& class_def = dex.GetClassDef(i);
       const char* descriptor = dex.GetClassDescriptor(class_def);
       VerifyClass(descriptor);
     }

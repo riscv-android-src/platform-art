@@ -89,7 +89,10 @@ class ClassLoaderContext {
   // If the context is empty, this method only creates a single PathClassLoader with the
   // given compilation_sources.
   //
-  // Notes:
+  // Shared libraries found in the chain will be canonicalized based on the dex files they
+  // contain.
+  //
+  // Implementation notes:
   //   1) the objects are not completely set up. Do not use this outside of tests and the compiler.
   //   2) should only be called before the first call to OpenDexFiles().
   jobject CreateClassLoader(const std::vector<const DexFile*>& compilation_sources) const;
@@ -154,10 +157,11 @@ class ClassLoaderContext {
   // This will return a context with a single and empty PathClassLoader.
   static std::unique_ptr<ClassLoaderContext> Default();
 
- private:
   struct ClassLoaderInfo {
     // The type of this class loader.
     ClassLoaderType type;
+    // Shared libraries this context has.
+    std::vector<std::unique_ptr<ClassLoaderInfo>> shared_libraries;
     // The list of class path elements that this loader loads.
     // Note that this list may contain relative paths.
     std::vector<std::string> classpath;
@@ -171,12 +175,34 @@ class ClassLoaderContext {
     // After OpenDexFiles, in case some of the dex files were opened from their oat files
     // this holds the list of opened oat files.
     std::vector<std::unique_ptr<OatFile>> opened_oat_files;
+    // The parent class loader.
+    std::unique_ptr<ClassLoaderInfo> parent;
 
     explicit ClassLoaderInfo(ClassLoaderType cl_type) : type(cl_type) {}
   };
 
+ private:
   // Creates an empty context (with no class loaders).
   ClassLoaderContext();
+
+  // Get the parent of the class loader chain at depth `index`.
+  ClassLoaderInfo* GetParent(size_t index) const {
+    ClassLoaderInfo* result = class_loader_chain_.get();
+    while ((result != nullptr) && (index-- != 0)) {
+      result = result->parent.get();
+    }
+    return result;
+  }
+
+  size_t GetParentChainSize() const {
+    size_t result = 0;
+    ClassLoaderInfo* info = class_loader_chain_.get();
+    while (info != nullptr) {
+      ++result;
+      info = info->parent.get();
+    }
+    return result;
+  }
 
   // Constructs an empty context.
   // `owns_the_dex_files` specifies whether or not the context will own the opened dex files
@@ -188,25 +214,27 @@ class ClassLoaderContext {
   // Reads the class loader spec in place and returns true if the spec is valid and the
   // compilation context was constructed.
   bool Parse(const std::string& spec, bool parse_checksums = false);
+  ClassLoaderInfo* ParseInternal(const std::string& spec, bool parse_checksums);
 
-  // Attempts to parse a single class loader spec for the given class_loader_type.
-  // If successful the class loader spec will be added to the chain.
-  // Returns whether or not the operation was successful.
-  bool ParseClassLoaderSpec(const std::string& class_loader_spec,
-                            ClassLoaderType class_loader_type,
-                            bool parse_checksums = false);
+  // Attempts to parse a single class loader spec.
+  // Returns the ClassLoaderInfo abstraction for this spec, or null if it cannot be parsed.
+  std::unique_ptr<ClassLoaderInfo> ParseClassLoaderSpec(
+      const std::string& class_loader_spec,
+      bool parse_checksums = false);
 
   // CHECKs that the dex files were opened (OpenDexFiles was called and set dex_files_open_result_
   // to true). Aborts if not. The `calling_method` is used in the log message to identify the source
   // of the call.
   void CheckDexFilesOpened(const std::string& calling_method) const;
 
-  // Adds the `class_loader` info to the context.
+  // Creates the `ClassLoaderInfo` representing`class_loader` and attach it to `this`.
   // The dex file present in `dex_elements` array (if not null) will be added at the end of
   // the classpath.
-  bool AddInfoToContextFromClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
-                                       Handle<mirror::ClassLoader> class_loader,
-                                       Handle<mirror::ObjectArray<mirror::Object>> dex_elements)
+  bool CreateInfoFromClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
+                                 Handle<mirror::ClassLoader> class_loader,
+                                 Handle<mirror::ObjectArray<mirror::Object>> dex_elements,
+                                 ClassLoaderInfo* child_info,
+                                 bool is_shared_library)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Encodes the context as a string suitable to be passed to dex2oat or to be added to the
@@ -219,6 +247,20 @@ class ClassLoaderContext {
                             bool for_dex2oat,
                             ClassLoaderContext* stored_context) const;
 
+  // Internal version of `EncodeContext`, which will be called recursively
+  // on the parent and shared libraries.
+  void EncodeContextInternal(const ClassLoaderInfo& info,
+                             const std::string& base_dir,
+                             bool for_dex2oat,
+                             ClassLoaderInfo* stored_info,
+                             std::ostringstream& out) const;
+
+  bool ClassLoaderInfoMatch(const ClassLoaderInfo& info,
+                            const ClassLoaderInfo& expected_info,
+                            const std::string& context_spec,
+                            bool verify_names,
+                            bool verify_checksums) const;
+
   // Extracts the class loader type from the given spec.
   // Return ClassLoaderContext::kInvalidClassLoader if the class loader type is not
   // recognized.
@@ -228,13 +270,8 @@ class ClassLoaderContext {
   // The returned format can be used when parsing a context spec.
   static const char* GetClassLoaderTypeName(ClassLoaderType type);
 
-  // Returns the WellKnownClass for the given class loader type.
-  static jclass GetClassLoaderClass(ClassLoaderType type);
-
-  // The class loader chain represented as a vector.
-  // The parent of class_loader_chain_[i] is class_loader_chain_[i++].
-  // The parent of the last element is assumed to be the boot class loader.
-  std::vector<ClassLoaderInfo> class_loader_chain_;
+  // The class loader chain.
+  std::unique_ptr<ClassLoaderInfo> class_loader_chain_;
 
   // Whether or not the class loader context should be ignored at runtime when loading the oat
   // files. When true, dex2oat will use OatFile::kSpecialSharedLibrary as the classpath key in

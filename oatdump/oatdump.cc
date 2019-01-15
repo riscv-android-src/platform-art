@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "android-base/logging.h"
+#include "android-base/parseint.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
@@ -48,6 +49,7 @@
 #include "debug/debug_info.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
+#include "dex/art_dex_file_loader.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/descriptors_names.h"
@@ -55,6 +57,7 @@
 #include "dex/dex_instruction-inl.h"
 #include "dex/string_reference.h"
 #include "dex/type_lookup_table.h"
+#include "dexlayout.h"
 #include "disassembler.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/space/image_space.h"
@@ -111,7 +114,7 @@ const char* image_roots_descriptions_[] = {
   "kOomeWhenThrowingOome",
   "kOomeWhenHandlingStackOverflow",
   "kNoClassDefFoundError",
-  "kClassLoader",
+  "kSpecialRoots",
 };
 
 // Map is so that we don't allocate multiple dex files for the same OatDexFile.
@@ -129,7 +132,7 @@ const DexFile* OpenDexFile(const OatDexFile* oat_dex_file, std::string* error_ms
 }
 
 template <typename ElfTypes>
-class OatSymbolizer FINAL {
+class OatSymbolizer final {
  public:
   OatSymbolizer(const OatFile* oat_file, const std::string& output_name, bool no_bits) :
       oat_file_(oat_file),
@@ -221,7 +224,7 @@ class OatSymbolizer FINAL {
     debug::WriteDebugInfo(builder_.get(),
                           debug_info,
                           dwarf::DW_DEBUG_FRAME_FORMAT,
-                          true /* write_oat_patches */);
+                          /* write_oat_patches= */ true);
 
     builder_->End();
 
@@ -293,7 +296,7 @@ class OatSymbolizer FINAL {
                      const DexFile& dex_file,
                      uint32_t class_def_index,
                      uint32_t dex_method_index,
-                     const DexFile::CodeItem* code_item,
+                     const dex::CodeItem* code_item,
                      uint32_t method_access_flags) {
     if ((method_access_flags & kAccAbstract) != 0) {
       // Abstract method, no code.
@@ -398,7 +401,7 @@ class OatDumper {
                                              options_.absolute_addresses_,
                                              oat_file.Begin(),
                                              oat_file.End(),
-                                             true /* can_read_literals_ */,
+                                             /* can_read_literals_= */ true,
                                              Is64BitInstructionSet(instruction_set_)
                                                  ? &Thread::DumpThreadOffset<PointerSize::k64>
                                                  : &Thread::DumpThreadOffset<PointerSize::k32>))) {
@@ -416,7 +419,7 @@ class OatDumper {
     return instruction_set_;
   }
 
-  typedef std::vector<std::unique_ptr<const DexFile>> DexFileUniqV;
+  using DexFileUniqV = std::vector<std::unique_ptr<const DexFile>>;
 
   bool Dump(std::ostream& os) {
     bool success = true;
@@ -469,17 +472,6 @@ class OatDumper {
     DUMP_OAT_HEADER_OFFSET("QUICK TO INTERPRETER BRIDGE",
                            GetQuickToInterpreterBridgeOffset);
 #undef DUMP_OAT_HEADER_OFFSET
-
-    os << "IMAGE PATCH DELTA:\n";
-    os << StringPrintf("%d (0x%08x)\n\n",
-                       oat_header.GetImagePatchDelta(),
-                       oat_header.GetImagePatchDelta());
-
-    os << "IMAGE FILE LOCATION OAT CHECKSUM:\n";
-    os << StringPrintf("0x%08x\n\n", oat_header.GetImageFileLocationOatChecksum());
-
-    os << "IMAGE FILE LOCATION OAT BEGIN:\n";
-    os << StringPrintf("0x%08x\n\n", oat_header.GetImageFileLocationOatDataBegin());
 
     // Print the key-value store.
     {
@@ -632,8 +624,61 @@ class OatDumper {
         const OatDexFile* oat_dex_file = oat_dex_files_[i];
         CHECK(oat_dex_file != nullptr);
         CHECK(vdex_dex_file != nullptr);
-        if (!ExportDexFile(os, *oat_dex_file, vdex_dex_file.get())) {
-          success = false;
+
+        // If a CompactDex file is detected within a Vdex container, DexLayout is used to convert
+        // back to a StandardDex file. Since the converted DexFile will most likely not reproduce
+        // the original input Dex file, the `update_checksum_` option is used to recompute the
+        // checksum. If the vdex container does not contain cdex resources (`used_dexlayout` is
+        // false), ExportDexFile() enforces a reproducible checksum verification.
+        if (vdex_dex_file->IsCompactDexFile()) {
+          Options options;
+          options.compact_dex_level_ = CompactDexLevel::kCompactDexLevelNone;
+          options.update_checksum_ = true;
+          DexLayout dex_layout(options, /*info=*/ nullptr, /*out_file=*/ nullptr, /*header=*/ nullptr);
+          std::unique_ptr<art::DexContainer> dex_container;
+          bool result = dex_layout.ProcessDexFile(vdex_dex_file->GetLocation().c_str(),
+                                                  vdex_dex_file.get(),
+                                                  i,
+                                                  &dex_container,
+                                                  &error_msg);
+          if (!result) {
+            os << "DexLayout failed to process Dex file: " + error_msg;
+            success = false;
+            break;
+          }
+          DexContainer::Section* main_section = dex_container->GetMainSection();
+          CHECK_EQ(dex_container->GetDataSection()->Size(), 0u);
+
+          const ArtDexFileLoader dex_file_loader;
+          std::unique_ptr<const DexFile> dex(dex_file_loader.Open(
+              main_section->Begin(),
+              main_section->Size(),
+              vdex_dex_file->GetLocation(),
+              vdex_file->GetLocationChecksum(i),
+              /*oat_dex_file=*/ nullptr,
+              /*verify=*/ false,
+              /*verify_checksum=*/ true,
+              &error_msg));
+          if (dex == nullptr) {
+            os << "Failed to load DexFile from layout container: " + error_msg;
+            success = false;
+            break;
+          }
+          if (dex->IsCompactDexFile()) {
+            os <<"CompactDex conversion to StandardDex failed";
+            success = false;
+            break;
+          }
+
+          if (!ExportDexFile(os, *oat_dex_file, dex.get(), /*used_dexlayout=*/ true)) {
+            success = false;
+            break;
+          }
+        } else {
+          if (!ExportDexFile(os, *oat_dex_file, vdex_dex_file.get(), /*used_dexlayout=*/ false)) {
+            success = false;
+            break;
+          }
         }
         i++;
       }
@@ -678,7 +723,7 @@ class OatDumper {
             << "': " << error_msg;
       } else {
         const char* descriptor = m->GetDeclaringClassDescriptor();
-        const DexFile::ClassDef* class_def =
+        const dex::ClassDef* class_def =
             OatDexFile::FindClassDef(*dex_file, descriptor, ComputeModifiedUtf8Hash(descriptor));
         if (class_def != nullptr) {
           uint16_t class_def_index = dex_file->GetIndexForClassDef(*class_def);
@@ -708,21 +753,21 @@ class OatDumper {
       return nullptr;
     }
 
-    std::unique_ptr<MemMap> mmap(MemMap::MapFile(
+    MemMap mmap = MemMap::MapFile(
         file->GetLength(),
         PROT_READ | PROT_WRITE,
         MAP_PRIVATE,
         file->Fd(),
-        /* start offset */ 0,
-        /* low_4gb */ false,
+        /* start offset= */ 0,
+        /* low_4gb= */ false,
         vdex_filename.c_str(),
-        error_msg));
-    if (mmap == nullptr) {
+        error_msg);
+    if (!mmap.IsValid()) {
       *error_msg = "Failed to mmap file " + vdex_filename + ": " + *error_msg;
       return nullptr;
     }
 
-    std::unique_ptr<VdexFile> vdex_file(new VdexFile(mmap.release()));
+    std::unique_ptr<VdexFile> vdex_file(new VdexFile(std::move(mmap)));
     if (!vdex_file->IsValid()) {
       *error_msg = "Vdex file is not valid";
       return nullptr;
@@ -735,7 +780,7 @@ class OatDumper {
     }
 
     vdex_file->Unquicken(MakeNonOwningPointerVector(tmp_dex_files),
-                         /* decompile_return_instruction */ true);
+                         /* decompile_return_instruction= */ true);
 
     *dex_files = std::move(tmp_dex_files);
     return vdex_file;
@@ -905,10 +950,16 @@ class OatDumper {
   // Dex resource is extracted from the oat_dex_file and its checksum is repaired since it's not
   // unquickened. Otherwise the dex_file has been fully unquickened and is expected to verify the
   // original checksum.
-  bool ExportDexFile(std::ostream& os, const OatDexFile& oat_dex_file, const DexFile* dex_file) {
+  bool ExportDexFile(std::ostream& os,
+                     const OatDexFile& oat_dex_file,
+                     const DexFile* dex_file,
+                     bool used_dexlayout) {
     std::string error_msg;
     std::string dex_file_location = oat_dex_file.GetDexFileLocation();
-    size_t fsize = oat_dex_file.FileSize();
+
+    // If dex_file (from unquicken or dexlayout) is not available, the output DexFile size is the
+    // same as the one extracted from the Oat container (pre-oreo)
+    size_t fsize = dex_file == nullptr ? oat_dex_file.FileSize() : dex_file->Size();
 
     // Some quick checks just in case
     if (fsize == 0 || fsize < sizeof(DexFile::Header)) {
@@ -928,27 +979,19 @@ class OatDumper {
       reinterpret_cast<DexFile::Header*>(const_cast<uint8_t*>(dex_file->Begin()))->checksum_ =
           dex_file->CalculateChecksum();
     } else {
-      // Vdex unquicken output should match original input bytecode
-      uint32_t orig_checksum =
-          reinterpret_cast<DexFile::Header*>(const_cast<uint8_t*>(dex_file->Begin()))->checksum_;
-      CHECK_EQ(orig_checksum, dex_file->CalculateChecksum());
-      if (orig_checksum != dex_file->CalculateChecksum()) {
-        os << "Unexpected checksum from unquicken dex file '" << dex_file_location << "'\n";
-        return false;
+      // If dexlayout was used to convert CompactDex back to StandardDex, checksum will be updated
+      // due to `update_checksum_` option, otherwise we expect a reproducible checksum.
+      if (!used_dexlayout) {
+        // Vdex unquicken output should match original input bytecode
+        uint32_t orig_checksum =
+            reinterpret_cast<DexFile::Header*>(const_cast<uint8_t*>(dex_file->Begin()))->checksum_;
+        if (orig_checksum != dex_file->CalculateChecksum()) {
+          os << "Unexpected checksum from unquicken dex file '" << dex_file_location << "'\n";
+          return false;
+        }
       }
     }
 
-    // Update header for shared section.
-    uint32_t shared_section_offset = 0u;
-    uint32_t shared_section_size = 0u;
-    if (dex_file->IsCompactDexFile()) {
-      CompactDexFile::Header* const header =
-          reinterpret_cast<CompactDexFile::Header*>(const_cast<uint8_t*>(dex_file->Begin()));
-      shared_section_offset = header->data_off_;
-      shared_section_size = header->data_size_;
-      // The shared section will be serialized right after the dex file.
-      header->data_off_ = header->file_size_;
-    }
     // Verify output directory exists
     if (!OS::DirectoryExists(options_.export_dex_location_)) {
       // TODO: Extend OS::DirectoryExists if symlink support is required
@@ -1002,15 +1045,6 @@ class OatDumper {
       return false;
     }
 
-    if (shared_section_size != 0) {
-      success = file->WriteFully(dex_file->Begin() + shared_section_offset, shared_section_size);
-      if (!success) {
-        os << "Failed to write shared data section";
-        file->Erase();
-        return false;
-      }
-    }
-
     if (file->FlushCloseOrErase() != 0) {
       os << "Flush and close failed";
       return false;
@@ -1038,7 +1072,7 @@ class OatDumper {
                          dex_file,
                          method.GetIndex(),
                          method.GetCodeItem(),
-                         method.GetRawAccessFlags(),
+                         method.GetAccessFlags(),
                          &addr_found)) {
         success = false;
       }
@@ -1058,12 +1092,12 @@ class OatDumper {
   static constexpr uint32_t kMaxCodeSize = 100 * 1000;
 
   bool DumpOatMethod(VariableIndentationOutputStream* vios,
-                     const DexFile::ClassDef& class_def,
+                     const dex::ClassDef& class_def,
                      uint32_t class_method_index,
                      const OatFile::OatClass& oat_class,
                      const DexFile& dex_file,
                      uint32_t dex_method_idx,
-                     const DexFile::CodeItem* code_item,
+                     const dex::CodeItem* code_item,
                      uint32_t method_access_flags,
                      bool* addr_found) {
     bool success = true;
@@ -1456,8 +1490,8 @@ class OatDumper {
                                          StackHandleScope<1>* hs,
                                          uint32_t dex_method_idx,
                                          const DexFile* dex_file,
-                                         const DexFile::ClassDef& class_def,
-                                         const DexFile::CodeItem* code_item,
+                                         const dex::ClassDef& class_def,
+                                         const dex::CodeItem* code_item,
                                          uint32_t method_access_flags) {
     if ((method_access_flags & kAccNative) == 0) {
       ScopedObjectAccess soa(Thread::Current());
@@ -1474,7 +1508,7 @@ class OatDumper {
       }
       return verifier::MethodVerifier::VerifyMethodAndDump(
           soa.Self(), vios, dex_method_idx, dex_file, dex_cache, *options_.class_loader_,
-          class_def, code_item, method, method_access_flags);
+          class_def, code_item, method, method_access_flags, /* api_level= */ 0);
     }
 
     return nullptr;
@@ -1734,28 +1768,24 @@ class ImageDumper {
 
     os << "IMAGE LOCATION: " << image_space_.GetImageLocation() << "\n\n";
 
-    os << "IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetImageBegin()) << "\n\n";
+    os << "IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetImageBegin()) << "\n";
+    os << "IMAGE SIZE: " << image_header_.GetImageSize() << "\n";
+    os << "IMAGE CHECKSUM: " << std::hex << image_header_.GetImageChecksum() << std::dec << "\n\n";
 
-    os << "IMAGE SIZE: " << image_header_.GetImageSize() << "\n\n";
+    os << "OAT CHECKSUM: " << StringPrintf("0x%08x\n\n", image_header_.GetOatChecksum()) << "\n";
+    os << "OAT FILE BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatFileBegin()) << "\n";
+    os << "OAT DATA BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatDataBegin()) << "\n";
+    os << "OAT DATA END:" << reinterpret_cast<void*>(image_header_.GetOatDataEnd()) << "\n";
+    os << "OAT FILE END:" << reinterpret_cast<void*>(image_header_.GetOatFileEnd()) << "\n\n";
+
+    os << "BOOT IMAGE BEGIN: " << reinterpret_cast<void*>(image_header_.GetBootImageBegin())
+        << "\n";
+    os << "BOOT IMAGE SIZE: " << image_header_.GetBootImageSize() << "\n\n";
 
     for (size_t i = 0; i < ImageHeader::kSectionCount; ++i) {
       auto section = static_cast<ImageHeader::ImageSections>(i);
       os << "IMAGE SECTION " << section << ": " << image_header_.GetImageSection(section) << "\n\n";
     }
-
-    os << "OAT CHECKSUM: " << StringPrintf("0x%08x\n\n", image_header_.GetOatChecksum());
-
-    os << "OAT FILE BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatFileBegin()) << "\n\n";
-
-    os << "OAT DATA BEGIN:" << reinterpret_cast<void*>(image_header_.GetOatDataBegin()) << "\n\n";
-
-    os << "OAT DATA END:" << reinterpret_cast<void*>(image_header_.GetOatDataEnd()) << "\n\n";
-
-    os << "OAT FILE END:" << reinterpret_cast<void*>(image_header_.GetOatFileEnd()) << "\n\n";
-
-    os << "PATCH DELTA:" << image_header_.GetPatchDelta() << "\n\n";
-
-    os << "COMPILE PIC: " << (image_header_.CompilePic() ? "yes" : "no") << "\n\n";
 
     {
       os << "ROOTS: " << reinterpret_cast<void*>(image_header_.GetImageRoots().Ptr()) << "\n";
@@ -1822,14 +1852,13 @@ class ImageDumper {
       oat_file = runtime->GetOatFileManager().FindOpenedOatFileFromOatLocation(oat_location);
     }
     if (oat_file == nullptr) {
-      oat_file = OatFile::Open(/* zip_fd */ -1,
+      oat_file = OatFile::Open(/*zip_fd=*/ -1,
                                oat_location,
                                oat_location,
-                               nullptr,
-                               nullptr,
-                               false,
-                               /*low_4gb*/false,
-                               nullptr,
+                               /*executable=*/ false,
+                               /*low_4gb=*/ false,
+                               /*abs_dex_location=*/ nullptr,
+                               /*reservation=*/ nullptr,
                                &error_msg);
     }
     if (oat_file == nullptr) {
@@ -1904,7 +1933,7 @@ class ImageDumper {
       stats_.file_bytes = file->GetLength();
       // If the image is compressed, adjust to decompressed size.
       size_t uncompressed_size = image_header_.GetImageSize() - sizeof(ImageHeader);
-      if (image_header_.GetStorageMode() == ImageHeader::kStorageModeUncompressed) {
+      if (image_header_.HasCompressedBlock()) {
         DCHECK_EQ(uncompressed_size, data_size) << "Sizes should match for uncompressed image";
       }
       stats_.file_bytes += uncompressed_size - data_size;
@@ -1916,8 +1945,9 @@ class ImageDumper {
     const auto& dex_cache_arrays_section = image_header_.GetDexCacheArraysSection();
     const auto& intern_section = image_header_.GetInternedStringsSection();
     const auto& class_table_section = image_header_.GetClassTableSection();
+    const auto& sro_section = image_header_.GetImageStringReferenceOffsetsSection();
+    const auto& metadata_section = image_header_.GetMetadataSection();
     const auto& bitmap_section = image_header_.GetImageBitmapSection();
-    const auto& relocations_section = image_header_.GetImageRelocationsSection();
 
     stats_.header_bytes = header_bytes;
 
@@ -1957,16 +1987,15 @@ class ImageDumper {
     CHECK_ALIGNED(bitmap_section.Offset(), kPageSize);
     stats_.alignment_bytes += RoundUp(bitmap_offset, kPageSize) - bitmap_offset;
 
-    // There should be no space between the bitmap and relocations.
-    CHECK_EQ(bitmap_section.Offset() + bitmap_section.Size(), relocations_section.Offset());
-
     stats_.bitmap_bytes += bitmap_section.Size();
-    stats_.relocations_bytes += relocations_section.Size();
     stats_.art_field_bytes += field_section.Size();
     stats_.art_method_bytes += method_section.Size();
     stats_.dex_cache_arrays_bytes += dex_cache_arrays_section.Size();
     stats_.interned_strings_bytes += intern_section.Size();
     stats_.class_table_bytes += class_table_section.Size();
+    stats_.sro_offset_bytes += sro_section.Size();
+    stats_.metadata_bytes += metadata_section.Size();
+
     stats_.Dump(os, indent_os);
     os << "\n";
 
@@ -1980,7 +2009,7 @@ class ImageDumper {
    public:
     explicit DumpArtMethodVisitor(ImageDumper* image_dumper) : image_dumper_(image_dumper) {}
 
-    virtual void Visit(ArtMethod* method) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    void Visit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_) {
       std::ostream& indent_os = image_dumper_->vios_.Stream();
       indent_os << method << " " << " ArtMethod: " << ArtMethod::PrettyMethod(method) << "\n";
       image_dumper_->DumpMethod(method, indent_os);
@@ -2064,9 +2093,9 @@ class ImageDumper {
     }
   }
 
-  static void DumpFields(std::ostream& os, mirror::Object* obj, mirror::Class* klass)
+  static void DumpFields(std::ostream& os, mirror::Object* obj, ObjPtr<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    mirror::Class* super = klass->GetSuperClass();
+    ObjPtr<mirror::Class> super = klass->GetSuperClass();
     if (super != nullptr) {
       DumpFields(os, obj, super);
     }
@@ -2383,64 +2412,45 @@ class ImageDumper {
 
  public:
   struct Stats {
-    size_t oat_file_bytes;
-    size_t file_bytes;
+    size_t oat_file_bytes = 0u;
+    size_t file_bytes = 0u;
 
-    size_t header_bytes;
-    size_t object_bytes;
-    size_t art_field_bytes;
-    size_t art_method_bytes;
-    size_t dex_cache_arrays_bytes;
-    size_t interned_strings_bytes;
-    size_t class_table_bytes;
-    size_t bitmap_bytes;
-    size_t relocations_bytes;
-    size_t alignment_bytes;
+    size_t header_bytes = 0u;
+    size_t object_bytes = 0u;
+    size_t art_field_bytes = 0u;
+    size_t art_method_bytes = 0u;
+    size_t dex_cache_arrays_bytes = 0u;
+    size_t interned_strings_bytes = 0u;
+    size_t class_table_bytes = 0u;
+    size_t sro_offset_bytes = 0u;
+    size_t metadata_bytes = 0u;
+    size_t bitmap_bytes = 0u;
+    size_t alignment_bytes = 0u;
 
-    size_t managed_code_bytes;
-    size_t managed_code_bytes_ignoring_deduplication;
-    size_t native_to_managed_code_bytes;
-    size_t class_initializer_code_bytes;
-    size_t large_initializer_code_bytes;
-    size_t large_method_code_bytes;
+    size_t managed_code_bytes = 0u;
+    size_t managed_code_bytes_ignoring_deduplication = 0u;
+    size_t native_to_managed_code_bytes = 0u;
+    size_t class_initializer_code_bytes = 0u;
+    size_t large_initializer_code_bytes = 0u;
+    size_t large_method_code_bytes = 0u;
 
-    size_t vmap_table_bytes;
+    size_t vmap_table_bytes = 0u;
 
-    size_t dex_instruction_bytes;
+    size_t dex_instruction_bytes = 0u;
 
     std::vector<ArtMethod*> method_outlier;
     std::vector<size_t> method_outlier_size;
     std::vector<double> method_outlier_expansion;
     std::vector<std::pair<std::string, size_t>> oat_dex_file_sizes;
 
-    Stats()
-        : oat_file_bytes(0),
-          file_bytes(0),
-          header_bytes(0),
-          object_bytes(0),
-          art_field_bytes(0),
-          art_method_bytes(0),
-          dex_cache_arrays_bytes(0),
-          interned_strings_bytes(0),
-          class_table_bytes(0),
-          bitmap_bytes(0),
-          relocations_bytes(0),
-          alignment_bytes(0),
-          managed_code_bytes(0),
-          managed_code_bytes_ignoring_deduplication(0),
-          native_to_managed_code_bytes(0),
-          class_initializer_code_bytes(0),
-          large_initializer_code_bytes(0),
-          large_method_code_bytes(0),
-          vmap_table_bytes(0),
-          dex_instruction_bytes(0) {}
+    Stats() {}
 
     struct SizeAndCount {
       SizeAndCount(size_t bytes_in, size_t count_in) : bytes(bytes_in), count(count_in) {}
       size_t bytes;
       size_t count;
     };
-    typedef SafeMap<std::string, SizeAndCount> SizeAndCountTable;
+    using SizeAndCountTable = SafeMap<std::string, SizeAndCount>;
     SizeAndCountTable sizes_and_counts;
 
     void Update(const char* descriptor, size_t object_bytes_in) {
@@ -2587,8 +2597,9 @@ class ImageDumper {
                                   "dex_cache_arrays_bytes =  %8zd (%2.0f%% of art file bytes)\n"
                                   "interned_string_bytes  =  %8zd (%2.0f%% of art file bytes)\n"
                                   "class_table_bytes      =  %8zd (%2.0f%% of art file bytes)\n"
+                                  "sro_bytes              =  %8zd (%2.0f%% of art file bytes)\n"
+                                  "metadata_bytes         =  %8zd (%2.0f%% of art file bytes)\n"
                                   "bitmap_bytes           =  %8zd (%2.0f%% of art file bytes)\n"
-                                  "relocations_bytes      =  %8zd (%2.0f%% of art file bytes)\n"
                                   "alignment_bytes        =  %8zd (%2.0f%% of art file bytes)\n\n",
                                   header_bytes, PercentOfFileBytes(header_bytes),
                                   object_bytes, PercentOfFileBytes(object_bytes),
@@ -2599,14 +2610,15 @@ class ImageDumper {
                                   interned_strings_bytes,
                                   PercentOfFileBytes(interned_strings_bytes),
                                   class_table_bytes, PercentOfFileBytes(class_table_bytes),
+                                  sro_offset_bytes, PercentOfFileBytes(sro_offset_bytes),
+                                  metadata_bytes, PercentOfFileBytes(metadata_bytes),
                                   bitmap_bytes, PercentOfFileBytes(bitmap_bytes),
-                                  relocations_bytes, PercentOfFileBytes(relocations_bytes),
                                   alignment_bytes, PercentOfFileBytes(alignment_bytes))
             << std::flush;
         CHECK_EQ(file_bytes,
                  header_bytes + object_bytes + art_field_bytes + art_method_bytes +
                  dex_cache_arrays_bytes + interned_strings_bytes + class_table_bytes +
-                 bitmap_bytes + relocations_bytes + alignment_bytes);
+                 sro_offset_bytes + metadata_bytes + bitmap_bytes + alignment_bytes);
       }
 
       os << "object_bytes breakdown:\n";
@@ -2720,14 +2732,13 @@ static int DumpImages(Runtime* runtime, OatDumperOptions* options, std::ostream*
     // We need to map the oat file in the low 4gb or else the fixup wont be able to fit oat file
     // pointers into 32 bit pointer sized ArtMethods.
     std::string error_msg;
-    std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+    std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                     options->app_oat_,
                                                     options->app_oat_,
-                                                    nullptr,
-                                                    nullptr,
-                                                    false,
-                                                    /*low_4gb*/true,
-                                                    nullptr,
+                                                    /*executable=*/ false,
+                                                    /*low_4gb=*/ true,
+                                                    /*abs_dex_location=*/ nullptr,
+                                                    /*reservation=*/ nullptr,
                                                     &error_msg));
     if (oat_file == nullptr) {
       LOG(ERROR) << "Failed to open oat file " << options->app_oat_ << " with error " << error_msg;
@@ -2844,14 +2855,13 @@ static int DumpOat(Runtime* runtime,
                  << "oatdump might fail if the oat file does not contain the dex code.";
   }
   std::string error_msg;
-  std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+  std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                   oat_filename,
                                                   oat_filename,
-                                                  nullptr,
-                                                  nullptr,
-                                                  false,
-                                                  /*low_4gb*/false,
+                                                  /*executable=*/ false,
+                                                  /*low_4gb=*/ false,
                                                   dex_filename,
+                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   if (oat_file == nullptr) {
     LOG(ERROR) << "Failed to open oat file from '" << oat_filename << "': " << error_msg;
@@ -2870,14 +2880,13 @@ static int SymbolizeOat(const char* oat_filename,
                         std::string& output_name,
                         bool no_bits) {
   std::string error_msg;
-  std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+  std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                   oat_filename,
                                                   oat_filename,
-                                                  nullptr,
-                                                  nullptr,
-                                                  false,
-                                                  /*low_4gb*/false,
+                                                  /*executable=*/ false,
+                                                  /*low_4gb=*/ false,
                                                   dex_filename,
+                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   if (oat_file == nullptr) {
     LOG(ERROR) << "Failed to open oat file from '" << oat_filename << "': " << error_msg;
@@ -2918,14 +2927,13 @@ class IMTDumper {
 
     if (oat_filename != nullptr) {
       std::string error_msg;
-      std::unique_ptr<OatFile> oat_file(OatFile::Open(/* zip_fd */ -1,
+      std::unique_ptr<OatFile> oat_file(OatFile::Open(/*zip_fd=*/ -1,
                                                       oat_filename,
                                                       oat_filename,
-                                                      nullptr,
-                                                      nullptr,
-                                                      false,
-                                                      /*low_4gb*/false,
+                                                      /*executable=*/ false,
+                                                      /*low_4gb=*/false,
                                                       dex_filename,
+                                                      /*reservation=*/ nullptr,
                                                       &error_msg));
       if (oat_file == nullptr) {
         LOG(ERROR) << "Failed to open oat file from '" << oat_filename << "': " << error_msg;
@@ -2999,7 +3007,7 @@ class IMTDumper {
       for (uint32_t class_def_index = 0;
            class_def_index != dex_file->NumClassDefs();
            ++class_def_index) {
-        const DexFile::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
+        const dex::ClassDef& class_def = dex_file->GetClassDef(class_def_index);
         const char* descriptor = dex_file->GetClassDescriptor(class_def);
         h_klass.Assign(class_linker->FindClass(self, descriptor, h_class_loader));
         if (h_klass == nullptr) {
@@ -3350,8 +3358,7 @@ struct OatdumpArgs : public CmdlineArgs {
  protected:
   using Base = CmdlineArgs;
 
-  virtual ParseStatus ParseCustom(const StringPiece& option,
-                                  std::string* error_msg) OVERRIDE {
+  ParseStatus ParseCustom(const StringPiece& option, std::string* error_msg) override {
     {
       ParseStatus base_parse = Base::ParseCustom(option, error_msg);
       if (base_parse != kParseUnknownArgument) {
@@ -3389,7 +3396,7 @@ struct OatdumpArgs : public CmdlineArgs {
     } else if (option.starts_with("--export-dex-to=")) {
       export_dex_location_ = option.substr(strlen("--export-dex-to=")).data();
     } else if (option.starts_with("--addr2instr=")) {
-      if (!ParseUint(option.substr(strlen("--addr2instr=")).data(), &addr2instr_)) {
+      if (!android::base::ParseUint(option.substr(strlen("--addr2instr=")).data(), &addr2instr_)) {
         *error_msg = "Address conversion failed";
         return kParseError;
       }
@@ -3408,7 +3415,7 @@ struct OatdumpArgs : public CmdlineArgs {
     return kParseOk;
   }
 
-  virtual ParseStatus ParseChecks(std::string* error_msg) OVERRIDE {
+  ParseStatus ParseChecks(std::string* error_msg) override {
     // Infer boot image location from the image location if possible.
     if (boot_image_location_ == nullptr) {
       boot_image_location_ = image_location_;
@@ -3432,7 +3439,7 @@ struct OatdumpArgs : public CmdlineArgs {
     return kParseOk;
   }
 
-  virtual std::string GetUsage() const {
+  std::string GetUsage() const override {
     std::string usage;
 
     usage +=
@@ -3536,7 +3543,7 @@ struct OatdumpArgs : public CmdlineArgs {
 };
 
 struct OatdumpMain : public CmdlineMain<OatdumpArgs> {
-  virtual bool NeedsRuntime() OVERRIDE {
+  bool NeedsRuntime() override {
     CHECK(args_ != nullptr);
 
     // If we are only doing the oat file, disable absolute_addresses. Keep them for image dumping.
@@ -3563,7 +3570,7 @@ struct OatdumpMain : public CmdlineMain<OatdumpArgs> {
           !args_->symbolize_;
   }
 
-  virtual bool ExecuteWithoutRuntime() OVERRIDE {
+  bool ExecuteWithoutRuntime() override {
     CHECK(args_ != nullptr);
     CHECK(args_->oat_filename_ != nullptr);
 
@@ -3586,7 +3593,7 @@ struct OatdumpMain : public CmdlineMain<OatdumpArgs> {
     }
   }
 
-  virtual bool ExecuteWithRuntime(Runtime* runtime) {
+  bool ExecuteWithRuntime(Runtime* runtime) override {
     CHECK(args_ != nullptr);
 
     if (!args_->imt_dump_.empty() || args_->imt_stat_dump_) {

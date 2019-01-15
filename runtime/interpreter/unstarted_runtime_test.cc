@@ -30,8 +30,11 @@
 #include "handle.h"
 #include "handle_scope-inl.h"
 #include "interpreter/interpreter_common.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
 #include "runtime.h"
@@ -261,7 +264,7 @@ TEST_F(UnstartedRuntimeTest, MemoryPeekShort) {
 
     UnstartedMemoryPeekShort(self, tmp.get(), &result, 0);
 
-    typedef int16_t unaligned_short __attribute__ ((aligned (1)));
+    using unaligned_short __attribute__((__aligned__(1))) = int16_t;
     const unaligned_short* short_ptr = reinterpret_cast<const unaligned_short*>(base_ptr + i);
     EXPECT_EQ(result.GetS(), *short_ptr);
   }
@@ -284,7 +287,7 @@ TEST_F(UnstartedRuntimeTest, MemoryPeekInt) {
 
     UnstartedMemoryPeekInt(self, tmp.get(), &result, 0);
 
-    typedef int32_t unaligned_int __attribute__ ((aligned (1)));
+    using unaligned_int __attribute__((__aligned__(1))) = int32_t;
     const unaligned_int* int_ptr = reinterpret_cast<const unaligned_int*>(base_ptr + i);
     EXPECT_EQ(result.GetI(), *int_ptr);
   }
@@ -307,7 +310,7 @@ TEST_F(UnstartedRuntimeTest, MemoryPeekLong) {
 
     UnstartedMemoryPeekLong(self, tmp.get(), &result, 0);
 
-    typedef int64_t unaligned_long __attribute__ ((aligned (1)));
+    using unaligned_long __attribute__((__aligned__(1))) = int64_t;
     const unaligned_long* long_ptr = reinterpret_cast<const unaligned_long*>(base_ptr + i);
     EXPECT_EQ(result.GetJ(), *long_ptr);
   }
@@ -695,7 +698,7 @@ TEST_F(UnstartedRuntimeTest, Ceil) {
       {  ld2,  ld2 }
   };
 
-  TestCeilFloor(true /* ceil */, self, tmp.get(), test_pairs, arraysize(test_pairs));
+  TestCeilFloor(/* ceil= */ true, self, tmp.get(), test_pairs, arraysize(test_pairs));
 }
 
 TEST_F(UnstartedRuntimeTest, Floor) {
@@ -722,7 +725,7 @@ TEST_F(UnstartedRuntimeTest, Floor) {
       {  ld2,  ld2 }
   };
 
-  TestCeilFloor(false /* floor */, self, tmp.get(), test_pairs, arraysize(test_pairs));
+  TestCeilFloor(/* ceil= */ false, self, tmp.get(), test_pairs, arraysize(test_pairs));
 }
 
 TEST_F(UnstartedRuntimeTest, ToLowerUpper) {

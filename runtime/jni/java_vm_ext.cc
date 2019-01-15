@@ -23,6 +23,7 @@
 #include "art_method-inl.h"
 #include "base/dumpable.h"
 #include "base/mutex-inl.h"
+#include "base/sdk_version.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "check_jni.h"
@@ -86,7 +87,10 @@ class SharedLibrary {
       self->GetJniEnv()->DeleteWeakGlobalRef(class_loader_);
     }
 
-    android::CloseNativeLibrary(handle_, needs_native_bridge_);
+    std::string error_msg;
+    if (!android::CloseNativeLibrary(handle_, needs_native_bridge_, &error_msg)) {
+      LOG(WARNING) << "Error while unloading native library \"" << path_ << "\": " << error_msg;
+    }
   }
 
   jweak GetClassLoader() const {
@@ -330,7 +334,7 @@ class Libraries {
     }
     ScopedThreadSuspension sts(self, kNative);
     // Do this without holding the jni libraries lock to prevent possible deadlocks.
-    typedef void (*JNI_OnUnloadFn)(JavaVM*, void*);
+    using JNI_OnUnloadFn = void(*)(JavaVM*, void*);
     for (auto library : unload_libraries) {
       void* const sym = library->FindSymbol("JNI_OnUnload", nullptr);
       if (sym == nullptr) {
@@ -531,8 +535,6 @@ void JavaVMExt::JniAbort(const char* jni_function_name, const char* msg) {
   if (current_method != nullptr) {
     os << "\n    from " << current_method->PrettyMethod();
   }
-  os << "\n";
-  self->Dump(os);
 
   if (check_jni_abort_hook_ != nullptr) {
     check_jni_abort_hook_(check_jni_abort_hook_data_, os.str());
@@ -1023,11 +1025,11 @@ bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,
     self->SetClassLoaderOverride(class_loader);
 
     VLOG(jni) << "[Calling JNI_OnLoad in \"" << path << "\"]";
-    typedef int (*JNI_OnLoadFn)(JavaVM*, void*);
+    using JNI_OnLoadFn = int(*)(JavaVM*, void*);
     JNI_OnLoadFn jni_on_load = reinterpret_cast<JNI_OnLoadFn>(sym);
     int version = (*jni_on_load)(this, nullptr);
 
-    if (runtime_->GetTargetSdkVersion() != 0 && runtime_->GetTargetSdkVersion() <= 21) {
+    if (IsSdkVersionSetAndAtMost(runtime_->GetTargetSdkVersion(), SdkVersion::kL)) {
       // Make sure that sigchain owns SIGSEGV.
       EnsureFrontOfChain(SIGSEGV);
     }

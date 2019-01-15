@@ -28,11 +28,13 @@
 #include "class_root.h"
 #include "common_runtime_test.h"
 #include "dex/dex_file_types.h"
+#include "dex/signature-inl.h"
 #include "dex/standard_dex_file.h"
 #include "entrypoints/entrypoint_utils-inl.h"
 #include "experimental_flags.h"
 #include "gc/heap.h"
 #include "handle_scope-inl.h"
+#include "mirror/array-alloc-inl.h"
 #include "mirror/accessible_object.h"
 #include "mirror/call_site.h"
 #include "mirror/class-inl.h"
@@ -45,6 +47,7 @@
 #include "mirror/method_handles_lookup.h"
 #include "mirror/method_type.h"
 #include "mirror/object-inl.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/proxy.h"
 #include "mirror/reference.h"
@@ -112,7 +115,8 @@ class ClassLinkerTest : public CommonRuntimeTest {
     EXPECT_EQ(0, primitive->GetIfTableCount());
     EXPECT_TRUE(primitive->GetIfTable() != nullptr);
     EXPECT_EQ(primitive->GetIfTable()->Count(), 0u);
-    EXPECT_EQ(kAccPublic | kAccFinal | kAccAbstract, primitive->GetAccessFlags());
+    EXPECT_EQ(kAccPublic | kAccFinal | kAccAbstract | kAccVerificationAttempted,
+              primitive->GetAccessFlags());
   }
 
   void AssertObjectClass(ObjPtr<mirror::Class> JavaLangObject)
@@ -426,13 +430,13 @@ class ClassLinkerTest : public CommonRuntimeTest {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     // Verify all the classes defined in this file
     for (size_t i = 0; i < dex.NumClassDefs(); i++) {
-      const DexFile::ClassDef& class_def = dex.GetClassDef(i);
+      const dex::ClassDef& class_def = dex.GetClassDef(i);
       const char* descriptor = dex.GetClassDescriptor(class_def);
       AssertDexFileClass(class_loader, descriptor);
     }
     // Verify all the types referenced by this file
     for (size_t i = 0; i < dex.NumTypeIds(); i++) {
-      const DexFile::TypeId& type_id = dex.GetTypeId(dex::TypeIndex(i));
+      const dex::TypeId& type_id = dex.GetTypeId(dex::TypeIndex(i));
       const char* descriptor = dex.GetTypeDescriptor(type_id);
       AssertDexFileClass(class_loader, descriptor);
     }
@@ -442,7 +446,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
 
   class TestRootVisitor : public SingleRootVisitor {
    public:
-    void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED) OVERRIDE {
+    void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED) override {
       EXPECT_TRUE(root != nullptr);
     }
   };
@@ -450,7 +454,7 @@ class ClassLinkerTest : public CommonRuntimeTest {
 
 class ClassLinkerMethodHandlesTest : public ClassLinkerTest {
  protected:
-  virtual void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE {
+  void SetUpRuntimeOptions(RuntimeOptions* options) override {
     CommonRuntimeTest::SetUpRuntimeOptions(options);
   }
 };
@@ -609,6 +613,10 @@ struct ClassExtOffsets : public CheckOffsets<mirror::ClassExt> {
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, obsolete_dex_caches_), "obsoleteDexCaches");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, obsolete_methods_), "obsoleteMethods");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, original_dex_file_), "originalDexFile");
+    addOffset(OFFSETOF_MEMBER(mirror::ClassExt, pre_redefine_class_def_index_),
+              "preRedefineClassDefIndex");
+    addOffset(OFFSETOF_MEMBER(mirror::ClassExt, pre_redefine_dex_file_ptr_),
+              "preRedefineDexFilePtr");
     addOffset(OFFSETOF_MEMBER(mirror::ClassExt, verify_error_), "verifyError");
   }
 };
@@ -660,12 +668,14 @@ struct DexCacheOffsets : public CheckOffsets<mirror::DexCache> {
   DexCacheOffsets() : CheckOffsets<mirror::DexCache>(false, "Ljava/lang/DexCache;") {
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, dex_file_), "dexFile");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, location_), "location");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_preresolved_strings_), "numPreResolvedStrings");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_call_sites_), "numResolvedCallSites");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_fields_), "numResolvedFields");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_method_types_), "numResolvedMethodTypes");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_methods_), "numResolvedMethods");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_resolved_types_), "numResolvedTypes");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_strings_), "numStrings");
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, preresolved_strings_), "preResolvedStrings");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_call_sites_), "resolvedCallSites");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_fields_), "resolvedFields");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, resolved_method_types_), "resolvedMethodTypes");
@@ -988,7 +998,7 @@ TEST_F(ClassLinkerTest, LookupResolvedTypeArray) {
   Handle<mirror::DexCache> dex_cache = hs.NewHandle(all_fields_klass->GetDexCache());
   const DexFile& dex_file = *dex_cache->GetDexFile();
   // Get the index of the array class we want to test.
-  const DexFile::TypeId* array_id = dex_file.FindTypeId("[Ljava/lang/Object;");
+  const dex::TypeId* array_id = dex_file.FindTypeId("[Ljava/lang/Object;");
   ASSERT_TRUE(array_id != nullptr);
   dex::TypeIndex array_idx = dex_file.GetIndexForTypeId(*array_id);
   // Check that the array class wasn't resolved yet.
@@ -1034,8 +1044,8 @@ TEST_F(ClassLinkerTest, LookupResolvedTypeErroneousInit) {
   // Force initialization to turn the class erroneous.
   bool initialized = class_linker_->EnsureInitialized(soa.Self(),
                                                       klass,
-                                                      /* can_init_fields */ true,
-                                                      /* can_init_parents */ true);
+                                                      /* can_init_fields= */ true,
+                                                      /* can_init_parents= */ true);
   EXPECT_FALSE(initialized);
   EXPECT_TRUE(soa.Self()->IsExceptionPending());
   soa.Self()->ClearException();
@@ -1314,21 +1324,21 @@ TEST_F(ClassLinkerTest, ResolveVerifyAndClinit) {
       klass->FindClassMethod("getS0", "()Ljava/lang/Object;", kRuntimePointerSize);
   ASSERT_TRUE(getS0 != nullptr);
   ASSERT_TRUE(getS0->IsStatic());
-  const DexFile::TypeId* type_id = dex_file->FindTypeId("LStaticsFromCode;");
+  const dex::TypeId* type_id = dex_file->FindTypeId("LStaticsFromCode;");
   ASSERT_TRUE(type_id != nullptr);
   dex::TypeIndex type_idx = dex_file->GetIndexForTypeId(*type_id);
   ObjPtr<mirror::Class> uninit = ResolveVerifyAndClinit(type_idx,
                                                         clinit,
                                                         soa.Self(),
-                                                        /* can_run_clinit */ true,
-                                                        /* verify_access */ false);
+                                                        /* can_run_clinit= */ true,
+                                                        /* verify_access= */ false);
   EXPECT_TRUE(uninit != nullptr);
   EXPECT_FALSE(uninit->IsInitialized());
   ObjPtr<mirror::Class> init = ResolveVerifyAndClinit(type_idx,
                                                       getS0,
                                                       soa.Self(),
-                                                      /* can_run_clinit */ true,
-                                                      /* verify_access */ false);
+                                                      /* can_run_clinit= */ true,
+                                                      /* verify_access= */ false);
   EXPECT_TRUE(init != nullptr);
   EXPECT_TRUE(init->IsInitialized());
 }
@@ -1530,7 +1540,7 @@ TEST_F(ClassLinkerTest, RegisterDexFileName) {
   {
     WriterMutexLock mu(soa.Self(), *Locks::dex_lock_);
     // Check that inserting with a UTF16 name works.
-    class_linker->RegisterDexFileLocked(*dex_file, dex_cache.Get(), /* class_loader */ nullptr);
+    class_linker->RegisterDexFileLocked(*dex_file, dex_cache.Get(), /* class_loader= */ nullptr);
   }
 }
 
@@ -1555,7 +1565,7 @@ TEST_F(ClassLinkerMethodHandlesTest, TestResolveMethodTypes) {
   Handle<mirror::DexCache> dex_cache = hs.NewHandle(
       class_linker_->FindDexCache(soa.Self(), dex_file));
 
-  const DexFile::MethodId& method1_id = dex_file.GetMethodId(method1->GetDexMethodIndex());
+  const dex::MethodId& method1_id = dex_file.GetMethodId(method1->GetDexMethodIndex());
 
   // This is the MethodType corresponding to the prototype of
   // String MethodTypes# method1(String).
@@ -1587,7 +1597,7 @@ TEST_F(ClassLinkerMethodHandlesTest, TestResolveMethodTypes) {
       kRuntimePointerSize);
   ASSERT_TRUE(method2 != nullptr);
   ASSERT_FALSE(method2->IsDirect());
-  const DexFile::MethodId& method2_id = dex_file.GetMethodId(method2->GetDexMethodIndex());
+  const dex::MethodId& method2_id = dex_file.GetMethodId(method2->GetDexMethodIndex());
   Handle<mirror::MethodType> method2_type = hs.NewHandle(
       class_linker_->ResolveMethodType(soa.Self(), method2_id.proto_idx_, dex_cache, class_loader));
   ASSERT_OBJ_PTR_NE(method1_type.Get(), method2_type.Get());
@@ -1699,14 +1709,14 @@ TEST_F(ClassLinkerClassLoaderTest, CreatePathClassLoader) {
   jobject class_loader_a = LoadDexInPathClassLoader("ForClassLoaderA", nullptr);
   VerifyClassResolution("LDefinedInA;", class_loader_a, class_loader_a);
   VerifyClassResolution("Ljava/lang/String;", class_loader_a, nullptr);
-  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find=*/ false);
 }
 
 TEST_F(ClassLinkerClassLoaderTest, CreateDelegateLastClassLoader) {
   jobject class_loader_a = LoadDexInDelegateLastClassLoader("ForClassLoaderA", nullptr);
   VerifyClassResolution("LDefinedInA;", class_loader_a, class_loader_a);
   VerifyClassResolution("Ljava/lang/String;", class_loader_a, nullptr);
-  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LDefinedInB;", class_loader_a, nullptr, /*should_find=*/ false);
 }
 
 TEST_F(ClassLinkerClassLoaderTest, CreateClassLoaderChain) {
@@ -1753,7 +1763,7 @@ TEST_F(ClassLinkerClassLoaderTest, CreateClassLoaderChain) {
   VerifyClassResolution("LDefinedInAC;", class_loader_d, class_loader_a);
 
   // Sanity check that we don't find an undefined class.
-  VerifyClassResolution("LNotDefined;", class_loader_d, nullptr, /*should_find*/ false);
+  VerifyClassResolution("LNotDefined;", class_loader_d, nullptr, /*should_find=*/ false);
 }
 
 }  // namespace art

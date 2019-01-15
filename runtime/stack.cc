@@ -139,9 +139,9 @@ mirror::Object* StackVisitor::GetThisObject() const {
     } else {
       uint16_t reg = accessor.RegistersSize() - accessor.InsSize();
       uint32_t value = 0;
-      bool success = GetVReg(m, reg, kReferenceVReg, &value);
-      // We currently always guarantee the `this` object is live throughout the method.
-      CHECK(success) << "Failed to read the this object in " << ArtMethod::PrettyMethod(m);
+      if (!GetVReg(m, reg, kReferenceVReg, &value)) {
+        return nullptr;
+      }
       return reinterpret_cast<mirror::Object*>(value);
     }
   }
@@ -223,20 +223,39 @@ bool StackVisitor::GetVRegFromOptimizedCode(ArtMethod* m, uint16_t vreg, VRegKin
   switch (location_kind) {
     case DexRegisterLocation::Kind::kInStack: {
       const int32_t offset = dex_register_map[vreg].GetStackOffsetInBytes();
+      BitMemoryRegion stack_mask = code_info.GetStackMaskOf(stack_map);
+      if (kind == kReferenceVReg && !stack_mask.LoadBit(offset / kFrameSlotSize)) {
+        return false;
+      }
       const uint8_t* addr = reinterpret_cast<const uint8_t*>(cur_quick_frame_) + offset;
       *val = *reinterpret_cast<const uint32_t*>(addr);
       return true;
     }
-    case DexRegisterLocation::Kind::kInRegister:
+    case DexRegisterLocation::Kind::kInRegister: {
+      uint32_t register_mask = code_info.GetRegisterMaskOf(stack_map);
+      uint32_t reg = dex_register_map[vreg].GetMachineRegister();
+      if (kind == kReferenceVReg && !(register_mask & (1 << reg))) {
+        return false;
+      }
+      return GetRegisterIfAccessible(reg, kind, val);
+    }
     case DexRegisterLocation::Kind::kInRegisterHigh:
     case DexRegisterLocation::Kind::kInFpuRegister:
     case DexRegisterLocation::Kind::kInFpuRegisterHigh: {
+      if (kind == kReferenceVReg) {
+        return false;
+      }
       uint32_t reg = dex_register_map[vreg].GetMachineRegister();
       return GetRegisterIfAccessible(reg, kind, val);
     }
-    case DexRegisterLocation::Kind::kConstant:
-      *val = dex_register_map[vreg].GetConstant();
+    case DexRegisterLocation::Kind::kConstant: {
+      uint32_t result = dex_register_map[vreg].GetConstant();
+      if (kind == kReferenceVReg && result != 0) {
+        return false;
+      }
+      *val = result;
       return true;
+    }
     case DexRegisterLocation::Kind::kNone:
       return false;
     default:
@@ -461,7 +480,7 @@ size_t StackVisitor::ComputeNumFrames(Thread* thread, StackWalkKind walk_kind) {
     NumFramesVisitor(Thread* thread_in, StackWalkKind walk_kind_in)
         : StackVisitor(thread_in, nullptr, walk_kind_in), frames(0) {}
 
-    bool VisitFrame() OVERRIDE {
+    bool VisitFrame() override {
       frames++;
       return true;
     }
@@ -487,7 +506,7 @@ bool StackVisitor::GetNextMethodAndDexPc(ArtMethod** next_method, uint32_t* next
           next_dex_pc_(0) {
     }
 
-    bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
       if (found_frame_) {
         ArtMethod* method = GetMethod();
         if (method != nullptr && !method->IsRuntimeMethod()) {
@@ -520,7 +539,7 @@ void StackVisitor::DescribeStack(Thread* thread) {
     explicit DescribeStackVisitor(Thread* thread_in)
         : StackVisitor(thread_in, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames) {}
 
-    bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
       LOG(INFO) << "Frame Id=" << GetFrameId() << " " << DescribeLocation();
       return true;
     }
@@ -549,7 +568,9 @@ void StackVisitor::SetMethod(ArtMethod* method) {
     cur_shadow_frame_->SetMethod(method);
   } else {
     DCHECK(cur_quick_frame_ != nullptr);
-    CHECK(!IsInInlinedFrame()) << "We do not support setting inlined method's ArtMethod!";
+    CHECK(!IsInInlinedFrame()) << "We do not support setting inlined method's ArtMethod: "
+                               << GetMethod()->PrettyMethod() << " is inlined into "
+                               << GetOuterMethod()->PrettyMethod();
     *cur_quick_frame_ = method;
   }
 }

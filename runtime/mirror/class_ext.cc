@@ -20,12 +20,14 @@
 #include "base/casts.h"
 #include "base/enums.h"
 #include "base/utils.h"
+#include "class-alloc-inl.h"
 #include "class-inl.h"
 #include "class_root.h"
 #include "dex/dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "object-inl.h"
-#include "object_array.h"
+#include "object_array-alloc-inl.h"
+#include "object_array-inl.h"
 #include "stack_trace_element.h"
 #include "well_known_classes.h"
 
@@ -115,6 +117,18 @@ void ClassExt::SetVerifyError(ObjPtr<Object> err) {
 void ClassExt::SetOriginalDexFile(ObjPtr<Object> bytes) {
   DCHECK(!Runtime::Current()->IsActiveTransaction());
   SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, original_dex_file_), bytes);
+}
+
+void ClassExt::SetPreRedefineClassDefIndex(uint16_t index) {
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+  SetField32<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, pre_redefine_class_def_index_),
+      static_cast<int32_t>(index));
+}
+
+void ClassExt::SetPreRedefineDexFile(const DexFile* dex_file) {
+  DCHECK(!Runtime::Current()->IsActiveTransaction());
+  SetField64<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, pre_redefine_dex_file_ptr_),
+      static_cast<int64_t>(reinterpret_cast<uintptr_t>(dex_file)));
 }
 
 }  // namespace mirror

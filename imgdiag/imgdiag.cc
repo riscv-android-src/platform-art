@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include <android-base/parseint.h>
 #include "android-base/stringprintf.h"
 
 #include "art_field-inl.h"
@@ -35,7 +36,7 @@
 #include "class_linker.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
-#include "image.h"
+#include "image-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "oat.h"
@@ -347,9 +348,9 @@ class ImgObjectVisitor : public ObjectVisitor {
     begin_image_ptr_(begin_image_ptr),
     dirty_pages_(dirty_pages) { }
 
-  virtual ~ImgObjectVisitor() OVERRIDE { }
+  ~ImgObjectVisitor() override { }
 
-  virtual void Visit(mirror::Object* object) OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+  void Visit(mirror::Object* object) override REQUIRES_SHARED(Locks::mutator_lock_) {
     // Sanity check that we are reading a real mirror::Object
     CHECK(object->GetClass() != nullptr) << "Image object at address "
                                          << object
@@ -658,8 +659,8 @@ class ImgArtMethodVisitor : public ArtMethodVisitor {
     dirty_func_(std::move(dirty_func)),
     begin_image_ptr_(begin_image_ptr),
     dirty_pages_(dirty_pages) { }
-  virtual ~ImgArtMethodVisitor() OVERRIDE { }
-  virtual void Visit(ArtMethod* method) OVERRIDE {
+  ~ImgArtMethodVisitor() override { }
+  void Visit(ArtMethod* method) override {
     dirty_func_(method, begin_image_ptr_, dirty_pages_);
   }
 
@@ -761,7 +762,8 @@ class RegionSpecializedBase<ArtMethod> : public RegionCommon<ArtMethod> {
 
     std::unordered_set<size_t> dirty_members;
     // Examine the members comprising the ArtMethod, computing which members are dirty.
-    for (const std::pair<size_t, MemberInfo::NameAndSize>& p : member_info_.offset_to_name_size_) {
+    for (const std::pair<const size_t,
+                         MemberInfo::NameAndSize>& p : member_info_.offset_to_name_size_) {
       const size_t offset = p.first;
       if (memcmp(base_ptr + offset, remote_bytes + offset, p.second.size_) != 0) {
         dirty_members.insert(p.first);
@@ -787,7 +789,8 @@ class RegionSpecializedBase<ArtMethod> : public RegionCommon<ArtMethod> {
   void DumpDirtyEntries() REQUIRES_SHARED(Locks::mutator_lock_) {
     DumpSamplesAndOffsetCount();
     os_ << "      offset to field map:\n";
-    for (const std::pair<size_t, MemberInfo::NameAndSize>& p : member_info_.offset_to_name_size_) {
+    for (const std::pair<const size_t,
+                         MemberInfo::NameAndSize>& p : member_info_.offset_to_name_size_) {
       const size_t offset = p.first;
       const size_t size = p.second.size_;
       os_ << StringPrintf("        %zu-%zu: ", offset, offset + size - 1)
@@ -1004,7 +1007,7 @@ class RegionData : public RegionSpecializedBase<T> {
                      begin_image_ptr,
                      RegionCommon<T>::remote_contents_,
                      base_ptr,
-                     /*log_dirty_objects*/true);
+                     /*log_dirty_objects=*/true);
     // Print shared dirty after since it's less important.
     if (RegionCommon<T>::GetZygoteDirtyEntryCount() != 0) {
       // We only reach this point if both pids were specified.  Furthermore,
@@ -1016,7 +1019,7 @@ class RegionData : public RegionSpecializedBase<T> {
                        begin_image_ptr,
                        RegionCommon<T>::zygote_contents_,
                        begin_image_ptr,
-                       /*log_dirty_objects*/false);
+                       /*log_dirty_objects=*/false);
     }
     RegionSpecializedBase<T>::DumpDirtyObjects();
     RegionSpecializedBase<T>::DumpDirtyEntries();
@@ -1671,8 +1674,7 @@ struct ImgDiagArgs : public CmdlineArgs {
  protected:
   using Base = CmdlineArgs;
 
-  virtual ParseStatus ParseCustom(const StringPiece& option,
-                                  std::string* error_msg) OVERRIDE {
+  ParseStatus ParseCustom(const StringPiece& option, std::string* error_msg) override {
     {
       ParseStatus base_parse = Base::ParseCustom(option, error_msg);
       if (base_parse != kParseUnknownArgument) {
@@ -1683,14 +1685,14 @@ struct ImgDiagArgs : public CmdlineArgs {
     if (option.starts_with("--image-diff-pid=")) {
       const char* image_diff_pid = option.substr(strlen("--image-diff-pid=")).data();
 
-      if (!ParseInt(image_diff_pid, &image_diff_pid_)) {
+      if (!android::base::ParseInt(image_diff_pid, &image_diff_pid_)) {
         *error_msg = "Image diff pid out of range";
         return kParseError;
       }
     } else if (option.starts_with("--zygote-diff-pid=")) {
       const char* zygote_diff_pid = option.substr(strlen("--zygote-diff-pid=")).data();
 
-      if (!ParseInt(zygote_diff_pid, &zygote_diff_pid_)) {
+      if (!android::base::ParseInt(zygote_diff_pid, &zygote_diff_pid_)) {
         *error_msg = "Zygote diff pid out of range";
         return kParseError;
       }
@@ -1703,7 +1705,7 @@ struct ImgDiagArgs : public CmdlineArgs {
     return kParseOk;
   }
 
-  virtual ParseStatus ParseChecks(std::string* error_msg) OVERRIDE {
+  ParseStatus ParseChecks(std::string* error_msg) override {
     // Perform the parent checks.
     ParseStatus parent_checks = Base::ParseChecks(error_msg);
     if (parent_checks != kParseOk) {
@@ -1731,7 +1733,7 @@ struct ImgDiagArgs : public CmdlineArgs {
     return kParseOk;
   }
 
-  virtual std::string GetUsage() const {
+  std::string GetUsage() const override {
     std::string usage;
 
     usage +=
@@ -1761,7 +1763,7 @@ struct ImgDiagArgs : public CmdlineArgs {
 };
 
 struct ImgDiagMain : public CmdlineMain<ImgDiagArgs> {
-  virtual bool ExecuteWithRuntime(Runtime* runtime) {
+  bool ExecuteWithRuntime(Runtime* runtime) override {
     CHECK(args_ != nullptr);
 
     return DumpImage(runtime,

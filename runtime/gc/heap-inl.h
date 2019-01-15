@@ -22,7 +22,6 @@
 #include "allocation_listener.h"
 #include "base/quasi_atomic.h"
 #include "base/time_utils.h"
-#include "base/utils.h"
 #include "gc/accounting/atomic_stack.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/allocation_record.h"
@@ -108,7 +107,8 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
   } else {
-    // Bytes allocated that takes bulk thread-local buffer allocations into account.
+    // Bytes allocated that includes bulk thread-local buffer allocations in addition to direct
+    // non-TLAB object allocations.
     size_t bytes_tl_bulk_allocated = 0u;
     obj = TryToAllocate<kInstrumented, false>(self, allocator, byte_count, &bytes_allocated,
                                               &usable_size, &bytes_tl_bulk_allocated);
@@ -128,10 +128,10 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
         if (!self->IsExceptionPending()) {
           // AllocObject will pick up the new allocator type, and instrumented as true is the safe
           // default.
-          return AllocObject</*kInstrumented*/true>(self,
-                                                    klass,
-                                                    byte_count,
-                                                    pre_fence_visitor);
+          return AllocObject</*kInstrumented=*/true>(self,
+                                                     klass,
+                                                     byte_count,
+                                                     pre_fence_visitor);
         }
         return nullptr;
       }
@@ -156,10 +156,10 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     }
     pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
-    size_t num_bytes_allocated_before =
-        num_bytes_allocated_.fetch_add(bytes_tl_bulk_allocated, std::memory_order_relaxed);
-    new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
     if (bytes_tl_bulk_allocated > 0) {
+      size_t num_bytes_allocated_before =
+          num_bytes_allocated_.fetch_add(bytes_tl_bulk_allocated, std::memory_order_relaxed);
+      new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
       // Only trace when we get an increase in the number of bytes allocated. This happens when
       // obtaining a new TLAB and isn't often enough to hurt performance according to golem.
       TraceHeapSize(new_num_bytes_allocated);
@@ -212,7 +212,9 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
   // optimized out. And for the other allocators, AllocatorMayHaveConcurrentGC is a constant since
   // the allocator_type should be constant propagated.
   if (AllocatorMayHaveConcurrentGC(allocator) && IsGcConcurrent()) {
-    CheckConcurrentGC(self, new_num_bytes_allocated, &obj);
+    // New_num_bytes_allocated is zero if we didn't update num_bytes_allocated_.
+    // That's fine.
+    CheckConcurrentGCForJava(self, new_num_bytes_allocated, &obj);
   }
   VerifyObject(obj);
   self->VerifyStack();
@@ -252,8 +254,8 @@ inline mirror::Object* Heap::TryToAllocate(Thread* self,
                                            size_t* bytes_allocated,
                                            size_t* usable_size,
                                            size_t* bytes_tl_bulk_allocated) {
-  if (allocator_type != kAllocatorTypeTLAB &&
-      allocator_type != kAllocatorTypeRegionTLAB &&
+  if (allocator_type != kAllocatorTypeRegionTLAB &&
+      allocator_type != kAllocatorTypeTLAB &&
       allocator_type != kAllocatorTypeRosAlloc &&
       UNLIKELY(IsOutOfMemoryOnAllocation(allocator_type, alloc_size, kGrow))) {
     return nullptr;
@@ -394,28 +396,46 @@ inline bool Heap::ShouldAllocLargeObject(ObjPtr<mirror::Class> c, size_t byte_co
 inline bool Heap::IsOutOfMemoryOnAllocation(AllocatorType allocator_type,
                                             size_t alloc_size,
                                             bool grow) {
-  size_t new_footprint = num_bytes_allocated_.load(std::memory_order_seq_cst) + alloc_size;
-  if (UNLIKELY(new_footprint > max_allowed_footprint_)) {
-    if (UNLIKELY(new_footprint > growth_limit_)) {
+  size_t old_target = target_footprint_.load(std::memory_order_relaxed);
+  while (true) {
+    size_t old_allocated = num_bytes_allocated_.load(std::memory_order_relaxed);
+    size_t new_footprint = old_allocated + alloc_size;
+    // Tests against heap limits are inherently approximate, since multiple allocations may
+    // race, and this is not atomic with the allocation.
+    if (UNLIKELY(new_footprint <= old_target)) {
+      return false;
+    } else if (UNLIKELY(new_footprint > growth_limit_)) {
       return true;
     }
-    if (!AllocatorMayHaveConcurrentGC(allocator_type) || !IsGcConcurrent()) {
-      if (!grow) {
+    // We are between target_footprint_ and growth_limit_ .
+    if (AllocatorMayHaveConcurrentGC(allocator_type) && IsGcConcurrent()) {
+      return false;
+    } else {
+      if (grow) {
+        if (target_footprint_.compare_exchange_weak(/*inout ref*/old_target, new_footprint,
+                                                    std::memory_order_relaxed)) {
+          VlogHeapGrowth(old_target, new_footprint, alloc_size);
+          return false;
+        }  // else try again.
+      } else {
         return true;
       }
-      // TODO: Grow for allocation is racy, fix it.
-      VlogHeapGrowth(max_allowed_footprint_, new_footprint, alloc_size);
-      max_allowed_footprint_ = new_footprint;
     }
   }
-  return false;
 }
 
-inline void Heap::CheckConcurrentGC(Thread* self,
+inline bool Heap::ShouldConcurrentGCForJava(size_t new_num_bytes_allocated) {
+  // For a Java allocation, we only check whether the number of Java allocated bytes excceeds a
+  // threshold. By not considering native allocation here, we (a) ensure that Java heap bounds are
+  // maintained, and (b) reduce the cost of the check here.
+  return new_num_bytes_allocated >= concurrent_start_bytes_;
+}
+
+inline void Heap::CheckConcurrentGCForJava(Thread* self,
                                     size_t new_num_bytes_allocated,
                                     ObjPtr<mirror::Object>* obj) {
-  if (UNLIKELY(new_num_bytes_allocated >= concurrent_start_bytes_)) {
-    RequestConcurrentGCAndSaveObject(self, false, obj);
+  if (UNLIKELY(ShouldConcurrentGCForJava(new_num_bytes_allocated))) {
+    RequestConcurrentGCAndSaveObject(self, false /* force_full */, obj);
   }
 }
 

@@ -17,6 +17,8 @@
 #ifndef ART_RUNTIME_OBJ_PTR_INL_H_
 #define ART_RUNTIME_OBJ_PTR_INL_H_
 
+#include <ostream>
+
 #include "base/bit_utils.h"
 #include "obj_ptr.h"
 #include "thread-current-inl.h"
@@ -24,18 +26,27 @@
 namespace art {
 
 template<class MirrorType>
+inline uintptr_t ObjPtr<MirrorType>::GetCurrentTrimedCookie() {
+  Thread* self = Thread::Current();
+  if (UNLIKELY(self == nullptr)) {
+    return kCookieMask;
+  }
+  return self->GetPoisonObjectCookie() & kCookieMask;
+}
+
+template<class MirrorType>
 inline bool ObjPtr<MirrorType>::IsValid() const {
   if (!kObjPtrPoisoning || IsNull()) {
     return true;
   }
-  return GetCookie() == TrimCookie(Thread::Current()->GetPoisonObjectCookie());
+  return GetCookie() == GetCurrentTrimedCookie();
 }
 
 template<class MirrorType>
 inline void ObjPtr<MirrorType>::AssertValid() const {
   if (kObjPtrPoisoning) {
     CHECK(IsValid()) << "Stale object pointer " << PtrUnchecked() << " , expected cookie "
-        << TrimCookie(Thread::Current()->GetPoisonObjectCookie()) << " but got " << GetCookie();
+        << GetCurrentTrimedCookie() << " but got " << GetCookie();
   }
 }
 
@@ -47,9 +58,7 @@ inline uintptr_t ObjPtr<MirrorType>::Encode(MirrorType* ptr) {
     DCHECK_LE(ref, 0xFFFFFFFFU);
     ref >>= kObjectAlignmentShift;
     // Put cookie in high bits.
-    Thread* self = Thread::Current();
-    DCHECK(self != nullptr);
-    ref |= self->GetPoisonObjectCookie() << kCookieShift;
+    ref |= GetCurrentTrimedCookie() << kCookieShift;
   }
   return ref;
 }

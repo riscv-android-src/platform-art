@@ -21,7 +21,6 @@
 
 #include "art_field.h"
 #include "base/callee_save_type.h"
-#include "base/utils.h"
 #include "class_linker-inl.h"
 #include "common_throws.h"
 #include "dex/code_item_accessors-inl.h"
@@ -31,6 +30,7 @@
 #include "dex/invoke_type.h"
 #include "dex/primitive.h"
 #include "gc_root-inl.h"
+#include "imtable-inl.h"
 #include "intrinsics_enum.h"
 #include "jit/profiling_info.h"
 #include "mirror/class-inl.h"
@@ -43,7 +43,6 @@
 #include "quick/quick_method_frame_info.h"
 #include "read_barrier-inl.h"
 #include "runtime-inl.h"
-#include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 
 namespace art {
@@ -224,11 +223,11 @@ inline const char* ArtMethod::GetName() {
 
 inline ObjPtr<mirror::String> ArtMethod::ResolveNameString() {
   DCHECK(!IsProxyMethod());
-  const DexFile::MethodId& method_id = GetDexFile()->GetMethodId(GetDexMethodIndex());
+  const dex::MethodId& method_id = GetDexFile()->GetMethodId(GetDexMethodIndex());
   return Runtime::Current()->GetClassLinker()->ResolveString(method_id.name_idx_, this);
 }
 
-inline const DexFile::CodeItem* ArtMethod::GetCodeItem() {
+inline const dex::CodeItem* ArtMethod::GetCodeItem() {
   return GetDexFile()->GetCodeItem(GetCodeItemOffset());
 }
 
@@ -245,16 +244,16 @@ inline int32_t ArtMethod::GetLineNumFromDexPC(uint32_t dex_pc) {
   return annotations::GetLineNumFromPC(GetDexFile(), this, dex_pc);
 }
 
-inline const DexFile::ProtoId& ArtMethod::GetPrototype() {
+inline const dex::ProtoId& ArtMethod::GetPrototype() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
   return dex_file->GetMethodPrototype(dex_file->GetMethodId(GetDexMethodIndex()));
 }
 
-inline const DexFile::TypeList* ArtMethod::GetParameterTypeList() {
+inline const dex::TypeList* ArtMethod::GetParameterTypeList() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  const DexFile::ProtoId& proto = dex_file->GetMethodPrototype(
+  const dex::ProtoId& proto = dex_file->GetMethodPrototype(
       dex_file->GetMethodId(GetDexMethodIndex()));
   return dex_file->GetProtoParameters(proto);
 }
@@ -273,7 +272,7 @@ inline uint16_t ArtMethod::GetClassDefIndex() {
   }
 }
 
-inline const DexFile::ClassDef& ArtMethod::GetClassDef() {
+inline const dex::ClassDef& ArtMethod::GetClassDef() {
   DCHECK(!IsProxyMethod());
   return GetDexFile()->GetClassDef(GetClassDefIndex());
 }
@@ -344,8 +343,8 @@ inline ArtMethod* ArtMethod::GetInterfaceMethodIfProxy(PointerSize pointer_size)
 inline dex::TypeIndex ArtMethod::GetReturnTypeIndex() {
   DCHECK(!IsProxyMethod());
   const DexFile* dex_file = GetDexFile();
-  const DexFile::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
-  const DexFile::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
+  const dex::MethodId& method_id = dex_file->GetMethodId(GetDexMethodIndex());
+  const dex::ProtoId& proto_id = dex_file->GetMethodPrototype(method_id);
   return proto_id.return_type_idx_;
 }
 
@@ -365,159 +364,6 @@ inline bool ArtMethod::HasSingleImplementation() {
     return true;
   }
   return (GetAccessFlags() & kAccSingleImplementation) != 0;
-}
-
-inline HiddenApiAccessFlags::ApiList ArtMethod::GetHiddenApiAccessFlags()
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (UNLIKELY(IsIntrinsic())) {
-    switch (static_cast<Intrinsics>(GetIntrinsic())) {
-      case Intrinsics::kSystemArrayCopyChar:
-      case Intrinsics::kStringGetCharsNoCheck:
-      case Intrinsics::kReferenceGetReferent:
-      case Intrinsics::kMemoryPeekByte:
-      case Intrinsics::kMemoryPokeByte:
-      case Intrinsics::kUnsafeCASInt:
-      case Intrinsics::kUnsafeCASLong:
-      case Intrinsics::kUnsafeCASObject:
-      case Intrinsics::kUnsafeGet:
-      case Intrinsics::kUnsafeGetAndAddInt:
-      case Intrinsics::kUnsafeGetAndAddLong:
-      case Intrinsics::kUnsafeGetAndSetInt:
-      case Intrinsics::kUnsafeGetAndSetLong:
-      case Intrinsics::kUnsafeGetAndSetObject:
-      case Intrinsics::kUnsafeGetLong:
-      case Intrinsics::kUnsafeGetLongVolatile:
-      case Intrinsics::kUnsafeGetObject:
-      case Intrinsics::kUnsafeGetObjectVolatile:
-      case Intrinsics::kUnsafeGetVolatile:
-      case Intrinsics::kUnsafePut:
-      case Intrinsics::kUnsafePutLong:
-      case Intrinsics::kUnsafePutLongOrdered:
-      case Intrinsics::kUnsafePutLongVolatile:
-      case Intrinsics::kUnsafePutObject:
-      case Intrinsics::kUnsafePutObjectOrdered:
-      case Intrinsics::kUnsafePutObjectVolatile:
-      case Intrinsics::kUnsafePutOrdered:
-      case Intrinsics::kUnsafePutVolatile:
-      case Intrinsics::kUnsafeLoadFence:
-      case Intrinsics::kUnsafeStoreFence:
-      case Intrinsics::kUnsafeFullFence:
-        // These intrinsics are on the light greylist and will fail a DCHECK in
-        // SetIntrinsic() if their flags change on the respective dex methods.
-        // Note that the DCHECK currently won't fail if the dex methods are
-        // whitelisted, e.g. in the core image (b/77733081). As a result, we
-        // might print warnings but we won't change the semantics.
-        return HiddenApiAccessFlags::kLightGreylist;
-      case Intrinsics::kStringNewStringFromBytes:
-      case Intrinsics::kStringNewStringFromChars:
-      case Intrinsics::kStringNewStringFromString:
-      case Intrinsics::kMemoryPeekIntNative:
-      case Intrinsics::kMemoryPeekLongNative:
-      case Intrinsics::kMemoryPeekShortNative:
-      case Intrinsics::kMemoryPokeIntNative:
-      case Intrinsics::kMemoryPokeLongNative:
-      case Intrinsics::kMemoryPokeShortNative:
-        return HiddenApiAccessFlags::kDarkGreylist;
-      case Intrinsics::kVarHandleFullFence:
-      case Intrinsics::kVarHandleAcquireFence:
-      case Intrinsics::kVarHandleReleaseFence:
-      case Intrinsics::kVarHandleLoadLoadFence:
-      case Intrinsics::kVarHandleStoreStoreFence:
-      case Intrinsics::kVarHandleCompareAndExchange:
-      case Intrinsics::kVarHandleCompareAndExchangeAcquire:
-      case Intrinsics::kVarHandleCompareAndExchangeRelease:
-      case Intrinsics::kVarHandleCompareAndSet:
-      case Intrinsics::kVarHandleGet:
-      case Intrinsics::kVarHandleGetAcquire:
-      case Intrinsics::kVarHandleGetAndAdd:
-      case Intrinsics::kVarHandleGetAndAddAcquire:
-      case Intrinsics::kVarHandleGetAndAddRelease:
-      case Intrinsics::kVarHandleGetAndBitwiseAnd:
-      case Intrinsics::kVarHandleGetAndBitwiseAndAcquire:
-      case Intrinsics::kVarHandleGetAndBitwiseAndRelease:
-      case Intrinsics::kVarHandleGetAndBitwiseOr:
-      case Intrinsics::kVarHandleGetAndBitwiseOrAcquire:
-      case Intrinsics::kVarHandleGetAndBitwiseOrRelease:
-      case Intrinsics::kVarHandleGetAndBitwiseXor:
-      case Intrinsics::kVarHandleGetAndBitwiseXorAcquire:
-      case Intrinsics::kVarHandleGetAndBitwiseXorRelease:
-      case Intrinsics::kVarHandleGetAndSet:
-      case Intrinsics::kVarHandleGetAndSetAcquire:
-      case Intrinsics::kVarHandleGetAndSetRelease:
-      case Intrinsics::kVarHandleGetOpaque:
-      case Intrinsics::kVarHandleGetVolatile:
-      case Intrinsics::kVarHandleSet:
-      case Intrinsics::kVarHandleSetOpaque:
-      case Intrinsics::kVarHandleSetRelease:
-      case Intrinsics::kVarHandleSetVolatile:
-      case Intrinsics::kVarHandleWeakCompareAndSet:
-      case Intrinsics::kVarHandleWeakCompareAndSetAcquire:
-      case Intrinsics::kVarHandleWeakCompareAndSetPlain:
-      case Intrinsics::kVarHandleWeakCompareAndSetRelease:
-        // These intrinsics are on the blacklist and will fail a DCHECK in
-        // SetIntrinsic() if their flags change on the respective dex methods.
-        // Note that the DCHECK currently won't fail if the dex methods are
-        // whitelisted, e.g. in the core image (b/77733081). Given that they are
-        // exclusively VarHandle intrinsics, they should not be used outside
-        // tests that do not enable hidden API checks.
-        return HiddenApiAccessFlags::kBlacklist;
-      default:
-        // Remaining intrinsics are public API. We DCHECK that in SetIntrinsic().
-        return HiddenApiAccessFlags::kWhitelist;
-    }
-  } else {
-    return HiddenApiAccessFlags::DecodeFromRuntime(GetAccessFlags());
-  }
-}
-
-inline void ArtMethod::SetIntrinsic(uint32_t intrinsic) {
-  // Currently we only do intrinsics for static/final methods or methods of final
-  // classes. We don't set kHasSingleImplementation for those methods.
-  DCHECK(IsStatic() || IsFinal() || GetDeclaringClass()->IsFinal()) <<
-      "Potential conflict with kAccSingleImplementation";
-  static const int kAccFlagsShift = CTZ(kAccIntrinsicBits);
-  DCHECK_LE(intrinsic, kAccIntrinsicBits >> kAccFlagsShift);
-  uint32_t intrinsic_bits = intrinsic << kAccFlagsShift;
-  uint32_t new_value = (GetAccessFlags() & ~kAccIntrinsicBits) | kAccIntrinsic | intrinsic_bits;
-  if (kIsDebugBuild) {
-    uint32_t java_flags = (GetAccessFlags() & kAccJavaFlagsMask);
-    bool is_constructor = IsConstructor();
-    bool is_synchronized = IsSynchronized();
-    bool skip_access_checks = SkipAccessChecks();
-    bool is_fast_native = IsFastNative();
-    bool is_critical_native = IsCriticalNative();
-    bool is_copied = IsCopied();
-    bool is_miranda = IsMiranda();
-    bool is_default = IsDefault();
-    bool is_default_conflict = IsDefaultConflicting();
-    bool is_compilable = IsCompilable();
-    bool must_count_locks = MustCountLocks();
-    HiddenApiAccessFlags::ApiList hidden_api_flags = GetHiddenApiAccessFlags();
-    SetAccessFlags(new_value);
-    DCHECK_EQ(java_flags, (GetAccessFlags() & kAccJavaFlagsMask));
-    DCHECK_EQ(is_constructor, IsConstructor());
-    DCHECK_EQ(is_synchronized, IsSynchronized());
-    DCHECK_EQ(skip_access_checks, SkipAccessChecks());
-    DCHECK_EQ(is_fast_native, IsFastNative());
-    DCHECK_EQ(is_critical_native, IsCriticalNative());
-    DCHECK_EQ(is_copied, IsCopied());
-    DCHECK_EQ(is_miranda, IsMiranda());
-    DCHECK_EQ(is_default, IsDefault());
-    DCHECK_EQ(is_default_conflict, IsDefaultConflicting());
-    DCHECK_EQ(is_compilable, IsCompilable());
-    DCHECK_EQ(must_count_locks, MustCountLocks());
-    // Only DCHECK that we have preserved the hidden API access flags if the
-    // original method was not on the whitelist. This is because the core image
-    // does not have the access flags set (b/77733081). It is fine to hard-code
-    // these because (a) warnings on greylist do not change semantics, and
-    // (b) only VarHandle intrinsics are blacklisted at the moment and they
-    // should not be used outside tests with disabled API checks.
-    if (hidden_api_flags != HiddenApiAccessFlags::kWhitelist) {
-      DCHECK_EQ(hidden_api_flags, GetHiddenApiAccessFlags()) << PrettyMethod();
-    }
-  } else {
-    SetAccessFlags(new_value);
-  }
 }
 
 template<ReadBarrierOption kReadBarrierOption, typename RootVisitorType>
@@ -572,6 +418,31 @@ inline CodeItemDataAccessor ArtMethod::DexInstructionData() {
 
 inline CodeItemDebugInfoAccessor ArtMethod::DexInstructionDebugInfo() {
   return CodeItemDebugInfoAccessor(*GetDexFile(), GetCodeItem(), GetDexMethodIndex());
+}
+
+inline void ArtMethod::SetCounter(int16_t hotness_count) {
+  DCHECK(!IsAbstract()) << PrettyMethod();
+  hotness_count_ = hotness_count;
+}
+
+inline uint16_t ArtMethod::GetCounter() {
+  DCHECK(!IsAbstract()) << PrettyMethod();
+  return hotness_count_;
+}
+
+inline uint32_t ArtMethod::GetImtIndex() {
+  if (LIKELY(IsAbstract() && imt_index_ != 0)) {
+    uint16_t imt_index = ~imt_index_;
+    DCHECK_EQ(imt_index, ImTable::GetImtIndex(this)) << PrettyMethod();
+    return imt_index;
+  } else {
+    return ImTable::GetImtIndex(this);
+  }
+}
+
+inline void ArtMethod::CalculateAndSetImtIndex() {
+  DCHECK(IsAbstract()) << PrettyMethod();
+  imt_index_ = ~ImTable::GetImtIndex(this);
 }
 
 }  // namespace art

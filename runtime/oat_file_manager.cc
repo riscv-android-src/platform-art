@@ -27,6 +27,7 @@
 #include "base/bit_vector-inl.h"
 #include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG.
+#include "base/mutex-inl.h"
 #include "base/stl_util.h"
 #include "base/systrace.h"
 #include "class_linker.h"
@@ -72,7 +73,6 @@ const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oa
       CHECK_NE(oat_file->Begin(), existing->Begin()) << "Oat file already mapped at that location";
     }
   }
-  have_non_pic_oat_file_ = have_non_pic_oat_file_ || !oat_file->IsPic();
   const OatFile* ret = oat_file.get();
   oat_files_.insert(std::move(oat_file));
   return ret;
@@ -85,7 +85,7 @@ void OatFileManager::UnRegisterAndDeleteOatFile(const OatFile* oat_file) {
   auto it = oat_files_.find(compare);
   CHECK(it != oat_files_.end());
   oat_files_.erase(it);
-  compare.release();
+  compare.release();  // NOLINT b/117926937
 }
 
 const OatFile* OatFileManager::FindOpenedOatFileFromDexLocation(
@@ -119,9 +119,10 @@ const OatFile* OatFileManager::FindOpenedOatFileFromOatLocationLocked(
 }
 
 std::vector<const OatFile*> OatFileManager::GetBootOatFiles() const {
-  std::vector<const OatFile*> oat_files;
   std::vector<gc::space::ImageSpace*> image_spaces =
       Runtime::Current()->GetHeap()->GetBootImageSpaces();
+  std::vector<const OatFile*> oat_files;
+  oat_files.reserve(image_spaces.size());
   for (gc::space::ImageSpace* image_space : image_spaces) {
     oat_files.push_back(image_space->GetOatFile());
   }
@@ -143,7 +144,7 @@ const OatFile* OatFileManager::GetPrimaryOatFile() const {
 }
 
 OatFileManager::OatFileManager()
-    : have_non_pic_oat_file_(false), only_use_system_oat_files_(false) {}
+    : only_use_system_oat_files_(false) {}
 
 OatFileManager::~OatFileManager() {
   // Explicitly clear oat_files_ since the OatFile destructor calls back into OatFileManager for
@@ -152,8 +153,9 @@ OatFileManager::~OatFileManager() {
 }
 
 std::vector<const OatFile*> OatFileManager::RegisterImageOatFiles(
-    std::vector<gc::space::ImageSpace*> spaces) {
+    const std::vector<gc::space::ImageSpace*>& spaces) {
   std::vector<const OatFile*> oat_files;
+  oat_files.reserve(spaces.size());
   for (gc::space::ImageSpace* space : spaces) {
     oat_files.push_back(RegisterOatFile(space->ReleaseOatFile()));
   }
@@ -182,9 +184,9 @@ class TypeIndexInfo {
 
  private:
   static BitVector GenerateTypeIndexes(const DexFile* dex_file) {
-    BitVector type_indexes(/*start_bits*/0, /*expandable*/true, Allocator::GetMallocAllocator());
+    BitVector type_indexes(/*start_bits=*/0, /*expandable=*/true, Allocator::GetMallocAllocator());
     for (uint16_t i = 0; i < dex_file->NumClassDefs(); ++i) {
-      const DexFile::ClassDef& class_def = dex_file->GetClassDef(i);
+      const dex::ClassDef& class_def = dex_file->GetClassDef(i);
       uint16_t type_idx = class_def.class_idx_.index_;
       type_indexes.SetBit(type_idx);
     }
@@ -291,10 +293,12 @@ static bool CheckClassCollision(const OatFile* oat_file,
 
   // Generate type index information for each dex file.
   std::vector<TypeIndexInfo> loaded_types;
+  loaded_types.reserve(dex_files_loaded.size());
   for (const DexFile* dex_file : dex_files_loaded) {
     loaded_types.push_back(TypeIndexInfo(dex_file));
   }
   std::vector<TypeIndexInfo> unloaded_types;
+  unloaded_types.reserve(dex_files_unloaded.size());
   for (const DexFile* dex_file : dex_files_unloaded) {
     unloaded_types.push_back(TypeIndexInfo(dex_file));
   }
@@ -303,12 +307,12 @@ static bool CheckClassCollision(const OatFile* oat_file,
   std::priority_queue<DexFileAndClassPair> queue;
   for (size_t i = 0; i < dex_files_loaded.size(); ++i) {
     if (loaded_types[i].GetIterator() != loaded_types[i].GetIteratorEnd()) {
-      queue.emplace(dex_files_loaded[i], &loaded_types[i], /*from_loaded_oat*/true);
+      queue.emplace(dex_files_loaded[i], &loaded_types[i], /*from_loaded_oat=*/true);
     }
   }
   for (size_t i = 0; i < dex_files_unloaded.size(); ++i) {
     if (unloaded_types[i].GetIterator() != unloaded_types[i].GetIteratorEnd()) {
-      queue.emplace(dex_files_unloaded[i], &unloaded_types[i], /*from_loaded_oat*/false);
+      queue.emplace(dex_files_unloaded[i], &unloaded_types[i], /*from_loaded_oat=*/false);
     }
   }
 
@@ -386,8 +390,8 @@ OatFileManager::CheckCollisionResult OatFileManager::CheckCollision(
   // the oat file without addition checks
   ClassLoaderContext::VerificationResult result = context->VerifyClassLoaderContextMatch(
       oat_file->GetClassLoaderContext(),
-      /*verify_names*/ true,
-      /*verify_checksums*/ true);
+      /*verify_names=*/ true,
+      /*verify_checksums=*/ true);
   switch (result) {
     case ClassLoaderContext::VerificationResult::kForcedToSkipChecks:
       return CheckCollisionResult::kSkippedClassLoaderContextSharedLibrary;
@@ -465,57 +469,15 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
                                       !runtime->IsAotCompiler(),
                                       only_use_system_oat_files_);
 
-  // Lock the target oat location to avoid races generating and loading the
-  // oat file.
-  std::string error_msg;
-  if (!oat_file_assistant.Lock(/*out*/&error_msg)) {
-    // Don't worry too much if this fails. If it does fail, it's unlikely we
-    // can generate an oat file anyway.
-    VLOG(class_linker) << "OatFileAssistant::Lock: " << error_msg;
-  }
-
-  const OatFile* source_oat_file = nullptr;
-
-  if (!oat_file_assistant.IsUpToDate()) {
-    // Update the oat file on disk if we can, based on the --compiler-filter
-    // option derived from the current runtime options.
-    // This may fail, but that's okay. Best effort is all that matters here.
-    // TODO(calin): b/64530081 b/66984396. Pass a null context to verify and compile
-    // secondary dex files in isolation (and avoid to extract/verify the main apk
-    // if it's in the class path). Note this trades correctness for performance
-    // since the resulting slow down is unacceptable in some cases until b/64530081
-    // is fixed.
-    // We still pass the class loader context when the classpath string of the runtime
-    // is not empty, which is the situation when ART is invoked standalone.
-    ClassLoaderContext* actual_context = Runtime::Current()->GetClassPathString().empty()
-        ? nullptr
-        : context.get();
-    switch (oat_file_assistant.MakeUpToDate(/*profile_changed*/ false,
-                                            actual_context,
-                                            /*out*/ &error_msg)) {
-      case OatFileAssistant::kUpdateFailed:
-        LOG(WARNING) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateNotAttempted:
-        // Avoid spamming the logs if we decided not to attempt making the oat
-        // file up to date.
-        VLOG(oat) << error_msg;
-        break;
-
-      case OatFileAssistant::kUpdateSucceeded:
-        // Nothing to do.
-        break;
-    }
-  }
-
   // Get the oat file on disk.
   std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
   VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
             << reinterpret_cast<uintptr_t>(oat_file.get())
             << " (executable=" << (oat_file != nullptr ? oat_file->IsExecutable() : false) << ")";
 
+  const OatFile* source_oat_file = nullptr;
   CheckCollisionResult check_collision_result = CheckCollisionResult::kPerformedHasCollisions;
+  std::string error_msg;
   if ((class_loader != nullptr || dex_elements != nullptr) && oat_file != nullptr) {
     // Prevent oat files from being loaded if no class_loader or dex_elements are provided.
     // This can happen when the deprecated DexFile.<init>(String) is called directly, and it
@@ -569,6 +531,8 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
   if (source_oat_file != nullptr) {
     bool added_image_space = false;
     if (source_oat_file->IsExecutable()) {
+      ScopedTrace app_image_timing("AppImage:Loading");
+
       // We need to throw away the image space if we are debuggable but the oat-file source of the
       // image is not otherwise we might get classes with inlined methods or other such things.
       std::unique_ptr<gc::space::ImageSpace> image_space;
@@ -608,7 +572,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
           if (added_image_space) {
             // Successfully added image space to heap, release the map so that it does not get
             // freed.
-            image_space.release();
+            image_space.release();  // NOLINT b/117926937
 
             // Register for tracking.
             for (const auto& dex_file : dex_files) {

@@ -20,12 +20,13 @@
 #include "base/atomic.h"
 #include "base/casts.h"
 #include "base/enums.h"
-#include "base/globals.h"
+#include "dex/primitive.h"
 #include "obj_ptr.h"
 #include "object_reference.h"
 #include "offsets.h"
 #include "read_barrier_config.h"
 #include "read_barrier_option.h"
+#include "runtime_globals.h"
 #include "verify_object.h"
 
 namespace art {
@@ -86,7 +87,7 @@ class MANAGED LOCKABLE Object {
     return sizeof(Object);
   }
 
-  static MemberOffset ClassOffset() {
+  static constexpr MemberOffset ClassOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Object, klass_);
   }
 
@@ -138,7 +139,7 @@ class MANAGED LOCKABLE Object {
       REQUIRES(!Locks::thread_list_lock_,
                !Locks::thread_suspend_count_lock_);
 
-  static MemberOffset MonitorOffset() {
+  static constexpr MemberOffset MonitorOffset() {
     return OFFSET_OF_OBJECT_MEMBER(Object, monitor_);
   }
 
@@ -169,19 +170,14 @@ class MANAGED LOCKABLE Object {
   void NotifyAll(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
   void Wait(Thread* self, int64_t timeout, int32_t nanos) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   Class* AsClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsObjectArray() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<class T,
-           VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<class T, VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ObjectArray<T>* AsObjectArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
@@ -198,39 +194,39 @@ class MANAGED LOCKABLE Object {
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   DexCache* AsDexCache() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsArrayInstance() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   Array* AsArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsBooleanArray() REQUIRES_SHARED(Locks::mutator_lock_);
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   BooleanArray* AsBooleanArray() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsByteArray() REQUIRES_SHARED(Locks::mutator_lock_);
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ByteArray* AsByteArray() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  ByteArray* AsByteSizedArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsCharArray() REQUIRES_SHARED(Locks::mutator_lock_);
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   CharArray* AsCharArray() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
+  bool IsShortArray() REQUIRES_SHARED(Locks::mutator_lock_);
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ShortArray* AsShortArray() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  ShortArray* AsShortSizedArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsIntArray() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   IntArray* AsIntArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsLongArray() REQUIRES_SHARED(Locks::mutator_lock_);
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   LongArray* AsLongArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -349,11 +345,35 @@ class MANAGED LOCKABLE Object {
   HeapReference<Object>* GetFieldObjectReferenceAddr(MemberOffset field_offset)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  template<typename kType, bool kIsVolatile>
+  ALWAYS_INLINE void SetFieldPrimitive(MemberOffset field_offset, kType new_value)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
+    kType* addr = reinterpret_cast<kType*>(raw_addr);
+    if (kIsVolatile) {
+      reinterpret_cast<Atomic<kType>*>(addr)->store(new_value, std::memory_order_seq_cst);
+    } else {
+      reinterpret_cast<Atomic<kType>*>(addr)->StoreJavaData(new_value);
+    }
+  }
+
+  template<typename kType, bool kIsVolatile>
+  ALWAYS_INLINE kType GetFieldPrimitive(MemberOffset field_offset)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    const uint8_t* raw_addr = reinterpret_cast<const uint8_t*>(this) + field_offset.Int32Value();
+    const kType* addr = reinterpret_cast<const kType*>(raw_addr);
+    if (kIsVolatile) {
+      return reinterpret_cast<const Atomic<kType>*>(addr)->load(std::memory_order_seq_cst);
+    } else {
+      return reinterpret_cast<const Atomic<kType>*>(addr)->LoadJavaData();
+    }
+  }
+
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
   ALWAYS_INLINE uint8_t GetFieldBoolean(MemberOffset field_offset)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     Verify<kVerifyFlags>();
-    return GetField<uint8_t, kIsVolatile>(field_offset);
+    return GetFieldPrimitive<uint8_t, kIsVolatile>(field_offset);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, bool kIsVolatile = false>
@@ -440,7 +460,7 @@ class MANAGED LOCKABLE Object {
   ALWAYS_INLINE int32_t GetField32(MemberOffset field_offset)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     Verify<kVerifyFlags>();
-    return GetField<int32_t, kIsVolatile>(field_offset);
+    return GetFieldPrimitive<int32_t, kIsVolatile>(field_offset);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -482,7 +502,7 @@ class MANAGED LOCKABLE Object {
   ALWAYS_INLINE int64_t GetField64(MemberOffset field_offset)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     Verify<kVerifyFlags>();
-    return GetField<int64_t, kIsVolatile>(field_offset);
+    return GetFieldPrimitive<int64_t, kIsVolatile>(field_offset);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -683,30 +703,6 @@ class MANAGED LOCKABLE Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
-  template<typename kSize, bool kIsVolatile>
-  ALWAYS_INLINE void SetField(MemberOffset field_offset, kSize new_value)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    uint8_t* raw_addr = reinterpret_cast<uint8_t*>(this) + field_offset.Int32Value();
-    kSize* addr = reinterpret_cast<kSize*>(raw_addr);
-    if (kIsVolatile) {
-      reinterpret_cast<Atomic<kSize>*>(addr)->store(new_value, std::memory_order_seq_cst);
-    } else {
-      reinterpret_cast<Atomic<kSize>*>(addr)->StoreJavaData(new_value);
-    }
-  }
-
-  template<typename kSize, bool kIsVolatile>
-  ALWAYS_INLINE kSize GetField(MemberOffset field_offset)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    const uint8_t* raw_addr = reinterpret_cast<const uint8_t*>(this) + field_offset.Int32Value();
-    const kSize* addr = reinterpret_cast<const kSize*>(raw_addr);
-    if (kIsVolatile) {
-      return reinterpret_cast<const Atomic<kSize>*>(addr)->load(std::memory_order_seq_cst);
-    } else {
-      return reinterpret_cast<const Atomic<kSize>*>(addr)->LoadJavaData();
-    }
-  }
-
   // Get a field with acquire semantics.
   template<typename kSize>
   ALWAYS_INLINE kSize GetFieldAcquire(MemberOffset field_offset)
@@ -763,6 +759,9 @@ class MANAGED LOCKABLE Object {
                             ObjPtr<mirror::Object> src,
                             size_t num_bytes)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  template<VerifyObjectFlags kVerifyFlags, Primitive::Type kType>
+  bool IsSpecificPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   static Atomic<uint32_t> hash_code_seed;
 

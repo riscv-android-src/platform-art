@@ -197,7 +197,7 @@ class CodeGenerator::CodeGenerationData : public DeletableArenaObject<kArenaAllo
     return GetNumberOfJitStringRoots() + GetNumberOfJitClassRoots();
   }
 
-  void EmitJitRoots(Handle<mirror::ObjectArray<mirror::Object>> roots)
+  void EmitJitRoots(/*out*/std::vector<Handle<mirror::Object>>* roots)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
@@ -230,29 +230,31 @@ class CodeGenerator::CodeGenerationData : public DeletableArenaObject<kArenaAllo
 };
 
 void CodeGenerator::CodeGenerationData::EmitJitRoots(
-    Handle<mirror::ObjectArray<mirror::Object>> roots) {
-  DCHECK_EQ(static_cast<size_t>(roots->GetLength()), GetNumberOfJitRoots());
+    /*out*/std::vector<Handle<mirror::Object>>* roots) {
+  DCHECK(roots->empty());
+  roots->reserve(GetNumberOfJitRoots());
   ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   size_t index = 0;
   for (auto& entry : jit_string_roots_) {
     // Update the `roots` with the string, and replace the address temporarily
     // stored to the index in the table.
     uint64_t address = entry.second;
-    roots->Set(index, reinterpret_cast<StackReference<mirror::String>*>(address)->AsMirrorPtr());
-    DCHECK(roots->Get(index) != nullptr);
+    roots->emplace_back(reinterpret_cast<StackReference<mirror::Object>*>(address));
+    DCHECK(roots->back() != nullptr);
+    DCHECK(roots->back()->IsString());
     entry.second = index;
     // Ensure the string is strongly interned. This is a requirement on how the JIT
     // handles strings. b/32995596
-    class_linker->GetInternTable()->InternStrong(
-        reinterpret_cast<mirror::String*>(roots->Get(index)));
+    class_linker->GetInternTable()->InternStrong(roots->back()->AsString());
     ++index;
   }
   for (auto& entry : jit_class_roots_) {
     // Update the `roots` with the class, and replace the address temporarily
     // stored to the index in the table.
     uint64_t address = entry.second;
-    roots->Set(index, reinterpret_cast<StackReference<mirror::Class>*>(address)->AsMirrorPtr());
-    DCHECK(roots->Get(index) != nullptr);
+    roots->emplace_back(reinterpret_cast<StackReference<mirror::Object>*>(address));
+    DCHECK(roots->back() != nullptr);
+    DCHECK(roots->back()->IsClass());
     entry.second = index;
     ++index;
   }
@@ -412,7 +414,7 @@ void CodeGenerator::Compile(CodeAllocator* allocator) {
     // This ensures that we have correct native line mapping for all native instructions.
     // It is necessary to make stepping over a statement work. Otherwise, any initial
     // instructions (e.g. moves) would be assumed to be the start of next statement.
-    MaybeRecordNativeDebugInfo(nullptr /* instruction */, block->GetDexPc());
+    MaybeRecordNativeDebugInfo(/* instruction= */ nullptr, block->GetDexPc());
     for (HInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
       HInstruction* current = it.Current();
       if (current->HasEnvironment()) {
@@ -985,7 +987,7 @@ static void CheckCovers(uint32_t dex_pc,
 // dex branch instructions.
 static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
                                             const CodeInfo& code_info,
-                                            const DexFile::CodeItem& code_item) {
+                                            const dex::CodeItem& code_item) {
   if (graph.HasTryCatch()) {
     // One can write loops through try/catch, which we do not support for OSR anyway.
     return;
@@ -1027,7 +1029,7 @@ static void CheckLoopEntriesCanBeUsedForOsr(const HGraph& graph,
   }
 }
 
-ScopedArenaVector<uint8_t> CodeGenerator::BuildStackMaps(const DexFile::CodeItem* code_item) {
+ScopedArenaVector<uint8_t> CodeGenerator::BuildStackMaps(const dex::CodeItem* code_item) {
   ScopedArenaVector<uint8_t> stack_map = GetStackMapStream()->Encode();
   if (kIsDebugBuild && code_item != nullptr) {
     CheckLoopEntriesCanBeUsedForOsr(*graph_, CodeInfo(stack_map.data()), *code_item);
@@ -1083,7 +1085,7 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
     // call). Therefore register_mask contains both callee-save and caller-save
     // registers that hold objects. We must remove the spilled caller-save from the
     // mask, since they will be overwritten by the callee.
-    uint32_t spills = GetSlowPathSpills(locations, /* core_registers */ true);
+    uint32_t spills = GetSlowPathSpills(locations, /* core_registers= */ true);
     register_mask &= ~spills;
   } else {
     // The register mask must be a subset of callee-save registers.
@@ -1124,6 +1126,7 @@ void CodeGenerator::RecordPcInfo(HInstruction* instruction,
   if (osr) {
     DCHECK_EQ(info->GetSuspendCheck(), instruction);
     DCHECK(info->IsIrreducible());
+    DCHECK(environment != nullptr);
     if (kIsDebugBuild) {
       for (size_t i = 0, environment_size = environment->Size(); i < environment_size; ++i) {
         HInstruction* in_environment = environment->GetInstructionAt(i);
@@ -1161,7 +1164,7 @@ void CodeGenerator::MaybeRecordNativeDebugInfo(HInstruction* instruction,
       // Ensure that we do not collide with the stack map of the previous instruction.
       GenerateNop();
     }
-    RecordPcInfo(instruction, dex_pc, slow_path, /* native_debug_info */ true);
+    RecordPcInfo(instruction, dex_pc, slow_path, /* native_debug_info= */ true);
   }
 }
 
@@ -1179,8 +1182,8 @@ void CodeGenerator::RecordCatchBlockInfo() {
 
     stack_map_stream->BeginStackMapEntry(dex_pc,
                                          native_pc,
-                                         /* register_mask */ 0,
-                                         /* stack_mask */ nullptr,
+                                         /* register_mask= */ 0,
+                                         /* sp_mask= */ nullptr,
                                          StackMap::Kind::Catch);
 
     HInstruction* current_phi = block->GetFirstPhi();
@@ -1394,37 +1397,12 @@ void CodeGenerator::EmitEnvironment(HEnvironment* environment, SlowPathCode* slo
 }
 
 bool CodeGenerator::CanMoveNullCheckToUser(HNullCheck* null_check) {
-  HInstruction* first_next_not_move = null_check->GetNextDisregardingMoves();
-
-  return (first_next_not_move != nullptr)
-      && first_next_not_move->CanDoImplicitNullCheckOn(null_check->InputAt(0));
+  return null_check->IsEmittedAtUseSite();
 }
 
 void CodeGenerator::MaybeRecordImplicitNullCheck(HInstruction* instr) {
-  if (!compiler_options_.GetImplicitNullChecks()) {
-    return;
-  }
-
-  // If we are from a static path don't record the pc as we can't throw NPE.
-  // NB: having the checks here makes the code much less verbose in the arch
-  // specific code generators.
-  if (instr->IsStaticFieldSet() || instr->IsStaticFieldGet()) {
-    return;
-  }
-
-  if (!instr->CanDoImplicitNullCheckOn(instr->InputAt(0))) {
-    return;
-  }
-
-  // Find the first previous instruction which is not a move.
-  HInstruction* first_prev_not_move = instr->GetPreviousDisregardingMoves();
-
-  // If the instruction is a null check it means that `instr` is the first user
-  // and needs to record the pc.
-  if (first_prev_not_move != nullptr && first_prev_not_move->IsNullCheck()) {
-    HNullCheck* null_check = first_prev_not_move->AsNullCheck();
-    // TODO: The parallel moves modify the environment. Their changes need to be
-    // reverted otherwise the stack maps at the throw point will not be correct.
+  HNullCheck* null_check = instr->GetImplicitNullCheck();
+  if (null_check != nullptr) {
     RecordPcInfo(null_check, null_check->GetDexPc());
   }
 }
@@ -1514,7 +1492,12 @@ void CodeGenerator::ValidateInvokeRuntime(QuickEntrypointEnum entrypoint,
           << " instruction->GetSideEffects().ToString()="
           << instruction->GetSideEffects().ToString();
     } else {
-      DCHECK(instruction->GetSideEffects().Includes(SideEffects::CanTriggerGC()) ||
+      // 'CanTriggerGC' side effect is used to restrict optimization of instructions which depend
+      // on GC (e.g. IntermediateAddress) - to ensure they are not alive across GC points. However
+      // if execution never returns to the compiled code from a GC point this restriction is
+      // unnecessary - in particular for fatal slow paths which might trigger GC.
+      DCHECK((slow_path->IsFatal() && !instruction->GetLocations()->WillCall()) ||
+             instruction->GetSideEffects().Includes(SideEffects::CanTriggerGC()) ||
              // When (non-Baker) read barriers are enabled, some instructions
              // use a slow path to emit a read barrier, which does not trigger
              // GC.
@@ -1572,7 +1555,7 @@ void CodeGenerator::ValidateInvokeRuntimeWithoutRecordingPcInfo(HInstruction* in
 void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* locations) {
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ true);
+  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ true);
   for (uint32_t i : LowToHighBits(core_spills)) {
     // If the register holds an object, update the stack mask.
     if (locations->RegisterContainsObject(i)) {
@@ -1584,7 +1567,7 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
     stack_offset += codegen->SaveCoreRegister(stack_offset, i);
   }
 
-  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ false);
+  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
   for (uint32_t i : LowToHighBits(fp_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
@@ -1596,14 +1579,14 @@ void SlowPathCode::SaveLiveRegisters(CodeGenerator* codegen, LocationSummary* lo
 void SlowPathCode::RestoreLiveRegisters(CodeGenerator* codegen, LocationSummary* locations) {
   size_t stack_offset = codegen->GetFirstRegisterSlotInSlowPath();
 
-  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ true);
+  const uint32_t core_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ true);
   for (uint32_t i : LowToHighBits(core_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
     stack_offset += codegen->RestoreCoreRegister(stack_offset, i);
   }
 
-  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers */ false);
+  const uint32_t fp_spills = codegen->GetSlowPathSpills(locations, /* core_registers= */ false);
   for (uint32_t i : LowToHighBits(fp_spills)) {
     DCHECK_LT(stack_offset, codegen->GetFrameSize() - codegen->FrameEntrySpillSize());
     DCHECK_LT(i, kMaximumNumberOfExpectedRegisters);
@@ -1665,28 +1648,21 @@ void CodeGenerator::CreateSystemArrayCopyLocationSummary(HInvoke* invoke) {
 }
 
 void CodeGenerator::EmitJitRoots(uint8_t* code,
-                                 Handle<mirror::ObjectArray<mirror::Object>> roots,
-                                 const uint8_t* roots_data) {
+                                 const uint8_t* roots_data,
+                                 /*out*/std::vector<Handle<mirror::Object>>* roots) {
   code_generation_data_->EmitJitRoots(roots);
   EmitJitRootPatches(code, roots_data);
 }
 
-QuickEntrypointEnum CodeGenerator::GetArrayAllocationEntrypoint(Handle<mirror::Class> array_klass) {
-  ScopedObjectAccess soa(Thread::Current());
-  if (array_klass == nullptr) {
-    // This can only happen for non-primitive arrays, as primitive arrays can always
-    // be resolved.
-    return kQuickAllocArrayResolved32;
-  }
-
-  switch (array_klass->GetComponentSize()) {
-    case 1: return kQuickAllocArrayResolved8;
-    case 2: return kQuickAllocArrayResolved16;
-    case 4: return kQuickAllocArrayResolved32;
-    case 8: return kQuickAllocArrayResolved64;
+QuickEntrypointEnum CodeGenerator::GetArrayAllocationEntrypoint(HNewArray* new_array) {
+  switch (new_array->GetComponentSizeShift()) {
+    case 0: return kQuickAllocArrayResolved8;
+    case 1: return kQuickAllocArrayResolved16;
+    case 2: return kQuickAllocArrayResolved32;
+    case 3: return kQuickAllocArrayResolved64;
   }
   LOG(FATAL) << "Unreachable";
-  return kQuickAllocArrayResolved;
+  UNREACHABLE();
 }
 
 }  // namespace art

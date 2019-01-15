@@ -462,6 +462,59 @@ void DexWriter::WriteAnnotationsDirectories(Stream* stream) {
   }
 }
 
+void DexWriter::WriteHiddenapiClassData(Stream* stream) {
+  if (header_->HiddenapiClassDatas().Empty()) {
+    return;
+  }
+  DCHECK_EQ(header_->HiddenapiClassDatas().Size(), header_->ClassDefs().Size());
+
+  stream->AlignTo(SectionAlignment(DexFile::kDexTypeHiddenapiClassData));
+  const uint32_t start = stream->Tell();
+
+  // Compute offsets for each class def and write the header.
+  // data_header[0]: total size of the section
+  // data_header[i + 1]: offset of class def[i] from the beginning of the section,
+  //                     or zero if no data
+  std::vector<uint32_t> data_header(header_->ClassDefs().Size() + 1, 0);
+  data_header[0] = sizeof(uint32_t) * (header_->ClassDefs().Size() + 1);
+  for (uint32_t i = 0; i < header_->ClassDefs().Size(); ++i) {
+    uint32_t item_size = header_->HiddenapiClassDatas()[i]->ItemSize();
+    data_header[i + 1] = item_size == 0u ? 0 : data_header[0];
+    data_header[0] += item_size;
+  }
+  stream->Write(data_header.data(), sizeof(uint32_t) * data_header.size());
+
+  // Write class data streams.
+  for (uint32_t i = 0; i < header_->ClassDefs().Size(); ++i) {
+    dex_ir::ClassDef* class_def = header_->ClassDefs()[i];
+    const auto& item = header_->HiddenapiClassDatas()[i];
+    DCHECK(item->GetClassDef() == class_def);
+
+    if (data_header[i + 1] != 0u) {
+      dex_ir::ClassData* class_data = class_def->GetClassData();
+      DCHECK(class_data != nullptr);
+      DCHECK_EQ(data_header[i + 1], stream->Tell() - start);
+      for (const dex_ir::FieldItem& field : *class_data->StaticFields()) {
+        stream->WriteUleb128(item->GetFlags(&field));
+      }
+      for (const dex_ir::FieldItem& field : *class_data->InstanceFields()) {
+        stream->WriteUleb128(item->GetFlags(&field));
+      }
+      for (const dex_ir::MethodItem& method : *class_data->DirectMethods()) {
+        stream->WriteUleb128(item->GetFlags(&method));
+      }
+      for (const dex_ir::MethodItem& method : *class_data->VirtualMethods()) {
+        stream->WriteUleb128(item->GetFlags(&method));
+      }
+    }
+  }
+  DCHECK_EQ(stream->Tell() - start, data_header[0]);
+
+  if (compute_offsets_ && start != stream->Tell()) {
+    header_->HiddenapiClassDatas().SetOffset(start);
+  }
+}
+
 void DexWriter::WriteDebugInfoItem(Stream* stream, dex_ir::DebugInfoItem* debug_info) {
   stream->AlignTo(SectionAlignment(DexFile::kDexTypeDebugInfoItem));
   ProcessOffset(stream, debug_info);
@@ -482,10 +535,10 @@ void DexWriter::WriteCodeItemPostInstructionData(Stream* stream,
                                                  dex_ir::CodeItem* code_item,
                                                  bool reserve_only) {
   if (code_item->TriesSize() != 0) {
-    stream->AlignTo(DexFile::TryItem::kAlignment);
+    stream->AlignTo(dex::TryItem::kAlignment);
     // Write try items.
     for (std::unique_ptr<const dex_ir::TryItem>& try_item : *code_item->Tries()) {
-      DexFile::TryItem disk_try_item;
+      dex::TryItem disk_try_item;
       if (!reserve_only) {
         disk_try_item.start_addr_ = try_item->StartAddr();
         disk_try_item.insn_count_ = try_item->InsnCount();
@@ -659,7 +712,7 @@ void DexWriter::WriteMapItems(Stream* stream, MapItemQueue* queue) {
   stream->Write(&map_list_size, sizeof(map_list_size));
   while (!queue->empty()) {
     const MapItem& item = queue->top();
-    DexFile::MapItem map_item;
+    dex::MapItem map_item;
     map_item.type_ = item.type_;
     map_item.size_ = item.size_;
     map_item.offset_ = item.offset_;
@@ -730,6 +783,9 @@ void DexWriter::GenerateAndWriteMapItems(Stream* stream) {
   queue.AddIfNotEmpty(MapItem(DexFile::kDexTypeAnnotationsDirectoryItem,
                               header_->AnnotationsDirectoryItems().Size(),
                               header_->AnnotationsDirectoryItems().GetOffset()));
+  queue.AddIfNotEmpty(MapItem(DexFile::kDexTypeHiddenapiClassData,
+                              header_->HiddenapiClassDatas().Empty() ? 0u : 1u,
+                              header_->HiddenapiClassDatas().GetOffset()));
   WriteMapItems(stream, &queue);
 }
 
@@ -790,16 +846,16 @@ bool DexWriter::Write(DexContainer* output, std::string* error_msg) {
   // Based on: https://source.android.com/devices/tech/dalvik/dex-format
   // Since the offsets may not be calculated already, the writing must be done in the correct order.
   const uint32_t string_ids_offset = stream->Tell();
-  WriteStringIds(stream, /*reserve_only*/ true);
+  WriteStringIds(stream, /*reserve_only=*/ true);
   WriteTypeIds(stream);
   const uint32_t proto_ids_offset = stream->Tell();
-  WriteProtoIds(stream, /*reserve_only*/ true);
+  WriteProtoIds(stream, /*reserve_only=*/ true);
   WriteFieldIds(stream);
   WriteMethodIds(stream);
   const uint32_t class_defs_offset = stream->Tell();
-  WriteClassDefs(stream, /*reserve_only*/ true);
+  WriteClassDefs(stream, /*reserve_only=*/ true);
   const uint32_t call_site_ids_offset = stream->Tell();
-  WriteCallSiteIds(stream, /*reserve_only*/ true);
+  WriteCallSiteIds(stream, /*reserve_only=*/ true);
   WriteMethodHandles(stream);
 
   uint32_t data_offset_ = 0u;
@@ -812,13 +868,13 @@ bool DexWriter::Write(DexContainer* output, std::string* error_msg) {
   // Write code item first to minimize the space required for encoded methods.
   // Reserve code item space since we need the debug offsets to actually write them.
   const uint32_t code_items_offset = stream->Tell();
-  WriteCodeItems(stream, /*reserve_only*/ true);
+  WriteCodeItems(stream, /*reserve_only=*/ true);
   // Write debug info section.
   WriteDebugInfoItems(stream);
   {
     // Actually write code items since debug info offsets are calculated now.
     Stream::ScopedSeek seek(stream, code_items_offset);
-    WriteCodeItems(stream, /*reserve_only*/ false);
+    WriteCodeItems(stream, /*reserve_only=*/ false);
   }
 
   WriteEncodedArrays(stream);
@@ -829,23 +885,24 @@ bool DexWriter::Write(DexContainer* output, std::string* error_msg) {
   WriteTypeLists(stream);
   WriteClassDatas(stream);
   WriteStringDatas(stream);
+  WriteHiddenapiClassData(stream);
 
   // Write delayed id sections that depend on data sections.
   {
     Stream::ScopedSeek seek(stream, string_ids_offset);
-    WriteStringIds(stream, /*reserve_only*/ false);
+    WriteStringIds(stream, /*reserve_only=*/ false);
   }
   {
     Stream::ScopedSeek seek(stream, proto_ids_offset);
-    WriteProtoIds(stream, /*reserve_only*/ false);
+    WriteProtoIds(stream, /*reserve_only=*/ false);
   }
   {
     Stream::ScopedSeek seek(stream, class_defs_offset);
-    WriteClassDefs(stream, /*reserve_only*/ false);
+    WriteClassDefs(stream, /*reserve_only=*/ false);
   }
   {
     Stream::ScopedSeek seek(stream, call_site_ids_offset);
-    WriteCallSiteIds(stream, /*reserve_only*/ false);
+    WriteCallSiteIds(stream, /*reserve_only=*/ false);
   }
 
   // Write the map list.

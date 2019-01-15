@@ -26,14 +26,14 @@
 
 #include "arch/instruction_set.h"
 #include "base/common_art_test.h"
-#include "base/globals.h"
-#include "base/mutex.h"
+#include "base/locks.h"
 #include "base/os.h"
 #include "base/unix_file/fd_file.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/compact_dex_level.h"
 // TODO: Add inl file and avoid including inl.
 #include "obj_ptr-inl.h"
+#include "runtime_globals.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -78,8 +78,8 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
     const ArtDexFileLoader dex_file_loader;
     CHECK(dex_file_loader.Open(input_jar.c_str(),
                                input_jar.c_str(),
-                               /*verify*/ true,
-                               /*verify_checksum*/ true,
+                               /*verify=*/ true,
+                               /*verify_checksum=*/ true,
                                &error_msg,
                                &dex_files)) << error_msg;
     EXPECT_EQ(dex_files.size(), 1u) << "Only one input dex is supported";
@@ -96,6 +96,9 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
     }
     return true;
   }
+
+  static bool StartDex2OatCommandLine(/*out*/std::vector<std::string>* argv,
+                                      /*out*/std::string* error_msg);
 
  protected:
   // Allow subclases such as CommonCompilerTest to add extra options.
@@ -115,11 +118,14 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
   jobject LoadMultiDex(const char* first_dex_name, const char* second_dex_name)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  jobject LoadDexInPathClassLoader(const std::string& dex_name, jobject parent_loader);
+  jobject LoadDexInPathClassLoader(const std::string& dex_name,
+                                   jobject parent_loader,
+                                   jobject shared_libraries = nullptr);
   jobject LoadDexInDelegateLastClassLoader(const std::string& dex_name, jobject parent_loader);
   jobject LoadDexInWellKnownClassLoader(const std::string& dex_name,
                                         jclass loader_class,
-                                        jobject parent_loader);
+                                        jobject parent_loader,
+                                        jobject shared_libraries = nullptr);
 
   std::unique_ptr<Runtime> runtime_;
 
@@ -157,11 +163,11 @@ class CommonRuntimeTestBase : public TestType, public CommonRuntimeTestImpl {
   virtual ~CommonRuntimeTestBase() {}
 
  protected:
-  virtual void SetUp() OVERRIDE {
+  void SetUp() override {
     CommonRuntimeTestImpl::SetUp();
   }
 
-  virtual void TearDown() OVERRIDE {
+  void TearDown() override {
     CommonRuntimeTestImpl::TearDown();
   }
 };

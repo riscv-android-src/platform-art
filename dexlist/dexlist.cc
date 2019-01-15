@@ -55,9 +55,9 @@ static FILE* gOutFile = stdout;
 /*
  * Data types that match the definitions in the VM specification.
  */
-typedef uint8_t  u1;
-typedef uint32_t u4;
-typedef uint64_t u8;
+using u1 = uint8_t;
+using u4 = uint32_t;
+using u8 = uint64_t;
 
 /*
  * Returns a newly-allocated string for the "dot version" of the class
@@ -80,24 +80,11 @@ static std::unique_ptr<char[]> descriptorToDot(const char* str) {
 }
 
 /*
- * Positions table callback; we just want to catch the number of the
- * first line in the method, which *should* correspond to the first
- * entry from the table.  (Could also use "min" here.)
- */
-static bool positionsCb(void* context, const DexFile::PositionInfo& entry) {
-  int* pFirstLine = reinterpret_cast<int *>(context);
-  if (*pFirstLine == -1) {
-    *pFirstLine = entry.line_;
-  }
-  return 0;
-}
-
-/*
  * Dumps a method.
  */
 static void dumpMethod(const DexFile* pDexFile,
                        const char* fileName, u4 idx, u4 flags ATTRIBUTE_UNUSED,
-                       const DexFile::CodeItem* pCode, u4 codeOffset) {
+                       const dex::CodeItem* pCode, u4 codeOffset) {
   // Abstract and native methods don't get listed.
   if (pCode == nullptr || codeOffset == 0) {
     return;
@@ -105,7 +92,7 @@ static void dumpMethod(const DexFile* pDexFile,
   CodeItemDebugInfoAccessor accessor(*pDexFile, pCode, idx);
 
   // Method information.
-  const DexFile::MethodId& pMethodId = pDexFile->GetMethodId(idx);
+  const dex::MethodId& pMethodId = pDexFile->GetMethodId(idx);
   const char* methodName = pDexFile->StringDataByIdx(pMethodId.name_idx_);
   const char* classDescriptor = pDexFile->StringByTypeIdx(pMethodId.class_idx_);
   std::unique_ptr<char[]> className(descriptorToDot(classDescriptor));
@@ -123,9 +110,13 @@ static void dumpMethod(const DexFile* pDexFile,
     fileName = "(none)";
   }
 
-  // Find the first line.
-  int firstLine = -1;
-  pDexFile->DecodeDebugPositionInfo(accessor.DebugInfoOffset(), positionsCb, &firstLine);
+  // We just want to catch the number of the first line in the method, which *should* correspond to
+  // the first entry from the table.
+  int first_line = -1;
+  accessor.DecodeDebugPositionInfo([&](const DexFile::PositionInfo& entry) {
+    first_line = entry.line_;
+    return true;  // Early exit since we only want the first line.
+  });
 
   // Method signature.
   const Signature signature = pDexFile->GetMethodSignature(pMethodId);
@@ -134,7 +125,7 @@ static void dumpMethod(const DexFile* pDexFile,
   // Dump actual method information.
   fprintf(gOutFile, "0x%08x %d %s %s %s %s %d\n",
           insnsOff, accessor.InsnsSizeInCodeUnits() * 2,
-          className.get(), methodName, typeDesc, fileName, firstLine);
+          className.get(), methodName, typeDesc, fileName, first_line);
 
   free(typeDesc);
 }
@@ -143,7 +134,7 @@ static void dumpMethod(const DexFile* pDexFile,
  * Runs through all direct and virtual methods in the class.
  */
 void dumpClass(const DexFile* pDexFile, u4 idx) {
-  const DexFile::ClassDef& class_def = pDexFile->GetClassDef(idx);
+  const dex::ClassDef& class_def = pDexFile->GetClassDef(idx);
 
   const char* fileName = nullptr;
   if (class_def.source_file_idx_.IsValid()) {
@@ -155,7 +146,7 @@ void dumpClass(const DexFile* pDexFile, u4 idx) {
     dumpMethod(pDexFile,
                fileName,
                method.GetIndex(),
-               method.GetRawAccessFlags(),
+               method.GetAccessFlags(),
                method.GetCodeItem(),
                method.GetCodeItemOffset());
   }
@@ -181,7 +172,7 @@ static int processFile(const char* fileName) {
   if (!dex_file_loader.OpenAll(reinterpret_cast<const uint8_t*>(content.data()),
                                content.size(),
                                fileName,
-                               /*verify*/ true,
+                               /*verify=*/ true,
                                kVerifyChecksum,
                                &error_code,
                                &error_msg,
@@ -206,7 +197,7 @@ static int processFile(const char* fileName) {
 /*
  * Shows usage.
  */
-static void usage(void) {
+static void usage() {
   LOG(ERROR) << "Copyright (C) 2007 The Android Open Source Project\n";
   LOG(ERROR) << gProgName << ": [-m p.c.m] [-o outfile] dexfile...";
   LOG(ERROR) << "";
@@ -221,7 +212,7 @@ int dexlistDriver(int argc, char** argv) {
   memset(&gOptions, 0, sizeof(gOptions));
 
   // Parse all arguments.
-  while (1) {
+  while (true) {
     const int ic = getopt(argc, argv, "o:m:");
     if (ic < 0) {
       break;  // done
@@ -266,7 +257,7 @@ int dexlistDriver(int argc, char** argv) {
 
   // Open alternative output file.
   if (gOptions.outputFileName) {
-    gOutFile = fopen(gOptions.outputFileName, "w");
+    gOutFile = fopen(gOptions.outputFileName, "we");
     if (!gOutFile) {
       PLOG(ERROR) << "Can't open " << gOptions.outputFileName;
       free(gOptions.argCopy);

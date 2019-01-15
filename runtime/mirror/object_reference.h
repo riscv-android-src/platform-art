@@ -18,10 +18,10 @@
 #define ART_RUNTIME_MIRROR_OBJECT_REFERENCE_H_
 
 #include "base/atomic.h"
-#include "base/globals.h"
-#include "base/mutex.h"  // For Locks::mutator_lock_.
+#include "base/locks.h"  // For Locks::mutator_lock_.
 #include "heap_poisoning.h"
 #include "obj_ptr.h"
+#include "runtime_globals.h"
 
 namespace art {
 namespace mirror {
@@ -60,6 +60,15 @@ class MANAGED ObjectReference {
   using Compression = PtrCompression<kPoisonReferences, MirrorType>;
 
  public:
+  /*
+   * Returns a pointer to the mirror of the managed object this reference is for.
+   *
+   * This does NOT return the current object (which isn't derived from, and
+   * therefor cannot be a mirror::Object) as a mirror pointer.  Instead, this
+   * returns a pointer to the mirror of the managed object this refers to.
+   *
+   * TODO (chriswailes): Rename to GetPtr().
+   */
   MirrorType* AsMirrorPtr() const {
     return Compression::Decompress(reference_);
   }

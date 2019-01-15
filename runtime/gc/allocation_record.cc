@@ -24,9 +24,7 @@
 #include "object_callbacks.h"
 #include "stack.h"
 
-#ifdef ART_TARGET_ANDROID
-#include "cutils/properties.h"
-#endif
+#include <android-base/properties.h>
 
 namespace art {
 namespace gc {
@@ -45,10 +43,10 @@ void AllocRecordObjectMap::SetProperties() {
 #ifdef ART_TARGET_ANDROID
   // Check whether there's a system property overriding the max number of records.
   const char* propertyName = "dalvik.vm.allocTrackerMax";
-  char allocMaxString[PROPERTY_VALUE_MAX];
-  if (property_get(propertyName, allocMaxString, "") > 0) {
+  std::string allocMaxString = android::base::GetProperty(propertyName, "");
+  if (!allocMaxString.empty()) {
     char* end;
-    size_t value = strtoul(allocMaxString, &end, 10);
+    size_t value = strtoul(allocMaxString.c_str(), &end, 10);
     if (*end != '\0') {
       LOG(ERROR) << "Ignoring  " << propertyName << " '" << allocMaxString
                  << "' --- invalid";
@@ -61,10 +59,10 @@ void AllocRecordObjectMap::SetProperties() {
   }
   // Check whether there's a system property overriding the number of recent records.
   propertyName = "dalvik.vm.recentAllocMax";
-  char recentAllocMaxString[PROPERTY_VALUE_MAX];
-  if (property_get(propertyName, recentAllocMaxString, "") > 0) {
+  std::string recentAllocMaxString = android::base::GetProperty(propertyName, "");
+  if (!recentAllocMaxString.empty()) {
     char* end;
-    size_t value = strtoul(recentAllocMaxString, &end, 10);
+    size_t value = strtoul(recentAllocMaxString.c_str(), &end, 10);
     if (*end != '\0') {
       LOG(ERROR) << "Ignoring  " << propertyName << " '" << recentAllocMaxString
                  << "' --- invalid";
@@ -77,10 +75,10 @@ void AllocRecordObjectMap::SetProperties() {
   }
   // Check whether there's a system property overriding the max depth of stack trace.
   propertyName = "debug.allocTracker.stackDepth";
-  char stackDepthString[PROPERTY_VALUE_MAX];
-  if (property_get(propertyName, stackDepthString, "") > 0) {
+  std::string stackDepthString = android::base::GetProperty(propertyName, "");
+  if (!stackDepthString.empty()) {
     char* end;
-    size_t value = strtoul(stackDepthString, &end, 10);
+    size_t value = strtoul(stackDepthString.c_str(), &end, 10);
     if (*end != '\0') {
       LOG(ERROR) << "Ignoring  " << propertyName << " '" << stackDepthString
                  << "' --- invalid";
@@ -186,34 +184,6 @@ void AllocRecordObjectMap::BroadcastForNewAllocationRecords() {
   new_record_condition_.Broadcast(Thread::Current());
 }
 
-class AllocRecordStackVisitor : public StackVisitor {
- public:
-  AllocRecordStackVisitor(Thread* thread, size_t max_depth, AllocRecordStackTrace* trace_out)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames),
-        max_depth_(max_depth),
-        trace_(trace_out) {}
-
-  // TODO: Enable annotalysis. We know lock is held in constructor, but abstraction confuses
-  // annotalysis.
-  bool VisitFrame() OVERRIDE NO_THREAD_SAFETY_ANALYSIS {
-    if (trace_->GetDepth() >= max_depth_) {
-      return false;
-    }
-    ArtMethod* m = GetMethod();
-    // m may be null if we have inlined methods of unresolved classes. b/27858645
-    if (m != nullptr && !m->IsRuntimeMethod()) {
-      m = m->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-      trace_->AddStackElement(AllocRecordStackTraceElement(m, GetDexPc()));
-    }
-    return true;
-  }
-
- private:
-  const size_t max_depth_;
-  AllocRecordStackTrace* const trace_;
-};
-
 void AllocRecordObjectMap::SetAllocTrackingEnabled(bool enable) {
   Thread* self = Thread::Current();
   Heap* heap = Runtime::Current()->GetHeap();
@@ -270,11 +240,26 @@ void AllocRecordObjectMap::RecordAllocation(Thread* self,
   // Get stack trace outside of lock in case there are allocations during the stack walk.
   // b/27858645.
   AllocRecordStackTrace trace;
-  AllocRecordStackVisitor visitor(self, max_stack_depth_, /*out*/ &trace);
   {
     StackHandleScope<1> hs(self);
     auto obj_wrapper = hs.NewHandleWrapper(obj);
-    visitor.WalkStack();
+
+    StackVisitor::WalkStack(
+        [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+          if (trace.GetDepth() >= max_stack_depth_) {
+            return false;
+          }
+          ArtMethod* m = stack_visitor->GetMethod();
+          // m may be null if we have inlined methods of unresolved classes. b/27858645
+          if (m != nullptr && !m->IsRuntimeMethod()) {
+            m = m->GetInterfaceMethodIfProxy(kRuntimePointerSize);
+            trace.AddStackElement(AllocRecordStackTraceElement(m, stack_visitor->GetDexPc()));
+          }
+          return true;
+        },
+        self,
+        /* context= */ nullptr,
+        art::StackVisitor::StackWalkKind::kIncludeInlinedFrames);
   }
 
   MutexLock mu(self, *Locks::alloc_tracker_lock_);

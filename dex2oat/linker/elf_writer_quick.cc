@@ -17,6 +17,7 @@
 #include "elf_writer_quick.h"
 
 #include <openssl/sha.h>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -68,7 +69,7 @@ class DebugInfoTask : public Task {
         debug_info_(debug_info) {
   }
 
-  void Run(Thread*) {
+  void Run(Thread*) override {
     result_ = debug::MakeMiniDebugInfo(isa_,
                                        instruction_set_features_,
                                        text_section_address_,
@@ -94,35 +95,35 @@ class DebugInfoTask : public Task {
 };
 
 template <typename ElfTypes>
-class ElfWriterQuick FINAL : public ElfWriter {
+class ElfWriterQuick final : public ElfWriter {
  public:
   ElfWriterQuick(const CompilerOptions& compiler_options,
                  File* elf_file);
   ~ElfWriterQuick();
 
-  void Start() OVERRIDE;
+  void Start() override;
   void PrepareDynamicSection(size_t rodata_size,
                              size_t text_size,
                              size_t data_bimg_rel_ro_size,
                              size_t bss_size,
                              size_t bss_methods_offset,
                              size_t bss_roots_offset,
-                             size_t dex_section_size) OVERRIDE;
-  void PrepareDebugInfo(const debug::DebugInfo& debug_info) OVERRIDE;
-  OutputStream* StartRoData() OVERRIDE;
-  void EndRoData(OutputStream* rodata) OVERRIDE;
-  OutputStream* StartText() OVERRIDE;
-  void EndText(OutputStream* text) OVERRIDE;
-  OutputStream* StartDataBimgRelRo() OVERRIDE;
-  void EndDataBimgRelRo(OutputStream* data_bimg_rel_ro) OVERRIDE;
-  void WriteDynamicSection() OVERRIDE;
-  void WriteDebugInfo(const debug::DebugInfo& debug_info) OVERRIDE;
-  bool StripDebugInfo() OVERRIDE;
-  bool End() OVERRIDE;
+                             size_t dex_section_size) override;
+  void PrepareDebugInfo(const debug::DebugInfo& debug_info) override;
+  OutputStream* StartRoData() override;
+  void EndRoData(OutputStream* rodata) override;
+  OutputStream* StartText() override;
+  void EndText(OutputStream* text) override;
+  OutputStream* StartDataBimgRelRo() override;
+  void EndDataBimgRelRo(OutputStream* data_bimg_rel_ro) override;
+  void WriteDynamicSection() override;
+  void WriteDebugInfo(const debug::DebugInfo& debug_info) override;
+  bool StripDebugInfo() override;
+  bool End() override;
 
-  virtual OutputStream* GetStream() OVERRIDE;
+  OutputStream* GetStream() override;
 
-  size_t GetLoadedSize() OVERRIDE;
+  size_t GetLoadedSize() override;
 
   static void EncodeOatPatches(const std::vector<uintptr_t>& locations,
                                std::vector<uint8_t>* buffer);
@@ -263,16 +264,15 @@ void ElfWriterQuick<ElfTypes>::PrepareDebugInfo(const debug::DebugInfo& debug_in
   if (!debug_info.Empty() && compiler_options_.GetGenerateMiniDebugInfo()) {
     // Prepare the mini-debug-info in background while we do other I/O.
     Thread* self = Thread::Current();
-    debug_info_task_ = std::unique_ptr<DebugInfoTask>(
-        new DebugInfoTask(builder_->GetIsa(),
-                          compiler_options_.GetInstructionSetFeatures(),
-                          builder_->GetText()->GetAddress(),
-                          text_size_,
-                          builder_->GetDex()->Exists() ? builder_->GetDex()->GetAddress() : 0,
-                          dex_section_size_,
-                          debug_info));
-    debug_info_thread_pool_ = std::unique_ptr<ThreadPool>(
-        new ThreadPool("Mini-debug-info writer", 1));
+    debug_info_task_ = std::make_unique<DebugInfoTask>(
+        builder_->GetIsa(),
+        compiler_options_.GetInstructionSetFeatures(),
+        builder_->GetText()->GetAddress(),
+        text_size_,
+        builder_->GetDex()->Exists() ? builder_->GetDex()->GetAddress() : 0,
+        dex_section_size_,
+        debug_info);
+    debug_info_thread_pool_ = std::make_unique<ThreadPool>("Mini-debug-info writer", 1);
     debug_info_thread_pool_->AddTask(self, debug_info_task_.get());
     debug_info_thread_pool_->StartWorkers(self);
   }

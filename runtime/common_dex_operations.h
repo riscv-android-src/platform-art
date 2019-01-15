@@ -20,13 +20,15 @@
 #include "android-base/logging.h"
 #include "art_field.h"
 #include "art_method.h"
+#include "base/locks.h"
 #include "base/macros.h"
-#include "base/mutex.h"
 #include "class_linker.h"
 #include "dex/code_item_accessors.h"
+#include "dex/dex_file_structs.h"
 #include "dex/primitive.h"
 #include "handle_scope-inl.h"
 #include "instrumentation.h"
+#include "interpreter/interpreter.h"
 #include "interpreter/shadow_frame.h"
 #include "interpreter/unstarted_runtime.h"
 #include "jvalue-inl.h"
@@ -41,7 +43,7 @@ namespace art {
 
 namespace interpreter {
   void ArtInterpreterToInterpreterBridge(Thread* self,
-                                        const DexFile::CodeItem* code_item,
+                                        const dex::CodeItem* code_item,
                                         ShadowFrame* shadow_frame,
                                         JValue* result)
      REQUIRES_SHARED(Locks::mutator_lock_);
@@ -171,6 +173,14 @@ ALWAYS_INLINE bool DoFieldPutCommon(Thread* self,
                                      value);
     if (UNLIKELY(self->IsExceptionPending())) {
       return false;
+    }
+    if (shadow_frame.GetForcePopFrame()) {
+      // We need to check this here since we expect that the FieldWriteEvent happens before the
+      // actual field write. If one pops the stack we should not modify the field.  The next
+      // instruction will force a pop. Return true.
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+      DCHECK(interpreter::PrevFrameWillRetry(self, shadow_frame));
+      return true;
     }
   }
 

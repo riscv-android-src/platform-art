@@ -20,6 +20,8 @@
 #include <list>
 #include <vector>
 
+#include <jni.h>
+
 #include "arch/instruction_set.h"
 #include "arch/instruction_set_features.h"
 #include "base/hash_set.h"
@@ -37,6 +39,7 @@ class CompilerOptions;
 class CumulativeLogger;
 class DexFile;
 class ProfileCompilationInfo;
+class TimingLogger;
 class VerificationResults;
 
 template<class T> class Handle;
@@ -57,9 +60,9 @@ class CommonCompilerTest : public CommonRuntimeTest {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:
-  void SetUp() OVERRIDE;
+  void SetUp() override;
 
-  void SetUpRuntimeOptions(RuntimeOptions* options) OVERRIDE;
+  void SetUpRuntimeOptions(RuntimeOptions* options) override;
 
   Compiler::Kind GetCompilerKind() const;
   void SetCompilerKind(Compiler::Kind compiler_kind);
@@ -73,7 +76,7 @@ class CommonCompilerTest : public CommonRuntimeTest {
     return CompilerFilter::kDefaultCompilerFilter;
   }
 
-  void TearDown() OVERRIDE;
+  void TearDown() override;
 
   void CompileClass(mirror::ClassLoader* class_loader, const char* class_name)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -87,6 +90,10 @@ class CommonCompilerTest : public CommonRuntimeTest {
   void CompileVirtualMethod(Handle<mirror::ClassLoader> class_loader, const char* class_name,
                             const char* method_name, const char* signature)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void CompileAll(jobject class_loader,
+                  const std::vector<const DexFile*>& dex_files,
+                  TimingLogger* timings) REQUIRES(!Locks::mutator_lock_);
 
   void ApplyInstructionSet();
   void OverrideInstructionSetFeatures(InstructionSet instruction_set, const std::string& variant);
@@ -115,7 +122,8 @@ class CommonCompilerTest : public CommonRuntimeTest {
   std::unique_ptr<CompilerDriver> compiler_driver_;
 
  private:
-  std::unique_ptr<MemMap> image_reservation_;
+  MemMap image_reservation_;
+  void* inaccessible_page_;
 
   // Chunks must not move their storage after being created - use the node-based std::list.
   std::list<std::vector<uint8_t>> header_code_and_maps_chunks_;

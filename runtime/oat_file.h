@@ -27,10 +27,8 @@
 #include "base/safe_map.h"
 #include "base/stringpiece.h"
 #include "base/tracking_safe_map.h"
-#include "base/utils.h"
 #include "class_status.h"
 #include "compiler_filter.h"
-#include "dex/dex_file.h"
 #include "dex/dex_file_layout.h"
 #include "dex/type_lookup_table.h"
 #include "dex/utf.h"
@@ -41,6 +39,7 @@
 namespace art {
 
 class BitVector;
+class DexFile;
 class ElfFile;
 class DexLayoutSections;
 template <class MirrorType> class GcRoot;
@@ -50,6 +49,10 @@ class OatHeader;
 class OatMethodOffsets;
 class OatQuickMethodHeader;
 class VdexFile;
+
+namespace dex {
+struct ClassDef;
+}  // namespace dex
 
 namespace gc {
 namespace collector {
@@ -85,12 +88,11 @@ class OatFile {
   static OatFile* Open(int zip_fd,
                        const std::string& filename,
                        const std::string& location,
-                       uint8_t* requested_base,
-                       uint8_t* oat_file_begin,
                        bool executable,
                        bool low_4gb,
                        const char* abs_dex_location,
-                       std::string* error_msg);
+                       /*inout*/MemMap* reservation,  // Where to load if not null.
+                       /*out*/std::string* error_msg);
 
   // Similar to OatFile::Open(const std::string...), but accepts input vdex and
   // odex files as file descriptors. We also take zip_fd in case the vdex does not
@@ -99,12 +101,11 @@ class OatFile {
                        int vdex_fd,
                        int oat_fd,
                        const std::string& oat_location,
-                       uint8_t* requested_base,
-                       uint8_t* oat_file_begin,
                        bool executable,
                        bool low_4gb,
                        const char* abs_dex_location,
-                       std::string* error_msg);
+                       /*inout*/MemMap* reservation,  // Where to load if not null.
+                       /*out*/std::string* error_msg);
 
   // Open an oat file from an already opened File.
   // Does not use dlopen underneath so cannot be used for runtime use
@@ -129,8 +130,6 @@ class OatFile {
     return is_executable_;
   }
 
-  bool IsPic() const;
-
   // Indicates whether the oat file was compiled with full debugging capability.
   bool IsDebuggable() const;
 
@@ -146,7 +145,7 @@ class OatFile {
 
   const OatHeader& GetOatHeader() const;
 
-  class OatMethod FINAL {
+  class OatMethod final {
    public:
     void LinkMethod(ArtMethod* method) const;
 
@@ -201,7 +200,7 @@ class OatFile {
     friend class OatClass;
   };
 
-  class OatClass FINAL {
+  class OatClass final {
    public:
     ClassStatus GetStatus() const {
       return status_;
@@ -230,12 +229,12 @@ class OatFile {
     // A representation of an invalid OatClass, used when an OatClass can't be found.
     // See FindOatClass().
     static OatClass Invalid() {
-      return OatClass(/* oat_file */ nullptr,
+      return OatClass(/* oat_file= */ nullptr,
                       ClassStatus::kErrorUnresolved,
                       kOatClassNoneCompiled,
-                      /* bitmap_size */ 0,
-                      /* bitmap_pointer */ nullptr,
-                      /* methods_pointer */ nullptr);
+                      /* bitmap_size= */ 0,
+                      /* bitmap_pointer= */ nullptr,
+                      /* methods_pointer= */ nullptr);
     }
 
    private:
@@ -444,7 +443,7 @@ class OatFile {
 // support forward declarations of inner classes, and we want to
 // forward-declare OatDexFile so that we can store an opaque pointer to an
 // OatDexFile in DexFile.
-class OatDexFile FINAL {
+class OatDexFile final {
  public:
   // Opens the DexFile referred to by this OatDexFile from within the containing OatFile.
   std::unique_ptr<const DexFile> OpenDexFile(std::string* error_msg) const;
@@ -505,9 +504,9 @@ class OatDexFile FINAL {
 
   // Looks up a class definition by its class descriptor. Hash must be
   // ComputeModifiedUtf8Hash(descriptor).
-  static const DexFile::ClassDef* FindClassDef(const DexFile& dex_file,
-                                               const char* descriptor,
-                                               size_t hash);
+  static const dex::ClassDef* FindClassDef(const DexFile& dex_file,
+                                           const char* descriptor,
+                                           size_t hash);
 
   // Madvise the dex file based on the state we are moving to.
   static void MadviseDexFile(const DexFile& dex_file, MadviseState state);

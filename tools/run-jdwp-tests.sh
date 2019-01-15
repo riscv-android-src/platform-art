@@ -43,6 +43,23 @@ android_root=${ART_TEST_ANDROID_ROOT:-/system}
 java_lib_location="${ANDROID_HOST_OUT}/../common/obj/JAVA_LIBRARIES"
 make_target_name="apache-harmony-jdwp-tests-hostdex"
 
+function boot_classpath_arg {
+  local dir="$1"
+  local suffix="$2"
+  shift 2
+  local separator=""
+  for var
+  do
+    printf -- "${separator}${dir}/${var}${suffix}.jar";
+    separator=":"
+  done
+}
+
+# Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
+# because that's what we use for compiling the core.art image.
+# It may contain additional modules from TEST_CORE_JARS.
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
+
 vm_args=""
 art="$android_root/bin/art"
 art_debugee="sh $android_root/bin/art"
@@ -59,6 +76,8 @@ debug="no"
 explicit_debug="no"
 verbose="no"
 image="-Ximage:/data/art-test/core.art"
+boot_classpath="$(boot_classpath_arg /system/framework -testdex $BOOT_CLASSPATH_JARS)"
+boot_classpath_locations=""
 with_jdwp_path=""
 agent_wrapper=""
 vm_args=""
@@ -90,10 +109,26 @@ while true; do
     art_debugee="bash ${OUT_DIR-out}/host/linux-x86/bin/art"
     # We force generation of a new image to avoid build-time and run-time classpath differences.
     image="-Ximage:/system/non/existent/vogar.art"
+    # Pass the host boot classpath.
+    if [ "${ANDROID_HOST_OUT:0:${#ANDROID_BUILD_TOP}+1}" = "${ANDROID_BUILD_TOP}/" ]; then
+      framework_location="${ANDROID_HOST_OUT:${#ANDROID_BUILD_TOP}+1}/framework"
+    else
+      echo "error: ANDROID_BUILD_TOP/ is not a prefix of ANDROID_HOST_OUT"
+      echo "ANDROID_BUILD_TOP=${ANDROID_BUILD_TOP}"
+      echo "ANDROID_HOST_OUT=${ANDROID_HOST_OUT}"
+      exit
+    fi
+    boot_classpath="$(boot_classpath_arg ${ANDROID_HOST_OUT}/framework -hostdex $BOOT_CLASSPATH_JARS)"
+    boot_classpath_locations="$(boot_classpath_arg ${framework_location} -hostdex $BOOT_CLASSPATH_JARS)"
     # We do not need a device directory on host.
     device_dir=""
     # Vogar knows which VM to use on host.
     vm_command=""
+    shift
+  elif [[ "$1" == "--mode=device" ]]; then
+    # Remove the --mode=device from the arguments and replace it with --mode=device_testdex
+    args=${args/$1}
+    args="$args --mode=device_testdex"
     shift
   elif [[ "$1" == "--mode=jvm" ]]; then
     mode="ri"
@@ -104,6 +139,8 @@ while true; do
     debuggee_args=""
     # No image. On the RI.
     image=""
+    boot_classpath=""
+    boot_classpath_locations=""
     # We do not need a device directory on RI.
     device_dir=""
     # Vogar knows which VM to use on RI.
@@ -260,8 +297,8 @@ else
   # we don't want to be trying to connect to adbconnection which might not have
   # been built.
   vm_args="${vm_args} --vm-arg -XjdwpProvider:none"
-  # Make sure the debuggee doesn't clean up what the debugger has generated.
-  art_debugee="$art_debugee --no-clean"
+  # Make sure the debuggee doesn't re-generate, nor clean up what the debugger has generated.
+  art_debugee="$art_debugee --no-compile --no-clean"
 fi
 
 function jlib_name {
@@ -305,22 +342,31 @@ fi
 
 if [[ "$image" != "" ]]; then
   vm_args="$vm_args --vm-arg $image"
+  debuggee_args="$debuggee_args $image"
+fi
+if [[ "$boot_classpath" != "" ]]; then
+  vm_args="$vm_args --vm-arg -Xbootclasspath:${boot_classpath}"
+  debuggee_args="$debuggee_args -Xbootclasspath:${boot_classpath}"
+fi
+if [[ "$boot_classpath_locations" != "" ]]; then
+  vm_args="$vm_args --vm-arg -Xbootclasspath-locations:${boot_classpath_locations}"
+  debuggee_args="$debuggee_args -Xbootclasspath-locations:${boot_classpath_locations}"
 fi
 
 if [[ "$plugin" != "" ]]; then
   vm_args="$vm_args --vm-arg $plugin"
 fi
 
-if $use_jit; then
+if [[ $mode != "ri" ]]; then
+  # Because we're running debuggable, we discard any AOT code.
+  # Therefore we run de2oat with 'quicken' to avoid spending time compiling.
   vm_args="$vm_args --vm-arg -Xcompiler-option --vm-arg --compiler-filter=quicken"
   debuggee_args="$debuggee_args -Xcompiler-option --compiler-filter=quicken"
-fi
 
-if $instant_jit; then
-  debuggee_args="$debuggee_args -Xjitthreshold:0"
-fi
+  if $instant_jit; then
+    debuggee_args="$debuggee_args -Xjitthreshold:0"
+  fi
 
-if [[ $mode != "ri" ]]; then
   vm_args="$vm_args --vm-arg -Xusejit:$use_jit"
   debuggee_args="$debuggee_args -Xusejit:$use_jit"
 fi
@@ -363,7 +409,7 @@ vogar $vm_command \
       --vm-arg -Djpda.settings.waitingTime=$jdwp_test_timeout \
       --vm-arg -Djpda.settings.transportAddress=127.0.0.1:55107 \
       --vm-arg -Djpda.settings.dumpProcess="$dump_command" \
-      --vm-arg -Djpda.settings.debuggeeJavaPath="$art_debugee $plugin $image $debuggee_args" \
+      --vm-arg -Djpda.settings.debuggeeJavaPath="$art_debugee $plugin $debuggee_args" \
       --classpath "$test_jar" \
       $toolchain_args \
       $test

@@ -31,7 +31,7 @@ dependencies:
 There are various options to invoke the script which are:
 -t: Either the test name as in art/test or the test name including the variant
     information. Eg, "-t 001-HelloWorld",
-    "-t test-art-host-run-test-debug-prebuild-optimizing-relocate-ntrace-cms-checkjni-picimage-npictest-ndebuggable-001-HelloWorld32"
+    "-t test-art-host-run-test-debug-prebuild-optimizing-relocate-ntrace-cms-checkjni-picimage-ndebuggable-001-HelloWorld32"
 -j: Number of thread workers to be used. Eg - "-j64"
 --dry-run: Instead of running the test name, just print its name.
 --verbose
@@ -117,6 +117,7 @@ build = False
 gdb = False
 gdb_arg = ''
 runtime_option = ''
+with_agent = []
 run_test_option = []
 stop_testrunner = False
 dex2oat_jobs = -1   # -1 corresponds to default threads for dex2oat
@@ -138,22 +139,21 @@ def gather_test_info():
   global TOTAL_VARIANTS_SET
   global DISABLED_TEST_CONTAINER
   # TODO: Avoid duplication of the variant names in different lists.
-  VARIANT_TYPE_DICT['pictest'] = {'pictest', 'npictest'}
   VARIANT_TYPE_DICT['run'] = {'ndebug', 'debug'}
   VARIANT_TYPE_DICT['target'] = {'target', 'host', 'jvm'}
   VARIANT_TYPE_DICT['trace'] = {'trace', 'ntrace', 'stream'}
-  VARIANT_TYPE_DICT['image'] = {'picimage', 'no-image', 'multipicimage'}
+  VARIANT_TYPE_DICT['image'] = {'picimage', 'no-image'}
   VARIANT_TYPE_DICT['debuggable'] = {'ndebuggable', 'debuggable'}
   VARIANT_TYPE_DICT['gc'] = {'gcstress', 'gcverify', 'cms'}
-  VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'no-dex2oat', 'prebuild'}
+  VARIANT_TYPE_DICT['prebuild'] = {'no-prebuild', 'prebuild'}
   VARIANT_TYPE_DICT['cdex_level'] = {'cdex-none', 'cdex-fast'}
-  VARIANT_TYPE_DICT['relocate'] = {'relocate-npatchoat', 'relocate', 'no-relocate'}
+  VARIANT_TYPE_DICT['relocate'] = {'relocate', 'no-relocate'}
   VARIANT_TYPE_DICT['jni'] = {'jni', 'forcecopy', 'checkjni'}
   VARIANT_TYPE_DICT['address_sizes'] = {'64', '32'}
   VARIANT_TYPE_DICT['jvmti'] = {'no-jvmti', 'jvmti-stress', 'redefine-stress', 'trace-stress',
                                 'field-stress', 'step-stress'}
-  VARIANT_TYPE_DICT['compiler'] = {'interp-ac', 'interpreter', 'jit', 'optimizing',
-                                   'regalloc_gc', 'speed-profile'}
+  VARIANT_TYPE_DICT['compiler'] = {'interp-ac', 'interpreter', 'jit', 'jit-on-first-use',
+                                   'optimizing', 'regalloc_gc', 'speed-profile', 'baseline'}
 
   for v_type in VARIANT_TYPE_DICT:
     TOTAL_VARIANTS_SET = TOTAL_VARIANTS_SET.union(VARIANT_TYPE_DICT.get(v_type))
@@ -180,7 +180,6 @@ def setup_test_env():
   # These are the default variant-options we will use if nothing in the group is specified.
   default_variants = {
       'target': {'host', 'target'},
-      'pictest': {'npictest'},
       'prebuild': {'prebuild'},
       'cdex_level': {'cdex-fast'},
       'jvmti': { 'no-jvmti'},
@@ -194,7 +193,6 @@ def setup_test_env():
       'gc': {'cms'},
       'jni': {'checkjni'},
       'image': {'picimage'},
-      'pictest': {'pictest'},
       'debuggable': {'ndebuggable'},
       'run': {'debug'},
       # address_sizes_target depends on the target so it is dealt with below.
@@ -333,6 +331,9 @@ def run_tests(tests):
   if runtime_option:
     for opt in runtime_option:
       options_all += ' --runtime-option ' + opt
+  if with_agent:
+    for opt in with_agent:
+      options_all += ' --with-agent ' + opt
 
   if dex2oat_jobs != -1:
     options_all += ' --dex2oat-jobs ' + str(dex2oat_jobs)
@@ -342,7 +343,7 @@ def run_tests(tests):
                                  user_input_variants['prebuild'], user_input_variants['compiler'],
                                  user_input_variants['relocate'], user_input_variants['trace'],
                                  user_input_variants['gc'], user_input_variants['jni'],
-                                 user_input_variants['image'], user_input_variants['pictest'],
+                                 user_input_variants['image'],
                                  user_input_variants['debuggable'], user_input_variants['jvmti'],
                                  user_input_variants['cdex_level'])
     return config
@@ -355,13 +356,13 @@ def run_tests(tests):
       'prebuild': [''], 'compiler': [''],
       'relocate': [''], 'trace': [''],
       'gc': [''], 'jni': [''],
-      'image': [''], 'pictest': [''],
+      'image': [''],
       'debuggable': [''], 'jvmti': [''],
       'cdex_level': ['']})
 
   def start_combination(config_tuple, address_size):
       test, target, run, prebuild, compiler, relocate, trace, gc, \
-      jni, image, pictest, debuggable, jvmti, cdex_level = config_tuple
+      jni, image, debuggable, jvmti, cdex_level = config_tuple
 
       if stop_testrunner:
         # When ART_TEST_KEEP_GOING is set to false, then as soon as a test
@@ -383,7 +384,6 @@ def run_tests(tests):
       test_name += gc + '-'
       test_name += jni + '-'
       test_name += image + '-'
-      test_name += pictest + '-'
       test_name += debuggable + '-'
       test_name += jvmti + '-'
       test_name += cdex_level + '-'
@@ -391,7 +391,7 @@ def run_tests(tests):
       test_name += address_size
 
       variant_set = {target, run, prebuild, compiler, relocate, trace, gc, jni,
-                     image, pictest, debuggable, jvmti, cdex_level, address_size}
+                     image, debuggable, jvmti, cdex_level, address_size}
 
       options_test = options_all
 
@@ -400,12 +400,15 @@ def run_tests(tests):
       elif target == 'jvm':
         options_test += ' --jvm'
 
-      # Honor ART_TEST_CHROOT and ART_TEST_ANDROID_ROOT, but only for target tests.
+      # Honor ART_TEST_CHROOT, ART_TEST_ANDROID_ROOT and ART_TEST_ANDROID_RUNTIME_ROOT,
+      # but only for target tests.
       if target == 'target':
         if env.ART_TEST_CHROOT:
           options_test += ' --chroot ' + env.ART_TEST_CHROOT
         if env.ART_TEST_ANDROID_ROOT:
           options_test += ' --android-root ' + env.ART_TEST_ANDROID_ROOT
+        if env.ART_TEST_ANDROID_RUNTIME_ROOT:
+          options_test += ' --android-runtime-root ' + env.ART_TEST_ANDROID_RUNTIME_ROOT
 
       if run == 'ndebug':
         options_test += ' -O'
@@ -414,8 +417,6 @@ def run_tests(tests):
         options_test += ' --prebuild'
       elif prebuild == 'no-prebuild':
         options_test += ' --no-prebuild'
-      elif prebuild == 'no-dex2oat':
-        options_test += ' --no-prebuild --no-dex2oat'
 
       if cdex_level:
         # Add option and remove the cdex- prefix.
@@ -431,15 +432,17 @@ def run_tests(tests):
         options_test += ' --interpreter --verify-soft-fail'
       elif compiler == 'jit':
         options_test += ' --jit'
+      elif compiler == 'jit-on-first-use':
+        options_test += ' --jit --runtime-option -Xjitthreshold:0'
       elif compiler == 'speed-profile':
         options_test += ' --random-profile'
+      elif compiler == 'baseline':
+        options_test += ' --baseline'
 
       if relocate == 'relocate':
         options_test += ' --relocate'
       elif relocate == 'no-relocate':
         options_test += ' --no-relocate'
-      elif relocate == 'relocate-npatchoat':
-        options_test += ' --relocate --no-patchoat'
 
       if trace == 'trace':
         options_test += ' --trace'
@@ -458,11 +461,6 @@ def run_tests(tests):
 
       if image == 'no-image':
         options_test += ' --no-image'
-      elif image == 'multipicimage':
-        options_test += ' --multi-image'
-
-      if pictest == 'pictest':
-        options_test += ' --pic-test'
 
       if debuggable == 'debuggable':
         options_test += ' --debuggable'
@@ -815,7 +813,7 @@ def parse_test_name(test_name):
   It supports two types of test_name:
   1) Like 001-HelloWorld. In this case, it will just verify if the test actually
   exists and if it does, it returns the testname.
-  2) Like test-art-host-run-test-debug-prebuild-interpreter-no-relocate-ntrace-cms-checkjni-picimage-npictest-ndebuggable-001-HelloWorld32
+  2) Like test-art-host-run-test-debug-prebuild-interpreter-no-relocate-ntrace-cms-checkjni-picimage-ndebuggable-001-HelloWorld32
   In this case, it will parse all the variants and check if they are placed
   correctly. If yes, it will set the various VARIANT_TYPES to use the
   variants required to run the test. Again, it returns the test_name
@@ -839,7 +837,6 @@ def parse_test_name(test_name):
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['gc']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['jni']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['image']) + ')-'
-  regex += '(' + '|'.join(VARIANT_TYPE_DICT['pictest']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['debuggable']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['jvmti']) + ')-'
   regex += '(' + '|'.join(VARIANT_TYPE_DICT['cdex_level']) + ')-'
@@ -856,12 +853,11 @@ def parse_test_name(test_name):
     _user_input_variants['gc'].add(match.group(7))
     _user_input_variants['jni'].add(match.group(8))
     _user_input_variants['image'].add(match.group(9))
-    _user_input_variants['pictest'].add(match.group(10))
-    _user_input_variants['debuggable'].add(match.group(11))
-    _user_input_variants['jvmti'].add(match.group(12))
-    _user_input_variants['cdex_level'].add(match.group(13))
-    _user_input_variants['address_sizes'].add(match.group(15))
-    return {match.group(14)}
+    _user_input_variants['debuggable'].add(match.group(10))
+    _user_input_variants['jvmti'].add(match.group(11))
+    _user_input_variants['cdex_level'].add(match.group(12))
+    _user_input_variants['address_sizes'].add(match.group(14))
+    return {match.group(13)}
   raise ValueError(test_name + " is not a valid test")
 
 
@@ -913,6 +909,7 @@ def parse_option():
   global timeout
   global dex2oat_jobs
   global run_all_configs
+  global with_agent
 
   parser = argparse.ArgumentParser(description="Runs all or a subset of the ART test suite.")
   parser.add_argument('-t', '--test', action='append', dest='tests', help='name(s) of the test(s)')
@@ -945,6 +942,8 @@ def parse_option():
                             This should be enclosed in single-quotes to allow for spaces. The option
                             will be split using shlex.split() prior to invoking run-test.
                             Example \"--run-test-option='--with-agent libtifast.so=MethodExit'\"""")
+  global_group.add_argument('--with-agent', action='append', dest='with_agent',
+                            help="""Pass an agent to be attached to the runtime""")
   global_group.add_argument('--runtime-option', action='append', dest='runtime_option',
                             help="""Pass an option to the runtime. Runtime options
                             starting with a '-' must be separated by a '=', for
@@ -993,6 +992,7 @@ def parse_option():
     if options['gdb_arg']:
       gdb_arg = options['gdb_arg']
   runtime_option = options['runtime_option'];
+  with_agent = options['with_agent'];
   run_test_option = sum(map(shlex.split, options['run_test_option']), [])
 
   timeout = options['timeout']
@@ -1015,10 +1015,8 @@ def main():
       build_targets += 'test-art-target-run-test-dependencies '
     if 'jvm' in _user_input_variants['target']:
       build_targets += 'test-art-host-run-test-dependencies '
-    build_command = 'make'
+    build_command = env.ANDROID_BUILD_TOP + '/build/soong/soong_ui.bash --make-mode'
     build_command += ' DX='
-    build_command += ' -j'
-    build_command += ' -C ' + env.ANDROID_BUILD_TOP
     build_command += ' ' + build_targets
     if subprocess.call(build_command.split()):
       # Debugging for b/62653020

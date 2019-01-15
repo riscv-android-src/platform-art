@@ -22,6 +22,7 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
+#include "base/casts.h"
 #include "base/enums.h"
 #include "base/utils.h"
 #include "class_linker.h"
@@ -108,7 +109,7 @@ void CommonCompilerTest::MakeExecutable(const void* code_start, size_t code_leng
   int result = mprotect(reinterpret_cast<void*>(base), len, PROT_READ | PROT_WRITE | PROT_EXEC);
   CHECK_EQ(result, 0);
 
-  FlushInstructionCache(reinterpret_cast<char*>(base), reinterpret_cast<char*>(base + len));
+  FlushInstructionCache(reinterpret_cast<void*>(base), reinterpret_cast<void*>(base + len));
 }
 
 void CommonCompilerTest::MakeExecutable(ObjPtr<mirror::ClassLoader> class_loader,
@@ -152,6 +153,10 @@ void CommonCompilerTest::SetUp() {
 
     CreateCompilerDriver();
   }
+  // Note: We cannot use MemMap because some tests tear down the Runtime and destroy
+  // the gMaps, so when destroying the MemMap, the test would crash.
+  inaccessible_page_ = mmap(nullptr, kPageSize, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  CHECK(inaccessible_page_ != MAP_FAILED) << strerror(errno);
 }
 
 void CommonCompilerTest::ApplyInstructionSet() {
@@ -184,17 +189,15 @@ void CommonCompilerTest::OverrideInstructionSetFeatures(InstructionSet instructi
 void CommonCompilerTest::CreateCompilerDriver() {
   ApplyInstructionSet();
 
-  compiler_options_->boot_image_ = true;
+  compiler_options_->image_type_ = CompilerOptions::ImageType::kBootImage;
   compiler_options_->compile_pic_ = false;  // Non-PIC boot image is a test configuration.
   compiler_options_->SetCompilerFilter(GetCompilerFilter());
   compiler_options_->image_classes_.swap(*GetImageClasses());
+  compiler_options_->profile_compilation_info_ = GetProfileCompilationInfo();
   compiler_driver_.reset(new CompilerDriver(compiler_options_.get(),
-                                            verification_results_.get(),
                                             compiler_kind_,
-                                            &compiler_options_->image_classes_,
                                             number_of_threads_,
-                                            /* swap_fd */ -1,
-                                            GetProfileCompilationInfo()));
+                                            /* swap_fd= */ -1));
 }
 
 void CommonCompilerTest::SetUpRuntimeOptions(RuntimeOptions* options) {
@@ -221,7 +224,11 @@ void CommonCompilerTest::TearDown() {
   callbacks_.reset();
   verification_results_.reset();
   compiler_options_.reset();
-  image_reservation_.reset();
+  image_reservation_.Reset();
+  if (inaccessible_page_ != nullptr) {
+    munmap(inaccessible_page_, kPageSize);
+    inaccessible_page_ = nullptr;
+  }
 
   CommonRuntimeTest::TearDown();
 }
@@ -257,7 +264,7 @@ void CommonCompilerTest::CompileMethod(ArtMethod* method) {
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(method->GetDexCache()));
     Handle<mirror::ClassLoader> h_class_loader = hs.NewHandle(
         self->DecodeJObject(class_loader)->AsClassLoader());
-    const DexFile::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
+    const dex::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
 
     std::vector<const DexFile*> dex_files;
     dex_files.push_back(dex_file);
@@ -267,8 +274,16 @@ void CommonCompilerTest::CompileMethod(ArtMethod* method) {
 
     compiler_driver_->InitializeThreadPools();
 
-    compiler_driver_->PreCompile(class_loader, dex_files, &timings);
+    compiler_driver_->PreCompile(class_loader,
+                                 dex_files,
+                                 &timings,
+                                 &compiler_options_->image_classes_,
+                                 verification_results_.get());
 
+    // Verification results in the `callback_` should not be used during compilation.
+    down_cast<QuickCompilerCallbacks*>(callbacks_.get())->SetVerificationResults(
+        reinterpret_cast<VerificationResults*>(inaccessible_page_));
+    compiler_options_->verification_results_ = verification_results_.get();
     compiler_driver_->CompileOne(self,
                                  class_loader,
                                  *dex_file,
@@ -279,6 +294,9 @@ void CommonCompilerTest::CompileMethod(ArtMethod* method) {
                                  code_item,
                                  dex_cache,
                                  h_class_loader);
+    compiler_options_->verification_results_ = nullptr;
+    down_cast<QuickCompilerCallbacks*>(callbacks_.get())->SetVerificationResults(
+        verification_results_.get());
 
     compiler_driver_->FreeThreadPools();
 
@@ -323,18 +341,45 @@ void CommonCompilerTest::ReserveImageSpace() {
   // accidentally end up colliding with the fixed memory address when we need to load the image.
   std::string error_msg;
   MemMap::Init();
-  image_reservation_.reset(MemMap::MapAnonymous("image reservation",
-                                                reinterpret_cast<uint8_t*>(ART_BASE_ADDRESS),
-                                                (size_t)120 * 1024 * 1024,  // 120MB
-                                                PROT_NONE,
-                                                false /* no need for 4gb flag with fixed mmap*/,
-                                                false /* not reusing existing reservation */,
-                                                &error_msg));
-  CHECK(image_reservation_.get() != nullptr) << error_msg;
+  image_reservation_ = MemMap::MapAnonymous("image reservation",
+                                            reinterpret_cast<uint8_t*>(ART_BASE_ADDRESS),
+                                            (size_t)120 * 1024 * 1024,  // 120MB
+                                            PROT_NONE,
+                                            false /* no need for 4gb flag with fixed mmap */,
+                                            /*reuse=*/ false,
+                                            /*reservation=*/ nullptr,
+                                            &error_msg);
+  CHECK(image_reservation_.IsValid()) << error_msg;
+}
+
+void CommonCompilerTest::CompileAll(jobject class_loader,
+                                    const std::vector<const DexFile*>& dex_files,
+                                    TimingLogger* timings) {
+  TimingLogger::ScopedTiming t(__FUNCTION__, timings);
+  SetDexFilesForOatFile(dex_files);
+
+  compiler_driver_->InitializeThreadPools();
+
+  compiler_driver_->PreCompile(class_loader,
+                               dex_files,
+                               timings,
+                               &compiler_options_->image_classes_,
+                               verification_results_.get());
+
+  // Verification results in the `callback_` should not be used during compilation.
+  down_cast<QuickCompilerCallbacks*>(callbacks_.get())->SetVerificationResults(
+      reinterpret_cast<VerificationResults*>(inaccessible_page_));
+  compiler_options_->verification_results_ = verification_results_.get();
+  compiler_driver_->CompileAll(class_loader, dex_files, timings);
+  compiler_options_->verification_results_ = nullptr;
+  down_cast<QuickCompilerCallbacks*>(callbacks_.get())->SetVerificationResults(
+      verification_results_.get());
+
+  compiler_driver_->FreeThreadPools();
 }
 
 void CommonCompilerTest::UnreserveImageSpace() {
-  image_reservation_.reset();
+  image_reservation_.Reset();
 }
 
 void CommonCompilerTest::SetDexFilesForOatFile(const std::vector<const DexFile*>& dex_files) {
@@ -344,7 +389,7 @@ void CommonCompilerTest::SetDexFilesForOatFile(const std::vector<const DexFile*>
 }
 
 void CommonCompilerTest::ClearBootImageOption() {
-  compiler_options_->boot_image_ = false;
+  compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
 }
 
 }  // namespace art

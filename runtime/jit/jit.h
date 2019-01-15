@@ -47,6 +47,7 @@ static constexpr int16_t kJitHotnessDisabled = -2;
 // At what priority to schedule jit threads. 9 is the lowest foreground priority on device.
 // See android/os/Process.java.
 static constexpr int kJitPoolThreadPthreadDefaultPriority = 9;
+static constexpr uint32_t kJitSamplesBatchSize = 32;  // Must be power of 2.
 
 class JitOptions {
  public:
@@ -122,12 +123,16 @@ class JitOptions {
   }
 
  private:
+  // We add the sample in batches of size kJitSamplesBatchSize.
+  // This method rounds the threshold so that it is multiple of the batch size.
+  static uint32_t RoundUpThreshold(uint32_t threshold);
+
   bool use_jit_compilation_;
   size_t code_cache_initial_capacity_;
   size_t code_cache_max_capacity_;
-  uint16_t compile_threshold_;
-  uint16_t warmup_threshold_;
-  uint16_t osr_threshold_;
+  uint32_t compile_threshold_;
+  uint32_t warmup_threshold_;
+  uint32_t osr_threshold_;
   uint16_t priority_thread_weight_;
   uint16_t invoke_transition_weight_;
   bool dump_info_on_shutdown_;
@@ -154,23 +159,28 @@ class Jit {
   static constexpr size_t kDefaultPriorityThreadWeightRatio = 1000;
   static constexpr size_t kDefaultInvokeTransitionWeightRatio = 500;
   // How frequently should the interpreter check to see if OSR compilation is ready.
-  static constexpr int16_t kJitRecheckOSRThreshold = 100;
+  static constexpr int16_t kJitRecheckOSRThreshold = 101;  // Prime number to avoid patterns.
 
   virtual ~Jit();
-  static Jit* Create(JitOptions* options, std::string* error_msg);
-  bool CompileMethod(ArtMethod* method, Thread* self, bool osr)
+
+  // Create JIT itself.
+  static Jit* Create(JitCodeCache* code_cache, JitOptions* options);
+
+  bool CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CreateThreadPool();
 
   const JitCodeCache* GetCodeCache() const {
-    return code_cache_.get();
+    return code_cache_;
   }
 
   JitCodeCache* GetCodeCache() {
-    return code_cache_.get();
+    return code_cache_;
   }
 
+  void CreateThreadPool();
   void DeleteThreadPool();
+  void WaitForWorkersToBeCreated();
+
   // Dump interesting info: #methods compiled, code vs data size, compile / verify cumulative
   // loggers.
   void DumpInfo(std::ostream& os) REQUIRES(!lock_);
@@ -213,7 +223,10 @@ class Jit {
   void MethodEntered(Thread* thread, ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void AddSamples(Thread* self, ArtMethod* method, uint16_t samples, bool with_backedges)
+  ALWAYS_INLINE void AddSamples(Thread* self,
+                                ArtMethod* method,
+                                uint16_t samples,
+                                bool with_backedges)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void InvokeVirtualOrInterface(ObjPtr<mirror::Object> this_object,
@@ -268,6 +281,7 @@ class Jit {
                                         JValue* result)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Load the compiler library.
   static bool LoadCompilerLibrary(std::string* error_msg);
 
   ThreadPool* GetThreadPool() const {
@@ -280,25 +294,44 @@ class Jit {
   // Start JIT threads.
   void Start();
 
- private:
-  explicit Jit(JitOptions* options);
+  // Transition to a child state.
+  void PostForkChildAction(bool is_zygote);
 
-  static bool LoadCompiler(std::string* error_msg);
+  // Prepare for forking.
+  void PreZygoteFork();
+
+  // Adjust state after forking.
+  void PostZygoteFork();
+
+ private:
+  Jit(JitCodeCache* code_cache, JitOptions* options);
+
+  // Compile the method if the number of samples passes a threshold.
+  // Returns false if we can not compile now - don't increment the counter and retry later.
+  bool MaybeCompileMethod(Thread* self,
+                          ArtMethod* method,
+                          uint32_t old_count,
+                          uint32_t new_count,
+                          bool with_backedges)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  static bool BindCompilerMethods(std::string* error_msg);
 
   // JIT compiler
   static void* jit_library_handle_;
   static void* jit_compiler_handle_;
-  static void* (*jit_load_)(bool*);
+  static void* (*jit_load_)(void);
   static void (*jit_unload_)(void*);
-  static bool (*jit_compile_method_)(void*, ArtMethod*, Thread*, bool);
+  static bool (*jit_compile_method_)(void*, ArtMethod*, Thread*, bool, bool);
   static void (*jit_types_loaded_)(void*, mirror::Class**, size_t count);
+  static void (*jit_update_options_)(void*);
+  static bool (*jit_generate_debug_info_)(void*);
+  template <typename T> static bool LoadSymbol(T*, const char* symbol, std::string* error_msg);
 
-  // We make this static to simplify the interaction with libart-compiler.so.
-  static bool generate_debug_info_;
-
+  // JIT resources owned by runtime.
+  jit::JitCodeCache* const code_cache_;
   const JitOptions* const options_;
 
-  std::unique_ptr<jit::JitCodeCache> code_cache_;
   std::unique_ptr<ThreadPool> thread_pool_;
 
   // Performance monitoring.

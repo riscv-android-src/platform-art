@@ -56,7 +56,7 @@ static void InterpreterJni(Thread* self,
   ScopedObjectAccessUnchecked soa(self);
   if (method->IsStatic()) {
     if (shorty == "L") {
-      typedef jobject (fntype)(JNIEnv*, jclass);
+      using fntype = jobject(JNIEnv*, jclass);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -67,35 +67,35 @@ static void InterpreterJni(Thread* self,
       }
       result->SetL(soa.Decode<mirror::Object>(jresult));
     } else if (shorty == "V") {
-      typedef void (fntype)(JNIEnv*, jclass);
+      using fntype = void(JNIEnv*, jclass);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       fn(soa.Env(), klass.get());
     } else if (shorty == "Z") {
-      typedef jboolean (fntype)(JNIEnv*, jclass);
+      using fntype = jboolean(JNIEnv*, jclass);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       result->SetZ(fn(soa.Env(), klass.get()));
     } else if (shorty == "BI") {
-      typedef jbyte (fntype)(JNIEnv*, jclass, jint);
+      using fntype = jbyte(JNIEnv*, jclass, jint);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       result->SetB(fn(soa.Env(), klass.get(), args[0]));
     } else if (shorty == "II") {
-      typedef jint (fntype)(JNIEnv*, jclass, jint);
+      using fntype = jint(JNIEnv*, jclass, jint);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       result->SetI(fn(soa.Env(), klass.get(), args[0]));
     } else if (shorty == "LL") {
-      typedef jobject (fntype)(JNIEnv*, jclass, jobject);
+      using fntype = jobject(JNIEnv*, jclass, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -108,14 +108,14 @@ static void InterpreterJni(Thread* self,
       }
       result->SetL(soa.Decode<mirror::Object>(jresult));
     } else if (shorty == "IIZ") {
-      typedef jint (fntype)(JNIEnv*, jclass, jint, jboolean);
+      using fntype = jint(JNIEnv*, jclass, jint, jboolean);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       result->SetI(fn(soa.Env(), klass.get(), args[0], args[1]));
     } else if (shorty == "ILI") {
-      typedef jint (fntype)(JNIEnv*, jclass, jobject, jint);
+      using fntype = jint(JNIEnv*, jclass, jobject, jint);
       fntype* const fn = reinterpret_cast<fntype*>(const_cast<void*>(
           method->GetEntryPointFromJni()));
       ScopedLocalRef<jclass> klass(soa.Env(),
@@ -125,7 +125,7 @@ static void InterpreterJni(Thread* self,
       ScopedThreadStateChange tsc(self, kNative);
       result->SetI(fn(soa.Env(), klass.get(), arg0.get(), args[1]));
     } else if (shorty == "SIZ") {
-      typedef jshort (fntype)(JNIEnv*, jclass, jint, jboolean);
+      using fntype = jshort(JNIEnv*, jclass, jint, jboolean);
       fntype* const fn =
           reinterpret_cast<fntype*>(const_cast<void*>(method->GetEntryPointFromJni()));
       ScopedLocalRef<jclass> klass(soa.Env(),
@@ -133,14 +133,14 @@ static void InterpreterJni(Thread* self,
       ScopedThreadStateChange tsc(self, kNative);
       result->SetS(fn(soa.Env(), klass.get(), args[0], args[1]));
     } else if (shorty == "VIZ") {
-      typedef void (fntype)(JNIEnv*, jclass, jint, jboolean);
+      using fntype = void(JNIEnv*, jclass, jint, jboolean);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
       ScopedThreadStateChange tsc(self, kNative);
       fn(soa.Env(), klass.get(), args[0], args[1]);
     } else if (shorty == "ZLL") {
-      typedef jboolean (fntype)(JNIEnv*, jclass, jobject, jobject);
+      using fntype = jboolean(JNIEnv*, jclass, jobject, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -151,7 +151,7 @@ static void InterpreterJni(Thread* self,
       ScopedThreadStateChange tsc(self, kNative);
       result->SetZ(fn(soa.Env(), klass.get(), arg0.get(), arg1.get()));
     } else if (shorty == "ZILL") {
-      typedef jboolean (fntype)(JNIEnv*, jclass, jint, jobject, jobject);
+      using fntype = jboolean(JNIEnv*, jclass, jint, jobject, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -162,7 +162,7 @@ static void InterpreterJni(Thread* self,
       ScopedThreadStateChange tsc(self, kNative);
       result->SetZ(fn(soa.Env(), klass.get(), args[0], arg1.get(), arg2.get()));
     } else if (shorty == "VILII") {
-      typedef void (fntype)(JNIEnv*, jclass, jint, jobject, jint, jint);
+      using fntype = void(JNIEnv*, jclass, jint, jobject, jint, jint);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -171,7 +171,7 @@ static void InterpreterJni(Thread* self,
       ScopedThreadStateChange tsc(self, kNative);
       fn(soa.Env(), klass.get(), args[0], arg1.get(), args[2], args[3]);
     } else if (shorty == "VLILII") {
-      typedef void (fntype)(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
+      using fntype = void(JNIEnv*, jclass, jobject, jint, jobject, jint, jint);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jclass> klass(soa.Env(),
                                    soa.AddLocalReference<jclass>(method->GetDeclaringClass()));
@@ -187,7 +187,7 @@ static void InterpreterJni(Thread* self,
     }
   } else {
     if (shorty == "L") {
-      typedef jobject (fntype)(JNIEnv*, jobject);
+      using fntype = jobject(JNIEnv*, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jobject> rcvr(soa.Env(),
                                    soa.AddLocalReference<jobject>(receiver));
@@ -198,14 +198,14 @@ static void InterpreterJni(Thread* self,
       }
       result->SetL(soa.Decode<mirror::Object>(jresult));
     } else if (shorty == "V") {
-      typedef void (fntype)(JNIEnv*, jobject);
+      using fntype = void(JNIEnv*, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jobject> rcvr(soa.Env(),
                                    soa.AddLocalReference<jobject>(receiver));
       ScopedThreadStateChange tsc(self, kNative);
       fn(soa.Env(), rcvr.get());
     } else if (shorty == "LL") {
-      typedef jobject (fntype)(JNIEnv*, jobject, jobject);
+      using fntype = jobject(JNIEnv*, jobject, jobject);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jobject> rcvr(soa.Env(),
                                    soa.AddLocalReference<jobject>(receiver));
@@ -219,7 +219,7 @@ static void InterpreterJni(Thread* self,
       result->SetL(soa.Decode<mirror::Object>(jresult));
       ScopedThreadStateChange tsc(self, kNative);
     } else if (shorty == "III") {
-      typedef jint (fntype)(JNIEnv*, jobject, jint, jint);
+      using fntype = jint(JNIEnv*, jobject, jint, jint);
       fntype* const fn = reinterpret_cast<fntype*>(method->GetEntryPointFromJni());
       ScopedLocalRef<jobject> rcvr(soa.Env(),
                                    soa.AddLocalReference<jobject>(receiver));
@@ -237,7 +237,11 @@ enum InterpreterImplKind {
   kMterpImplKind          // Assembly interpreter
 };
 
+#if ART_USE_CXX_INTERPRETER
+static constexpr InterpreterImplKind kInterpreterImplKind = kSwitchImplKind;
+#else
 static constexpr InterpreterImplKind kInterpreterImplKind = kMterpImplKind;
+#endif
 
 static inline JValue Execute(
     Thread* self,
@@ -248,6 +252,14 @@ static inline JValue Execute(
     bool from_deoptimize = false) REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(!shadow_frame.GetMethod()->IsAbstract());
   DCHECK(!shadow_frame.GetMethod()->IsNative());
+
+  // Check that we are using the right interpreter.
+  if (kIsDebugBuild && self->UseMterp() != CanUseMterp()) {
+    // The flag might be currently being updated on all threads. Retry with lock.
+    MutexLock tll_mu(self, *Locks::thread_list_lock_);
+    DCHECK_EQ(self->UseMterp(), CanUseMterp());
+  }
+
   if (LIKELY(!from_deoptimize)) {  // Entering the method, but not via deoptimization.
     if (kIsDebugBuild) {
       CHECK_EQ(shadow_frame.GetDexPC(), 0u);
@@ -261,6 +273,12 @@ static inline JValue Execute(
                                         shadow_frame.GetThisObject(accessor.InsSize()),
                                         method,
                                         0);
+      if (UNLIKELY(shadow_frame.GetForcePopFrame())) {
+        // The caller will retry this invoke. Just return immediately without any value.
+        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+        DCHECK(PrevFrameWillRetry(self, shadow_frame));
+        return JValue();
+      }
       if (UNLIKELY(self->IsExceptionPending())) {
         instrumentation->MethodUnwindEvent(self,
                                            shadow_frame.GetThisObject(accessor.InsSize()),
@@ -315,7 +333,7 @@ static inline JValue Execute(
       } else {
         while (true) {
           // Mterp does not support all instrumentation/debugging.
-          if (MterpShouldSwitchInterpreters() != 0) {
+          if (!self->UseMterp()) {
             return ExecuteSwitchImpl<false, false>(self, accessor, shadow_frame, result_register,
                                                    false);
           }
@@ -348,6 +366,13 @@ static inline JValue Execute(
     }
   } else {
     // Enter the "with access check" interpreter.
+
+    // The boot classpath should really not have to run access checks.
+    DCHECK(method->GetDeclaringClass()->GetClassLoader() != nullptr
+           || Runtime::Current()->IsVerificationSoftFail()
+           || Runtime::Current()->IsAotCompiler())
+        << method->PrettyMethod();
+
     if (kInterpreterImplKind == kMterpImplKind) {
       // No access check variants for Mterp.  Just use the switch version.
       if (transaction_active) {
@@ -494,8 +519,8 @@ void EnterInterpreterFromDeoptimize(Thread* self,
   JValue value;
   // Set value to last known result in case the shadow frame chain is empty.
   value.SetJ(ret_val->GetJ());
-  // Are we executing the first shadow frame?
-  bool first = true;
+  // How many frames we have executed.
+  size_t frame_cnt = 0;
   while (shadow_frame != nullptr) {
     // We do not want to recover lock state for lock counting when deoptimizing. Currently,
     // the compiler should not have compiled a method that failed structured-locking checks.
@@ -510,24 +535,30 @@ void EnterInterpreterFromDeoptimize(Thread* self,
       // the instrumentation. To prevent from reporting it a second time, we simply pass a
       // null Instrumentation*.
       const instrumentation::Instrumentation* const instrumentation =
-          first ? nullptr : Runtime::Current()->GetInstrumentation();
+          frame_cnt == 0 ? nullptr : Runtime::Current()->GetInstrumentation();
       new_dex_pc = MoveToExceptionHandler(
           self, *shadow_frame, instrumentation) ? shadow_frame->GetDexPC() : dex::kDexNoIndex;
     } else if (!from_code) {
       // Deoptimization is not called from code directly.
       const Instruction* instr = &accessor.InstructionAt(dex_pc);
-      if (deopt_method_type == DeoptimizationMethodType::kKeepDexPc) {
-        DCHECK(first);
+      if (deopt_method_type == DeoptimizationMethodType::kKeepDexPc ||
+          shadow_frame->GetForceRetryInstruction()) {
+        DCHECK(frame_cnt == 0 || (frame_cnt == 1 && shadow_frame->GetForceRetryInstruction()))
+            << "frame_cnt: " << frame_cnt
+            << " force-retry: " << shadow_frame->GetForceRetryInstruction();
         // Need to re-execute the dex instruction.
         // (1) An invocation might be split into class initialization and invoke.
         //     In this case, the invoke should not be skipped.
         // (2) A suspend check should also execute the dex instruction at the
         //     corresponding dex pc.
+        // If the ForceRetryInstruction bit is set this must be the second frame (the first being
+        // the one that is being popped).
         DCHECK_EQ(new_dex_pc, dex_pc);
+        shadow_frame->SetForceRetryInstruction(false);
       } else if (instr->Opcode() == Instruction::MONITOR_ENTER ||
                  instr->Opcode() == Instruction::MONITOR_EXIT) {
         DCHECK(deopt_method_type == DeoptimizationMethodType::kDefault);
-        DCHECK(first);
+        DCHECK_EQ(frame_cnt, 0u);
         // Non-idempotent dex instruction should not be re-executed.
         // On the other hand, if a MONITOR_ENTER is at the dex_pc of a suspend
         // check, that MONITOR_ENTER should be executed. That case is handled
@@ -553,7 +584,7 @@ void EnterInterpreterFromDeoptimize(Thread* self,
         DCHECK_EQ(new_dex_pc, dex_pc);
       } else {
         DCHECK(deopt_method_type == DeoptimizationMethodType::kDefault);
-        DCHECK(first);
+        DCHECK_EQ(frame_cnt, 0u);
         // By default, we re-execute the dex instruction since if they are not
         // an invoke, so that we don't have to decode the dex instruction to move
         // result into the right vreg. All slow paths have been audited to be
@@ -566,7 +597,7 @@ void EnterInterpreterFromDeoptimize(Thread* self,
     } else {
       // Nothing to do, the dex_pc is the one at which the code requested
       // the deoptimization.
-      DCHECK(first);
+      DCHECK_EQ(frame_cnt, 0u);
       DCHECK_EQ(new_dex_pc, dex_pc);
     }
     if (new_dex_pc != dex::kDexNoIndex) {
@@ -575,8 +606,8 @@ void EnterInterpreterFromDeoptimize(Thread* self,
                       accessor,
                       *shadow_frame,
                       value,
-                      /* stay_in_interpreter */ true,
-                      /* from_deoptimize */ true);
+                      /* stay_in_interpreter= */ true,
+                      /* from_deoptimize= */ true);
     }
     ShadowFrame* old_frame = shadow_frame;
     shadow_frame = shadow_frame->GetLink();
@@ -585,7 +616,7 @@ void EnterInterpreterFromDeoptimize(Thread* self,
     // and should advance dex pc past the invoke instruction.
     from_code = false;
     deopt_method_type = DeoptimizationMethodType::kDefault;
-    first = false;
+    frame_cnt++;
   }
   ret_val->SetJ(value.GetJ());
 }
@@ -655,6 +686,19 @@ void CheckInterpreterAsmConstants() {
 
 void InitInterpreterTls(Thread* self) {
   InitMterpTls(self);
+}
+
+bool PrevFrameWillRetry(Thread* self, const ShadowFrame& frame) {
+  ShadowFrame* prev_frame = frame.GetLink();
+  if (prev_frame == nullptr) {
+    NthCallerVisitor vis(self, 1, false);
+    vis.WalkStack();
+    prev_frame = vis.GetCurrentShadowFrame();
+    if (prev_frame == nullptr) {
+      prev_frame = self->FindDebuggerShadowFrame(vis.GetFrameId());
+    }
+  }
+  return prev_frame != nullptr && prev_frame->GetForceRetryInstruction();
 }
 
 }  // namespace interpreter

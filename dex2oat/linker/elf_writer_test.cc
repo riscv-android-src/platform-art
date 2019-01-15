@@ -14,9 +14,12 @@
  * limitations under the License.
  */
 
+#include <sys/mman.h>  // For the PROT_NONE constant.
+
 #include "elf_file.h"
 
 #include "base/file_utils.h"
+#include "base/mem_map.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "common_compiler_test.h"
@@ -31,7 +34,7 @@ namespace linker {
 
 class ElfWriterTest : public CommonCompilerTest {
  protected:
-  virtual void SetUp() {
+  void SetUp() override {
     ReserveImageSpace();
     CommonCompilerTest::SetUp();
   }
@@ -65,9 +68,9 @@ TEST_F(ElfWriterTest, dlsym) {
   {
     std::string error_msg;
     std::unique_ptr<ElfFile> ef(ElfFile::Open(file.get(),
-                                              false,
-                                              false,
-                                              /*low_4gb*/false,
+                                              /*writable=*/ false,
+                                              /*program_header_only=*/ false,
+                                              /*low_4gb=*/false,
                                               &error_msg));
     CHECK(ef.get() != nullptr) << error_msg;
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatdata, "oatdata", false);
@@ -77,9 +80,9 @@ TEST_F(ElfWriterTest, dlsym) {
   {
     std::string error_msg;
     std::unique_ptr<ElfFile> ef(ElfFile::Open(file.get(),
-                                              false,
-                                              false,
-                                              /*low_4gb*/false,
+                                              /*writable=*/ false,
+                                              /*program_header_only=*/ false,
+                                              /*low_4gb=*/ false,
                                               &error_msg));
     CHECK(ef.get() != nullptr) << error_msg;
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatdata, "oatdata", true);
@@ -87,16 +90,27 @@ TEST_F(ElfWriterTest, dlsym) {
     EXPECT_ELF_FILE_ADDRESS(ef, dl_oatlastword, "oatlastword", true);
   }
   {
-    uint8_t* base = reinterpret_cast<uint8_t*>(ART_BASE_ADDRESS);
     std::string error_msg;
     std::unique_ptr<ElfFile> ef(ElfFile::Open(file.get(),
-                                              false,
-                                              true,
-                                              /*low_4gb*/false,
-                                              &error_msg,
-                                              base));
+                                              /*writable=*/ false,
+                                              /*program_header_only=*/ true,
+                                              /*low_4gb=*/ false,
+                                              &error_msg));
     CHECK(ef.get() != nullptr) << error_msg;
-    CHECK(ef->Load(file.get(), false, /*low_4gb*/false, &error_msg)) << error_msg;
+    size_t size;
+    bool success = ef->GetLoadedSize(&size, &error_msg);
+    CHECK(success) << error_msg;
+    MemMap reservation = MemMap::MapAnonymous("ElfWriterTest#dlsym reservation",
+                                              RoundUp(size, kPageSize),
+                                              PROT_NONE,
+                                              /*low_4gb=*/ true,
+                                              &error_msg);
+    CHECK(reservation.IsValid()) << error_msg;
+    uint8_t* base = reservation.Begin();
+    success =
+        ef->Load(file.get(), /*executable=*/ false, /*low_4gb=*/ false, &reservation, &error_msg);
+    CHECK(success) << error_msg;
+    CHECK(!reservation.IsValid());
     EXPECT_EQ(reinterpret_cast<uintptr_t>(dl_oatdata) + reinterpret_cast<uintptr_t>(base),
         reinterpret_cast<uintptr_t>(ef->FindDynamicSymbolAddress("oatdata")));
     EXPECT_EQ(reinterpret_cast<uintptr_t>(dl_oatexec) + reinterpret_cast<uintptr_t>(base),
@@ -116,9 +130,9 @@ TEST_F(ElfWriterTest, CheckBuildIdPresent) {
   {
     std::string error_msg;
     std::unique_ptr<ElfFile> ef(ElfFile::Open(file.get(),
-                                              false,
-                                              false,
-                                              /*low_4gb*/false,
+                                              /*writable=*/ false,
+                                              /*program_header_only=*/ false,
+                                              /*low_4gb=*/ false,
                                               &error_msg));
     CHECK(ef.get() != nullptr) << error_msg;
     EXPECT_TRUE(ef->HasSection(".note.gnu.build-id"));
@@ -149,7 +163,7 @@ TEST_F(ElfWriterTest, EncodeDecodeOatPatches) {
     // Patch manually.
     std::vector<uint8_t> expected = initial_data;
     for (uintptr_t location : patch_locations) {
-      typedef __attribute__((__aligned__(1))) uint32_t UnalignedAddress;
+      using UnalignedAddress __attribute__((__aligned__(1))) = uint32_t;
       *reinterpret_cast<UnalignedAddress*>(expected.data() + location) += delta;
     }
 

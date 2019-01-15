@@ -19,12 +19,11 @@
 
 #include <memory>
 
-#include "base/globals.h"
-#include "base/mutex.h"
+#include "base/locks.h"
+#include "base/mem_map.h"
+#include "runtime_globals.h"
 
 namespace art {
-
-class MemMap;
 
 namespace mirror {
 class Object;
@@ -66,6 +65,11 @@ class CardTable {
     return GetCard(obj) == kCardDirty;
   }
 
+  // Is the object on a clean card?
+  bool IsClean(const mirror::Object* obj) const {
+    return GetCard(obj) == kCardClean;
+  }
+
   // Return the state of the card at an address.
   uint8_t GetCard(const mirror::Object* obj) const {
     return *CardFromAddr(obj);
@@ -91,12 +95,10 @@ class CardTable {
   }
 
   /*
-   * Visitor is expected to take in a card and return the new value. When a value is modified, the
-   * modify visitor is called.
-   * visitor: The visitor which modifies the cards. Returns the new value for a card given an old
-   * value.
-   * modified: Whenever the visitor modifies a card, this visitor is called on the card. Enables
-   * us to know which cards got cleared.
+   * Modify cards in the range from scan_begin (inclusive) to scan_end (exclusive). Each card
+   * value v is replaced by visitor(v). Visitor() should not have side-effects.
+   * Whenever a card value is changed, modified(card_address, old_value, new_value) is invoked.
+   * For opportunistic performance reasons, this assumes that visitor(kCardClean) is kCardClean!
    */
   template <typename Visitor, typename ModifiedVisitor>
   void ModifyCardsAtomic(uint8_t* scan_begin,
@@ -133,7 +135,7 @@ class CardTable {
   bool AddrIsInCardTable(const void* addr) const;
 
  private:
-  CardTable(MemMap* begin, uint8_t* biased_begin, size_t offset);
+  CardTable(MemMap&& mem_map, uint8_t* biased_begin, size_t offset);
 
   // Returns true iff the card table address is within the bounds of the card table.
   bool IsValidCard(const uint8_t* card_addr) const ALWAYS_INLINE;
@@ -144,7 +146,7 @@ class CardTable {
   void VerifyCardTable();
 
   // Mmapped pages for the card table
-  std::unique_ptr<MemMap> mem_map_;
+  MemMap mem_map_;
   // Value used to compute card table addresses from object addresses, see GetBiasedBegin
   uint8_t* const biased_begin_;
   // Card table doesn't begin at the beginning of the mem_map_, instead it is displaced by offset

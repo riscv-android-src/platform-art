@@ -151,7 +151,7 @@ static JniCompiledMethod ArtJniCompileMethodInternal(const CompilerOptions& comp
     // Don't allow both @FastNative and @CriticalNative. They are mutually exclusive.
     if (UNLIKELY(is_fast_native && is_critical_native)) {
       LOG(FATAL) << "JniCompile: Method cannot be both @CriticalNative and @FastNative"
-                 << dex_file.PrettyMethod(method_idx, /* with_signature */ true);
+                 << dex_file.PrettyMethod(method_idx, /* with_signature= */ true);
     }
 
     // @CriticalNative - extra checks:
@@ -162,15 +162,15 @@ static JniCompiledMethod ArtJniCompileMethodInternal(const CompilerOptions& comp
       CHECK(is_static)
           << "@CriticalNative functions cannot be virtual since that would"
           << "require passing a reference parameter (this), which is illegal "
-          << dex_file.PrettyMethod(method_idx, /* with_signature */ true);
+          << dex_file.PrettyMethod(method_idx, /* with_signature= */ true);
       CHECK(!is_synchronized)
           << "@CriticalNative functions cannot be synchronized since that would"
           << "require passing a (class and/or this) reference parameter, which is illegal "
-          << dex_file.PrettyMethod(method_idx, /* with_signature */ true);
+          << dex_file.PrettyMethod(method_idx, /* with_signature= */ true);
       for (size_t i = 0; i < strlen(shorty); ++i) {
         CHECK_NE(Primitive::kPrimNot, Primitive::GetType(shorty[i]))
             << "@CriticalNative methods' shorty types must not have illegal references "
-            << dex_file.PrettyMethod(method_idx, /* with_signature */ true);
+            << dex_file.PrettyMethod(method_idx, /* with_signature= */ true);
       }
     }
   }
@@ -218,12 +218,6 @@ static JniCompiledMethod ArtJniCompileMethodInternal(const CompilerOptions& comp
       GetMacroAssembler<kPointerSize>(&allocator, instruction_set, instruction_set_features);
   jni_asm->cfi().SetEnabled(compiler_options.GenerateAnyDebugInfo());
   jni_asm->SetEmitRunTimeChecksInDebugMode(compiler_options.EmitRunTimeChecksInDebugMode());
-
-  // Offsets into data structures
-  // TODO: if cross compiling these offsets are for the host not the target
-  const Offset functions(OFFSETOF_MEMBER(JNIEnvExt, functions));
-  const Offset monitor_enter(OFFSETOF_MEMBER(JNINativeInterface, MonitorEnter));
-  const Offset monitor_exit(OFFSETOF_MEMBER(JNINativeInterface, MonitorExit));
 
   // 1. Build the frame saving all callee saves, Method*, and PC return address.
   const size_t frame_size(main_jni_conv->FrameSize());  // Excludes outgoing args.
@@ -638,7 +632,7 @@ static JniCompiledMethod ArtJniCompileMethodInternal(const CompilerOptions& comp
   __ DecreaseFrameSize(current_out_arg_size);
 
   // 15. Process pending exceptions from JNI call or monitor exit.
-  __ ExceptionPoll(main_jni_conv->InterproceduralScratchRegister(), 0 /* stack_adjust */);
+  __ ExceptionPoll(main_jni_conv->InterproceduralScratchRegister(), 0 /* stack_adjust= */);
 
   // 16. Remove activation - need to restore callee save registers since the GC may have changed
   //     them.

@@ -25,6 +25,12 @@
 #include <sys/resource.h>
 #include <sys/time.h>
 
+#if __has_feature(hwaddress_sanitizer)
+#include <sanitizer/hwasan_interface.h>
+#else
+#define __hwasan_tag_pointer(p, t) (p)
+#endif
+
 #include <algorithm>
 #include <bitset>
 #include <cerrno>
@@ -33,12 +39,16 @@
 #include <sstream>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "arch/context-inl.h"
 #include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/atomic.h"
 #include "base/bit_utils.h"
+#include "base/casts.h"
+#include "arch/context.h"
 #include "base/file_utils.h"
 #include "base/memory_tool.h"
 #include "base/mutex.h"
@@ -64,13 +74,16 @@
 #include "gc_root.h"
 #include "handle_scope-inl.h"
 #include "indirect_reference_table-inl.h"
+#include "instrumentation.h"
 #include "interpreter/interpreter.h"
+#include "interpreter/mterp/mterp.h"
 #include "interpreter/shadow_frame-inl.h"
 #include "java_frame_root_info.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_internal.h"
-#include "mirror/class-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class_loader.h"
+#include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "monitor.h"
@@ -86,6 +99,7 @@
 #include "quick_exception_handler.h"
 #include "read_barrier-inl.h"
 #include "reflection.h"
+#include "runtime-inl.h"
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
@@ -143,11 +157,12 @@ void UpdateReadBarrierEntrypoints(QuickEntryPoints* qpoints, bool is_active);
 void Thread::SetIsGcMarkingAndUpdateEntrypoints(bool is_marking) {
   CHECK(kUseReadBarrier);
   tls32_.is_gc_marking = is_marking;
-  UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, /* is_active */ is_marking);
+  UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, /* is_active= */ is_marking);
   ResetQuickAllocEntryPointsForThread(is_marking);
 }
 
 void Thread::InitTlsEntryPoints() {
+  ScopedTrace trace("InitTlsEntryPoints");
   // Insert a placeholder so we can easily tell if we call an unimplemented entry point.
   uintptr_t* begin = reinterpret_cast<uintptr_t*>(&tlsPtr_.jni_entrypoints);
   uintptr_t* end = reinterpret_cast<uintptr_t*>(
@@ -273,6 +288,120 @@ void Thread::PopDeoptimizationContext(JValue* result,
 void Thread::AssertHasDeoptimizationContext() {
   CHECK(tlsPtr_.deoptimization_context_stack != nullptr)
       << "No deoptimization context for thread " << *this;
+}
+
+enum {
+  kPermitAvailable = 0,  // Incrementing consumes the permit
+  kNoPermit = 1,  // Incrementing marks as waiter waiting
+  kNoPermitWaiterWaiting = 2
+};
+
+void Thread::Park(bool is_absolute, int64_t time) {
+  DCHECK(this == Thread::Current());
+#if ART_USE_FUTEXES
+  // Consume the permit, or mark as waiting. This cannot cause park_state to go
+  // outside of its valid range (0, 1, 2), because in all cases where 2 is
+  // assigned it is set back to 1 before returning, and this method cannot run
+  // concurrently with itself since it operates on the current thread.
+  int old_state = tls32_.park_state_.fetch_add(1, std::memory_order_relaxed);
+  if (old_state == kNoPermit) {
+    // no permit was available. block thread until later.
+    Runtime::Current()->GetRuntimeCallbacks()->ThreadParkStart(is_absolute, time);
+    int result = 0;
+    bool timed_out = false;
+    if (!is_absolute && time == 0) {
+      // Thread.getState() is documented to return waiting for untimed parks.
+      ScopedThreadSuspension sts(this, ThreadState::kWaiting);
+      DCHECK_EQ(NumberOfHeldMutexes(), 0u);
+      result = futex(tls32_.park_state_.Address(),
+                     FUTEX_WAIT_PRIVATE,
+                     /* sleep if val = */ kNoPermitWaiterWaiting,
+                     /* timeout */ nullptr,
+                     nullptr,
+                     0);
+    } else if (time > 0) {
+      // Only actually suspend and futex_wait if we're going to wait for some
+      // positive amount of time - the kernel will reject negative times with
+      // EINVAL, and a zero time will just noop.
+
+      // Thread.getState() is documented to return timed wait for timed parks.
+      ScopedThreadSuspension sts(this, ThreadState::kTimedWaiting);
+      DCHECK_EQ(NumberOfHeldMutexes(), 0u);
+      timespec timespec;
+      if (is_absolute) {
+        // Time is millis when scheduled for an absolute time
+        timespec.tv_nsec = (time % 1000) * 1000000;
+        timespec.tv_sec = time / 1000;
+        // This odd looking pattern is recommended by futex documentation to
+        // wait until an absolute deadline, with otherwise identical behavior to
+        // FUTEX_WAIT_PRIVATE. This also allows parkUntil() to return at the
+        // correct time when the system clock changes.
+        result = futex(tls32_.park_state_.Address(),
+                       FUTEX_WAIT_BITSET_PRIVATE | FUTEX_CLOCK_REALTIME,
+                       /* sleep if val = */ kNoPermitWaiterWaiting,
+                       &timespec,
+                       nullptr,
+                       FUTEX_BITSET_MATCH_ANY);
+      } else {
+        // Time is nanos when scheduled for a relative time
+        timespec.tv_sec = time / 1000000000;
+        timespec.tv_nsec = time % 1000000000;
+        result = futex(tls32_.park_state_.Address(),
+                       FUTEX_WAIT_PRIVATE,
+                       /* sleep if val = */ kNoPermitWaiterWaiting,
+                       &timespec,
+                       nullptr,
+                       0);
+      }
+    }
+    if (result == -1) {
+      switch (errno) {
+        case ETIMEDOUT:
+          timed_out = true;
+          FALLTHROUGH_INTENDED;
+        case EAGAIN:
+        case EINTR: break;  // park() is allowed to spuriously return
+        default: PLOG(FATAL) << "Failed to park";
+      }
+    }
+    // Mark as no longer waiting, and consume permit if there is one.
+    tls32_.park_state_.store(kNoPermit, std::memory_order_relaxed);
+    // TODO: Call to signal jvmti here
+    Runtime::Current()->GetRuntimeCallbacks()->ThreadParkFinished(timed_out);
+  } else {
+    // the fetch_add has consumed the permit. immediately return.
+    DCHECK_EQ(old_state, kPermitAvailable);
+  }
+#else
+  #pragma clang diagnostic push
+  #pragma clang diagnostic warning "-W#warnings"
+  #warning "LockSupport.park/unpark implemented as noops without FUTEX support."
+  #pragma clang diagnostic pop
+  UNUSED(is_absolute, time);
+  UNIMPLEMENTED(WARNING);
+  sched_yield();
+#endif
+}
+
+void Thread::Unpark() {
+#if ART_USE_FUTEXES
+  // Set permit available; will be consumed either by fetch_add (when the thread
+  // tries to park) or store (when the parked thread is woken up)
+  if (tls32_.park_state_.exchange(kPermitAvailable, std::memory_order_relaxed)
+      == kNoPermitWaiterWaiting) {
+    int result = futex(tls32_.park_state_.Address(),
+                       FUTEX_WAKE_PRIVATE,
+                       /* number of waiters = */ 1,
+                       nullptr,
+                       nullptr,
+                       0);
+    if (result == -1) {
+      PLOG(FATAL) << "Failed to unpark";
+    }
+  }
+#else
+  UNIMPLEMENTED(WARNING);
+#endif
 }
 
 void Thread::PushStackedShadowFrame(ShadowFrame* sf, StackedShadowFrameType type) {
@@ -479,6 +608,22 @@ void* Thread::CreateCallback(void* arg) {
 
     runtime->GetRuntimeCallbacks()->ThreadStart(self);
 
+    // Unpark ourselves if the java peer was unparked before it started (see
+    // b/28845097#comment49 for more information)
+
+    ArtField* unparkedField = jni::DecodeArtField(
+        WellKnownClasses::java_lang_Thread_unparkedBeforeStart);
+    bool should_unpark = false;
+    {
+      // Hold the lock here, so that if another thread calls unpark before the thread starts
+      // we don't observe the unparkedBeforeStart field before the unparker writes to it,
+      // which could cause a lost unpark.
+      art::MutexLock mu(soa.Self(), *art::Locks::thread_list_lock_);
+      should_unpark = unparkedField->GetBoolean(self->tlsPtr_.opeer) == JNI_TRUE;
+    }
+    if (should_unpark) {
+      self->Unpark();
+    }
     // Invoke the 'run' method of our java.lang.Thread.
     ObjPtr<mirror::Object> receiver = self->tlsPtr_.opeer;
     jmethodID mid = WellKnownClasses::java_lang_Thread_run;
@@ -494,7 +639,7 @@ void* Thread::CreateCallback(void* arg) {
 Thread* Thread::FromManagedThread(const ScopedObjectAccessAlreadyRunnable& soa,
                                   ObjPtr<mirror::Object> thread_peer) {
   ArtField* f = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_nativePeer);
-  Thread* result = reinterpret_cast<Thread*>(static_cast<uintptr_t>(f->GetLong(thread_peer)));
+  Thread* result = reinterpret_cast64<Thread*>(f->GetLong(thread_peer));
   // Sanity check that if we have a result it is either suspended or we hold the thread_list_lock_
   // to stop it from going away.
   if (kIsDebugBuild) {
@@ -570,7 +715,7 @@ void Thread::InstallImplicitProtection() {
   VLOG(threads) << "installing stack protected region at " << std::hex <<
         static_cast<void*>(pregion) << " to " <<
         static_cast<void*>(pregion + kStackOverflowProtectedSize - 1);
-  if (ProtectStack(/* fatal_on_error */ false)) {
+  if (ProtectStack(/* fatal_on_error= */ false)) {
     // Tell the kernel that we won't be needing these pages any more.
     // NB. madvise will probably write zeroes into the memory (on linux it does).
     uint32_t unwanted_size = stack_top - pregion - kPageSize;
@@ -623,7 +768,9 @@ void Thread::InstallImplicitProtection() {
 #endif
       volatile char space[kPageSize - (kAsanMultiplier * 256)];
       char sink ATTRIBUTE_UNUSED = space[zero];  // NOLINT
-      if (reinterpret_cast<uintptr_t>(space) >= target + kPageSize) {
+      // Remove tag from the pointer. Nop in non-hwasan builds.
+      uintptr_t addr = reinterpret_cast<uintptr_t>(__hwasan_tag_pointer(space, 0));
+      if (addr >= target + kPageSize) {
         Touch(target);
       }
       zero *= 2;  // Try to avoid tail recursion.
@@ -637,7 +784,7 @@ void Thread::InstallImplicitProtection() {
       static_cast<void*>(pregion + kStackOverflowProtectedSize - 1);
 
   // Protect the bottom of the stack to prevent read/write to it.
-  ProtectStack(/* fatal_on_error */ true);
+  ProtectStack(/* fatal_on_error= */ true);
 
   // Tell the kernel that we won't be needing these pages any more.
   // NB. madvise will probably write zeroes into the memory (on linux it does).
@@ -720,7 +867,7 @@ void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_siz
       // JNIEnvExt we created.
       // Note: we can't check for tmp_jni_env == nullptr, as that would require synchronization
       //       between the threads.
-      child_jni_env_ext.release();
+      child_jni_env_ext.release();  // NOLINT pthreads API.
       return;
     }
   }
@@ -759,6 +906,8 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   tlsPtr_.pthread_self = pthread_self();
   CHECK(is_started_);
 
+  ScopedTrace trace("Thread::Init");
+
   SetUpAlternateSignalStack();
   if (!InitStackHwm()) {
     return false;
@@ -768,7 +917,10 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
   RemoveSuspendTrigger();
   InitCardTable();
   InitTid();
-  interpreter::InitInterpreterTls(this);
+  {
+    ScopedTrace trace2("InitInterpreterTls");
+    interpreter::InitInterpreterTls(this);
+  }
 
 #ifdef ART_TARGET_ANDROID
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
@@ -792,6 +944,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     }
   }
 
+  ScopedTrace trace3("ThreadList::Register");
   thread_list->Register(this);
   return true;
 }
@@ -799,6 +952,7 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
 template <typename PeerAction>
 Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_action) {
   Runtime* runtime = Runtime::Current();
+  ScopedTrace trace("Thread::Attach");
   if (runtime == nullptr) {
     LOG(ERROR) << "Thread attaching to non-existent runtime: " <<
         ((thread_name != nullptr) ? thread_name : "(Unnamed)");
@@ -806,6 +960,7 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, PeerAction peer_
   }
   Thread* self;
   {
+    ScopedTrace trace2("Thread birth");
     MutexLock mu(nullptr, *Locks::runtime_shutdown_lock_);
     if (runtime->IsShuttingDownLocked()) {
       LOG(WARNING) << "Thread attaching while runtime is shutting down: " <<
@@ -899,7 +1054,7 @@ Thread* Thread::Attach(const char* thread_name, bool as_daemon, jobject thread_p
     }
     self->GetJniEnv()->SetLongField(thread_peer,
                                     WellKnownClasses::java_lang_Thread_nativePeer,
-                                    reinterpret_cast<jlong>(self));
+                                    reinterpret_cast64<jlong>(self));
     return true;
   };
   return Attach(thread_name, as_daemon, set_peer_action);
@@ -941,8 +1096,9 @@ void Thread::CreatePeer(const char* name, bool as_daemon, jobject thread_group) 
 
   Thread* self = this;
   DCHECK_EQ(self, Thread::Current());
-  env->SetLongField(peer.get(), WellKnownClasses::java_lang_Thread_nativePeer,
-                    reinterpret_cast<jlong>(self));
+  env->SetLongField(peer.get(),
+                    WellKnownClasses::java_lang_Thread_nativePeer,
+                    reinterpret_cast64<jlong>(self));
 
   ScopedObjectAccess soa(self);
   StackHandleScope<1> hs(self);
@@ -1106,6 +1262,7 @@ static void GetThreadStack(pthread_t thread,
 }
 
 bool Thread::InitStackHwm() {
+  ScopedTrace trace("InitStackHwm");
   void* read_stack_base;
   size_t read_stack_size;
   size_t read_guard_size;
@@ -1228,34 +1385,6 @@ static void UnsafeLogFatalForSuspendCount(Thread* self, Thread* thread) NO_THREA
   LOG(FATAL) << ss.str();
 }
 
-void Thread::SetCanBeSuspendedByUserCode(bool can_be_suspended_by_user_code) {
-  CHECK_EQ(this, Thread::Current()) << "This function may only be called on the current thread. "
-                                    << *Thread::Current() << " tried to modify the suspendability "
-                                    << "of " << *this;
-  // NB This checks the new value! This ensures that we can only set can_be_suspended_by_user_code
-  // to false if !CanCallIntoJava().
-  DCHECK(!CanCallIntoJava() || can_be_suspended_by_user_code)
-      << "Threads able to call into java may not be marked as unsuspendable!";
-  if (can_be_suspended_by_user_code == CanBeSuspendedByUserCode()) {
-    // Don't need to do anything if nothing is changing.
-    return;
-  }
-  art::MutexLock mu(this, *Locks::user_code_suspension_lock_);
-  art::MutexLock thread_list_mu(this, *Locks::thread_suspend_count_lock_);
-
-  // We want to add the user-code suspend count if we are newly allowing user-code suspends and
-  // remove them if we are disabling them.
-  int adj = can_be_suspended_by_user_code ? GetUserCodeSuspendCount() : -GetUserCodeSuspendCount();
-  // Adjust the global suspend count appropriately. Use kInternal to not change the ForUserCode
-  // count.
-  if (adj != 0) {
-    bool suspend = ModifySuspendCountInternal(this, adj, nullptr, SuspendReason::kInternal);
-    CHECK(suspend) << this << " was unable to modify it's own suspend count!";
-  }
-  // Mark thread as accepting user-code suspensions.
-  can_be_suspended_by_user_code_ = can_be_suspended_by_user_code;
-}
-
 bool Thread::ModifySuspendCountInternal(Thread* self,
                                         int delta,
                                         AtomicInteger* suspend_barrier,
@@ -1276,17 +1405,6 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
     if (UNLIKELY(delta + tls32_.user_code_suspend_count < 0)) {
       LOG(ERROR) << "attempting to modify suspend count in an illegal way.";
       return false;
-    }
-    DCHECK(this == self || this->IsSuspended())
-        << "Only self kForUserCode suspension on an unsuspended thread is allowed: " << this;
-    if (UNLIKELY(!CanBeSuspendedByUserCode())) {
-      VLOG(threads) << this << " is being requested to suspend for user code but that is disabled "
-                    << "the thread will not actually go to sleep.";
-      // Having the user_code_suspend_count still be around is useful but we don't need to actually
-      // do anything since we aren't going to 'really' suspend. Just adjust the
-      // user_code_suspend_count and return.
-      tls32_.user_code_suspend_count += delta;
-      return true;
     }
   }
   if (UNLIKELY(delta < 0 && tls32_.suspend_count <= 0)) {
@@ -1377,7 +1495,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
         done = pending_threads->CompareAndSetWeakRelaxed(cur_val, cur_val - 1);
 #if ART_USE_FUTEXES
         if (done && (cur_val - 1) == 0) {  // Weak CAS may fail spuriously.
-          futex(pending_threads->Address(), FUTEX_WAKE, -1, nullptr, nullptr, 0);
+          futex(pending_threads->Address(), FUTEX_WAKE_PRIVATE, -1, nullptr, nullptr, 0);
         }
 #endif
       } while (!done);
@@ -1486,7 +1604,7 @@ class BarrierClosure : public Closure {
  public:
   explicit BarrierClosure(Closure* wrapped) : wrapped_(wrapped), barrier_(0) {}
 
-  void Run(Thread* self) OVERRIDE {
+  void Run(Thread* self) override {
     wrapped_->Run(self);
     barrier_.Pass(self);
   }
@@ -1770,8 +1888,9 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   // Grab the scheduler stats for this thread.
   std::string scheduler_stats;
-  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)) {
-    scheduler_stats.resize(scheduler_stats.size() - 1);  // Lose the trailing '\n'.
+  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)
+      && !scheduler_stats.empty()) {
+    scheduler_stats = android::base::Trim(scheduler_stats);  // Lose the trailing '\n'.
   } else {
     scheduler_stats = "0 0 0";
   }
@@ -1844,11 +1963,10 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
   static constexpr size_t kMaxRepetition = 3u;
 
   VisitMethodResult StartMethod(ArtMethod* m, size_t frame_nr ATTRIBUTE_UNUSED)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     m = m->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-    ObjPtr<mirror::Class> c = m->GetDeclaringClass();
-    ObjPtr<mirror::DexCache> dex_cache = c->GetDexCache();
+    ObjPtr<mirror::DexCache> dex_cache = m->GetDexCache();
     int line_number = -1;
     if (dex_cache != nullptr) {  // be tolerant of bad input
       const DexFile* dex_file = dex_cache->GetDexFile();
@@ -1883,24 +2001,24 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
     return VisitMethodResult::kContinueMethod;
   }
 
-  VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) OVERRIDE {
+  VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) override {
     return VisitMethodResult::kContinueMethod;
   }
 
   void VisitWaitingObject(mirror::Object* obj, ThreadState state ATTRIBUTE_UNUSED)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - waiting on ", ThreadList::kInvalidThreadId);
   }
   void VisitSleepingObject(mirror::Object* obj)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - sleeping on ", ThreadList::kInvalidThreadId);
   }
   void VisitBlockedOnObject(mirror::Object* obj,
                             ThreadState state,
                             uint32_t owner_tid)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const char* msg;
     switch (state) {
@@ -1919,7 +2037,7 @@ struct StackDumpVisitor : public MonitorObjectsStackVisitor {
     PrintObject(obj, msg, owner_tid);
   }
   void VisitLockedObject(mirror::Object* obj)
-      OVERRIDE
+      override
       REQUIRES_SHARED(Locks::mutator_lock_) {
     PrintObject(obj, "  - locked ", ThreadList::kInvalidThreadId);
   }
@@ -2041,13 +2159,13 @@ void Thread::DumpStack(std::ostream& os,
       DumpKernelStack(os, GetTid(), "  kernel: ", false);
       ArtMethod* method =
           GetCurrentMethod(nullptr,
-                           /*check_suspended*/ !force_dump_stack,
-                           /*abort_on_error*/ !(dump_for_abort || force_dump_stack));
+                           /*check_suspended=*/ !force_dump_stack,
+                           /*abort_on_error=*/ !(dump_for_abort || force_dump_stack));
       DumpNativeStack(os, GetTid(), backtrace_map, "  native: ", method);
     }
     DumpJavaStack(os,
-                  /*check_suspended*/ !force_dump_stack,
-                  /*dump_locks*/ !force_dump_stack);
+                  /*check_suspended=*/ !force_dump_stack,
+                  /*dump_locks=*/ !force_dump_stack);
   } else {
     os << "Not able to dump stack of thread that isn't suspended";
   }
@@ -2148,9 +2266,8 @@ void Thread::NotifyThreadGroup(ScopedObjectAccessAlreadyRunnable& soa, jobject t
 Thread::Thread(bool daemon)
     : tls32_(daemon),
       wait_monitor_(nullptr),
-      can_call_into_java_(true),
-      can_be_suspended_by_user_code_(true) {
-  wait_mutex_ = new Mutex("a thread wait mutex");
+      is_runtime_thread_(false) {
+  wait_mutex_ = new Mutex("a thread wait mutex", LockLevel::kThreadWaitLock);
   wait_cond_ = new ConditionVariable("a thread wait condition variable", *wait_mutex_);
   tlsPtr_.instrumentation_stack = new std::deque<instrumentation::InstrumentationStackFrame>;
   tlsPtr_.name = new std::string(kThreadNameDuringStartup);
@@ -2160,6 +2277,9 @@ Thread::Thread(bool daemon)
   tls32_.state_and_flags.as_struct.flags = 0;
   tls32_.state_and_flags.as_struct.state = kNative;
   tls32_.interrupted.store(false, std::memory_order_relaxed);
+  // Initialize with no permit; if the java Thread was unparked before being
+  // started, it will unpark itself before calling into java code.
+  tls32_.park_state_.store(kNoPermit, std::memory_order_relaxed);
   memset(&tlsPtr_.held_mutexes[0], 0, sizeof(tlsPtr_.held_mutexes));
   std::fill(tlsPtr_.rosalloc_runs,
             tlsPtr_.rosalloc_runs + kNumRosAllocThreadLocalSizeBracketsInThread,
@@ -2171,6 +2291,15 @@ Thread::Thread(bool daemon)
   tlsPtr_.flip_function = nullptr;
   tlsPtr_.thread_local_mark_stack = nullptr;
   tls32_.is_transitioning_to_runnable = false;
+  tls32_.use_mterp = false;
+}
+
+void Thread::NotifyInTheadList() {
+  tls32_.use_mterp = interpreter::CanUseMterp();
+}
+
+bool Thread::CanLoadClasses() const {
+  return !IsRuntimeThread() || !Runtime::Current()->IsJavaDebuggable();
 }
 
 bool Thread::IsStillStarting() const {
@@ -2216,7 +2345,7 @@ class MonitorExitVisitor : public SingleRootVisitor {
 
   // NO_THREAD_SAFETY_ANALYSIS due to MonitorExit.
   void VisitRoot(mirror::Object* entered_monitor, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE NO_THREAD_SAFETY_ANALYSIS {
+      override NO_THREAD_SAFETY_ANALYSIS {
     if (self_->HoldsLock(entered_monitor)) {
       LOG(WARNING) << "Calling MonitorExit on object "
                    << entered_monitor << " (" << entered_monitor->PrettyTypeOf() << ")"
@@ -2467,12 +2596,15 @@ bool Thread::IsInterrupted() {
 }
 
 void Thread::Interrupt(Thread* self) {
-  MutexLock mu(self, *wait_mutex_);
-  if (tls32_.interrupted.load(std::memory_order_seq_cst)) {
-    return;
+  {
+    MutexLock mu(self, *wait_mutex_);
+    if (tls32_.interrupted.load(std::memory_order_seq_cst)) {
+      return;
+    }
+    tls32_.interrupted.store(true, std::memory_order_seq_cst);
+    NotifyLocked(self);
   }
-  tls32_.interrupted.store(true, std::memory_order_seq_cst);
-  NotifyLocked(self);
+  Unpark();
 }
 
 void Thread::Notify() {
@@ -2507,7 +2639,7 @@ class FetchStackTraceVisitor : public StackVisitor {
         saved_frames_(saved_frames),
         max_saved_frames_(max_saved_frames) {}
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     // We want to skip frames up to and including the exception's constructor.
     // Note we also skip the frame if it doesn't have a method (namely the callee
     // save frame)
@@ -2595,7 +2727,7 @@ class BuildInternalStackTraceVisitor : public StackVisitor {
     self_->EndAssertNoThreadSuspension(nullptr);
   }
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (trace_ == nullptr) {
       return true;  // We're probably trying to fillInStackTrace for an OutOfMemoryError.
     }
@@ -2845,7 +2977,7 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
 
    protected:
     VisitMethodResult StartMethod(ArtMethod* m, size_t frame_nr ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       ObjPtr<mirror::StackTraceElement> obj = CreateStackTraceElement(
           soaa_, m, GetDexPc(/* abort on error */ false));
@@ -2856,7 +2988,7 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
       return VisitMethodResult::kContinueMethod;
     }
 
-    VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) OVERRIDE {
+    VisitMethodResult EndMethod(ArtMethod* m ATTRIBUTE_UNUSED) override {
       lock_objects_.push_back({});
       lock_objects_[lock_objects_.size() - 1].swap(frame_lock_objects_);
 
@@ -2866,24 +2998,24 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
     }
 
     void VisitWaitingObject(mirror::Object* obj, ThreadState state ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       wait_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitSleepingObject(mirror::Object* obj)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       wait_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitBlockedOnObject(mirror::Object* obj,
                               ThreadState state ATTRIBUTE_UNUSED,
                               uint32_t owner_tid ATTRIBUTE_UNUSED)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       block_jobject_.reset(soaa_.AddLocalReference<jobject>(obj));
     }
     void VisitLockedObject(mirror::Object* obj)
-        OVERRIDE
+        override
         REQUIRES_SHARED(Locks::mutator_lock_) {
       frame_lock_objects_.emplace_back(soaa_.Env(), soaa_.AddLocalReference<jobject>(obj));
     }
@@ -2930,8 +3062,8 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
   // Make sure the AnnotatedStackTraceElement.class is initialized, b/76208924 .
   class_linker->EnsureInitialized(soa.Self(),
                                   h_aste_class,
-                                  /* can_init_fields */ true,
-                                  /* can_init_parents */ true);
+                                  /* can_init_fields= */ true,
+                                  /* can_init_parents= */ true);
   if (soa.Self()->IsExceptionPending()) {
     // This should not fail in a healthy runtime.
     return nullptr;
@@ -3139,8 +3271,10 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
 }
 
 void Thread::ThrowOutOfMemoryError(const char* msg) {
-  LOG(WARNING) << StringPrintf("Throwing OutOfMemoryError \"%s\"%s",
-      msg, (tls32_.throwing_OutOfMemoryError ? " (recursive case)" : ""));
+  LOG(WARNING) << "Throwing OutOfMemoryError "
+               << '"' << msg << '"'
+               << " (VmSize " << GetProcessStatus("VmSize")
+               << (tls32_.throwing_OutOfMemoryError ? ", recursive case)" : ")");
   if (!tls32_.throwing_OutOfMemoryError) {
     tls32_.throwing_OutOfMemoryError = true;
     ThrowNewException("Ljava/lang/OutOfMemoryError;", msg);
@@ -3394,11 +3528,41 @@ void Thread::QuickDeliverException() {
     HandleWrapperObjPtr<mirror::Throwable> h_exception(hs.NewHandleWrapper(&exception));
     instrumentation->ExceptionThrownEvent(this, exception.Ptr());
   }
-  // Does instrumentation need to deoptimize the stack?
-  // Note: we do this *after* reporting the exception to instrumentation in case it
-  // now requires deoptimization. It may happen if a debugger is attached and requests
-  // new events (single-step, breakpoint, ...) when the exception is reported.
-  if (Dbg::IsForcedInterpreterNeededForException(this)) {
+  // Does instrumentation need to deoptimize the stack or otherwise go to interpreter for something?
+  // Note: we do this *after* reporting the exception to instrumentation in case it now requires
+  // deoptimization. It may happen if a debugger is attached and requests new events (single-step,
+  // breakpoint, ...) when the exception is reported.
+  //
+  // Note we need to check for both force_frame_pop and force_retry_instruction. The first is
+  // expected to happen fairly regularly but the second can only happen if we are using
+  // instrumentation trampolines (for example with DDMS tracing). That forces us to do deopt later
+  // and see every frame being popped. We don't need to handle it any differently.
+  ShadowFrame* cf;
+  bool force_deopt;
+  {
+    NthCallerVisitor visitor(this, 0, false);
+    visitor.WalkStack();
+    cf = visitor.GetCurrentShadowFrame();
+    if (cf == nullptr) {
+      cf = FindDebuggerShadowFrame(visitor.GetFrameId());
+    }
+    bool force_frame_pop = cf != nullptr && cf->GetForcePopFrame();
+    bool force_retry_instr = cf != nullptr && cf->GetForceRetryInstruction();
+    if (kIsDebugBuild && force_frame_pop) {
+      NthCallerVisitor penultimate_visitor(this, 1, false);
+      penultimate_visitor.WalkStack();
+      ShadowFrame* penultimate_frame = penultimate_visitor.GetCurrentShadowFrame();
+      if (penultimate_frame == nullptr) {
+        penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
+      }
+      DCHECK(penultimate_frame != nullptr &&
+             penultimate_frame->GetForceRetryInstruction())
+          << "Force pop frame without retry instruction found. penultimate frame is null: "
+          << (penultimate_frame == nullptr ? "true" : "false");
+    }
+    force_deopt = force_frame_pop || force_retry_instr;
+  }
+  if (Dbg::IsForcedInterpreterNeededForException(this) || force_deopt) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
     if (Runtime::Current()->IsAsyncDeoptimizeable(visitor.caller_pc)) {
@@ -3406,11 +3570,19 @@ void Thread::QuickDeliverException() {
       const DeoptimizationMethodType method_type = DeoptimizationMethodType::kDefault;
       // Save the exception into the deoptimization context so it can be restored
       // before entering the interpreter.
+      if (force_deopt) {
+        VLOG(deopt) << "Deopting " << cf->GetMethod()->PrettyMethod() << " for frame-pop";
+        DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
+        // Get rid of the exception since we are doing a framepop instead.
+        LOG(WARNING) << "Suppressing pending exception for retry-instruction/frame-pop: "
+                     << exception->Dump();
+        ClearException();
+      }
       PushDeoptimizationContext(
           JValue(),
-          false /* is_reference */,
-          exception,
-          false /* from_code */,
+          /* is_reference= */ false,
+          (force_deopt ? nullptr : exception),
+          /* from_code= */ false,
           method_type);
       artDeoptimize(this);
       UNREACHABLE();
@@ -3448,50 +3620,34 @@ Context* Thread::GetLongJumpContext() {
   return result;
 }
 
-// Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
-//       so we don't abort in a special situation (thinlocked monitor) when dumping the Java stack.
-struct CurrentMethodVisitor FINAL : public StackVisitor {
-  CurrentMethodVisitor(Thread* thread, Context* context, bool check_suspended, bool abort_on_error)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      : StackVisitor(thread,
-                     context,
-                     StackVisitor::StackWalkKind::kIncludeInlinedFrames,
-                     check_suspended),
-        this_object_(nullptr),
-        method_(nullptr),
-        dex_pc_(0),
-        abort_on_error_(abort_on_error) {}
-  bool VisitFrame() OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
-    ArtMethod* m = GetMethod();
-    if (m->IsRuntimeMethod()) {
-      // Continue if this is a runtime method.
-      return true;
-    }
-    if (context_ != nullptr) {
-      this_object_ = GetThisObject();
-    }
-    method_ = m;
-    dex_pc_ = GetDexPc(abort_on_error_);
-    return false;
-  }
-  ObjPtr<mirror::Object> this_object_;
-  ArtMethod* method_;
-  uint32_t dex_pc_;
-  const bool abort_on_error_;
-};
-
-ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc,
+ArtMethod* Thread::GetCurrentMethod(uint32_t* dex_pc_out,
                                     bool check_suspended,
                                     bool abort_on_error) const {
-  CurrentMethodVisitor visitor(const_cast<Thread*>(this),
-                               nullptr,
-                               check_suspended,
-                               abort_on_error);
-  visitor.WalkStack(false);
-  if (dex_pc != nullptr) {
-    *dex_pc = visitor.dex_pc_;
+  // Note: this visitor may return with a method set, but dex_pc_ being DexFile:kDexNoIndex. This is
+  //       so we don't abort in a special situation (thinlocked monitor) when dumping the Java
+  //       stack.
+  ArtMethod* method = nullptr;
+  uint32_t dex_pc = dex::kDexNoIndex;
+  StackVisitor::WalkStack(
+      [&](const StackVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtMethod* m = visitor->GetMethod();
+        if (m->IsRuntimeMethod()) {
+          // Continue if this is a runtime method.
+          return true;
+        }
+        method = m;
+        dex_pc = visitor->GetDexPc(abort_on_error);
+        return false;
+      },
+      const_cast<Thread*>(this),
+      /* context= */ nullptr,
+      StackVisitor::StackWalkKind::kIncludeInlinedFrames,
+      check_suspended);
+
+  if (dex_pc_out != nullptr) {
+    *dex_pc_out = dex_pc;
   }
-  return visitor.method_;
+  return method;
 }
 
 bool Thread::HoldsLock(ObjPtr<mirror::Object> object) const {
@@ -3512,7 +3668,7 @@ class ReferenceMapVisitor : public StackVisitor {
       : StackVisitor(thread, context, StackVisitor::StackWalkKind::kSkipInlinedFrames),
         visitor_(visitor) {}
 
-  bool VisitFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
     if (false) {
       LOG(INFO) << "Visiting stack roots in " << ArtMethod::PrettyMethod(GetMethod())
                 << StringPrintf("@ PC:%04x", GetDexPc());
@@ -3544,7 +3700,7 @@ class ReferenceMapVisitor : public StackVisitor {
       }
     }
     // Mark lock count map required for structured locking checks.
-    shadow_frame->GetLockCountData().VisitMonitors(visitor_, /* vreg */ -1, this);
+    shadow_frame->GetLockCountData().VisitMonitors(visitor_, /* vreg= */ -1, this);
   }
 
  private:
@@ -3560,7 +3716,7 @@ class ReferenceMapVisitor : public StackVisitor {
       if (kVerifyImageObjectsMarked) {
         gc::Heap* const heap = Runtime::Current()->GetHeap();
         gc::space::ContinuousSpace* space = heap->FindContinuousSpaceFromObject(klass,
-                                                                                /*fail_ok*/true);
+                                                                                /*fail_ok=*/true);
         if (space != nullptr && space->IsImageSpace()) {
           bool failed = false;
           if (!space->GetLiveBitmap()->Test(klass.Ptr())) {
@@ -3582,7 +3738,7 @@ class ReferenceMapVisitor : public StackVisitor {
         }
       }
       mirror::Object* new_ref = klass.Ptr();
-      visitor_(&new_ref, /* vreg */ -1, this);
+      visitor_(&new_ref, /* vreg= */ -1, this);
       if (new_ref != klass) {
         method->CASDeclaringClass(klass.Ptr(), new_ref->AsClass());
       }
@@ -3601,8 +3757,8 @@ class ReferenceMapVisitor : public StackVisitor {
     if (!m->IsNative() && !m->IsRuntimeMethod() && (!m->IsProxyMethod() || m->IsConstructor())) {
       const OatQuickMethodHeader* method_header = GetCurrentOatQuickMethodHeader();
       DCHECK(method_header->IsOptimized());
-      StackReference<mirror::Object>* vreg_base = reinterpret_cast<StackReference<mirror::Object>*>(
-          reinterpret_cast<uintptr_t>(cur_quick_frame));
+      StackReference<mirror::Object>* vreg_base =
+          reinterpret_cast<StackReference<mirror::Object>*>(cur_quick_frame);
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
       CodeInfo code_info(method_header, kPrecise
           ? CodeInfo::DecodeFlags::AllTables  // We will need dex register maps.
@@ -3655,7 +3811,7 @@ class ReferenceMapVisitor : public StackVisitor {
         mirror::Object* ref = ref_addr->AsMirrorPtr();
         if (ref != nullptr) {
           mirror::Object* new_ref = ref;
-          visitor_(&new_ref, /* vreg */ -1, this);
+          visitor_(&new_ref, /* vreg= */ -1, this);
           if (ref != new_ref) {
             ref_addr->Assign(new_ref);
           }
@@ -3848,16 +4004,16 @@ void Thread::VisitRoots(RootVisitor* visitor) {
 
 void Thread::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   if ((flags & VisitRootFlags::kVisitRootFlagPrecise) != 0) {
-    VisitRoots</* kPrecise */ true>(visitor);
+    VisitRoots</* kPrecise= */ true>(visitor);
   } else {
-    VisitRoots</* kPrecise */ false>(visitor);
+    VisitRoots</* kPrecise= */ false>(visitor);
   }
 }
 
 class VerifyRootVisitor : public SingleRootVisitor {
  public:
   void VisitRoot(mirror::Object* root, const RootInfo& info ATTRIBUTE_UNUSED)
-      OVERRIDE REQUIRES_SHARED(Locks::mutator_lock_) {
+      override REQUIRES_SHARED(Locks::mutator_lock_) {
     VerifyObject(root);
   }
 };
@@ -4065,7 +4221,29 @@ mirror::Object* Thread::GetPeerFromOtherThread() const {
 
 void Thread::SetReadBarrierEntrypoints() {
   // Make sure entrypoints aren't null.
-  UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, /* is_active*/ true);
+  UpdateReadBarrierEntrypoints(&tlsPtr_.quick_entrypoints, /* is_active=*/ true);
+}
+
+void Thread::ClearAllInterpreterCaches() {
+  static struct ClearInterpreterCacheClosure : Closure {
+    virtual void Run(Thread* thread) {
+      thread->GetInterpreterCache()->Clear(thread);
+    }
+  } closure;
+  Runtime::Current()->GetThreadList()->RunCheckpoint(&closure);
+}
+
+void Thread::ReleaseLongJumpContextInternal() {
+  // Each QuickExceptionHandler gets a long jump context and uses
+  // it for doing the long jump, after finding catch blocks/doing deoptimization.
+  // Both finding catch blocks and deoptimization can trigger another
+  // exception such as a result of class loading. So there can be nested
+  // cases of exception handling and multiple contexts being used.
+  // ReleaseLongJumpContext tries to save the context in tlsPtr_.long_jump_context
+  // for reuse so there is no need to always allocate a new one each time when
+  // getting a context. Since we only keep one context for reuse, delete the
+  // existing one since the passed in context is yet to be used for longjump.
+  delete tlsPtr_.long_jump_context;
 }
 
 }  // namespace art

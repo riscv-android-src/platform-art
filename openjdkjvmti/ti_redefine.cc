@@ -49,6 +49,7 @@
 #include "dex/dex_file.h"
 #include "dex/dex_file_loader.h"
 #include "dex/dex_file_types.h"
+#include "dex/signature-inl.h"
 #include "events-inl.h"
 #include "gc/allocation_listener.h"
 #include "gc/heap.h"
@@ -63,9 +64,13 @@
 #include "jni/jni_env_ext-inl.h"
 #include "jvmti_allocator.h"
 #include "linear_alloc.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_ext.h"
 #include "mirror/object.h"
+#include "mirror/object_array-alloc-inl.h"
+#include "mirror/object_array-inl.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "non_debuggable_classes.h"
 #include "object_lock.h"
@@ -152,13 +157,13 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
       const std::unordered_set<art::ArtMethod*>& obsoleted_methods,
       ObsoleteMap* obsolete_maps)
         : StackVisitor(thread,
-                       /*context*/nullptr,
+                       /*context=*/nullptr,
                        StackVisitor::StackWalkKind::kIncludeInlinedFrames),
           allocator_(allocator),
           obsoleted_methods_(obsoleted_methods),
           obsolete_maps_(obsolete_maps) { }
 
-  ~ObsoleteMethodStackVisitor() OVERRIDE {}
+  ~ObsoleteMethodStackVisitor() override {}
 
  public:
   // Returns true if we successfully installed obsolete methods on this thread, filling
@@ -177,13 +182,15 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
     visitor.WalkStack();
   }
 
-  bool VisitFrame() OVERRIDE REQUIRES(art::Locks::mutator_lock_) {
+  bool VisitFrame() override REQUIRES(art::Locks::mutator_lock_) {
     art::ScopedAssertNoThreadSuspension snts("Fixing up the stack for obsolete methods.");
     art::ArtMethod* old_method = GetMethod();
     if (obsoleted_methods_.find(old_method) != obsoleted_methods_.end()) {
       // We cannot ensure that the right dex file is used in inlined frames so we don't support
       // redefining them.
-      DCHECK(!IsInInlinedFrame()) << "Inlined frames are not supported when using redefinition";
+      DCHECK(!IsInInlinedFrame()) << "Inlined frames are not supported when using redefinition: "
+                                  << old_method->PrettyMethod() << " is inlined into "
+                                  << GetOuterMethod()->PrettyMethod();
       art::ArtMethod* new_obsolete_method = obsolete_maps_->FindObsoleteVersion(old_method);
       if (new_obsolete_method == nullptr) {
         // Create a new Obsolete Method and put it in the list.
@@ -300,24 +307,21 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
 }
 
 // Moves dex data to an anonymous, read-only mmap'd region.
-std::unique_ptr<art::MemMap> Redefiner::MoveDataToMemMap(const std::string& original_location,
-                                                         art::ArrayRef<const unsigned char> data,
-                                                         std::string* error_msg) {
-  std::unique_ptr<art::MemMap> map(art::MemMap::MapAnonymous(
+art::MemMap Redefiner::MoveDataToMemMap(const std::string& original_location,
+                                        art::ArrayRef<const unsigned char> data,
+                                        std::string* error_msg) {
+  art::MemMap map = art::MemMap::MapAnonymous(
       StringPrintf("%s-transformed", original_location.c_str()).c_str(),
-      nullptr,
       data.size(),
       PROT_READ|PROT_WRITE,
-      /*low_4gb*/false,
-      /*reuse*/false,
-      error_msg));
-  if (map == nullptr) {
-    return map;
+      /*low_4gb=*/ false,
+      error_msg);
+  if (LIKELY(map.IsValid())) {
+    memcpy(map.Begin(), data.data(), data.size());
+    // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
+    // programs from corrupting it.
+    map.Protect(PROT_READ);
   }
-  memcpy(map->Begin(), data.data(), data.size());
-  // Make the dex files mmap read only. This matches how other DexFiles are mmaped and prevents
-  // programs from corrupting it.
-  map->Protect(PROT_READ);
   return map;
 }
 
@@ -429,27 +433,26 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
   }
   JvmtiUniquePtr<char> generic_unique_ptr(MakeJvmtiUniquePtr(env, generic_ptr_unused));
   JvmtiUniquePtr<char> signature_unique_ptr(MakeJvmtiUniquePtr(env, signature_ptr));
-  std::unique_ptr<art::MemMap> map(MoveDataToMemMap(original_dex_location,
-                                                    def.GetDexData(),
-                                                    error_msg_));
+  art::MemMap map = MoveDataToMemMap(original_dex_location, def.GetDexData(), error_msg_);
   std::ostringstream os;
-  if (map.get() == nullptr) {
+  if (!map.IsValid()) {
     os << "Failed to create anonymous mmap for modified dex file of class " << def.GetName()
        << "in dex file " << original_dex_location << " because: " << *error_msg_;
     *error_msg_ = os.str();
     return ERR(OUT_OF_MEMORY);
   }
-  if (map->Size() < sizeof(art::DexFile::Header)) {
+  if (map.Size() < sizeof(art::DexFile::Header)) {
     *error_msg_ = "Could not read dex file header because dex_data was too short";
     return ERR(INVALID_CLASS_FORMAT);
   }
-  uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map->Begin())->checksum_;
+  std::string name = map.GetName();
+  uint32_t checksum = reinterpret_cast<const art::DexFile::Header*>(map.Begin())->checksum_;
   const art::ArtDexFileLoader dex_file_loader;
-  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(map->GetName(),
+  std::unique_ptr<const art::DexFile> dex_file(dex_file_loader.Open(name,
                                                                     checksum,
                                                                     std::move(map),
-                                                                    /*verify*/true,
-                                                                    /*verify_checksum*/true,
+                                                                    /*verify=*/true,
+                                                                    /*verify_checksum=*/true,
                                                                     error_msg_));
   if (dex_file.get() == nullptr) {
     os << "Unable to load modified dex file for " << def.GetName() << ": " << *error_msg_;
@@ -629,7 +632,7 @@ bool Redefiner::ClassRedefinition::CheckSameMethods() {
   // and removals. We should have already checked the fields.
   for (const art::ClassAccessor::Method& method : accessor.GetMethods()) {
     // Get the data on the method we are searching for
-    const art::DexFile::MethodId& new_method_id = dex_file_->GetMethodId(method.GetIndex());
+    const art::dex::MethodId& new_method_id = dex_file_->GetMethodId(method.GetIndex());
     const char* new_method_name = dex_file_->GetMethodName(new_method_id);
     art::Signature new_method_signature = dex_file_->GetMethodSignature(new_method_id);
     art::ArtMethod* old_method = FindMethod(h_klass, new_method_name, new_method_signature);
@@ -672,7 +675,7 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
   auto old_iter = old_fields.begin();
   for (const art::ClassAccessor::Field& new_field : new_accessor.GetFields()) {
     // Get the data on the method we are searching for
-    const art::DexFile::FieldId& new_field_id = dex_file_->GetFieldId(new_field.GetIndex());
+    const art::dex::FieldId& new_field_id = dex_file_->GetFieldId(new_field.GetIndex());
     const char* new_field_name = dex_file_->GetFieldName(new_field_id);
     const char* new_field_type = dex_file_->GetFieldTypeDescriptor(new_field_id);
 
@@ -685,7 +688,7 @@ bool Redefiner::ClassRedefinition::CheckSameFields() {
       return false;
     }
 
-    const art::DexFile::FieldId& old_field_id = old_dex_file.GetFieldId(old_iter->GetIndex());
+    const art::dex::FieldId& old_field_id = old_dex_file.GetFieldId(old_iter->GetIndex());
     const char* old_field_name = old_dex_file.GetFieldName(old_field_id);
     const char* old_field_type = old_dex_file.GetFieldTypeDescriptor(old_field_id);
 
@@ -736,7 +739,7 @@ bool Redefiner::ClassRedefinition::CheckClass() {
   }
   // Get the ClassDef from the new DexFile.
   // Since the dex file has only a single class def the index is always 0.
-  const art::DexFile::ClassDef& def = dex_file_->GetClassDef(0);
+  const art::dex::ClassDef& def = dex_file_->GetClassDef(0);
   // Get the class as it is now.
   art::Handle<art::mirror::Class> current_class(hs.NewHandle(GetMirrorClass()));
 
@@ -773,7 +776,7 @@ bool Redefiner::ClassRedefinition::CheckClass() {
       return false;
     }
   }
-  const art::DexFile::TypeList* interfaces = dex_file_->GetInterfacesList(def);
+  const art::dex::TypeList* interfaces = dex_file_->GetInterfacesList(def);
   if (interfaces == nullptr) {
     if (current_class->NumDirectInterfaces() != 0) {
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_HIERARCHY_CHANGED), "Interfaces added");
@@ -781,7 +784,7 @@ bool Redefiner::ClassRedefinition::CheckClass() {
     }
   } else {
     DCHECK(!current_class->IsProxyClass());
-    const art::DexFile::TypeList* current_interfaces = current_class->GetInterfaceTypeList();
+    const art::dex::TypeList* current_interfaces = current_class->GetInterfaceTypeList();
     if (current_interfaces == nullptr || current_interfaces->Size() != interfaces->Size()) {
       RecordFailure(ERR(UNSUPPORTED_REDEFINITION_HIERARCHY_CHANGED), "Interfaces added or removed");
       return false;
@@ -1120,11 +1123,12 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
                                                  dex_file_.get(),
                                                  hs.NewHandle(iter.GetNewDexCache()),
                                                  hs.NewHandle(GetClassLoader()),
-                                                 dex_file_->GetClassDef(0), /*class_def*/
-                                                 nullptr, /*compiler_callbacks*/
-                                                 true, /*allow_soft_failures*/
-                                                 /*log_level*/
+                                                 /*class_def=*/ dex_file_->GetClassDef(0),
+                                                 /*callbacks=*/ nullptr,
+                                                 /*allow_soft_failures=*/ true,
+                                                 /*log_level=*/
                                                  art::verifier::HardFailLogMode::kLogWarning,
+                                                 art::Runtime::Current()->GetTargetSdkVersion(),
                                                  &error);
   switch (failure) {
     case art::verifier::FailureKind::kNoFailure:
@@ -1290,7 +1294,7 @@ bool Redefiner::FinishAllRemainingAllocations(RedefinitionDataHolder& holder) {
 }
 
 void Redefiner::ClassRedefinition::ReleaseDexFile() {
-  dex_file_.release();
+  dex_file_.release();  // NOLINT b/117926937
 }
 
 void Redefiner::ReleaseAllDexFiles() {
@@ -1369,7 +1373,7 @@ jvmtiError Redefiner::Run() {
   // TODO We might want to give this its own suspended state!
   // TODO This isn't right. We need to change state without any chance of suspend ideally!
   art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
-  art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend*/true);
+  art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend=*/true);
   for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
     art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
     ClassRedefinition& redef = data.GetRedefinition();
@@ -1393,14 +1397,14 @@ jvmtiError Redefiner::Run() {
 }
 
 void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class> mclass,
-                                                 const art::DexFile::ClassDef& class_def) {
+                                                 const art::dex::ClassDef& class_def) {
   art::ClassLinker* linker = driver_->runtime_->GetClassLinker();
   art::PointerSize image_pointer_size = linker->GetImagePointerSize();
-  const art::DexFile::TypeId& declaring_class_id = dex_file_->GetTypeId(class_def.class_idx_);
+  const art::dex::TypeId& declaring_class_id = dex_file_->GetTypeId(class_def.class_idx_);
   const art::DexFile& old_dex_file = mclass->GetDexFile();
   // Update methods.
   for (art::ArtMethod& method : mclass->GetDeclaredMethods(image_pointer_size)) {
-    const art::DexFile::StringId* new_name_id = dex_file_->FindStringId(method.GetName());
+    const art::dex::StringId* new_name_id = dex_file_->FindStringId(method.GetName());
     art::dex::TypeIndex method_return_idx =
         dex_file_->GetIndexForTypeId(*dex_file_->FindTypeId(method.GetReturnTypeDescriptor()));
     const auto* old_type_list = method.GetParameterTypeList();
@@ -1413,12 +1417,11 @@ void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class>
                       old_dex_file.GetTypeId(
                           old_type_list->GetTypeItem(i).type_idx_)))));
     }
-    const art::DexFile::ProtoId* proto_id = dex_file_->FindProtoId(method_return_idx,
-                                                                   new_type_list);
+    const art::dex::ProtoId* proto_id = dex_file_->FindProtoId(method_return_idx, new_type_list);
     CHECK(proto_id != nullptr || old_type_list == nullptr);
-    const art::DexFile::MethodId* method_id = dex_file_->FindMethodId(declaring_class_id,
-                                                                      *new_name_id,
-                                                                      *proto_id);
+    const art::dex::MethodId* method_id = dex_file_->FindMethodId(declaring_class_id,
+                                                                  *new_name_id,
+                                                                  *proto_id);
     CHECK(method_id != nullptr);
     uint32_t dex_method_idx = dex_file_->GetIndexForMethodId(*method_id);
     method.SetDexMethodIndex(dex_method_idx);
@@ -1434,12 +1437,12 @@ void Redefiner::ClassRedefinition::UpdateFields(art::ObjPtr<art::mirror::Class> 
   for (auto fields_iter : {mclass->GetIFields(), mclass->GetSFields()}) {
     for (art::ArtField& field : fields_iter) {
       std::string declaring_class_name;
-      const art::DexFile::TypeId* new_declaring_id =
+      const art::dex::TypeId* new_declaring_id =
           dex_file_->FindTypeId(field.GetDeclaringClass()->GetDescriptor(&declaring_class_name));
-      const art::DexFile::StringId* new_name_id = dex_file_->FindStringId(field.GetName());
-      const art::DexFile::TypeId* new_type_id = dex_file_->FindTypeId(field.GetTypeDescriptor());
+      const art::dex::StringId* new_name_id = dex_file_->FindStringId(field.GetName());
+      const art::dex::TypeId* new_type_id = dex_file_->FindTypeId(field.GetTypeDescriptor());
       CHECK(new_name_id != nullptr && new_type_id != nullptr && new_declaring_id != nullptr);
-      const art::DexFile::FieldId* new_field_id =
+      const art::dex::FieldId* new_field_id =
           dex_file_->FindFieldId(*new_declaring_id, *new_name_id, *new_type_id);
       CHECK(new_field_id != nullptr);
       // We only need to update the index since the other data in the ArtField cannot be updated.
@@ -1454,9 +1457,22 @@ void Redefiner::ClassRedefinition::UpdateClass(
     art::ObjPtr<art::mirror::DexCache> new_dex_cache,
     art::ObjPtr<art::mirror::Object> original_dex_file) {
   DCHECK_EQ(dex_file_->NumClassDefs(), 1u);
-  const art::DexFile::ClassDef& class_def = dex_file_->GetClassDef(0);
+  const art::dex::ClassDef& class_def = dex_file_->GetClassDef(0);
   UpdateMethods(mclass, class_def);
   UpdateFields(mclass);
+
+  art::ObjPtr<art::mirror::ClassExt> ext(mclass->GetExtData());
+  CHECK(!ext.IsNull());
+  ext->SetOriginalDexFile(original_dex_file);
+
+  // If this is the first time the class is being redefined, store
+  // the native DexFile pointer and initial ClassDef index in ClassExt.
+  // This preserves the pointer for hiddenapi access checks which need
+  // to read access flags from the initial DexFile.
+  if (ext->GetPreRedefineDexFile() == nullptr) {
+    ext->SetPreRedefineDexFile(&mclass->GetDexFile());
+    ext->SetPreRedefineClassDefIndex(mclass->GetDexClassDefIndex());
+  }
 
   // Update the class fields.
   // Need to update class last since the ArtMethod gets its DexFile from the class (which is needed
@@ -1464,9 +1480,6 @@ void Redefiner::ClassRedefinition::UpdateClass(
   mclass->SetDexCache(new_dex_cache.Ptr());
   mclass->SetDexClassDefIndex(dex_file_->GetIndexForClassDef(class_def));
   mclass->SetDexTypeIndex(dex_file_->GetIndexForTypeId(*dex_file_->FindTypeId(class_sig_.c_str())));
-  art::ObjPtr<art::mirror::ClassExt> ext(mclass->GetExtData());
-  CHECK(!ext.IsNull());
-  ext->SetOriginalDexFile(original_dex_file);
 
   // Notify the jit that all the methods in this class were redefined. Need to do this last since
   // the jit relies on the dex_file_ being correct (for native methods at least) to find the method

@@ -59,8 +59,7 @@ art_cc_defaults {
     shared_libs: [
         "libartd",
         "libartd-disassembler",
-        "libvixld-arm",
-        "libvixld-arm64",
+        "libvixld",
         "libart-gtest",
         "libdexfiled",
         "libprofiled",
@@ -291,6 +290,8 @@ art_cc_defaults {
         "1946-list-descriptors/descriptors.cc",
         "1950-unprepared-transform/unprepared_transform.cc",
         "1951-monitor-enter-no-suspend/raw_monitor.cc",
+        "1953-pop-frame/pop_frame.cc",
+        "1957-error-ext/lasterror.cc",
     ],
     // Use NDK-compatible headers for ctstiagent.
     header_libs: [
@@ -320,6 +321,8 @@ art_cc_defaults {
         "983-source-transform-verify/source_transform_art.cc",
         "1940-ddms-ext/ddm_ext.cc",
         "1944-sudden-exit/sudden_exit.cc",
+        // "1952-pop-frame-jit/pop_frame.cc",
+        "1959-redefine-object-instrument/fake_redef_object.cc",
     ],
     static_libs: [
         "libz",
@@ -417,10 +420,11 @@ art_cc_test_library {
 
 art_cc_defaults {
     name: "libtistress-static-defaults",
-    defaults: ["libtistress-srcs"],
-    static_libs: art_static_dependencies + [
-        "slicer",
+    defaults: [
+        "libtistress-srcs",
+        "libart_static_defaults",
     ],
+    static_libs: ["slicer"],
 }
 
 art_cc_test_library {
@@ -453,7 +457,6 @@ cc_defaults {
         "004-UnsafeTest/unsafe_test.cc",
         "044-proxy/native_proxy.cc",
         "051-thread/thread_test.cc",
-        "117-nopatchoat/nopatchoat.cc",
         "1337-gc-coverage/gc_coverage.cc",
         "136-daemon-jni-shutdown/daemon_jni_shutdown.cc",
         "137-cfi/cfi.cc",
@@ -492,6 +495,7 @@ cc_defaults {
         "708-jit-cache-churn/jit.cc",
         "800-smali/jni.cc",
         "909-attach-agent/disallow_debugging.cc",
+        "1001-app-image-regions/app_image_regions.cc",
         "1947-breakpoint-redefine-deopt/check_deopt.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",

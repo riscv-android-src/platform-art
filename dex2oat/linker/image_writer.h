@@ -26,6 +26,7 @@
 #include <set>
 #include <stack>
 #include <string>
+#include <unordered_map>
 
 #include "art_method.h"
 #include "base/bit_utils.h"
@@ -73,17 +74,32 @@ static constexpr int kInvalidFd = -1;
 namespace linker {
 
 // Write a Space built during compilation for use during execution.
-class ImageWriter FINAL {
+class ImageWriter final {
  public:
   ImageWriter(const CompilerOptions& compiler_options,
               uintptr_t image_begin,
-              bool compile_pic,
-              bool compile_app_image,
               ImageHeader::StorageMode image_storage_mode,
-              const std::vector<const char*>& oat_filenames,
+              const std::vector<std::string>& oat_filenames,
               const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
+              jobject class_loader,
               const HashSet<std::string>* dirty_image_objects);
 
+  /*
+   * Modifies the heap and collects information about objects and code so that
+   * they can be written to the boot or app image later.
+   *
+   * First, unneeded classes are removed from the managed heap.  Next, we
+   * remove cached values and calculate necessary metadata for later in the
+   * process. Optionally some debugging information is collected and used to
+   * verify the state of the heap at this point.  Next, metadata from earlier
+   * is used to calculate offsets of references to strings to speed up string
+   * interning when the image is loaded.  Lastly, we allocate enough memory to
+   * fit all image data minus the bitmap and relocation sections.
+   *
+   * This function should only be called when all objects to be included in the
+   * image have been initialized and all native methods have been generated.  In
+   * addition, no other thread should be modifying the heap.
+   */
   bool PrepareImageAddressSpace(TimingLogger* timings);
 
   bool IsImageAddressSpaceReady() const {
@@ -96,10 +112,7 @@ class ImageWriter FINAL {
     return true;
   }
 
-  ObjPtr<mirror::ClassLoader> GetClassLoader() {
-    CHECK_EQ(class_loaders_.size(), compile_app_image_ ? 1u : 0u);
-    return compile_app_image_ ? *class_loaders_.begin() : nullptr;
-  }
+  ObjPtr<mirror::ClassLoader> GetAppClassLoader() const REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <typename T>
   T* GetImageAddress(T* object) const REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -129,8 +142,8 @@ class ImageWriter FINAL {
   // If oat_fd is not kInvalidFd, then we use that for the oat file. Otherwise we open
   // the names in oat_filenames.
   bool Write(int image_fd,
-             const std::vector<const char*>& image_filenames,
-             const std::vector<const char*>& oat_filenames)
+             const std::vector<std::string>& image_filenames,
+             const std::vector<std::string>& oat_filenames)
       REQUIRES(!Locks::mutator_lock_);
 
   uintptr_t GetOatDataBegin(size_t oat_index) {
@@ -193,6 +206,8 @@ class ImageWriter FINAL {
     kIMTConflictTable,
     // Runtime methods (always clean, do not have a length prefix array).
     kRuntimeMethod,
+    // Metadata bin for data that is temporary during image lifetime.
+    kMetadata,
     // Dex cache arrays have a special slot for PC-relative addressing. Since they are
     // huge, and as such their dirtiness is not important for the clean/dirty separation,
     // we arbitrarily keep them at the end of the native data.
@@ -210,6 +225,7 @@ class ImageWriter FINAL {
     kArtMethodArrayClean,
     kArtMethodDirty,
     kArtMethodArrayDirty,
+    kGcRootPointer,
     kRuntimeMethod,
     kIMTable,
     kIMTConflictTable,
@@ -263,16 +279,24 @@ class ImageWriter FINAL {
 
    private:
     // Must be the same size as LockWord, any larger and we would truncate the data.
-    const uint32_t lockword_;
+    uint32_t lockword_;
   };
 
   struct ImageInfo {
     ImageInfo();
     ImageInfo(ImageInfo&&) = default;
 
-    // Create the image sections into the out sections variable, returns the size of the image
-    // excluding the bitmap.
-    size_t CreateImageSections(ImageSection* out_sections) const;
+    /*
+     * Creates ImageSection objects that describe most of the sections of a
+     * boot or AppImage. The following sections are not included:
+     *   - ImageHeader::kSectionImageBitmap
+     *
+     * In addition, the ImageHeader is not covered here.
+     *
+     * This function will return the total size of the covered sections as well
+     * as a vector containing the individual ImageSection objects.
+     */
+    std::pair<size_t, std::vector<ImageSection>> CreateImageSections() const;
 
     size_t GetStubOffset(StubType stub_type) const {
       DCHECK_LT(static_cast<size_t>(stub_type), kNumberOfStubTypes);
@@ -307,7 +331,7 @@ class ImageWriter FINAL {
     // Calculate the sum total of the bin slot sizes in [0, up_to). Defaults to all bins.
     size_t GetBinSizeSum(Bin up_to) const;
 
-    std::unique_ptr<MemMap> image_;  // Memory mapped for generating the image.
+    MemMap image_;  // Memory mapped for generating the image.
 
     // Target begin of this image. Notes: It is not valid to write here, this is the address
     // of the target image, not necessarily where image_ is mapped. The address is only valid
@@ -364,17 +388,18 @@ class ImageWriter FINAL {
     // Number of pointer fixup bytes.
     size_t pointer_fixup_bytes_ = 0;
 
+    // Number of offsets to string references that will be written to the
+    // StringFieldOffsets section.
+    size_t num_string_references_ = 0;
+
     // Intern table associated with this image for serialization.
     std::unique_ptr<InternTable> intern_table_;
 
     // Class table associated with this image for serialization.
     std::unique_ptr<ClassTable> class_table_;
 
-    // Relocations of references/pointers. For boot image, it contains one bit
-    // for each location that can be relocated. For app image, it contains twice
-    // that many bits, first half contains relocations within this image and the
-    // second half contains relocations for references to the boot image.
-    std::vector<uint8_t> relocation_bitmap_;
+    // Padding objects to ensure region alignment (if required).
+    std::vector<size_t> padding_object_offsets_;
   };
 
   // We use the lock word to store the offset of the object in the image.
@@ -408,7 +433,7 @@ class ImageWriter FINAL {
     size_t offset = GetImageOffset(object);
     size_t oat_index = GetOatIndex(object);
     const ImageInfo& image_info = GetImageInfo(oat_index);
-    uint8_t* dst = image_info.image_->Begin() + offset;
+    uint8_t* dst = image_info.image_.Begin() + offset;
     return reinterpret_cast<mirror::Object*>(dst);
   }
 
@@ -429,19 +454,24 @@ class ImageWriter FINAL {
   // Debug aid that list of requested image classes.
   void DumpImageClasses();
 
-  // Preinitializes some otherwise lazy fields (such as Class name) to avoid runtime image dirtying.
-  void ComputeLazyFieldsForImageClasses()
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Visit all class loaders.
   void VisitClassLoaders(ClassLoaderVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Remove unwanted classes from various roots.
   void PruneNonImageClasses() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Remove unwanted classes from the DexCache roots and preload deterministic DexCache contents.
-  void PruneAndPreloadDexCache(ObjPtr<mirror::DexCache> dex_cache,
-                               ObjPtr<mirror::ClassLoader> class_loader)
+  // Remove unwanted classes from the DexCache roots.
+  void PruneDexCache(ObjPtr<mirror::DexCache> dex_cache, ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::classlinker_classes_lock_);
+
+  // Preload deterministic DexCache contents.
+  void PreloadDexCache(ObjPtr<mirror::DexCache> dex_cache, ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::classlinker_classes_lock_);
+
+  // Find dex caches for pruning or preloading.
+  std::vector<ObjPtr<mirror::DexCache>> FindDexCaches(Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::classlinker_classes_lock_);
 
@@ -472,51 +502,55 @@ class ImageWriter FINAL {
   void CopyAndFixupObject(mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupMethod(ArtMethod* orig, ArtMethod* copy, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupImTable(ImTable* orig, ImTable* copy, size_t oat_index)
+  void CopyAndFixupImTable(ImTable* orig, ImTable* copy)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupImtConflictTable(ImtConflictTable* orig,
-                                    ImtConflictTable* copy,
-                                    size_t oat_index)
+  void CopyAndFixupImtConflictTable(ImtConflictTable* orig, ImtConflictTable* copy)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  template <bool kCheckNotNull = true>
-  void RecordImageRelocation(const void* dest, size_t oat_index, bool app_to_boot_image = false);
-  void FixupClass(mirror::Class* orig, mirror::Class* copy, size_t oat_index)
+
+  /*
+   * Copies metadata from the heap into a buffer that will be compressed and
+   * written to the image.
+   *
+   * This function copies the string offset metadata from a local vector to an
+   * offset inside the image_ field of an ImageInfo struct.  The offset into the
+   * memory pointed to by the image_ field is obtained from the ImageSection
+   * object for the String Offsets section.
+   *
+   * All data for the image, besides the object bitmap and the relocation data,
+   * will also be copied into the memory region pointed to by image_.
+   */
+  void CopyMetadata();
+
+  void FixupClass(mirror::Class* orig, mirror::Class* copy)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void FixupObject(mirror::Object* orig, mirror::Object* copy, size_t oat_index)
+  void FixupObject(mirror::Object* orig, mirror::Object* copy)
       REQUIRES_SHARED(Locks::mutator_lock_);
   template <typename T>
   void FixupDexCacheArrayEntry(std::atomic<mirror::DexCachePair<T>>* orig_array,
                                std::atomic<mirror::DexCachePair<T>>* new_array,
-                               uint32_t array_index,
-                               size_t oat_index)
+                               uint32_t array_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
   template <typename T>
   void FixupDexCacheArrayEntry(std::atomic<mirror::NativeDexCachePair<T>>* orig_array,
                                std::atomic<mirror::NativeDexCachePair<T>>* new_array,
-                               uint32_t array_index,
-                               size_t oat_index)
+                               uint32_t array_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void FixupDexCacheArrayEntry(GcRoot<mirror::CallSite>* orig_array,
                                GcRoot<mirror::CallSite>* new_array,
-                               uint32_t array_index,
-                               size_t oat_index)
+                               uint32_t array_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
   template <typename EntryType>
   void FixupDexCacheArray(mirror::DexCache* orig_dex_cache,
                           mirror::DexCache* copy_dex_cache,
-                          size_t oat_index,
                           MemberOffset array_offset,
                           uint32_t size)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void FixupDexCache(mirror::DexCache* orig_dex_cache,
-                     mirror::DexCache* copy_dex_cache,
-                     size_t oat_index)
+                     mirror::DexCache* copy_dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void FixupPointerArray(mirror::Object* dst,
                          mirror::PointerArray* arr,
-                         mirror::Class* klass,
-                         Bin array_type,
-                         size_t oat_index)
+                         Bin array_type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get quick code for non-resolution/imt_conflict/abstract method.
@@ -558,6 +592,63 @@ class ImageWriter FINAL {
                                   std::unordered_set<mirror::Object*>* visited)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  /*
+   * This type holds the information necessary for calculating
+   * AppImageReferenceOffsetInfo values after the object relocations have been
+   * computed.
+   *
+   * The first element will always be a pointer to a managed object.  If the
+   * pointer has been tagged (testable with HasDexCacheNativeRefTag) it
+   * indicates that the referenced object is a DexCache object that requires
+   * special handling during loading and the second element has no meaningful
+   * value.  If the pointer isn't tagged then the second element is an
+   * object-relative offset to a field containing a string reference.
+   *
+   * Note that it is possible for an untagged DexCache pointer to occur in the
+   * first position if it has a managed reference that needs to be updated.
+   *
+   * TODO (chriswailes): Add a note indicating the source line where we ensure
+   * that no moving garbage collection will occur.
+   *
+   * TODO (chriswailes): Replace with std::variant once ART is building with
+   * C++17
+   */
+  typedef std::pair<uintptr_t, uint32_t> HeapReferencePointerInfo;
+
+  /*
+   * Collects the info necessary for calculating image offsets to string field
+   * later.
+   *
+   * This function is used when constructing AppImages.  Because AppImages
+   * contain strings that must be interned we need to visit references to these
+   * strings when the AppImage is loaded and either insert them into the
+   * runtime intern table or replace the existing reference with a reference
+   * to the interned strings.
+   *
+   * To speed up the interning of strings when the AppImage is loaded we include
+   * a list of offsets to string references in the AppImage.  These are then
+   * iterated over at load time and fixed up.
+   *
+   * To record the offsets we first have to count the number of string
+   * references that will be included in the AppImage.  This allows use to both
+   * allocate enough memory for soring the offsets and correctly calculate the
+   * offsets of various objects into the image.  Once the image offset
+   * calculations are done for managed objects the reference object/offset pairs
+   * are translated to image offsets.  The CopyMetadata function then copies
+   * these offsets into the image.
+   */
+  std::vector<HeapReferencePointerInfo> CollectStringReferenceInfo() const
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  /*
+   * Ensures that assumptions about native GC roots and AppImages hold.
+   *
+   * This function verifies the following condition(s):
+   *   - Native references to managed strings are only reachable through DexCache
+   *     objects
+   */
+  void VerifyNativeGCRootInvariants() const REQUIRES_SHARED(Locks::mutator_lock_);
+
   bool IsMultiImage() const {
     return image_infos_.size() > 1;
   }
@@ -586,7 +677,12 @@ class ImageWriter FINAL {
   template <typename T>
   T* NativeCopyLocation(T* obj) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Return true of obj is inside of the boot image space. This may only return true if we are
+  // Return true if `obj` belongs to the image we're writing.
+  // For a boot image, this is true for all objects.
+  // For an app image, boot image objects and boot class path dex caches are excluded.
+  bool IsImageObject(ObjPtr<mirror::Object> obj) const REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Return true if `obj` is inside of the boot image space. This may only return true if we are
   // compiling an app image.
   bool IsInBootImage(const void* obj) const;
 
@@ -618,18 +714,30 @@ class ImageWriter FINAL {
 
   // Copy a reference and record image relocation.
   template <typename DestType>
-  void CopyAndFixupReference(DestType* dest, ObjPtr<mirror::Object> src, size_t oat_index)
+  void CopyAndFixupReference(DestType* dest, ObjPtr<mirror::Object> src)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Copy a native pointer and record image relocation.
-  void CopyAndFixupPointer(void** target, void* value, size_t oat_index, PointerSize pointer_size)
+  void CopyAndFixupPointer(void** target, void* value, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupPointer(void** target, void* value, size_t oat_index)
+  void CopyAndFixupPointer(void** target, void* value)
       REQUIRES_SHARED(Locks::mutator_lock_);
   void CopyAndFixupPointer(
-      void* object, MemberOffset offset, void* value, size_t oat_index, PointerSize pointer_size)
+      void* object, MemberOffset offset, void* value, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void CopyAndFixupPointer(void* object, MemberOffset offset, void* value, size_t oat_index)
+  void CopyAndFixupPointer(void* object, MemberOffset offset, void* value)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  /*
+   * Tests an object to see if it will be contained in an AppImage.
+   *
+   * An object reference is considered to be a AppImage String reference iff:
+   *   - It isn't null
+   *   - The referred-object isn't in the boot image
+   *   - The referred-object is a Java String
+   */
+  ALWAYS_INLINE
+  bool IsValidAppImageStringReference(ObjPtr<mirror::Object> referred_obj) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   const CompilerOptions& compiler_options_;
@@ -650,10 +758,6 @@ class ImageWriter FINAL {
 
   // Oat index map for objects.
   std::unordered_map<mirror::Object*, uint32_t> oat_index_map_;
-
-  // Boolean flags.
-  const bool compile_pic_;
-  const bool compile_app_image_;
 
   // Size of pointers on the target architecture.
   PointerSize target_ptr_size_;
@@ -676,19 +780,20 @@ class ImageWriter FINAL {
   // Prune class memoization table to speed up ContainsBootClassLoaderNonImageClass.
   std::unordered_map<mirror::Class*, bool> prune_class_memo_;
 
-  // Class loaders with a class table to write out. There should only be one class loader because
-  // dex2oat loads the dex files to be compiled into a single class loader. For the boot image,
-  // null is a valid entry.
-  std::unordered_set<mirror::ClassLoader*> class_loaders_;
+  // The application class loader. Null for boot image.
+  jobject app_class_loader_;
 
   // Boot image live objects, null for app image.
   mirror::ObjectArray<mirror::Object>* boot_image_live_objects_;
+
+  // Offsets into the image that indicate where string references are recorded.
+  std::vector<AppImageReferenceOffsetInfo> string_reference_offsets_;
 
   // Which mode the image is stored as, see image.h
   const ImageHeader::StorageMode image_storage_mode_;
 
   // The file names of oat files.
-  const std::vector<const char*>& oat_filenames_;
+  const std::vector<std::string>& oat_filenames_;
 
   // Map of dex files to the indexes of oat files that they were compiled into.
   const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map_;
@@ -696,7 +801,13 @@ class ImageWriter FINAL {
   // Set of objects known to be dirty in the image. Can be nullptr if there are none.
   const HashSet<std::string>* dirty_image_objects_;
 
-  class ComputeLazyFieldsForClassesVisitor;
+  // Objects are guaranteed to not cross the region size boundary.
+  size_t region_size_ = 0u;
+
+  // Region alignment bytes wasted.
+  size_t region_alignment_wasted_ = 0u;
+
+  class ImageFileGuard;
   class FixupClassVisitor;
   class FixupRootVisitor;
   class FixupVisitor;
@@ -704,9 +815,23 @@ class ImageWriter FINAL {
   class NativeLocationVisitor;
   class PruneClassesVisitor;
   class PruneClassLoaderClassesVisitor;
+  class PruneObjectReferenceVisitor;
   class RegisterBootClassPathClassesVisitor;
   class VisitReferencesVisitor;
-  class PruneObjectReferenceVisitor;
+
+  /*
+   * A visitor class for extracting object/offset pairs.
+   *
+   * This visitor walks the fields of an object and extracts object/offset pairs
+   * that are later translated to image offsets.  This visitor is only
+   * responsible for extracting info for Java references.  Native references to
+   * Java strings are handled in the wrapper function
+   * CollectStringReferenceInfo().
+   */
+  class CollectStringReferenceVisitor;
+
+  // A visitor used by the VerifyNativeGCRootInvariants() function.
+  class NativeGCRootInvariantVisitor;
 
   DISALLOW_COPY_AND_ASSIGN(ImageWriter);
 };

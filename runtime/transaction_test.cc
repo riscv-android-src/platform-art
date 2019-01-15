@@ -21,7 +21,8 @@
 #include "class_linker-inl.h"
 #include "common_runtime_test.h"
 #include "dex/dex_file.h"
-#include "mirror/array-inl.h"
+#include "mirror/array-alloc-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -488,7 +489,7 @@ TEST_F(TransactionTest, ResolveString) {
 
   // Go search the dex file to find the string id of our string.
   static const char* kResolvedString = "ResolvedString";
-  const DexFile::StringId* string_id = dex_file->FindStringId(kResolvedString);
+  const dex::StringId* string_id = dex_file->FindStringId(kResolvedString);
   ASSERT_TRUE(string_id != nullptr);
   dex::StringIndex string_idx = dex_file->GetIndexForStringId(*string_id);
   ASSERT_TRUE(string_idx.IsValid());

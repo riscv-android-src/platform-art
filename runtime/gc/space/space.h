@@ -21,12 +21,12 @@
 #include <string>
 
 #include "base/atomic.h"
-#include "base/globals.h"
+#include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
-#include "base/mutex.h"
 #include "gc/accounting/space_bitmap.h"
 #include "gc/collector/object_byte_pair.h"
+#include "runtime_globals.h"
 
 namespace art {
 namespace mirror {
@@ -352,7 +352,7 @@ class DiscontinuousSpace : public Space {
     return mark_bitmap_.get();
   }
 
-  virtual bool IsDiscontinuousSpace() const OVERRIDE {
+  bool IsDiscontinuousSpace() const override {
     return true;
   }
 
@@ -377,30 +377,30 @@ class MemMapSpace : public ContinuousSpace {
   }
 
   MemMap* GetMemMap() {
-    return mem_map_.get();
+    return &mem_map_;
   }
 
   const MemMap* GetMemMap() const {
-    return mem_map_.get();
+    return &mem_map_;
   }
 
-  MemMap* ReleaseMemMap() {
-    return mem_map_.release();
+  MemMap ReleaseMemMap() {
+    return std::move(mem_map_);
   }
 
  protected:
   MemMapSpace(const std::string& name,
-              MemMap* mem_map,
+              MemMap&& mem_map,
               uint8_t* begin,
               uint8_t* end,
               uint8_t* limit,
               GcRetentionPolicy gc_retention_policy)
       : ContinuousSpace(name, gc_retention_policy, begin, end, limit),
-        mem_map_(mem_map) {
+        mem_map_(std::move(mem_map)) {
   }
 
   // Underlying storage of the space
-  std::unique_ptr<MemMap> mem_map_;
+  MemMap mem_map_;
 
  private:
   DISALLOW_IMPLICIT_CONSTRUCTORS(MemMapSpace);
@@ -409,14 +409,14 @@ class MemMapSpace : public ContinuousSpace {
 // Used by the heap compaction interface to enable copying from one type of alloc space to another.
 class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
  public:
-  bool IsAllocSpace() const OVERRIDE {
+  bool IsAllocSpace() const override {
     return true;
   }
-  AllocSpace* AsAllocSpace() OVERRIDE {
+  AllocSpace* AsAllocSpace() override {
     return this;
   }
 
-  bool IsContinuousMemMapAllocSpace() const OVERRIDE {
+  bool IsContinuousMemMapAllocSpace() const override {
     return true;
   }
   ContinuousMemMapAllocSpace* AsContinuousMemMapAllocSpace() {
@@ -435,11 +435,11 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   // Clear the space back to an empty space.
   virtual void Clear() = 0;
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
     return live_bitmap_.get();
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const OVERRIDE {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return mark_bitmap_.get();
   }
 
@@ -451,9 +451,13 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   std::unique_ptr<accounting::ContinuousSpaceBitmap> mark_bitmap_;
   std::unique_ptr<accounting::ContinuousSpaceBitmap> temp_bitmap_;
 
-  ContinuousMemMapAllocSpace(const std::string& name, MemMap* mem_map, uint8_t* begin,
-                             uint8_t* end, uint8_t* limit, GcRetentionPolicy gc_retention_policy)
-      : MemMapSpace(name, mem_map, begin, end, limit, gc_retention_policy) {
+  ContinuousMemMapAllocSpace(const std::string& name,
+                             MemMap&& mem_map,
+                             uint8_t* begin,
+                             uint8_t* end,
+                             uint8_t* limit,
+                             GcRetentionPolicy gc_retention_policy)
+      : MemMapSpace(name, std::move(mem_map), begin, end, limit, gc_retention_policy) {
   }
 
  private:

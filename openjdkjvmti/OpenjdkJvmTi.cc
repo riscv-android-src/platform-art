@@ -29,6 +29,7 @@
  * questions.
  */
 
+#include <memory>
 #include <string>
 #include <type_traits>
 #include <vector>
@@ -58,6 +59,7 @@
 #include "ti_field.h"
 #include "ti_heap.h"
 #include "ti_jni.h"
+#include "ti_logging.h"
 #include "ti_method.h"
 #include "ti_monitor.h"
 #include "ti_object.h"
@@ -313,10 +315,10 @@ class JvmtiFunctions {
     return StackUtil::GetFrameCount(env, thread, count_ptr);
   }
 
-  static jvmtiError PopFrame(jvmtiEnv* env, jthread thread ATTRIBUTE_UNUSED) {
+  static jvmtiError PopFrame(jvmtiEnv* env, jthread thread) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_pop_frame);
-    return ERR(NOT_IMPLEMENTED);
+    return StackUtil::PopFrame(env, thread);
   }
 
   static jvmtiError GetFrameLocation(jvmtiEnv* env,
@@ -506,13 +508,15 @@ class JvmtiFunctions {
 
   static jvmtiError IterateOverInstancesOfClass(
       jvmtiEnv* env,
-      jclass klass ATTRIBUTE_UNUSED,
-      jvmtiHeapObjectFilter object_filter ATTRIBUTE_UNUSED,
-      jvmtiHeapObjectCallback heap_object_callback ATTRIBUTE_UNUSED,
-      const void* user_data ATTRIBUTE_UNUSED) {
+      jclass klass,
+      jvmtiHeapObjectFilter object_filter,
+      jvmtiHeapObjectCallback heap_object_callback,
+      const void* user_data) {
     ENSURE_VALID_ENV(env);
     ENSURE_HAS_CAP(env, can_tag_objects);
-    return ERR(NOT_IMPLEMENTED);
+    HeapUtil heap_util(ArtJvmTiEnv::AsArtJvmTiEnv(env)->object_tag_table.get());
+    return heap_util.IterateOverInstancesOfClass(
+        env, klass, object_filter, heap_object_callback, user_data);
   }
 
   static jvmtiError GetLocalObject(jvmtiEnv* env,
@@ -785,7 +789,7 @@ class JvmtiFunctions {
                                                      classes,
                                                      &error_msg);
     if (res != OK) {
-      LOG(WARNING) << "FAILURE TO RETRANFORM " << error_msg;
+      JVMTI_LOG(WARNING, env) << "FAILURE TO RETRANFORM " << error_msg;
     }
     return res;
   }
@@ -804,7 +808,7 @@ class JvmtiFunctions {
                                                 class_definitions,
                                                 &error_msg);
     if (res != OK) {
-      LOG(WARNING) << "FAILURE TO REDEFINE " << error_msg;
+      JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE " << error_msg;
     }
     return res;
   }
@@ -1193,7 +1197,7 @@ class JvmtiFunctions {
 #undef ADD_CAPABILITY
     gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                              changed,
-                                             /*added*/true);
+                                             /*added=*/true);
     return ret;
   }
 
@@ -1217,7 +1221,7 @@ class JvmtiFunctions {
 #undef DEL_CAPABILITY
     gEventHandler->HandleChangedCapabilities(ArtJvmTiEnv::AsArtJvmTiEnv(env),
                                              changed,
-                                             /*added*/false);
+                                             /*added=*/false);
     return OK;
   }
 
@@ -1487,8 +1491,9 @@ ArtJvmTiEnv::ArtJvmTiEnv(art::JavaVMExt* runtime, EventHandler* event_handler, j
       local_data(nullptr),
       ti_version(version),
       capabilities(),
-      event_info_mutex_("jvmtiEnv_EventInfoMutex") {
-  object_tag_table = std::unique_ptr<ObjectTagTable>(new ObjectTagTable(event_handler, this));
+      event_info_mutex_("jvmtiEnv_EventInfoMutex"),
+      last_error_mutex_("jvmtiEnv_LastErrorMutex", art::LockLevel::kGenericBottomLock) {
+  object_tag_table = std::make_unique<ObjectTagTable>(event_handler, this);
   functions = &gJvmtiInterface;
 }
 
@@ -1547,7 +1552,7 @@ extern "C" bool ArtPlugin_Initialize() {
 
   {
     // Make sure we can deopt anything we need to.
-    art::ScopedObjectAccess soa(art::Thread::Current());
+    art::ScopedSuspendAll ssa(__FUNCTION__);
     gDeoptManager->FinishSetup();
   }
 

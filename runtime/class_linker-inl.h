@@ -21,8 +21,10 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "base/mutex.h"
 #include "class_linker.h"
-#include "gc/heap-inl.h"
+#include "dex/dex_file.h"
+#include "dex/dex_file_structs.h"
 #include "gc_root-inl.h"
 #include "handle_scope-inl.h"
 #include "mirror/class_loader.h"
@@ -136,7 +138,7 @@ inline ObjPtr<mirror::Class> ClassLinker::ResolveType(dex::TypeIndex type_idx,
   ObjPtr<mirror::Class> resolved_type =
       referrer->GetDexCache<kWithoutReadBarrier>()->GetResolvedType(type_idx);
   if (UNLIKELY(resolved_type == nullptr)) {
-    resolved_type = DoResolveType(type_idx, referrer->GetDeclaringClass());
+    resolved_type = DoResolveType(type_idx, referrer);
   }
   return resolved_type;
 }
@@ -150,7 +152,7 @@ inline ObjPtr<mirror::Class> ClassLinker::ResolveType(dex::TypeIndex type_idx,
   ObjPtr<mirror::Class> resolved_type =
       referrer->GetDexCache<kWithoutReadBarrier>()->GetResolvedType(type_idx);
   if (UNLIKELY(resolved_type == nullptr)) {
-    resolved_type = DoResolveType(type_idx, referrer->GetDeclaringClass());
+    resolved_type = DoResolveType(type_idx, referrer);
   }
   return resolved_type;
 }
@@ -271,7 +273,7 @@ inline bool ClassLinker::CheckInvokeClassMismatch(ObjPtr<mirror::DexCache> dex_c
       dex_cache,
       type,
       [this, dex_cache, method_idx, class_loader]() REQUIRES_SHARED(Locks::mutator_lock_) {
-        const DexFile::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(method_idx);
+        const dex::MethodId& method_id = dex_cache->GetDexFile()->GetMethodId(method_idx);
         ObjPtr<mirror::Class> klass =
             LookupResolvedType(method_id.class_idx_, dex_cache, class_loader);
         DCHECK(klass != nullptr);
@@ -286,7 +288,7 @@ inline ArtMethod* ClassLinker::LookupResolvedMethod(uint32_t method_idx,
   ArtMethod* resolved = dex_cache->GetResolvedMethod(method_idx, pointer_size);
   if (resolved == nullptr) {
     const DexFile& dex_file = *dex_cache->GetDexFile();
-    const DexFile::MethodId& method_id = dex_file.GetMethodId(method_idx);
+    const dex::MethodId& method_id = dex_file.GetMethodId(method_idx);
     ObjPtr<mirror::Class> klass = LookupResolvedType(method_id.class_idx_, dex_cache, class_loader);
     if (klass != nullptr) {
       resolved = FindResolvedMethod(klass, dex_cache, class_loader, method_idx);
@@ -315,7 +317,7 @@ inline ArtMethod* ClassLinker::GetResolvedMethod(uint32_t method_idx, ArtMethod*
     // Check if the invoke type matches the class type.
     ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
     ObjPtr<mirror::ClassLoader> class_loader = referrer->GetClassLoader();
-    if (CheckInvokeClassMismatch</* kThrow */ false>(dex_cache, type, method_idx, class_loader)) {
+    if (CheckInvokeClassMismatch</* kThrow= */ false>(dex_cache, type, method_idx, class_loader)) {
       return nullptr;
     }
     // Check access.
@@ -366,7 +368,7 @@ inline ArtMethod* ClassLinker::ResolveMethod(Thread* self,
     // Check if the invoke type matches the class type.
     ObjPtr<mirror::DexCache> dex_cache = referrer->GetDexCache();
     ObjPtr<mirror::ClassLoader> class_loader = referrer->GetClassLoader();
-    if (CheckInvokeClassMismatch</* kThrow */ true>(dex_cache, type, method_idx, class_loader)) {
+    if (CheckInvokeClassMismatch</* kThrow= */ true>(dex_cache, type, method_idx, class_loader)) {
       DCHECK(Thread::Current()->IsExceptionPending());
       return nullptr;
     }
@@ -437,6 +439,14 @@ inline void ClassLinker::VisitClassTables(const Visitor& visitor) {
       visitor(data.class_table);
     }
   }
+}
+
+template <ReadBarrierOption kReadBarrierOption>
+inline ObjPtr<mirror::ObjectArray<mirror::Class>> ClassLinker::GetClassRoots() {
+  ObjPtr<mirror::ObjectArray<mirror::Class>> class_roots =
+      class_roots_.Read<kReadBarrierOption>();
+  DCHECK(class_roots != nullptr);
+  return class_roots;
 }
 
 }  // namespace art

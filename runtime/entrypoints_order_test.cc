@@ -14,8 +14,6 @@
  * limitations under the License.
  */
 
-#include <setjmp.h>
-
 #include <memory>
 
 #include "base/macros.h"
@@ -127,9 +125,7 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_objects, jni_entrypoints, sizeof(size_t));
 
     // Skip across the entrypoints structures.
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, mterp_current_ibase, mterp_default_ibase, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, mterp_default_ibase, mterp_alt_ibase, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, mterp_alt_ibase, rosalloc_runs, sizeof(void*));
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, mterp_current_ibase, rosalloc_runs, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, rosalloc_runs, thread_local_alloc_stack_top,
                         sizeof(void*) * kNumRosAllocThreadLocalSizeBracketsInThread);
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_alloc_stack_top, thread_local_alloc_stack_end,
@@ -140,8 +136,11 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, flip_function, method_verifier, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, method_verifier, thread_local_mark_stack, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, thread_local_mark_stack, async_exception, sizeof(void*));
-    EXPECT_OFFSET_DIFF(Thread, tlsPtr_.async_exception, Thread, wait_mutex_, sizeof(void*),
-                       thread_tlsptr_end);
+    // The first field after tlsPtr_ is forced to a 16 byte alignment so it might have some space.
+    auto offset_tlsptr_end = OFFSETOF_MEMBER(Thread, tlsPtr_) +
+        sizeof(decltype(reinterpret_cast<Thread*>(16)->tlsPtr_));
+    CHECKED(offset_tlsptr_end - OFFSETOF_MEMBER(Thread, tlsPtr_.async_exception) == sizeof(void*),
+            "async_exception last field");
   }
 
   void CheckJniEntryPoints() {

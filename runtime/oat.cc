@@ -17,10 +17,10 @@
 #include "oat.h"
 
 #include <string.h>
-#include <zlib.h>
 
 #include "android-base/stringprintf.h"
 
+#include "arch/instruction_set.h"
 #include "arch/instruction_set_features.h"
 #include "base/bit_utils.h"
 #include "base/strlcpy.h"
@@ -68,7 +68,7 @@ OatHeader::OatHeader(InstructionSet instruction_set,
                      const InstructionSetFeatures* instruction_set_features,
                      uint32_t dex_file_count,
                      const SafeMap<std::string, std::string>* variable_data)
-    : adler32_checksum_(adler32(0L, Z_NULL, 0)),
+    : oat_checksum_(0u),
       instruction_set_(instruction_set),
       instruction_set_features_bitmap_(instruction_set_features->AsBitmap()),
       dex_file_count_(dex_file_count),
@@ -80,10 +80,7 @@ OatHeader::OatHeader(InstructionSet instruction_set,
       quick_generic_jni_trampoline_offset_(0),
       quick_imt_conflict_trampoline_offset_(0),
       quick_resolution_trampoline_offset_(0),
-      quick_to_interpreter_bridge_offset_(0),
-      image_patch_delta_(0),
-      image_file_location_oat_checksum_(0),
-      image_file_location_oat_data_begin_(0) {
+      quick_to_interpreter_bridge_offset_(0) {
   // Don't want asserts in header as they would be checked in each file that includes it. But the
   // fields are private, so we check inside a method.
   static_assert(sizeof(magic_) == sizeof(kOatMagic),
@@ -110,9 +107,6 @@ bool OatHeader::IsValid() const {
   if (!IsAligned<kPageSize>(executable_offset_)) {
     return false;
   }
-  if (!IsAligned<kPageSize>(image_patch_delta_)) {
-    return false;
-  }
   if (!IsValidInstructionSet(instruction_set_)) {
     return false;
   }
@@ -135,9 +129,6 @@ std::string OatHeader::GetValidationErrorMessage() const {
   if (!IsAligned<kPageSize>(executable_offset_)) {
     return "Executable offset not page-aligned.";
   }
-  if (!IsAligned<kPageSize>(image_patch_delta_)) {
-    return "Image patch delta not page-aligned.";
-  }
   if (!IsValidInstructionSet(instruction_set_)) {
     return StringPrintf("Invalid instruction set, %d.", static_cast<int>(instruction_set_));
   }
@@ -151,48 +142,11 @@ const char* OatHeader::GetMagic() const {
 
 uint32_t OatHeader::GetChecksum() const {
   CHECK(IsValid());
-  return adler32_checksum_;
+  return oat_checksum_;
 }
 
-void OatHeader::UpdateChecksumWithHeaderData() {
-  UpdateChecksum(&instruction_set_, sizeof(instruction_set_));
-  UpdateChecksum(&instruction_set_features_bitmap_, sizeof(instruction_set_features_bitmap_));
-  UpdateChecksum(&dex_file_count_, sizeof(dex_file_count_));
-  UpdateChecksum(&image_file_location_oat_checksum_, sizeof(image_file_location_oat_checksum_));
-  UpdateChecksum(&image_file_location_oat_data_begin_, sizeof(image_file_location_oat_data_begin_));
-
-  // Update checksum for variable data size.
-  UpdateChecksum(&key_value_store_size_, sizeof(key_value_store_size_));
-
-  // Update for data, if existing.
-  if (key_value_store_size_ > 0U) {
-    UpdateChecksum(&key_value_store_, key_value_store_size_);
-  }
-
-  UpdateChecksum(&executable_offset_, sizeof(executable_offset_));
-  UpdateChecksum(&interpreter_to_interpreter_bridge_offset_,
-                 sizeof(interpreter_to_interpreter_bridge_offset_));
-  UpdateChecksum(&interpreter_to_compiled_code_bridge_offset_,
-                 sizeof(interpreter_to_compiled_code_bridge_offset_));
-  UpdateChecksum(&jni_dlsym_lookup_offset_, sizeof(jni_dlsym_lookup_offset_));
-  UpdateChecksum(&quick_generic_jni_trampoline_offset_,
-                 sizeof(quick_generic_jni_trampoline_offset_));
-  UpdateChecksum(&quick_imt_conflict_trampoline_offset_,
-                 sizeof(quick_imt_conflict_trampoline_offset_));
-  UpdateChecksum(&quick_resolution_trampoline_offset_,
-                 sizeof(quick_resolution_trampoline_offset_));
-  UpdateChecksum(&quick_to_interpreter_bridge_offset_,
-                 sizeof(quick_to_interpreter_bridge_offset_));
-}
-
-void OatHeader::UpdateChecksum(const void* data, size_t length) {
-  DCHECK(IsValid());
-  if (data != nullptr) {
-    const uint8_t* bytes = reinterpret_cast<const uint8_t*>(data);
-    adler32_checksum_ = adler32(adler32_checksum_, bytes, length);
-  } else {
-    DCHECK_EQ(0U, length);
-  }
+void OatHeader::SetChecksum(uint32_t oat_checksum) {
+  oat_checksum_ = oat_checksum;
 }
 
 InstructionSet OatHeader::GetInstructionSet() const {
@@ -362,47 +316,6 @@ void OatHeader::SetQuickToInterpreterBridgeOffset(uint32_t offset) {
   quick_to_interpreter_bridge_offset_ = offset;
 }
 
-int32_t OatHeader::GetImagePatchDelta() const {
-  CHECK(IsValid());
-  return image_patch_delta_;
-}
-
-void OatHeader::RelocateOat(off_t delta) {
-  CHECK(IsValid());
-  CHECK_ALIGNED(delta, kPageSize);
-  image_patch_delta_ += delta;
-  if (image_file_location_oat_data_begin_ != 0) {
-    image_file_location_oat_data_begin_ += delta;
-  }
-}
-
-void OatHeader::SetImagePatchDelta(int32_t off) {
-  CHECK(IsValid());
-  CHECK_ALIGNED(off, kPageSize);
-  image_patch_delta_ = off;
-}
-
-uint32_t OatHeader::GetImageFileLocationOatChecksum() const {
-  CHECK(IsValid());
-  return image_file_location_oat_checksum_;
-}
-
-void OatHeader::SetImageFileLocationOatChecksum(uint32_t image_file_location_oat_checksum) {
-  CHECK(IsValid());
-  image_file_location_oat_checksum_ = image_file_location_oat_checksum;
-}
-
-uint32_t OatHeader::GetImageFileLocationOatDataBegin() const {
-  CHECK(IsValid());
-  return image_file_location_oat_data_begin_;
-}
-
-void OatHeader::SetImageFileLocationOatDataBegin(uint32_t image_file_location_oat_data_begin) {
-  CHECK(IsValid());
-  CHECK_ALIGNED(image_file_location_oat_data_begin, kPageSize);
-  image_file_location_oat_data_begin_ = image_file_location_oat_data_begin;
-}
-
 uint32_t OatHeader::GetKeyValueStoreSize() const {
   CHECK(IsValid());
   return key_value_store_size_;
@@ -479,10 +392,6 @@ bool OatHeader::GetStoreKeyValuePairByIndex(size_t index, const char** key,
 
 size_t OatHeader::GetHeaderSize() const {
   return sizeof(OatHeader) + key_value_store_size_;
-}
-
-bool OatHeader::IsPic() const {
-  return IsKeyEnabled(OatHeader::kPicKey);
 }
 
 bool OatHeader::IsDebuggable() const {
