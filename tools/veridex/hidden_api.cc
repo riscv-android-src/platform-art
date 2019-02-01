@@ -30,15 +30,14 @@ HiddenApi::HiddenApi(const char* filename, bool sdk_uses_only) {
   std::ifstream in(filename);
   for (std::string str; std::getline(in, str);) {
     std::vector<std::string> values = android::base::Split(str, ",");
-    CHECK_EQ(values.size(), 2u) << "Currently only signature and one flag are supported";
-
     const std::string& signature = values[0];
-    const std::string& flag_str = values[1];
 
-    hiddenapi::ApiList membership = hiddenapi::ApiList::FromName(flag_str);
-    CHECK(membership.IsValid()) << "Unknown ApiList name: " << flag_str;
+    hiddenapi::ApiList membership;
+    bool success = hiddenapi::ApiList::FromNames(values.begin() + 1, values.end(), &membership);
+    CHECK(success) << "Unknown ApiList flag: " << str;
+    CHECK(membership.IsValid()) << "Invalid ApiList: " << membership;
 
-    if (sdk_uses_only != (membership == hiddenapi::ApiList::Whitelist())) {
+    if (sdk_uses_only != membership.Contains(hiddenapi::ApiList::Whitelist())) {
       // Either we want only SDK uses and this is not a whitelist entry,
       // or we want only non-SDK uses and this is a whitelist entry.
       continue;

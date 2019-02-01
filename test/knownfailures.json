@@ -1088,6 +1088,7 @@
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
+                  "1339-dead-reference-safe",
                   "1951-monitor-enter-no-suspend",
                   "1957-error-ext"],
         "variant": "jvm",
@@ -1172,9 +1173,22 @@
         "description": ["Tests are expected to fail with baseline."]
     },
     {
+        "tests": ["1339-dead-reference-safe"],
+        "variant": "debuggable",
+        "description": [ "Fails to eliminate dead reference when debuggable." ]
+    },
+    {
         "tests": ["708-jit-cache-churn"],
         "variant": "jit-on-first-use",
         "bug": "b/120112467",
         "description": [ "Fails on Android Build hosts with uncaught std::bad_alloc." ]
+    },
+    {
+        "tests": ["719-dm-verify-redefinition"],
+        "variant": "jvm | speed-profile | interp-ac | target",
+        "description": ["Doesn't run on RI because of boot class redefintion.",
+                        "Doesn't work with profiles because the run-test is not setup to",
+                        "support both. It also needs full verification, so no interp-ac.",
+                        "Requires zip, which isn't available on device"]
     }
 ]

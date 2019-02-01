@@ -29,15 +29,6 @@
 #include "thread-inl.h"
 #include "well_known_classes.h"
 
-#ifdef ART_TARGET_ANDROID
-#include <metricslogger/metrics_logger.h>
-using android::metricslogger::ComplexEventLogger;
-using android::metricslogger::ACTION_HIDDEN_API_ACCESSED;
-using android::metricslogger::FIELD_HIDDEN_API_ACCESS_METHOD;
-using android::metricslogger::FIELD_HIDDEN_API_ACCESS_DENIED;
-using android::metricslogger::FIELD_HIDDEN_API_SIGNATURE;
-#endif
-
 namespace art {
 namespace hiddenapi {
 
@@ -63,6 +54,19 @@ static inline std::ostream& operator<<(std::ostream& os, AccessMethod value) {
     case AccessMethod::kLinking:
       os << "linking";
       break;
+  }
+  return os;
+}
+
+static inline std::ostream& operator<<(std::ostream& os, const AccessContext& value)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (!value.GetClass().IsNull()) {
+    std::string tmp;
+    os << value.GetClass()->GetDescriptor(&tmp);
+  } else if (value.GetDexFile() != nullptr) {
+    os << value.GetDexFile()->GetLocation();
+  } else {
+    os << "<unknown_caller>";
   }
   return os;
 }
@@ -169,28 +173,6 @@ bool MemberSignature::MemberNameAndTypeMatch(const MemberSignature& other) {
   return member_name_ == other.member_name_ && type_signature_ == other.type_signature_;
 }
 
-#ifdef ART_TARGET_ANDROID
-// Convert an AccessMethod enum to a value for logging from the proto enum.
-// This method may look odd (the enum values are current the same), but it
-// prevents coupling the internal enum to the proto enum (which should never
-// be changed) so that we are free to change the internal one if necessary in
-// future.
-inline static int32_t GetEnumValueForLog(AccessMethod access_method) {
-  switch (access_method) {
-    case AccessMethod::kNone:
-      return android::metricslogger::ACCESS_METHOD_NONE;
-    case AccessMethod::kReflection:
-      return android::metricslogger::ACCESS_METHOD_REFLECTION;
-    case AccessMethod::kJNI:
-      return android::metricslogger::ACCESS_METHOD_JNI;
-    case AccessMethod::kLinking:
-      return android::metricslogger::ACCESS_METHOD_LINKING;
-    default:
-      DCHECK(false);
-  }
-}
-#endif
-
 void MemberSignature::LogAccessToEventLog(AccessMethod access_method, bool access_denied) {
 #ifdef ART_TARGET_ANDROID
   if (access_method == AccessMethod::kLinking || access_method == AccessMethod::kNone) {
@@ -200,19 +182,32 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, bool acces
     // None does not correspond to actual access, so should also be ignored.
     return;
   }
-  ComplexEventLogger log_maker(ACTION_HIDDEN_API_ACCESSED);
-  log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_METHOD, GetEnumValueForLog(access_method));
-  if (access_denied) {
-    log_maker.AddTaggedData(FIELD_HIDDEN_API_ACCESS_DENIED, 1);
+  Runtime* runtime = Runtime::Current();
+  if (runtime->IsAotCompiler()) {
+    return;
   }
+  JNIEnvExt* env = Thread::Current()->GetJniEnv();
   const std::string& package_name = Runtime::Current()->GetProcessPackageName();
-  if (!package_name.empty()) {
-    log_maker.SetPackageName(package_name);
+  ScopedLocalRef<jstring> package_str(env, env->NewStringUTF(package_name.c_str()));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    LOG(ERROR) << "Unable to allocate string for package name which called hidden api";
   }
   std::ostringstream signature_str;
   Dump(signature_str);
-  log_maker.AddTaggedData(FIELD_HIDDEN_API_SIGNATURE, signature_str.str());
-  log_maker.Record();
+  ScopedLocalRef<jstring> signature_jstr(env,
+      env->NewStringUTF(signature_str.str().c_str()));
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    LOG(ERROR) << "Unable to allocate string for hidden api method signature";
+  }
+  env->CallStaticVoidMethod(WellKnownClasses::dalvik_system_VMRuntime,
+      WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed, package_str.get(),
+      signature_jstr.get(), static_cast<jint>(access_method), access_denied);
+  if (env->ExceptionCheck()) {
+    env->ExceptionClear();
+    LOG(ERROR) << "Unable to report hidden api usage";
+  }
 #else
   UNUSED(access_method);
   UNUSED(access_denied);
@@ -267,9 +262,6 @@ static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
   }
 }
 
-static constexpr uint32_t kNoDexFlags = 0u;
-static constexpr uint32_t kInvalidDexFlags = static_cast<uint32_t>(-1);
-
 static ALWAYS_INLINE uint32_t GetMemberDexIndex(ArtField* field) {
   return field->GetDexFieldIndex();
 }
@@ -302,12 +294,10 @@ uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
       ClassAccessor::Field, ClassAccessor::Method>::type;
 
   ObjPtr<mirror::Class> declaring_class = member->GetDeclaringClass();
-  if (declaring_class.IsNull()) {
-    return kNoDexFlags;
-  }
+  DCHECK(!declaring_class.IsNull()) << "Attempting to access a runtime method";
 
-  uint32_t flags = kInvalidDexFlags;
-  DCHECK(!AreValidDexFlags(flags));
+  ApiList flags;
+  DCHECK(!flags.IsValid());
 
   // Check if the declaring class has ClassExt allocated. If it does, check if
   // the pre-JVMTI redefine dex file has been set to determine if the declaring
@@ -318,17 +308,15 @@ uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
     // Class is not redefined. Find the class def, iterate over its members and
     // find the entry corresponding to this `member`.
     const dex::ClassDef* class_def = declaring_class->GetClassDef();
-    if (class_def == nullptr) {
-      flags = kNoDexFlags;
-    } else {
-      uint32_t member_index = GetMemberDexIndex(member);
-      auto fn_visit = [&](const AccessorType& dex_member) {
-        if (dex_member.GetIndex() == member_index) {
-          flags = dex_member.GetHiddenapiFlags();
-        }
-      };
-      VisitMembers(declaring_class->GetDexFile(), *class_def, fn_visit);
-    }
+    DCHECK(class_def != nullptr) << "Class def should always be set for initialized classes";
+
+    uint32_t member_index = GetMemberDexIndex(member);
+    auto fn_visit = [&](const AccessorType& dex_member) {
+      if (dex_member.GetIndex() == member_index) {
+        flags = ApiList(dex_member.GetHiddenapiFlags());
+      }
+    };
+    VisitMembers(declaring_class->GetDexFile(), *class_def, fn_visit);
   } else {
     // Class was redefined using JVMTI. We have a pointer to the original dex file
     // and the class def index of this class in that dex file, but the field/method
@@ -344,22 +332,30 @@ uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
       MemberSignature cur_signature(dex_member);
       if (member_signature.MemberNameAndTypeMatch(cur_signature)) {
         DCHECK(member_signature.Equals(cur_signature));
-        flags = dex_member.GetHiddenapiFlags();
+        flags = ApiList(dex_member.GetHiddenapiFlags());
       }
     };
     VisitMembers(*original_dex, original_class_def, fn_visit);
   }
 
-  CHECK_NE(flags, kInvalidDexFlags) << "Could not find hiddenapi flags for "
+  CHECK(flags.IsValid()) << "Could not find hiddenapi flags for "
       << Dumpable<MemberSignature>(MemberSignature(member));
-  DCHECK(AreValidDexFlags(flags));
-  return flags;
+  return flags.GetDexFlags();
 }
 
 template<typename T>
-bool ShouldDenyAccessToMemberImpl(T* member,
-                                  hiddenapi::ApiList api_list,
-                                  AccessMethod access_method) {
+void MaybeReportCorePlatformApiViolation(T* member,
+                                         const AccessContext& caller_context,
+                                         AccessMethod access_method) {
+  if (access_method != AccessMethod::kNone) {
+    MemberSignature sig(member);
+    LOG(ERROR) << "CorePlatformApi violation: " << Dumpable<MemberSignature>(sig)
+               << " from " << caller_context << " using " << access_method;
+  }
+}
+
+template<typename T>
+bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod access_method) {
   DCHECK(member != nullptr);
   Runtime* runtime = Runtime::Current();
 
@@ -414,14 +410,20 @@ bool ShouldDenyAccessToMemberImpl(T* member,
   return deny_access;
 }
 
-// Need to instantiate this.
+// Need to instantiate these.
 template uint32_t GetDexFlags<ArtField>(ArtField* member);
 template uint32_t GetDexFlags<ArtMethod>(ArtMethod* member);
+template void MaybeReportCorePlatformApiViolation(ArtField* member,
+                                                  const AccessContext& caller_context,
+                                                  AccessMethod access_method);
+template void MaybeReportCorePlatformApiViolation(ArtMethod* member,
+                                                  const AccessContext& caller_context,
+                                                  AccessMethod access_method);
 template bool ShouldDenyAccessToMemberImpl<ArtField>(ArtField* member,
-                                                     hiddenapi::ApiList api_list,
+                                                     ApiList api_list,
                                                      AccessMethod access_method);
 template bool ShouldDenyAccessToMemberImpl<ArtMethod>(ArtMethod* member,
-                                                      hiddenapi::ApiList api_list,
+                                                      ApiList api_list,
                                                       AccessMethod access_method);
 }  // namespace detail
 
