@@ -100,9 +100,11 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
   // property from `original` to `new_dex_file`.
   const art::DexFileLoader dex_file_loader;
 
-  if (original.IsCompactDexFile()) {
+  if (original.IsCompactDexFile() || original.HasHiddenapiClassData()) {
     // Since we are supposed to return a standard dex, convert back using dexlayout. It's OK to do
     // this before unquickening.
+    // We also do dex layout for dex files that have hidden API data, as we want to remove that
+    // data.
     art::Options options;
     options.compact_dex_level_ = art::CompactDexLevel::kCompactDexLevelNone;
     // Add a filter to only include the class that has the matching descriptor.
@@ -141,14 +143,12 @@ std::unique_ptr<FixedUpDexFile> FixedUpDexFile::Create(const art::DexFile& origi
       /*verify_checksum=*/false,
       &error);
 
-  if (new_dex_file  == nullptr) {
+  if (new_dex_file == nullptr) {
     LOG(ERROR) << "Unable to open dex file from memory for unquickening! error: " << error;
     return nullptr;
   }
 
-  if (original.IsPlatformDexFile()) {
-    const_cast<art::DexFile*>(new_dex_file.get())->SetIsPlatformDexFile();
-  }
+  const_cast<art::DexFile*>(new_dex_file.get())->SetHiddenapiDomain(original.GetHiddenapiDomain());
 
   DoDexUnquicken(*new_dex_file, original);
 

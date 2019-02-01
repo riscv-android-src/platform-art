@@ -24,6 +24,7 @@
 #include <android-base/logging.h>
 
 #include "base/globals.h"
+#include "base/hiddenapi_domain.h"
 #include "base/macros.h"
 #include "base/value_object.h"
 #include "class_iterator.h"
@@ -617,6 +618,10 @@ class DexFile {
     return hiddenapi_class_data_;
   }
 
+  ALWAYS_INLINE bool HasHiddenapiClassData() const {
+    return hiddenapi_class_data_ != nullptr;
+  }
+
   const dex::AnnotationItem* GetAnnotationItem(const dex::AnnotationSetItem* set_item,
                                                uint32_t index) const {
     DCHECK_LE(index, set_item->size_);
@@ -754,13 +759,8 @@ class DexFile {
   ALWAYS_INLINE const StandardDexFile* AsStandardDexFile() const;
   ALWAYS_INLINE const CompactDexFile* AsCompactDexFile() const;
 
-  ALWAYS_INLINE bool IsPlatformDexFile() const {
-    return is_platform_dex_;
-  }
-
-  ALWAYS_INLINE void SetIsPlatformDexFile() {
-    is_platform_dex_ = true;
-  }
+  hiddenapi::Domain GetHiddenapiDomain() const { return hiddenapi_domain_; }
+  void SetHiddenapiDomain(hiddenapi::Domain value) { hiddenapi_domain_ = value; }
 
   bool IsInMainSection(const void* addr) const {
     return Begin() <= addr && addr < Begin() + Size();
@@ -874,8 +874,7 @@ class DexFile {
   // If the dex file is a compact dex file. If false then the dex file is a standard dex file.
   const bool is_compact_dex_;
 
-  // If the dex file is located in /system/framework/.
-  bool is_platform_dex_;
+  hiddenapi::Domain hiddenapi_domain_;
 
   friend class DexFileLoader;
   friend class DexFileVerifierTest;
