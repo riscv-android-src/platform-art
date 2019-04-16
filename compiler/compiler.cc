@@ -22,17 +22,22 @@
 #include "base/utils.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_file.h"
-#include "driver/compiler_driver.h"
+#include "oat.h"
 #include "optimizing/optimizing_compiler.h"
 
 namespace art {
 
-Compiler* Compiler::Create(CompilerDriver* driver, Compiler::Kind kind) {
+Compiler* Compiler::Create(const CompilerOptions& compiler_options,
+                           CompiledMethodStorage* storage,
+                           Compiler::Kind kind) {
+  // Check that oat version when runtime was compiled matches the oat version of the compiler.
+  constexpr std::array<uint8_t, 4> compiler_oat_version = OatHeader::kOatVersion;
+  OatHeader::CheckOatVersion(compiler_oat_version);
   switch (kind) {
     case kQuick:
       // TODO: Remove Quick in options.
     case kOptimizing:
-      return CreateOptimizingCompiler(driver);
+      return CreateOptimizingCompiler(compiler_options, storage);
 
     default:
       LOG(FATAL) << "UNREACHABLE";

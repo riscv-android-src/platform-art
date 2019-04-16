@@ -59,6 +59,7 @@ class MethodVerifier;
 class RegisterLine;
 using RegisterLineArenaUniquePtr = std::unique_ptr<RegisterLine, RegisterLineArenaDelete>;
 class RegType;
+struct ScopedNewLine;
 
 // We don't need to store the register data for many instructions, because we either only need
 // it at branch points (for verification) or GC points and branches (for verification +
@@ -99,27 +100,6 @@ class PcToRegisterLineTable {
 // The verifier
 class MethodVerifier {
  public:
-  // Verify a class. Returns "kNoFailure" on success.
-  static FailureKind VerifyClass(Thread* self,
-                                 ObjPtr<mirror::Class> klass,
-                                 CompilerCallbacks* callbacks,
-                                 bool allow_soft_failures,
-                                 HardFailLogMode log_level,
-                                 uint32_t api_level,
-                                 std::string* error)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  static FailureKind VerifyClass(Thread* self,
-                                 const DexFile* dex_file,
-                                 Handle<mirror::DexCache> dex_cache,
-                                 Handle<mirror::ClassLoader> class_loader,
-                                 const dex::ClassDef& class_def,
-                                 CompilerCallbacks* callbacks,
-                                 bool allow_soft_failures,
-                                 HardFailLogMode log_level,
-                                 uint32_t api_level,
-                                 std::string* error)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   static MethodVerifier* VerifyMethodAndDump(Thread* self,
                                              VariableIndentationOutputStream* vios,
                                              uint32_t method_idx,
@@ -147,7 +127,7 @@ class MethodVerifier {
   std::ostream& Fail(VerifyError error);
 
   // Log for verification information.
-  std::ostream& LogVerifyInfo();
+  ScopedNewLine LogVerifyInfo();
 
   // Dump the failures encountered by the verifier.
   std::ostream& DumpFailures(std::ostream& os);
@@ -807,6 +787,7 @@ class MethodVerifier {
   const uint32_t api_level_;
 
   friend class art::Thread;
+  friend class ClassVerifier;
   friend class VerifierDepsTest;
 
   DISALLOW_COPY_AND_ASSIGN(MethodVerifier);

@@ -122,13 +122,21 @@ class JvmtiFunctions {
 
  public:
   static jvmtiError Allocate(jvmtiEnv* env, jlong size, unsigned char** mem_ptr) {
-    ENSURE_VALID_ENV(env);
+    jvmtiError err = getEnvironmentError(env);
+    // Allow UNATTACHED_THREAD since we don't really care about that for this function.
+    if (err != OK && err != ERR(UNATTACHED_THREAD)) {
+      return err;
+    }
     ENSURE_NON_NULL(mem_ptr);
     return AllocUtil::Allocate(env, size, mem_ptr);
   }
 
   static jvmtiError Deallocate(jvmtiEnv* env, unsigned char* mem) {
-    ENSURE_VALID_ENV(env);
+    jvmtiError err = getEnvironmentError(env);
+    // Allow UNATTACHED_THREAD since we don't really care about that for this function.
+    if (err != OK && err != ERR(UNATTACHED_THREAD)) {
+      return err;
+    }
     return AllocUtil::Deallocate(env, mem);
   }
 
@@ -1053,22 +1061,9 @@ class JvmtiFunctions {
                                              jthread event_thread,
                                              ...) {
     ENSURE_VALID_ENV(env);
-    art::Thread* art_thread = nullptr;
-    if (event_thread != nullptr) {
-      // TODO The locking around this call is less then what we really want.
-      art::ScopedObjectAccess soa(art::Thread::Current());
-      art::MutexLock mu(soa.Self(), *art::Locks::thread_list_lock_);
-      jvmtiError err = ERR(INTERNAL);
-      if (!ThreadUtil::GetAliveNativeThread(event_thread, soa, &art_thread, &err)) {
-        return err;
-      } else if (art_thread->IsStillStarting()) {
-        return ERR(THREAD_NOT_ALIVE);
-      }
-    }
-
     ArtJvmTiEnv* art_env = ArtJvmTiEnv::AsArtJvmTiEnv(env);
     return gEventHandler->SetEvent(art_env,
-                                   art_thread,
+                                   event_thread,
                                    GetArtJvmtiEvent(art_env, event_type),
                                    mode);
   }

@@ -31,8 +31,10 @@
 
 #include "ti_redefine.h"
 
+#include <iterator>
 #include <limits>
 #include <string_view>
+#include <unordered_map>
 
 #include <android-base/logging.h>
 #include <android-base/stringprintf.h>
@@ -67,7 +69,7 @@
 #include "mirror/array-alloc-inl.h"
 #include "mirror/class-alloc-inl.h"
 #include "mirror/class-inl.h"
-#include "mirror/class_ext.h"
+#include "mirror/class_ext-inl.h"
 #include "mirror/object.h"
 #include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
@@ -80,7 +82,7 @@
 #include "ti_breakpoint.h"
 #include "ti_class_loader.h"
 #include "transform.h"
-#include "verifier/method_verifier.h"
+#include "verifier/class_verifier.h"
 #include "verifier/verifier_enums.h"
 
 namespace openjdkjvmti {
@@ -92,14 +94,13 @@ using android::base::StringPrintf;
 // almost as soon as they are created since the GetObsoleteDexCache method will succeed.
 class ObsoleteMap {
  public:
-  art::ArtMethod* FindObsoleteVersion(art::ArtMethod* original)
+  art::ArtMethod* FindObsoleteVersion(art::ArtMethod* original) const
       REQUIRES(art::Locks::mutator_lock_, art::Roles::uninterruptible_) {
     auto method_pair = id_map_.find(original);
     if (method_pair != id_map_.end()) {
       art::ArtMethod* res = obsolete_methods_->GetElementPtrSize<art::ArtMethod*>(
           method_pair->second, art::kRuntimePointerSize);
       DCHECK(res != nullptr);
-      DCHECK_EQ(original, res->GetNonObsoleteMethod());
       return res;
     } else {
       return nullptr;
@@ -135,6 +136,58 @@ class ObsoleteMap {
     }
     // Sanity check that the same slot in obsolete_dex_caches_ is free.
     DCHECK(obsolete_dex_caches_->Get(next_free_slot_) == nullptr);
+  }
+
+  struct ObsoleteMethodPair {
+    art::ArtMethod* old_method;
+    art::ArtMethod* obsolete_method;
+  };
+
+  class ObsoleteMapIter : public std::iterator<std::forward_iterator_tag, ObsoleteMethodPair> {
+   public:
+    ObsoleteMethodPair operator*() const
+        REQUIRES(art::Locks::mutator_lock_, art::Roles::uninterruptible_) {
+      art::ArtMethod* obsolete = map_->FindObsoleteVersion(iter_->first);
+      DCHECK(obsolete != nullptr);
+      return { iter_->first, obsolete };
+    }
+
+    bool operator==(ObsoleteMapIter other) const {
+      return map_ == other.map_ && iter_ == other.iter_;
+    }
+
+    bool operator!=(ObsoleteMapIter other) const {
+      return !(*this == other);
+    }
+
+    ObsoleteMapIter operator++(int) const {
+      ObsoleteMapIter retval = *this;
+      ++(*this);
+      return retval;
+    }
+
+    ObsoleteMapIter operator++() const {
+      ++iter_;
+      return *this;
+    }
+
+   private:
+    ObsoleteMapIter(const ObsoleteMap* map,
+                    std::unordered_map<art::ArtMethod*, int32_t>::const_iterator iter)
+        : map_(map), iter_(iter) {}
+
+    const ObsoleteMap* map_;
+    mutable std::unordered_map<art::ArtMethod*, int32_t>::const_iterator iter_;
+
+    friend class ObsoleteMap;
+  };
+
+  ObsoleteMapIter end() const {
+    return ObsoleteMapIter(this, id_map_.cend());
+  }
+
+  ObsoleteMapIter begin() const {
+    return ObsoleteMapIter(this, id_map_.cbegin());
   }
 
  private:
@@ -208,13 +261,6 @@ class ObsoleteMethodStackVisitor : public art::StackVisitor {
         new_obsolete_method->SetDontCompile();
         cl->SetEntryPointsForObsoleteMethod(new_obsolete_method);
         obsolete_maps_->RecordObsolete(old_method, new_obsolete_method);
-        // Update JIT Data structures to point to the new method.
-        art::jit::Jit* jit = art::Runtime::Current()->GetJit();
-        if (jit != nullptr) {
-          // Notify the JIT we are making this obsolete method. It will update the jit's internal
-          // structures to keep track of the new obsolete method.
-          jit->GetCodeCache()->MoveObsoleteMethod(old_method, new_obsolete_method);
-        }
       }
       DCHECK(new_obsolete_method != nullptr);
       SetMethod(new_obsolete_method);
@@ -240,7 +286,7 @@ jvmtiError Redefiner::IsModifiableClass(jvmtiEnv* env ATTRIBUTE_UNUSED,
   art::ScopedObjectAccess soa(self);
   art::StackHandleScope<1> hs(self);
   art::ObjPtr<art::mirror::Object> obj(self->DecodeJObject(klass));
-  if (obj.IsNull()) {
+  if (obj.IsNull() || !obj->IsClass()) {
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
@@ -256,7 +302,7 @@ jvmtiError Redefiner::GetClassRedefinitionError(jclass klass, /*out*/std::string
   art::ScopedObjectAccess soa(self);
   art::StackHandleScope<1> hs(self);
   art::ObjPtr<art::mirror::Object> obj(self->DecodeJObject(klass));
-  if (obj.IsNull()) {
+  if (obj.IsNull() || !obj->IsClass()) {
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
@@ -468,11 +514,11 @@ jvmtiError Redefiner::AddRedefinition(ArtJvmTiEnv* env, const ArtClassDefinition
   return OK;
 }
 
-art::mirror::Class* Redefiner::ClassRedefinition::GetMirrorClass() {
+art::ObjPtr<art::mirror::Class> Redefiner::ClassRedefinition::GetMirrorClass() {
   return driver_->self_->DecodeJObject(klass_)->AsClass();
 }
 
-art::mirror::ClassLoader* Redefiner::ClassRedefinition::GetClassLoader() {
+art::ObjPtr<art::mirror::ClassLoader> Redefiner::ClassRedefinition::GetClassLoader() {
   return GetMirrorClass()->GetClassLoader();
 }
 
@@ -591,6 +637,15 @@ void Redefiner::ClassRedefinition::FindAndAllocateObsoleteMethods(
     art::MutexLock mu(driver_->self_, *art::Locks::thread_list_lock_);
     art::ThreadList* list = art::Runtime::Current()->GetThreadList();
     list->ForEach(DoAllocateObsoleteMethodsCallback, static_cast<void*>(&ctx));
+    // Update JIT Data structures to point to the new method.
+    art::jit::Jit* jit = art::Runtime::Current()->GetJit();
+    if (jit != nullptr) {
+      for (const ObsoleteMap::ObsoleteMethodPair& it : *ctx.obsolete_map) {
+        // Notify the JIT we are making this obsolete method. It will update the jit's internal
+        // structures to keep track of the new obsolete method.
+        jit->GetCodeCache()->MoveObsoleteMethod(it.old_method, it.obsolete_method);
+      }
+    }
   }
 }
 
@@ -1119,17 +1174,17 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
   std::string error;
   // TODO Make verification log level lower
   art::verifier::FailureKind failure =
-      art::verifier::MethodVerifier::VerifyClass(driver_->self_,
-                                                 dex_file_.get(),
-                                                 hs.NewHandle(iter.GetNewDexCache()),
-                                                 hs.NewHandle(GetClassLoader()),
-                                                 /*class_def=*/ dex_file_->GetClassDef(0),
-                                                 /*callbacks=*/ nullptr,
-                                                 /*allow_soft_failures=*/ true,
-                                                 /*log_level=*/
-                                                 art::verifier::HardFailLogMode::kLogWarning,
-                                                 art::Runtime::Current()->GetTargetSdkVersion(),
-                                                 &error);
+      art::verifier::ClassVerifier::VerifyClass(driver_->self_,
+                                                dex_file_.get(),
+                                                hs.NewHandle(iter.GetNewDexCache()),
+                                                hs.NewHandle(GetClassLoader()),
+                                                /*class_def=*/ dex_file_->GetClassDef(0),
+                                                /*callbacks=*/ nullptr,
+                                                /*allow_soft_failures=*/ true,
+                                                /*log_level=*/
+                                                art::verifier::HardFailLogMode::kLogWarning,
+                                                art::Runtime::Current()->GetTargetSdkVersion(),
+                                                &error);
   switch (failure) {
     case art::verifier::FailureKind::kNoFailure:
     case art::verifier::FailureKind::kSoftFailure:
@@ -1239,7 +1294,7 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
 }
 
 void Redefiner::ClassRedefinition::UnregisterJvmtiBreakpoints() {
-  BreakpointUtil::RemoveBreakpointsInClass(driver_->env_, GetMirrorClass());
+  BreakpointUtil::RemoveBreakpointsInClass(driver_->env_, GetMirrorClass().Ptr());
 }
 
 void Redefiner::ClassRedefinition::UnregisterBreakpoints() {

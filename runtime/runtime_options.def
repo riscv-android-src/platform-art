@@ -55,6 +55,7 @@ RUNTIME_OPTIONS_KEY (double,              HeapTargetUtilization,          gc::He
 RUNTIME_OPTIONS_KEY (double,              ForegroundHeapGrowthMultiplier, gc::Heap::kDefaultHeapGrowthMultiplier)
 RUNTIME_OPTIONS_KEY (unsigned int,        ParallelGCThreads,              0u)
 RUNTIME_OPTIONS_KEY (unsigned int,        ConcGCThreads)
+RUNTIME_OPTIONS_KEY (unsigned int,        FinalizerTimeoutMs,             10000u)
 RUNTIME_OPTIONS_KEY (Memory<1>,           StackSize)  // -Xss
 RUNTIME_OPTIONS_KEY (unsigned int,        MaxSpinsBeforeThinLockInflation,Monitor::kDefaultMaxSpinsBeforeThinLockInflation)
 RUNTIME_OPTIONS_KEY (MillisecondsToNanoseconds, \
@@ -88,7 +89,6 @@ RUNTIME_OPTIONS_KEY (MillisecondsToNanoseconds, \
 RUNTIME_OPTIONS_KEY (std::vector<std::string>, \
                                           PropertiesList)  // -D<whatever> -D<whatever> ...
 RUNTIME_OPTIONS_KEY (std::string,         JniTrace)
-RUNTIME_OPTIONS_KEY (std::string,         PatchOat)
 RUNTIME_OPTIONS_KEY (bool,                Relocate,                       kDefaultMustRelocate)
 RUNTIME_OPTIONS_KEY (bool,                ImageDex2Oat,                   true)
 RUNTIME_OPTIONS_KEY (bool,                Interpret,                      false) // -Xint
@@ -120,7 +120,12 @@ RUNTIME_OPTIONS_KEY (verifier::VerifyMode, \
                                           Verify,                         verifier::VerifyMode::kEnable)
 RUNTIME_OPTIONS_KEY (unsigned int,        TargetSdkVersion, \
                                           static_cast<unsigned int>(SdkVersion::kUnset))
-RUNTIME_OPTIONS_KEY (Unit,                HiddenApiChecks)
+RUNTIME_OPTIONS_KEY (hiddenapi::EnforcementPolicy,
+                                          HiddenApiPolicy,
+                                          hiddenapi::EnforcementPolicy::kDisabled)
+RUNTIME_OPTIONS_KEY (hiddenapi::EnforcementPolicy,
+                                          CorePlatformApiPolicy,
+                                          hiddenapi::EnforcementPolicy::kDisabled)
 RUNTIME_OPTIONS_KEY (std::string,         NativeBridge)
 RUNTIME_OPTIONS_KEY (unsigned int,        ZygoteMaxFailedBoots,           10)
 RUNTIME_OPTIONS_KEY (Unit,                NoDexFileFallback)
@@ -155,5 +160,9 @@ RUNTIME_OPTIONS_KEY (Unit,                UseStderrLogger)
 
 RUNTIME_OPTIONS_KEY (Unit,                OnlyUseSystemOatFiles)
 RUNTIME_OPTIONS_KEY (unsigned int,        VerifierLoggingThreshold,       100)
+
+RUNTIME_OPTIONS_KEY (gc::space::ImageSpaceLoadingOrder, \
+                     ImageSpaceLoadingOrder, \
+                     gc::space::ImageSpaceLoadingOrder::kSystemFirst)
 
 #undef RUNTIME_OPTIONS_KEY

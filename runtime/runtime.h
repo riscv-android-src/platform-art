@@ -27,12 +27,14 @@
 #include <memory>
 #include <vector>
 
+#include "base/file_utils.h"
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
+#include "gc/space/image_space_loading_order.h"
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jdwp_provider.h"
@@ -184,6 +186,10 @@ class Runtime {
     return image_location_;
   }
 
+  bool IsUsingDefaultBootImageLocation() const {
+    return is_using_default_boot_image_location_;
+  }
+
   // Starts a runtime, which may cause threads to be started and code to run.
   bool Start() UNLOCK_FUNCTION(Locks::mutator_lock_);
 
@@ -264,6 +270,10 @@ class Runtime {
 
   size_t GetDefaultStackSize() const {
     return default_stack_size_;
+  }
+
+  unsigned int GetFinalizerTimeoutMs() const {
+    return finalizer_timeout_ms_;
   }
 
   gc::Heap* GetHeap() const {
@@ -583,6 +593,18 @@ class Runtime {
     }
   }
 
+  const std::string& GetProcessDataDirectory() const {
+    return process_data_directory_;
+  }
+
+  void SetProcessDataDirectory(const char* data_dir) {
+    if (data_dir == nullptr) {
+      process_data_directory_.clear();
+    } else {
+      process_data_directory_ = data_dir;
+    }
+  }
+
   bool IsDexFileFallbackEnabled() const {
     return allow_dex_file_fallback_;
   }
@@ -770,6 +792,10 @@ class Runtime {
     dump_gc_performance_on_shutdown_ = value;
   }
 
+  bool GetDumpGCPerformanceOnShutdown() const {
+    return dump_gc_performance_on_shutdown_;
+  }
+
   void IncrementDeoptimizationCount(DeoptimizationKind kind) {
     DCHECK_LE(kind, DeoptimizationKind::kLast);
     deoptimization_counts_[static_cast<size_t>(kind)]++;
@@ -829,6 +855,17 @@ class Runtime {
 
   void SetLoadAppImageStartupCacheEnabled(bool enabled) {
     load_app_image_startup_cache_ = enabled;
+  }
+
+  // Notify the runtime that application startup is considered completed. Only has effect for the
+  // first call.
+  void NotifyStartupCompleted();
+
+  // Return true if startup is already completed.
+  bool GetStartupCompleted() const;
+
+  gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
+    return image_space_loading_order_;
   }
 
  private:
@@ -909,6 +946,7 @@ class Runtime {
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
+  bool is_using_default_boot_image_location_;
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
@@ -921,6 +959,9 @@ class Runtime {
 
   // The default stack size for managed threads created by the runtime.
   size_t default_stack_size_;
+
+  // Finalizers running for longer than this many milliseconds abort the runtime.
+  unsigned int finalizer_timeout_ms_;
 
   gc::Heap* heap_;
 
@@ -1109,6 +1150,9 @@ class Runtime {
   // The package of the app running in this process.
   std::string process_package_name_;
 
+  // The data directory of the app running in this process.
+  std::string process_data_directory_;
+
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
 
@@ -1154,6 +1198,12 @@ class Runtime {
   uint32_t verifier_logging_threshold_ms_;
 
   bool load_app_image_startup_cache_ = false;
+
+  // If startup has completed, must happen at most once.
+  std::atomic<bool> startup_completed_ = false;
+
+  gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
+      gc::space::ImageSpaceLoadingOrder::kSystemFirst;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

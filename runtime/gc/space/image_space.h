@@ -19,6 +19,7 @@
 
 #include "gc/accounting/space_bitmap.h"
 #include "image.h"
+#include "image_space_loading_order.h"
 #include "space.h"
 
 namespace art {
@@ -34,7 +35,7 @@ namespace space {
 // An image space is a space backed with a memory mapped image.
 class ImageSpace : public MemMapSpace {
  public:
-  SpaceType GetType() const {
+  SpaceType GetType() const override {
     return kSpaceTypeImageSpace;
   }
 
@@ -48,6 +49,10 @@ class ImageSpace : public MemMapSpace {
       const std::vector<std::string>& boot_class_path_locations,
       const std::string& image_location,
       const InstructionSet image_isa,
+      ImageSpaceLoadingOrder order,
+      bool relocate,
+      bool executable,
+      bool is_zygote,
       size_t extra_reservation_size,
       /*out*/std::vector<std::unique_ptr<space::ImageSpace>>* boot_image_spaces,
       /*out*/MemMap* extra_reservation) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -63,6 +68,7 @@ class ImageSpace : public MemMapSpace {
   // reason in error_msg.
   static std::unique_ptr<ImageHeader> ReadImageHeader(const char* image_location,
                                                       InstructionSet image_isa,
+                                                      ImageSpaceLoadingOrder order,
                                                       std::string* error_msg);
 
   // Give access to the OatFile.
@@ -101,7 +107,7 @@ class ImageSpace : public MemMapSpace {
     return live_bitmap_.get();
   }
 
-  void Dump(std::ostream& os) const;
+  void Dump(std::ostream& os) const override;
 
   // Sweeping image spaces is a NOP.
   void Sweep(bool /* swap_bitmaps */, size_t* /* freed_objects */, size_t* /* freed_bytes */) {
@@ -129,9 +135,10 @@ class ImageSpace : public MemMapSpace {
   // Returns the checksums for the boot image and extra boot class path dex files,
   // based on the boot class path, image location and ISA (may differ from the ISA of an
   // initialized Runtime). The boot image and dex files do not need to be loaded in memory.
-  static std::string GetBootClassPathChecksums(const std::vector<std::string>& boot_class_path,
+  static std::string GetBootClassPathChecksums(ArrayRef<const std::string> boot_class_path,
                                                const std::string& image_location,
                                                InstructionSet image_isa,
+                                               ImageSpaceLoadingOrder order,
                                                /*out*/std::string* error_msg);
 
   // Returns the checksums for the boot image and extra boot class path dex files,
@@ -164,6 +171,9 @@ class ImageSpace : public MemMapSpace {
 
   // De-initialize the image-space by undoing the effects in Init().
   virtual ~ImageSpace();
+
+  void DisablePreResolvedStrings() REQUIRES_SHARED(Locks::mutator_lock_);
+  void ReleaseMetadata() REQUIRES_SHARED(Locks::mutator_lock_);
 
  protected:
   // Tries to initialize an ImageSpace from the given image path, returning null on error.

@@ -25,6 +25,7 @@
 #include <vector>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "art_method-inl.h"
 #include "base/file_utils.h"
@@ -33,7 +34,7 @@
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
 #include "class_linker-inl.h"
-#include "common_compiler_test.h"
+#include "common_compiler_driver_test.h"
 #include "compiler_callbacks.h"
 #include "debug/method_debug_info.h"
 #include "dex/quick_compiler_callbacks.h"
@@ -42,16 +43,16 @@
 #include "driver/compiler_options.h"
 #include "gc/space/image_space.h"
 #include "image_writer.h"
-#include "linker/buffered_output_stream.h"
 #include "linker/elf_writer.h"
 #include "linker/elf_writer_quick.h"
-#include "linker/file_output_stream.h"
 #include "linker/multi_oat_relative_patcher.h"
 #include "lock_word.h"
 #include "mirror/object-inl.h"
 #include "oat_writer.h"
 #include "scoped_thread_state_change-inl.h"
 #include "signal_catcher.h"
+#include "stream/buffered_output_stream.h"
+#include "stream/file_output_stream.h"
 
 namespace art {
 namespace linker {
@@ -72,9 +73,9 @@ struct CompilationHelper {
   ~CompilationHelper();
 };
 
-class ImageTest : public CommonCompilerTest {
+class ImageTest : public CommonCompilerDriverTest {
  protected:
-  virtual void SetUp() {
+  void SetUp() override {
     ReserveImageSpace();
     CommonCompilerTest::SetUp();
   }

@@ -234,8 +234,6 @@ class ImageWriter final {
   friend std::ostream& operator<<(std::ostream& stream, const NativeObjectRelocationType& type);
 
   enum class StubType {
-    kInterpreterToInterpreterBridge,
-    kInterpreterToCompiledCodeBridge,
     kJNIDlsymLookup,
     kQuickGenericJNITrampoline,
     kQuickIMTConflictTrampoline,
@@ -426,7 +424,8 @@ class ImageWriter final {
 
   void AddDexCacheArrayRelocation(void* array, size_t offset, size_t oat_index)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void AddMethodPointerArray(mirror::PointerArray* arr) REQUIRES_SHARED(Locks::mutator_lock_);
+  void AddMethodPointerArray(ObjPtr<mirror::PointerArray> arr)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   mirror::Object* GetLocalAddress(mirror::Object* object) const
       REQUIRES_SHARED(Locks::mutator_lock_) {

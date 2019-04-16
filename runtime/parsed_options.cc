@@ -57,6 +57,8 @@ bool ParsedOptions::Parse(const RuntimeOptions& options,
 }
 
 using RuntimeParser = CmdlineParser<RuntimeArgumentMap, RuntimeArgumentMap::Key>;
+using HiddenapiPolicyValueMap =
+    std::initializer_list<std::pair<const char*, hiddenapi::EnforcementPolicy>>;
 
 // Yes, the stack frame is huge. But we get called super early on (and just once)
 // to pass the command line arguments, so we'll probably be ok.
@@ -69,6 +71,13 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
 
   std::unique_ptr<RuntimeParser::Builder> parser_builder =
       std::make_unique<RuntimeParser::Builder>();
+
+  HiddenapiPolicyValueMap hiddenapi_policy_valuemap =
+      {{"disabled",  hiddenapi::EnforcementPolicy::kDisabled},
+       {"just-warn", hiddenapi::EnforcementPolicy::kJustWarn},
+       {"enabled",   hiddenapi::EnforcementPolicy::kEnabled}};
+  DCHECK_EQ(hiddenapi_policy_valuemap.size(),
+            static_cast<size_t>(hiddenapi::EnforcementPolicy::kMax) + 1);
 
   parser_builder->
        Define("-Xzygote")
@@ -89,6 +98,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Ximage:_")
           .WithType<std::string>()
           .IntoKey(M::Image)
+      .Define("-Ximage-load-order:_")
+          .WithType<gc::space::ImageSpaceLoadingOrder>()
+          .WithValueMap({{"system", gc::space::ImageSpaceLoadingOrder::kSystemFirst},
+                         {"data", gc::space::ImageSpaceLoadingOrder::kDataFirst}})
+          .IntoKey(M::ImageSpaceLoadingOrder)
       .Define("-Xcheck:jni")
           .IntoKey(M::CheckJni)
       .Define("-Xjniopts:forcecopy")
@@ -136,6 +150,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:ConcGCThreads=_")
           .WithType<unsigned int>()
           .IntoKey(M::ConcGCThreads)
+      .Define("-XX:FinalizerTimeoutMs=_")
+          .WithType<unsigned int>()
+          .IntoKey(M::FinalizerTimeoutMs)
       .Define("-Xss_")
           .WithType<Memory<1>>()
           .IntoKey(M::StackSize)
@@ -219,9 +236,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xjnitrace:_")
           .WithType<std::string>()
           .IntoKey(M::JniTrace)
-      .Define("-Xpatchoat:_")
-          .WithType<std::string>()
-          .IntoKey(M::PatchOat)
       .Define({"-Xrelocate", "-Xnorelocate"})
           .WithValues({true, false})
           .IntoKey(M::Relocate)
@@ -329,8 +343,14 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xtarget-sdk-version:_")
           .WithType<unsigned int>()
           .IntoKey(M::TargetSdkVersion)
-      .Define("-Xhidden-api-checks")
-          .IntoKey(M::HiddenApiChecks)
+      .Define("-Xhidden-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::HiddenApiPolicy)
+      .Define("-Xcore-platform-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::CorePlatformApiPolicy)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
       .Define("-Xonly-use-system-oat-files")
@@ -564,7 +584,6 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   {
     // If not set, background collector type defaults to homogeneous compaction.
-    // If foreground is GSS, use GSS as background collector.
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
@@ -580,12 +599,8 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     }
 
     if (background_collector_type_ == gc::kCollectorTypeNone) {
-      if (collector_type_ != gc::kCollectorTypeGSS) {
-        background_collector_type_ = low_memory_mode_ ?
-            gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
-      } else {
-        background_collector_type_ = collector_type_;
-      }
+      background_collector_type_ = low_memory_mode_ ?
+          gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
     }
 
     args.Set(M::BackgroundGc, BackgroundGcOption { background_collector_type_ });
@@ -609,8 +624,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
   }
 
   if (!args.Exists(M::CompilerCallbacksPtr) && !args.Exists(M::Image)) {
-    std::string image = GetAndroidRoot();
-    image += "/framework/boot.art";
+    std::string image = GetDefaultBootImageLocation(GetAndroidRoot());
     args.Set(M::Image, image);
   }
 
@@ -709,6 +723,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:+DisableExplicitGC\n");
   UsageMessage(stream, "  -XX:ParallelGCThreads=integervalue\n");
   UsageMessage(stream, "  -XX:ConcGCThreads=integervalue\n");
+  UsageMessage(stream, "  -XX:FinalizerTimeoutMs=integervalue\n");
   UsageMessage(stream, "  -XX:MaxSpinsBeforeThinLockInflation=integervalue\n");
   UsageMessage(stream, "  -XX:LongPauseLogThreshold=integervalue\n");
   UsageMessage(stream, "  -XX:LongGCLogThreshold=integervalue\n");
@@ -737,7 +752,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -Xcompiler:filename\n");
   UsageMessage(stream, "  -Xcompiler-option dex2oat-option\n");
   UsageMessage(stream, "  -Ximage-compiler-option dex2oat-option\n");
-  UsageMessage(stream, "  -Xpatchoat:filename (obsolete, ignored)\n");
   UsageMessage(stream, "  -Xusejit:booleanvalue\n");
   UsageMessage(stream, "  -Xjitinitialsize:N\n");
   UsageMessage(stream, "  -Xjitmaxsize:N\n");

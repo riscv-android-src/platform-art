@@ -738,6 +738,10 @@ class DexFile {
   static uint32_t CalculateChecksum(const uint8_t* begin, size_t size);
   static uint32_t ChecksumMemoryRange(const uint8_t* begin, size_t size);
 
+  // Number of bytes at the beginning of the dex file header which are skipped
+  // when computing the adler32 checksum of the entire file.
+  static constexpr uint32_t kNumNonChecksumBytes = OFFSETOF_MEMBER(DexFile::Header, signature_);
+
   // Returns a human-readable form of the method at an index.
   std::string PrettyMethod(uint32_t method_idx, bool with_signature = true) const;
   // Returns a human-readable form of the field at an index.
@@ -756,7 +760,7 @@ class DexFile {
   ALWAYS_INLINE const CompactDexFile* AsCompactDexFile() const;
 
   hiddenapi::Domain GetHiddenapiDomain() const { return hiddenapi_domain_; }
-  void SetHiddenapiDomain(hiddenapi::Domain value) { hiddenapi_domain_ = value; }
+  void SetHiddenapiDomain(hiddenapi::Domain value) const { hiddenapi_domain_ = value; }
 
   bool IsInMainSection(const void* addr) const {
     return Begin() <= addr && addr < Begin() + Size();
@@ -870,7 +874,10 @@ class DexFile {
   // If the dex file is a compact dex file. If false then the dex file is a standard dex file.
   const bool is_compact_dex_;
 
-  hiddenapi::Domain hiddenapi_domain_;
+  // The domain this dex file belongs to for hidden API access checks.
+  // It is decleared `mutable` because the domain is assigned after the DexFile
+  // has been created and can be changed later by the runtime.
+  mutable hiddenapi::Domain hiddenapi_domain_;
 
   friend class DexFileLoader;
   friend class DexFileVerifierTest;

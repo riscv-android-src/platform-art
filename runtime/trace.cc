@@ -478,11 +478,11 @@ void Trace::StopTracing(bool finish_tracing, bool flush_file) {
         MutexLock mu(self, *Locks::thread_list_lock_);
         runtime->GetThreadList()->ForEach(ClearThreadStackTraceAndClockBase, nullptr);
       } else {
-        runtime->GetInstrumentation()->DisableMethodTracing(kTracerInstrumentationKey);
         runtime->GetInstrumentation()->RemoveListener(
             the_trace, instrumentation::Instrumentation::kMethodEntered |
             instrumentation::Instrumentation::kMethodExited |
             instrumentation::Instrumentation::kMethodUnwind);
+        runtime->GetInstrumentation()->DisableMethodTracing(kTracerInstrumentationKey);
       }
     }
     // At this point, code may read buf_ as it's writers are shutdown
@@ -805,8 +805,7 @@ void Trace::ReadClocks(Thread* thread, uint32_t* thread_clock_diff, uint32_t* wa
 }
 
 bool Trace::RegisterMethod(ArtMethod* method) {
-  mirror::DexCache* dex_cache = method->GetDexCache();
-  const DexFile* dex_file = dex_cache->GetDexFile();
+  const DexFile* dex_file = method->GetDexFile();
   if (seen_methods_.find(dex_file) == seen_methods_.end()) {
     seen_methods_.insert(std::make_pair(dex_file, new DexIndexBitSet()));
   }

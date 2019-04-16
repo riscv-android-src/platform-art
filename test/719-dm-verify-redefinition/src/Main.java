@@ -13,15 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import java.util.BitSet;
 
 public class Main {
   public static void main(String[] args) {
     System.out.println("Hello, world!");
-    if (BitSet.class.getClassLoader().equals(String.class.getClassLoader())) {
-      System.out.println("Correct resolution of boot class.");
-    } else {
-      System.out.println("Bogus resolution of boot class.");
-    }
   }
 }

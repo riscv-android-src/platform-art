@@ -33,7 +33,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
-#include "mirror/stack_trace_element.h"
+#include "mirror/stack_trace_element-inl.h"
 #include "oat_quick_method_header.h"
 #include "obj_ptr-inl.h"
 #include "optimizing/stack_map_stream.h"
@@ -80,7 +80,7 @@ class ExceptionTest : public CommonRuntimeTest {
     stack_maps.BeginMethod(4 * sizeof(void*), 0u, 0u, 0u);
     stack_maps.BeginStackMapEntry(kDexPc, native_pc_offset);
     stack_maps.EndStackMapEntry();
-    stack_maps.EndMethod(code_size);
+    stack_maps.EndMethod();
     ScopedArenaVector<uint8_t> stack_map = stack_maps.Encode();
 
     const size_t stack_maps_size = stack_map.size();

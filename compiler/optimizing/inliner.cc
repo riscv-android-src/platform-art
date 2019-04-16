@@ -289,7 +289,7 @@ static uint32_t FindMethodIndexIn(ArtMethod* method,
   }
 }
 
-static dex::TypeIndex FindClassIndexIn(mirror::Class* cls,
+static dex::TypeIndex FindClassIndexIn(ObjPtr<mirror::Class> cls,
                                        const DexCompilationUnit& compilation_unit)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const DexFile& dex_file = *compilation_unit.GetDexFile();
@@ -368,7 +368,7 @@ HInliner::InlineCacheType HInliner::GetInlineCacheType(
   }
 }
 
-static mirror::Class* GetMonomorphicType(Handle<mirror::ObjectArray<mirror::Class>> classes)
+static ObjPtr<mirror::Class> GetMonomorphicType(Handle<mirror::ObjectArray<mirror::Class>> classes)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   DCHECK(classes->Get(0) != nullptr);
   return classes->Get(0);
@@ -380,6 +380,11 @@ ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
   }
   if (Runtime::Current()->IsAotCompiler()) {
     // No CHA-based devirtulization for AOT compiler (yet).
+    return nullptr;
+  }
+  if (Runtime::Current()->IsZygote()) {
+    // No CHA-based devirtulization for Zygote, as it compiles with
+    // offline information.
     return nullptr;
   }
   if (outermost_graph_->IsCompilingOsr()) {
@@ -589,9 +594,12 @@ bool HInliner::TryInlineFromInlineCache(const DexFile& caller_dex_file,
 
   StackHandleScope<1> hs(Thread::Current());
   Handle<mirror::ObjectArray<mirror::Class>> inline_cache;
-  InlineCacheType inline_cache_type = Runtime::Current()->IsAotCompiler()
-      ? GetInlineCacheAOT(caller_dex_file, invoke_instruction, &hs, &inline_cache)
-      : GetInlineCacheJIT(invoke_instruction, &hs, &inline_cache);
+  // The Zygote JIT compiles based on a profile, so we shouldn't use runtime inline caches
+  // for it.
+  InlineCacheType inline_cache_type =
+      (Runtime::Current()->IsAotCompiler() || Runtime::Current()->IsZygote())
+          ? GetInlineCacheAOT(caller_dex_file, invoke_instruction, &hs, &inline_cache)
+          : GetInlineCacheJIT(invoke_instruction, &hs, &inline_cache);
 
   switch (inline_cache_type) {
     case kInlineCacheNoData: {
@@ -679,7 +687,6 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
     StackHandleScope<1>* hs,
     /*out*/Handle<mirror::ObjectArray<mirror::Class>>* inline_cache)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(Runtime::Current()->IsAotCompiler());
   const ProfileCompilationInfo* pci = codegen_->GetCompilerOptions().GetProfileCompilationInfo();
   if (pci == nullptr) {
     return kInlineCacheNoData;
@@ -1727,7 +1734,7 @@ HInstanceFieldSet* HInliner::CreateInstanceFieldSet(uint32_t field_index,
 }
 
 template <typename T>
-static inline Handle<T> NewHandleIfDifferent(T* object,
+static inline Handle<T> NewHandleIfDifferent(ObjPtr<T> object,
                                              Handle<T> hint,
                                              VariableSizedHandleScope* handles)
     REQUIRES_SHARED(Locks::mutator_lock_) {

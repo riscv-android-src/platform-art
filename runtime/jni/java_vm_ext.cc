@@ -38,6 +38,7 @@
 #include "jni_internal.h"
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
+#include "mirror/dex_cache-inl.h"
 #include "nativebridge/native_bridge.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "nativehelper/scoped_utf_chars.h"
@@ -161,8 +162,8 @@ class SharedLibrary {
   void* FindSymbol(const std::string& symbol_name, const char* shorty = nullptr)
       REQUIRES(!Locks::mutator_lock_) {
     return NeedsNativeBridge()
-        ? FindSymbolWithNativeBridge(symbol_name.c_str(), shorty)
-        : FindSymbolWithoutNativeBridge(symbol_name.c_str());
+        ? FindSymbolWithNativeBridge(symbol_name, shorty)
+        : FindSymbolWithoutNativeBridge(symbol_name);
   }
 
   // No mutator lock since dlsym may block for a while if another thread is doing dlopen.
@@ -224,6 +225,20 @@ class Libraries {
     STLDeleteValues(&libraries_);
   }
 
+  // NO_THREAD_SAFETY_ANALYSIS as this is during runtime shutdown, and we have
+  // no thread to lock this with.
+  void UnloadBootNativeLibraries(JavaVM* vm) const NO_THREAD_SAFETY_ANALYSIS {
+    CHECK(Thread::Current() == nullptr);
+    std::vector<SharedLibrary*> unload_libraries;
+    for (auto it = libraries_.begin(); it != libraries_.end(); ++it) {
+      SharedLibrary* const library = it->second;
+      if (library->GetClassLoader() == nullptr) {
+        unload_libraries.push_back(library);
+      }
+    }
+    UnloadLibraries(vm, unload_libraries);
+  }
+
   // NO_THREAD_SAFETY_ANALYSIS since this may be called from Dumpable. Dumpable can't be annotated
   // properly due to the template. The caller should be holding the jni_libraries_lock_.
   void Dump(std::ostream& os) const NO_THREAD_SAFETY_ANALYSIS {
@@ -258,7 +273,8 @@ class Libraries {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     std::string jni_short_name(m->JniShortName());
     std::string jni_long_name(m->JniLongName());
-    mirror::ClassLoader* const declaring_class_loader = m->GetDeclaringClass()->GetClassLoader();
+    const ObjPtr<mirror::ClassLoader> declaring_class_loader =
+        m->GetDeclaringClass()->GetClassLoader();
     ScopedObjectAccessUnchecked soa(Thread::Current());
     void* const declaring_class_loader_allocator =
         Runtime::Current()->GetClassLinker()->GetAllocatorForClassLoader(declaring_class_loader);
@@ -337,17 +353,23 @@ class Libraries {
     }
     ScopedThreadSuspension sts(self, kNative);
     // Do this without holding the jni libraries lock to prevent possible deadlocks.
-    using JNI_OnUnloadFn = void(*)(JavaVM*, void*);
+    UnloadLibraries(self->GetJniEnv()->GetVm(), unload_libraries);
     for (auto library : unload_libraries) {
+      delete library;
+    }
+  }
+
+  static void UnloadLibraries(JavaVM* vm, const std::vector<SharedLibrary*>& libraries) {
+    using JNI_OnUnloadFn = void(*)(JavaVM*, void*);
+    for (SharedLibrary* library : libraries) {
       void* const sym = library->FindSymbol("JNI_OnUnload", nullptr);
       if (sym == nullptr) {
         VLOG(jni) << "[No JNI_OnUnload found in \"" << library->GetPath() << "\"]";
       } else {
         VLOG(jni) << "[JNI_OnUnload found for \"" << library->GetPath() << "\"]: Calling...";
         JNI_OnUnloadFn jni_on_unload = reinterpret_cast<JNI_OnUnloadFn>(sym);
-        jni_on_unload(self->GetJniEnv()->GetVm(), nullptr);
+        jni_on_unload(vm, nullptr);
       }
-      delete library;
     }
   }
 
@@ -488,6 +510,7 @@ JavaVMExt::JavaVMExt(Runtime* runtime,
 }
 
 JavaVMExt::~JavaVMExt() {
+  UnloadBootNativeLibraries();
 }
 
 // Checking "globals" and "weak_globals" usually requires locks, but we
@@ -854,6 +877,10 @@ void JavaVMExt::DumpReferenceTables(std::ostream& os) {
 
 void JavaVMExt::UnloadNativeLibraries() {
   libraries_.get()->UnloadNativeLibraries();
+}
+
+void JavaVMExt::UnloadBootNativeLibraries() {
+  libraries_.get()->UnloadBootNativeLibraries(this);
 }
 
 bool JavaVMExt::LoadNativeLibrary(JNIEnv* env,

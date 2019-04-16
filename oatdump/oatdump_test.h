@@ -72,16 +72,14 @@ class OatDumpTest : public CommonRuntimeTest {
 
   // Returns path to the oatdump/dex2oat/dexdump binary.
   std::string GetExecutableFilePath(const char* name, bool is_debug, bool is_static) {
-    std::string root = GetTestAndroidRoot();
-    root += "/bin/";
-    root += name;
+    std::string path = GetAndroidRuntimeBinDir() + '/' + name;
     if (is_debug) {
-      root += "d";
+      path += 'd';
     }
     if (is_static) {
-      root += "s";
+      path += 's';
     }
-    return root;
+    return path;
   }
 
   std::string GetExecutableFilePath(Flavor flavor, const char* name) {
@@ -92,6 +90,7 @@ class OatDumpTest : public CommonRuntimeTest {
     kModeOat,
     kModeCoreOat,
     kModeOatWithBootImage,
+    kModeAppImage,
     kModeArt,
     kModeSymbolize,
   };
@@ -106,6 +105,10 @@ class OatDumpTest : public CommonRuntimeTest {
     // Use ProfileTestMultiDex as it contains references to boot image strings
     // that shall use different code for PIC and non-PIC.
     return "ProfileTestMultiDex";
+  }
+
+  std::string GetAppImageName() {
+    return tmp_dir_ + "/" + GetAppBaseName() + ".art";
   }
 
   std::string GetAppOdexName() {
@@ -200,6 +203,17 @@ class OatDumpTest : public CommonRuntimeTest {
         exec_argv.push_back("--instruction-set=" + std::string(
             GetInstructionSetString(kRuntimeISA)));
         exec_argv.push_back("--oat-file=" + GetAppOdexName());
+      } else if (mode == kModeAppImage) {
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(GetClassPathOption("-Xbootclasspath:", GetLibCoreDexFileNames()));
+        exec_argv.push_back("--runtime-arg");
+        exec_argv.push_back(
+            GetClassPathOption("-Xbootclasspath-locations:", GetLibCoreDexLocations()));
+        exec_argv.push_back("--image=" + GetCoreArtLocation());
+        exec_argv.push_back("--instruction-set=" + std::string(
+            GetInstructionSetString(kRuntimeISA)));
+        exec_argv.push_back("--app-oat=" + GetAppOdexName());
+        exec_argv.push_back("--app-image=" + GetAppImageName());
       } else if (mode == kModeCoreOat) {
         exec_argv.push_back("--oat-file=" + core_oat_location_);
       } else {

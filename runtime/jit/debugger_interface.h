@@ -21,11 +21,13 @@
 #include <vector>
 
 #include "arch/instruction_set_features.h"
+#include "base/array_ref.h"
 #include "base/locks.h"
 
 namespace art {
 
 class DexFile;
+class Mutex;
 class Thread;
 
 // This method is declared in the compiler library.
@@ -33,8 +35,9 @@ class Thread;
 typedef std::vector<uint8_t> PackElfFileForJITFunction(
     InstructionSet isa,
     const InstructionSetFeatures* features,
-    std::vector<const uint8_t*>& added_elf_files,
+    std::vector<ArrayRef<const uint8_t>>& added_elf_files,
     std::vector<const void*>& removed_symbols,
+    bool compress,
     /*out*/ size_t* num_symbols);
 
 // Notify native tools (e.g. libunwind) that DEX file has been opened.
@@ -57,6 +60,11 @@ void RemoveNativeDebugInfoForJit(Thread* self, const void* code_ptr);
 
 // Returns approximate memory used by debug info for JIT code.
 size_t GetJitMiniDebugInfoMemUsage();
+
+// Get the lock which protects the native debug info.
+// Used only in tests to unwind while the JIT thread is running.
+// TODO: Unwinding should be race-free. Remove this.
+Mutex* GetNativeDebugInfoLock();
 
 }  // namespace art
 

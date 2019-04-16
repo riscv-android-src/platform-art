@@ -35,6 +35,7 @@
 #include "gc/collector/iteration.h"
 #include "gc/collector_type.h"
 #include "gc/gc_cause.h"
+#include "gc/space/image_space_loading_order.h"
 #include "gc/space/large_object_space.h"
 #include "handle.h"
 #include "obj_ptr.h"
@@ -215,7 +216,8 @@ class Heap {
        bool use_generational_cc,
        uint64_t min_interval_homogeneous_space_compaction_by_oom,
        bool dump_region_info_before_gc,
-       bool dump_region_info_after_gc);
+       bool dump_region_info_after_gc,
+       space::ImageSpaceLoadingOrder image_space_loading_order);
 
   ~Heap();
 
@@ -305,9 +307,6 @@ class Heap {
   // Change the allocator, updates entrypoints.
   void ChangeAllocator(AllocatorType allocator)
       REQUIRES(Locks::mutator_lock_, !Locks::runtime_shutdown_lock_);
-
-  // Transition the garbage collector during runtime, may copy objects from one space to another.
-  void TransitionCollector(CollectorType collector_type) REQUIRES(!*gc_complete_lock_);
 
   // Change the collector to be one of the possible options (MS, CMS, SS).
   void ChangeCollector(CollectorType collector_type)
@@ -689,9 +688,6 @@ class Heap {
                          uint32_t* boot_oat_begin,
                          uint32_t* boot_oat_end);
 
-  // Permenantly disable moving garbage collection.
-  void DisableMovingGc() REQUIRES(!*gc_complete_lock_);
-
   space::DlMallocSpace* GetDlMallocSpace() const {
     return dlmalloc_space_;
   }
@@ -833,8 +829,17 @@ class Heap {
     alloc_tracking_enabled_.store(enabled, std::memory_order_relaxed);
   }
 
-  AllocRecordObjectMap* GetAllocationRecords() const
-      REQUIRES(Locks::alloc_tracker_lock_) {
+  // Return the current stack depth of allocation records.
+  size_t GetAllocTrackerStackDepth() const {
+    return alloc_record_depth_;
+  }
+
+  // Return the current stack depth of allocation records.
+  void SetAllocTrackerStackDepth(size_t alloc_record_depth) {
+    alloc_record_depth_ = alloc_record_depth;
+  }
+
+  AllocRecordObjectMap* GetAllocationRecords() const REQUIRES(Locks::alloc_tracker_lock_) {
     return allocation_records_.get();
   }
 
@@ -945,7 +950,6 @@ class Heap {
     return
         collector_type == kCollectorTypeCC ||
         collector_type == kCollectorTypeSS ||
-        collector_type == kCollectorTypeGSS ||
         collector_type == kCollectorTypeCCBackground ||
         collector_type == kCollectorTypeHomogeneousSpaceCompact;
   }
@@ -1518,6 +1522,7 @@ class Heap {
   // Allocation tracking support
   Atomic<bool> alloc_tracking_enabled_;
   std::unique_ptr<AllocRecordObjectMap> allocation_records_;
+  size_t alloc_record_depth_;
 
   // GC stress related data structures.
   Mutex* backtrace_lock_ DEFAULT_MUTEX_ACQUIRED_AFTER;

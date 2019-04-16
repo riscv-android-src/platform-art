@@ -125,7 +125,6 @@ libart_cc_defaults {
         "managed_stack.cc",
         "method_handles.cc",
         "mirror/array.cc",
-        "mirror/call_site.cc",
         "mirror/class.cc",
         "mirror/class_ext.cc",
         "mirror/dex_cache.cc",
@@ -142,6 +141,7 @@ libart_cc_defaults {
         "mirror/throwable.cc",
         "mirror/var_handle.cc",
         "monitor.cc",
+        "monitor_objects_stack_visitor.cc",
         "native_bridge_art_interface.cc",
         "native_stack_dump.cc",
         "native/dalvik_system_DexFile.cc",
@@ -203,6 +203,7 @@ libart_cc_defaults {
         "transaction.cc",
         "var_handles.cc",
         "vdex_file.cc",
+        "verifier/class_verifier.cc",
         "verifier/instruction_flags.cc",
         "verifier/method_verifier.cc",
         "verifier/reg_type.cc",
@@ -340,7 +341,7 @@ libart_cc_defaults {
                 "thread_android.cc",
             ],
             shared_libs: [
-                "libtombstoned_client",
+                "libdl_android",
             ],
             static_libs: [
                 "libz",  // For adler32.
@@ -382,7 +383,6 @@ libart_cc_defaults {
     export_generated_headers: ["cpp-define-generator-asm-support"],
     include_dirs: [
         "art/sigchainlib",
-        "external/zlib",
     ],
     header_libs: [
         "art_cmdlineparser_headers",
@@ -399,6 +399,7 @@ libart_cc_defaults {
         "liblog",
         // For common macros.
         "libbase",
+        "libunwindstack",
     ],
     static: {
         static_libs: ["libsigchain_dummy"],
@@ -415,11 +416,6 @@ libart_cc_defaults {
 
 libart_static_cc_defaults {
     name: "libart_static_base_defaults",
-    target: {
-        android: {
-            static_libs: ["libtombstoned_client_static"],
-        },
-    },
     static_libs: [
         "libartpalette",
         "libbacktrace",
@@ -429,6 +425,7 @@ libart_static_cc_defaults {
         "liblog",
         "libnativebridge",
         "libnativeloader",
+        "libsigchain_dummy",
         "libunwindstack",
         "libz",
     ],
@@ -442,7 +439,10 @@ cc_defaults {
         "libdexfile_static_defaults",
         "libprofile_static_defaults",
     ],
-    static_libs: ["libart"],
+    static_libs: [
+        "libart",
+        "libelffile",
+    ],
 }
 
 cc_defaults {
@@ -453,7 +453,10 @@ cc_defaults {
         "libdexfiled_static_defaults",
         "libprofiled_static_defaults",
     ],
-    static_libs: ["libartd"],
+    static_libs: [
+        "libartd",
+        "libelffiled",
+    ],
 }
 
 gensrcs {
@@ -509,6 +512,9 @@ art_cc_library {
     },
     whole_static_libs: [
     ],
+    static_libs: [
+        "libelffile",
+    ],
     shared_libs: [
         "libartbase",
         "libdexfile",
@@ -534,6 +540,9 @@ art_cc_library {
     ],
     whole_static_libs: [
     ],
+    static_libs: [
+        "libelffiled",
+    ],
     shared_libs: [
         "libartbased",
         "libdexfiled",
@@ -553,7 +562,7 @@ art_cc_library {
     ],
     shared_libs: [
         "libartd",
-	"libartbase-art-gtest",
+        "libartbase-art-gtest",
         "libbase",
         "libbacktrace",
     ],
@@ -618,6 +627,7 @@ art_cc_test {
         "jdwp/jdwp_options_test.cc",
         "jit/profiling_info_test.cc",
         "jni/java_vm_ext_test.cc",
+        "jni/jni_internal_test.cc",
         "method_handles_test.cc",
         "mirror/dex_cache_test.cc",
         "mirror/method_type_test.cc",
@@ -629,12 +639,14 @@ art_cc_test {
         "oat_file_assistant_test.cc",
         "parsed_options_test.cc",
         "prebuilt_tools_test.cc",
+        "proxy_test.cc",
         "reference_table_test.cc",
         "runtime_callbacks_test.cc",
         "subtype_check_info_test.cc",
         "subtype_check_test.cc",
         "thread_pool_test.cc",
         "transaction_test.cc",
+        "two_runtimes_test.cc",
         "vdex_file_test.cc",
         "verifier/method_verifier_test.cc",
         "verifier/reg_type_test.cc",
@@ -645,9 +657,6 @@ art_cc_test {
     header_libs: [
         "art_cmdlineparser_headers", // For parsed_options_test.
     ],
-    include_dirs: [
-        "external/zlib",
-    ],
 }
 
 art_cc_test {
@@ -656,9 +665,8 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: [
-        "jni/jni_internal_test.cc",
-        "proxy_test.cc",
         "reflection_test.cc",
+        "module_exclusion_test.cc",
     ],
     shared_libs: [
         "libartd-compiler",

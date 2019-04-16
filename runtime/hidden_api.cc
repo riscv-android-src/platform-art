@@ -21,10 +21,12 @@
 #include "art_field-inl.h"
 #include "art_method-inl.h"
 #include "base/dumpable.h"
+#include "base/file_utils.h"
 #include "class_root.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/dex_file_loader.h"
 #include "mirror/class_ext.h"
+#include "oat_file.h"
 #include "scoped_thread_state_change.h"
 #include "thread-inl.h"
 #include "well_known_classes.h"
@@ -71,6 +73,45 @@ static inline std::ostream& operator<<(std::ostream& os, const AccessContext& va
   return os;
 }
 
+static Domain DetermineDomainFromLocation(const std::string& dex_location,
+                                          ObjPtr<mirror::ClassLoader> class_loader) {
+  // If running with APEX, check `path` against known APEX locations.
+  // These checks will be skipped on target buildbots where ANDROID_RUNTIME_ROOT
+  // is set to "/system".
+  if (RuntimeModuleRootDistinctFromAndroidRoot()) {
+    if (LocationIsOnRuntimeModule(dex_location.c_str()) ||
+        LocationIsOnConscryptModule(dex_location.c_str())) {
+      return Domain::kCorePlatform;
+    }
+
+    if (LocationIsOnApex(dex_location.c_str())) {
+      return Domain::kPlatform;
+    }
+  }
+
+  if (LocationIsOnSystemFramework(dex_location.c_str())) {
+    return Domain::kPlatform;
+  }
+
+  if (class_loader.IsNull()) {
+    LOG(WARNING) << "DexFile " << dex_location
+        << " is in boot class path but is not in a known location";
+    return Domain::kPlatform;
+  }
+
+  return Domain::kApplication;
+}
+
+void InitializeDexFileDomain(const DexFile& dex_file, ObjPtr<mirror::ClassLoader> class_loader) {
+  Domain dex_domain = DetermineDomainFromLocation(dex_file.GetLocation(), class_loader);
+
+  // Assign the domain unless a more permissive domain has already been assigned.
+  // This may happen when DexFile is initialized as trusted.
+  if (IsDomainMoreTrustedThan(dex_domain, dex_file.GetHiddenapiDomain())) {
+    dex_file.SetHiddenapiDomain(dex_domain);
+  }
+}
+
 namespace detail {
 
 // Do not change the values of items in this enum, as they are written to the
@@ -90,10 +131,8 @@ MemberSignature::MemberSignature(ArtField* field) {
 }
 
 MemberSignature::MemberSignature(ArtMethod* method) {
-  // If this is a proxy method, print the signature of the interface method.
-  method = method->GetInterfaceMethodIfProxy(
-      Runtime::Current()->GetClassLinker()->GetImagePointerSize());
-
+  DCHECK(method == method->GetInterfaceMethodIfProxy(kRuntimePointerSize))
+      << "Caller should have replaced proxy method with interface method";
   class_name_ = method->GetDeclaringClass()->GetDescriptor(&tmp_);
   member_name_ = method->GetName();
   type_signature_ = method->GetSignature().ToString();
@@ -157,9 +196,12 @@ void MemberSignature::Dump(std::ostream& os) const {
   }
 }
 
-void MemberSignature::WarnAboutAccess(AccessMethod access_method, hiddenapi::ApiList list) {
+void MemberSignature::WarnAboutAccess(AccessMethod access_method,
+                                      hiddenapi::ApiList list,
+                                      bool access_denied) {
   LOG(WARNING) << "Accessing hidden " << (type_ == kField ? "field " : "method ")
-               << Dumpable<MemberSignature>(*this) << " (" << list << ", " << access_method << ")";
+               << Dumpable<MemberSignature>(*this) << " (" << list << ", " << access_method
+               << (access_denied ? ", denied)" : ", allowed)");
 }
 
 bool MemberSignature::Equals(const MemberSignature& other) {
@@ -173,7 +215,9 @@ bool MemberSignature::MemberNameAndTypeMatch(const MemberSignature& other) {
   return member_name_ == other.member_name_ && type_signature_ == other.type_signature_;
 }
 
-void MemberSignature::LogAccessToEventLog(AccessMethod access_method, bool access_denied) {
+void MemberSignature::LogAccessToEventLog(uint32_t sampled_value,
+                                          AccessMethod access_method,
+                                          bool access_denied) {
 #ifdef ART_TARGET_ANDROID
   if (access_method == AccessMethod::kLinking || access_method == AccessMethod::kNone) {
     // Linking warnings come from static analysis/compilation of the bytecode
@@ -202,13 +246,18 @@ void MemberSignature::LogAccessToEventLog(AccessMethod access_method, bool acces
     LOG(ERROR) << "Unable to allocate string for hidden api method signature";
   }
   env->CallStaticVoidMethod(WellKnownClasses::dalvik_system_VMRuntime,
-      WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed, package_str.get(),
-      signature_jstr.get(), static_cast<jint>(access_method), access_denied);
+      WellKnownClasses::dalvik_system_VMRuntime_hiddenApiUsed,
+      sampled_value,
+      package_str.get(),
+      signature_jstr.get(),
+      static_cast<jint>(access_method),
+      access_denied);
   if (env->ExceptionCheck()) {
     env->ExceptionClear();
     LOG(ERROR) << "Unable to report hidden api usage";
   }
 #else
+  UNUSED(sampled_value);
   UNUSED(access_method);
   UNUSED(access_denied);
 #endif
@@ -255,10 +304,16 @@ static ALWAYS_INLINE bool CanUpdateRuntimeFlags(ArtMethod* method) {
 }
 
 template<typename T>
-static ALWAYS_INLINE void MaybeWhitelistMember(Runtime* runtime, T* member)
+static ALWAYS_INLINE void MaybeUpdateAccessFlags(Runtime* runtime, T* member, uint32_t flag)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (CanUpdateRuntimeFlags(member) && runtime->ShouldDedupeHiddenApiWarnings()) {
-    member->SetAccessFlags(member->GetAccessFlags() | kAccPublicApi);
+  // Update the access flags unless:
+  // (a) `member` is an intrinsic
+  // (b) this is AOT compiler, as we do not want the updated access flags in the boot/app image
+  // (c) deduping warnings has been explicitly switched off.
+  if (CanUpdateRuntimeFlags(member) &&
+      !runtime->IsAotCompiler() &&
+      runtime->ShouldDedupeHiddenApiWarnings()) {
+    member->SetAccessFlags(member->GetAccessFlags() | flag);
   }
 }
 
@@ -290,6 +345,7 @@ static void VisitMembers(const DexFile& dex_file,
 template<typename T>
 uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
   static_assert(std::is_same<T, ArtField>::value || std::is_same<T, ArtMethod>::value);
+  constexpr bool kMemberIsField = std::is_same<T, ArtField>::value;
   using AccessorType = typename std::conditional<std::is_same<T, ArtField>::value,
       ClassAccessor::Field, ClassAccessor::Method>::type;
 
@@ -308,15 +364,22 @@ uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
     // Class is not redefined. Find the class def, iterate over its members and
     // find the entry corresponding to this `member`.
     const dex::ClassDef* class_def = declaring_class->GetClassDef();
-    DCHECK(class_def != nullptr) << "Class def should always be set for initialized classes";
-
-    uint32_t member_index = GetMemberDexIndex(member);
-    auto fn_visit = [&](const AccessorType& dex_member) {
-      if (dex_member.GetIndex() == member_index) {
-        flags = ApiList(dex_member.GetHiddenapiFlags());
-      }
-    };
-    VisitMembers(declaring_class->GetDexFile(), *class_def, fn_visit);
+    if (class_def == nullptr) {
+      // ClassDef is not set for proxy classes. Only their fields can ever be inspected.
+      DCHECK(declaring_class->IsProxyClass())
+          << "Only proxy classes are expected not to have a class def";
+      DCHECK(kMemberIsField)
+          << "Interface methods should be inspected instead of proxy class methods";
+      flags = ApiList::Greylist();
+    } else {
+      uint32_t member_index = GetMemberDexIndex(member);
+      auto fn_visit = [&](const AccessorType& dex_member) {
+        if (dex_member.GetIndex() == member_index) {
+          flags = ApiList(dex_member.GetHiddenapiFlags());
+        }
+      };
+      VisitMembers(declaring_class->GetDexFile(), *class_def, fn_visit);
+    }
   } else {
     // Class was redefined using JVMTI. We have a pointer to the original dex file
     // and the class def index of this class in that dex file, but the field/method
@@ -344,14 +407,27 @@ uint32_t GetDexFlags(T* member) REQUIRES_SHARED(Locks::mutator_lock_) {
 }
 
 template<typename T>
-void MaybeReportCorePlatformApiViolation(T* member,
-                                         const AccessContext& caller_context,
-                                         AccessMethod access_method) {
+bool HandleCorePlatformApiViolation(T* member,
+                                    const AccessContext& caller_context,
+                                    AccessMethod access_method,
+                                    EnforcementPolicy policy) {
+  DCHECK(policy != EnforcementPolicy::kDisabled)
+      << "Should never enter this function when access checks are completely disabled";
+
   if (access_method != AccessMethod::kNone) {
-    MemberSignature sig(member);
-    LOG(ERROR) << "CorePlatformApi violation: " << Dumpable<MemberSignature>(sig)
-               << " from " << caller_context << " using " << access_method;
+    LOG(WARNING) << "Core platform API violation: "
+        << Dumpable<MemberSignature>(MemberSignature(member))
+        << " from " << caller_context << " using " << access_method;
+
+    // If policy is set to just warn, add kAccCorePlatformApi to access flags of
+    // `member` to avoid reporting the violation again next time.
+    if (policy == EnforcementPolicy::kJustWarn) {
+      MaybeUpdateAccessFlags(Runtime::Current(), member, kAccCorePlatformApi);
+    }
   }
+
+  // Deny access if enforcement is enabled.
+  return policy == EnforcementPolicy::kEnabled;
 }
 
 template<typename T>
@@ -375,7 +451,7 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
     // Avoid re-examining the exemption list next time.
     // Note this results in no warning for the member, which seems like what one would expect.
     // Exemptions effectively adds new members to the whitelist.
-    MaybeWhitelistMember(runtime, member);
+    MaybeUpdateAccessFlags(runtime, member, kAccPublicApi);
     return false;
   }
 
@@ -383,7 +459,7 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
     // Print a log message with information about this class member access.
     // We do this if we're about to deny access, or the app is debuggable.
     if (kLogAllAccesses || deny_access || runtime->IsJavaDebuggable()) {
-      member_signature.WarnAboutAccess(access_method, api_list);
+      member_signature.WarnAboutAccess(access_method, api_list, deny_access);
     }
 
     // If there is a StrictMode listener, notify it about this violation.
@@ -394,16 +470,18 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
       uint32_t eventLogSampleRate = runtime->GetHiddenApiEventLogSampleRate();
       // Assert that RAND_MAX is big enough, to ensure sampling below works as expected.
       static_assert(RAND_MAX >= 0xffff, "RAND_MAX too small");
-      if (eventLogSampleRate != 0 &&
-          (static_cast<uint32_t>(std::rand()) & 0xffff) < eventLogSampleRate) {
-        member_signature.LogAccessToEventLog(access_method, deny_access);
+      if (eventLogSampleRate != 0) {
+        const uint32_t sampled_value = static_cast<uint32_t>(std::rand()) & 0xffff;
+        if (sampled_value < eventLogSampleRate) {
+          member_signature.LogAccessToEventLog(sampled_value, access_method, deny_access);
+        }
       }
     }
 
     // If this access was not denied, move the member into whitelist and skip
     // the warning the next time the member is accessed.
     if (!deny_access) {
-      MaybeWhitelistMember(runtime, member);
+      MaybeUpdateAccessFlags(runtime, member, kAccPublicApi);
     }
   }
 
@@ -413,12 +491,14 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
 // Need to instantiate these.
 template uint32_t GetDexFlags<ArtField>(ArtField* member);
 template uint32_t GetDexFlags<ArtMethod>(ArtMethod* member);
-template void MaybeReportCorePlatformApiViolation(ArtField* member,
-                                                  const AccessContext& caller_context,
-                                                  AccessMethod access_method);
-template void MaybeReportCorePlatformApiViolation(ArtMethod* member,
-                                                  const AccessContext& caller_context,
-                                                  AccessMethod access_method);
+template bool HandleCorePlatformApiViolation(ArtField* member,
+                                             const AccessContext& caller_context,
+                                             AccessMethod access_method,
+                                             EnforcementPolicy policy);
+template bool HandleCorePlatformApiViolation(ArtMethod* member,
+                                             const AccessContext& caller_context,
+                                             AccessMethod access_method,
+                                             EnforcementPolicy policy);
 template bool ShouldDenyAccessToMemberImpl<ArtField>(ArtField* member,
                                                      ApiList api_list,
                                                      AccessMethod access_method);

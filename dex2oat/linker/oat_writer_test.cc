@@ -23,7 +23,7 @@
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
-#include "common_compiler_test.h"
+#include "common_compiler_driver_test.h"
 #include "compiled_method-inl.h"
 #include "compiler.h"
 #include "debug/method_debug_info.h"
@@ -35,12 +35,9 @@
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "entrypoints/quick/quick_entrypoints.h"
-#include "linker/buffered_output_stream.h"
 #include "linker/elf_writer.h"
 #include "linker/elf_writer_quick.h"
-#include "linker/file_output_stream.h"
 #include "linker/multi_oat_relative_patcher.h"
-#include "linker/vector_output_stream.h"
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
@@ -48,12 +45,15 @@
 #include "oat_writer.h"
 #include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stream/buffered_output_stream.h"
+#include "stream/file_output_stream.h"
+#include "stream/vector_output_stream.h"
 #include "vdex_file.h"
 
 namespace art {
 namespace linker {
 
-class OatTest : public CommonCompilerTest {
+class OatTest : public CommonCompilerDriverTest {
  protected:
   static const bool kCompile = false;  // DISABLED_ due to the time to compile libcore
 
@@ -466,7 +466,7 @@ TEST_F(OatTest, WriteRead) {
 TEST_F(OatTest, OatHeaderSizeCheck) {
   // If this test is failing and you have to update these constants,
   // it is time to update OatHeader::kOatVersion
-  EXPECT_EQ(64U, sizeof(OatHeader));
+  EXPECT_EQ(56U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
   EXPECT_EQ(166 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),

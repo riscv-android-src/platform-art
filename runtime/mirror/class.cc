@@ -31,7 +31,7 @@
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
 #include "dex/signature-inl.h"
-#include "dex_cache.h"
+#include "dex_cache-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/heap-inl.h"
 #include "handle_scope-inl.h"
@@ -94,10 +94,10 @@ ObjPtr<mirror::Class> Class::GetPrimitiveClass(ObjPtr<mirror::String> name) {
   }
 }
 
-ClassExt* Class::EnsureExtDataPresent(Thread* self) {
+ObjPtr<ClassExt> Class::EnsureExtDataPresent(Thread* self) {
   ObjPtr<ClassExt> existing(GetExtData());
   if (!existing.IsNull()) {
-    return existing.Ptr();
+    return existing;
   }
   StackHandleScope<3> hs(self);
   // Handlerize 'this' since we are allocating here.
@@ -136,7 +136,7 @@ ClassExt* Class::EnsureExtDataPresent(Thread* self) {
     if (throwable != nullptr) {
       self->SetException(throwable.Get());
     }
-    return ret.Ptr();
+    return ret;
   }
 }
 
@@ -252,8 +252,8 @@ void Class::SetClassSize(uint32_t new_class_size) {
 // Class.getName: keywords for primitive types, regular "[I" form for primitive arrays (so "int"
 // but "[I"), and arrays of reference types written between "L" and ";" but with dots rather than
 // slashes (so "java.lang.String" but "[Ljava.lang.String;"). Madness.
-String* Class::ComputeName(Handle<Class> h_this) {
-  String* name = h_this->GetName();
+ObjPtr<String> Class::ComputeName(Handle<Class> h_this) {
+  ObjPtr<String> name = h_this->GetName();
   if (name != nullptr) {
     return name;
   }
@@ -999,25 +999,36 @@ void Class::SetSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size) {
 }
 
 const char* Class::GetDescriptor(std::string* storage) {
-  if (IsPrimitive()) {
-    return Primitive::Descriptor(GetPrimitiveType());
-  } else if (IsArrayClass()) {
-    return GetArrayDescriptor(storage);
-  } else if (IsProxyClass()) {
-    *storage = Runtime::Current()->GetClassLinker()->GetDescriptorForProxy(this);
-    return storage->c_str();
-  } else {
-    const DexFile& dex_file = GetDexFile();
-    const dex::TypeId& type_id = dex_file.GetTypeId(GetClassDef()->class_idx_);
-    return dex_file.GetTypeDescriptor(type_id);
+  size_t dim = 0u;
+  ObjPtr<mirror::Class> klass = this;
+  while (klass->IsArrayClass()) {
+    ++dim;
+    // No read barrier needed, we're reading a chain of constant references for comparison
+    // with null. Then we follow up below with reading constant references to read constant
+    // primitive data in both proxy and non-proxy paths. See ReadBarrierOption.
+    klass = klass->GetComponentType<kDefaultVerifyFlags, kWithoutReadBarrier>();
   }
-}
-
-const char* Class::GetArrayDescriptor(std::string* storage) {
-  std::string temp;
-  const char* elem_desc = GetComponentType()->GetDescriptor(&temp);
-  *storage = "[";
-  *storage += elem_desc;
+  if (klass->IsProxyClass()) {
+    // No read barrier needed, the `name` field is constant for proxy classes and
+    // the contents of the String are also constant. See ReadBarrierOption.
+    ObjPtr<mirror::String> name = klass->GetName<kVerifyNone, kWithoutReadBarrier>();
+    DCHECK(name != nullptr);
+    *storage = DotToDescriptor(name->ToModifiedUtf8().c_str());
+  } else {
+    const char* descriptor;
+    if (klass->IsPrimitive()) {
+      descriptor = Primitive::Descriptor(klass->GetPrimitiveType());
+    } else {
+      const DexFile& dex_file = klass->GetDexFile();
+      const dex::TypeId& type_id = dex_file.GetTypeId(klass->GetDexTypeIndex());
+      descriptor = dex_file.GetTypeDescriptor(type_id);
+    }
+    if (dim == 0) {
+      return descriptor;
+    }
+    *storage = descriptor;
+  }
+  storage->insert(0u, dim, '[');
   return storage->c_str();
 }
 
@@ -1115,7 +1126,7 @@ const dex::TypeList* Class::GetInterfaceTypeList() {
 }
 
 void Class::PopulateEmbeddedVTable(PointerSize pointer_size) {
-  PointerArray* table = GetVTableDuringLinking();
+  ObjPtr<PointerArray> table = GetVTableDuringLinking();
   CHECK(table != nullptr) << PrettyClass();
   const size_t table_length = table->GetLength();
   SetEmbeddedVTableLength(table_length);
@@ -1181,8 +1192,7 @@ class CopyClassVisitor {
     h_new_class_obj->SetClassSize(new_length_);
     // Visit all of the references to make sure there is no from space references in the native
     // roots.
-    ObjPtr<Object>(h_new_class_obj.Get())->VisitReferences(
-        ReadBarrierOnNativeRootsVisitor(), VoidFunctor());
+    h_new_class_obj->Object::VisitReferences(ReadBarrierOnNativeRootsVisitor(), VoidFunctor());
   }
 
  private:
@@ -1195,7 +1205,8 @@ class CopyClassVisitor {
   DISALLOW_COPY_AND_ASSIGN(CopyClassVisitor);
 };
 
-Class* Class::CopyOf(Thread* self, int32_t new_length, ImTable* imt, PointerSize pointer_size) {
+ObjPtr<Class> Class::CopyOf(
+    Thread* self, int32_t new_length, ImTable* imt, PointerSize pointer_size) {
   DCHECK_GE(new_length, static_cast<int32_t>(sizeof(Class)));
   // We may get copied by a compacting GC.
   StackHandleScope<1> hs(self);
@@ -1218,7 +1229,10 @@ Class* Class::CopyOf(Thread* self, int32_t new_length, ImTable* imt, PointerSize
 
 bool Class::ProxyDescriptorEquals(const char* match) {
   DCHECK(IsProxyClass());
-  return Runtime::Current()->GetClassLinker()->GetDescriptorForProxy(this) == match;
+  std::string storage;
+  const char* descriptor = GetDescriptor(&storage);
+  DCHECK(descriptor == storage.c_str());
+  return storage == match;
 }
 
 // TODO: Move this to java_lang_Class.cc?

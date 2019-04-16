@@ -16,13 +16,16 @@
 #
 
 import argparse
+import fnmatch
 import logging
 import os
+import os.path
 import subprocess
 import sys
 import zipfile
 
 logging.basicConfig(format='%(message)s')
+
 
 class FSObject:
   def __init__(self, name, is_dir, is_exec, is_symlink):
@@ -30,8 +33,10 @@ class FSObject:
     self.is_dir = is_dir
     self.is_exec = is_exec
     self.is_symlink = is_symlink
+
   def __str__(self):
     return '%s(dir=%r,exec=%r,symlink=%r)' % (self.name, self.is_dir, self.is_exec, self.is_symlink)
+
 
 class TargetApexProvider:
   def __init__(self, apex, tmpdir, debugfs):
@@ -40,8 +45,8 @@ class TargetApexProvider:
     self._folder_cache = {}
     self._payload = os.path.join(self._tmpdir, 'apex_payload.img')
     # Extract payload to tmpdir.
-    zip = zipfile.ZipFile(apex)
-    zip.extract('apex_payload.img', tmpdir)
+    apex_zip = zipfile.ZipFile(apex)
+    apex_zip.extract('apex_payload.img', tmpdir)
 
   def __del__(self):
     # Delete temps.
@@ -49,22 +54,22 @@ class TargetApexProvider:
       os.remove(self._payload)
 
   def get(self, path):
-    dir, name = os.path.split(path)
-    if len(dir) == 0:
-      dir = '.'
-    map = self.read_dir(dir)
-    return map[name] if name in map else None
+    apex_dir, name = os.path.split(path)
+    if not apex_dir:
+      apex_dir = '.'
+    apex_map = self.read_dir(apex_dir)
+    return apex_map[name] if name in apex_map else None
 
-  def read_dir(self, dir):
-    if dir in self._folder_cache:
-      return self._folder_cache[dir]
+  def read_dir(self, apex_dir):
+    if apex_dir in self._folder_cache:
+      return self._folder_cache[apex_dir]
     # Cannot use check_output as it will annoy with stderr.
-    process = subprocess.Popen([self._debugfs, '-R', 'ls -l -p %s' % (dir), self._payload],
+    process = subprocess.Popen([self._debugfs, '-R', 'ls -l -p %s' % apex_dir, self._payload],
                                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                universal_newlines=True)
-    stdout, stderr = process.communicate()
+    stdout, _ = process.communicate()
     res = str(stdout)
-    map = {}
+    apex_map = {}
     # Debugfs output looks like this:
     #   debugfs 1.44.4 (18-Aug-2018)
     #   /12/040755/0/2000/.//
@@ -88,30 +93,33 @@ class TargetApexProvider:
         continue
       comps = line.split('/')
       if len(comps) != 8:
-        logging.warn('Could not break and parse line \'%s\'', line)
+        logging.warning('Could not break and parse line \'%s\'', line)
         continue
       bits = comps[2]
       name = comps[5]
       if len(bits) != 6:
-        logging.warn('Dont understand bits \'%s\'', bits)
+        logging.warning('Dont understand bits \'%s\'', bits)
         continue
-      is_dir = True if bits[1] == '4' else False
+      is_dir = bits[1] == '4'
+
       def is_exec_bit(ch):
-        return True if int(ch) & 1 == 1 else False
+        return int(ch) & 1 == 1
+
       is_exec = is_exec_bit(bits[3]) and is_exec_bit(bits[4]) and is_exec_bit(bits[5])
-      is_symlink = True if bits[1] == '2' else False
-      map[name] = FSObject(name, is_dir, is_exec, is_symlink)
-    self._folder_cache[dir] = map
-    return map
+      is_symlink = bits[1] == '2'
+      apex_map[name] = FSObject(name, is_dir, is_exec, is_symlink)
+    self._folder_cache[apex_dir] = apex_map
+    return apex_map
+
 
 class HostApexProvider:
   def __init__(self, apex, tmpdir):
     self._tmpdir = tmpdir
-    self._folder_cache = {}
+    self.folder_cache = {}
     self._payload = os.path.join(self._tmpdir, 'apex_payload.zip')
     # Extract payload to tmpdir.
-    zip = zipfile.ZipFile(apex)
-    zip.extract('apex_payload.zip', tmpdir)
+    apex_zip = zipfile.ZipFile(apex)
+    apex_zip.extract('apex_payload.zip', tmpdir)
 
   def __del__(self):
     # Delete temps.
@@ -119,24 +127,24 @@ class HostApexProvider:
       os.remove(self._payload)
 
   def get(self, path):
-    dir, name = os.path.split(path)
-    if len(dir) == 0:
-      dir = ''
-    map = self.read_dir(dir)
-    return map[name] if name in map else None
+    apex_dir, name = os.path.split(path)
+    if not apex_dir:
+      apex_dir = ''
+    apex_map = self.read_dir(apex_dir)
+    return apex_map[name] if name in apex_map else None
 
-  def read_dir(self, dir):
-    if dir in self._folder_cache:
-      return self._folder_cache[dir]
-    if not self._folder_cache:
+  def read_dir(self, apex_dir):
+    if apex_dir in self.folder_cache:
+      return self.folder_cache[apex_dir]
+    if not self.folder_cache:
       self.parse_zip()
-    if dir in self._folder_cache:
-      return self._folder_cache[dir]
+    if apex_dir in self.folder_cache:
+      return self.folder_cache[apex_dir]
     return {}
 
   def parse_zip(self):
-    zip = zipfile.ZipFile(self._payload)
-    infos = zip.infolist()
+    apex_zip = zipfile.ZipFile(self._payload)
+    infos = apex_zip.infolist()
     for zipinfo in infos:
       path = zipinfo.filename
 
@@ -144,20 +152,21 @@ class HostApexProvider:
       assert path
 
       def get_octal(val, index):
-        return (val >> (index * 3)) & 0x7;
+        return (val >> (index * 3)) & 0x7
+
       def bits_is_exec(val):
         # TODO: Enforce group/other, too?
         return get_octal(val, 2) & 1 == 1
 
       is_zipinfo = True
       while path:
-        dir, base = os.path.split(path)
+        apex_dir, base = os.path.split(path)
         # TODO: If directories are stored, base will be empty.
 
-        if not dir in self._folder_cache:
-          self._folder_cache[dir] = {}
-        dir_map = self._folder_cache[dir]
-        if not base in dir_map:
+        if apex_dir not in self.folder_cache:
+          self.folder_cache[apex_dir] = {}
+        dir_map = self.folder_cache[apex_dir]
+        if base not in dir_map:
           if is_zipinfo:
             bits = (zipinfo.external_attr >> 16) & 0xFFFF
             is_dir = get_octal(bits, 4) == 4
@@ -169,408 +178,583 @@ class HostApexProvider:
             is_dir = True
           dir_map[base] = FSObject(base, is_dir, is_exec, is_symlink)
         is_zipinfo = False
-        path = dir
+        path = apex_dir
+
 
 # DO NOT USE DIRECTLY! This is an "abstract" base class.
 class Checker:
   def __init__(self, provider):
     self._provider = provider
     self._errors = 0
+    self._expected_file_globs = set()
 
-  def fail(self, msg, *args):
+  def fail(self, msg, *fail_args):
     self._errors += 1
-    logging.error(msg, args)
+    logging.error(msg, *fail_args)
 
   def error_count(self):
     return self._errors
+
   def reset_errors(self):
     self._errors = 0
 
-  def is_file(self, file):
-    fs_object = self._provider.get(file)
+  def is_file(self, path):
+    fs_object = self._provider.get(path)
     if fs_object is None:
-      return (False, 'Could not find %s')
+      return False, 'Could not find %s'
     if fs_object.is_dir:
-      return (False, '%s is a directory')
-    return (True, '')
+      return False, '%s is a directory'
+    return True, ''
 
-  def check_file(self, file):
-    chk = self.is_file(file)
-    if not chk[0]:
-      self.fail(chk[1], file)
-    return chk[0]
-  def check_no_file(self, file):
-    chk = self.is_file(file)
-    if chk[0]:
-      self.fail('File %s does exist', file)
-    return not chk[0]
+  def check_file(self, path):
+    ok, msg = self.is_file(path)
+    if not ok:
+      self.fail(msg, path)
+    self._expected_file_globs.add(path)
+    return ok
 
-  def check_binary(self, file):
-    path = 'bin/%s' % (file)
+  def check_executable(self, filename):
+    path = 'bin/%s' % filename
     if not self.check_file(path):
-      return False
+      return
     if not self._provider.get(path).is_exec:
       self.fail('%s is not executable', path)
-      return False
-    return True
 
-  def check_binary_symlink(self, file):
-    path = 'bin/%s' % (file)
+  def check_executable_symlink(self, filename):
+    path = 'bin/%s' % filename
     fs_object = self._provider.get(path)
     if fs_object is None:
       self.fail('Could not find %s', path)
-      return False
+      return
     if fs_object.is_dir:
       self.fail('%s is a directory', path)
-      return False
+      return
     if not fs_object.is_symlink:
       self.fail('%s is not a symlink', path)
-      return False
-    return True
+    self._expected_file_globs.add(path)
 
-  def check_single_library(self, file):
-    res1 = self.is_file('lib/%s' % (file))
-    res2 = self.is_file('lib64/%s' % (file))
-    if not res1[0] and not res2[0]:
-      self.fail('Library missing: %s', file)
-      return False
-    return True
+  def check_single_library(self, filename):
+    lib_path = 'lib/%s' % filename
+    lib64_path = 'lib64/%s' % filename
+    lib_is_file, _ = self.is_file(lib_path)
+    if lib_is_file:
+      self._expected_file_globs.add(lib_path)
+    lib64_is_file, _ = self.is_file(lib64_path)
+    if lib64_is_file:
+      self._expected_file_globs.add(lib64_path)
+    if not lib_is_file and not lib64_is_file:
+      self.fail('Library missing: %s', filename)
 
-  def check_no_library(self, file):
-    res1 = self.is_file('lib/%s' % (file))
-    res2 = self.is_file('lib64/%s' % (file))
-    if res1[0] or res2[0]:
-      self.fail('Library exists: %s', file)
-      return False
-    return True
+  def check_java_library(self, basename):
+    return self.check_file('javalib/%s.jar' % basename)
 
-  def check_java_library(self, file):
-    return self.check_file('javalib/%s' % (file))
+  def ignore_path(self, path_glob):
+    self._expected_file_globs.add(path_glob)
+
+  def check_no_superfluous_files(self, dir_path):
+    paths = []
+    for name in sorted(self._provider.read_dir(dir_path).keys()):
+      if name not in ('.', '..'):
+        paths.append(os.path.join(dir_path, name))
+    expected_paths = set()
+    dir_prefix = dir_path + '/'
+    for path_glob in self._expected_file_globs:
+      expected_paths |= set(fnmatch.filter(paths, path_glob))
+      # If there are globs in subdirectories of dir_path we want to match their
+      # path segments at this directory level.
+      if path_glob.startswith(dir_prefix):
+        subpath = path_glob[len(dir_prefix):]
+        subpath_first_segment, _, _ = subpath.partition('/')
+        expected_paths |= set(fnmatch.filter(paths, dir_prefix + subpath_first_segment))
+    for unexpected_path in set(paths) - expected_paths:
+      self.fail('Unexpected file \'%s\'', unexpected_path)
 
   # Just here for docs purposes, even if it isn't good Python style.
 
-  def check_library(self, file):
+  def check_symlinked_multilib_executable(self, filename):
+    """Check bin/filename32, and/or bin/filename64, with symlink bin/filename."""
     raise NotImplementedError
 
-  def check_first_library(self, file):
+  def check_symlinked_prefer32_executable(self, filename):
+    """Check bin/filename32, or bin/filename64 on 64 bit only, with symlink bin/filename."""
     raise NotImplementedError
 
-  def check_multilib_binary(self, file):
+  def check_multilib_executable(self, filename):
+    """Check bin/filename for 32 bit, and/or bin/filename64."""
     raise NotImplementedError
 
-  def check_prefer32_binary(self, file):
+  def check_native_library(self, basename):
+    """Check lib/basename.so, and/or lib64/basename.so."""
+    raise NotImplementedError
+
+  def check_optional_native_library(self, basename_glob):
+    """Allow lib/basename.so and/or lib64/basename.so to exist."""
+    raise NotImplementedError
+
+  def check_prefer64_library(self, basename):
+    """Check lib64/basename.so, or lib/basename.so on 32 bit only."""
     raise NotImplementedError
 
 
 class Arch32Checker(Checker):
-  def __init__(self, provider):
-    super().__init__(provider)
+  def check_symlinked_multilib_executable(self, filename):
+    self.check_executable('%s32' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_multilib_binary(self, file):
-    return all([self.check_binary('%s32' % (file)),
-                self.check_no_file('bin/%s64' % (file)),
-                self.check_binary_symlink(file)])
+  def check_symlinked_prefer32_executable(self, filename):
+    self.check_executable('%s32' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_library(self, file):
+  def check_multilib_executable(self, filename):
+    self.check_executable(filename)
+
+  def check_native_library(self, basename):
     # TODO: Use $TARGET_ARCH (e.g. check whether it is "arm" or "arm64") to improve
     # the precision of this test?
-    return all([self.check_file('lib/%s' % (file)), self.check_no_file('lib64/%s' % (file))])
+    self.check_file('lib/%s.so' % basename)
 
-  def check_first_library(self, file):
-    return self.check_library(file)
+  def check_optional_native_library(self, basename_glob):
+    self.ignore_path('lib/%s.so' % basename_glob)
 
-  def check_prefer32_binary(self, file):
-    return self.check_binary('%s32' % (file))
+  def check_prefer64_library(self, basename):
+    self.check_native_library(basename)
 
 
 class Arch64Checker(Checker):
-  def __init__(self, provider):
-    super().__init__(provider)
+  def check_symlinked_multilib_executable(self, filename):
+    self.check_executable('%s64' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_multilib_binary(self, file):
-    return all([self.check_no_file('bin/%s32' % (file)),
-                self.check_binary('%s64' % (file)),
-                self.check_binary_symlink(file)])
+  def check_symlinked_prefer32_executable(self, filename):
+    self.check_executable('%s64' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_library(self, file):
+  def check_multilib_executable(self, filename):
+    self.check_executable('%s64' % filename)
+
+  def check_native_library(self, basename):
     # TODO: Use $TARGET_ARCH (e.g. check whether it is "arm" or "arm64") to improve
     # the precision of this test?
-    return all([self.check_no_file('lib/%s' % (file)), self.check_file('lib64/%s' % (file))])
+    self.check_file('lib64/%s.so' % basename)
 
-  def check_first_library(self, file):
-    return self.check_library(file)
+  def check_optional_native_library(self, basename_glob):
+    self.ignore_path('lib64/%s.so' % basename_glob)
 
-  def check_prefer32_binary(self, file):
-    return self.check_binary('%s64' % (file))
+  def check_prefer64_library(self, basename):
+    self.check_native_library(basename)
 
 
 class MultilibChecker(Checker):
-  def __init__(self, provider):
-    super().__init__(provider)
+  def check_symlinked_multilib_executable(self, filename):
+    self.check_executable('%s32' % filename)
+    self.check_executable('%s64' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_multilib_binary(self, file):
-    return all([self.check_binary('%s32' % (file)),
-                self.check_binary('%s64' % (file)),
-                self.check_binary_symlink(file)])
+  def check_symlinked_prefer32_executable(self, filename):
+    self.check_executable('%s32' % filename)
+    self.check_executable_symlink(filename)
 
-  def check_library(self, file):
+  def check_multilib_executable(self, filename):
+    self.check_executable('%s64' % filename)
+    self.check_executable(filename)
+
+  def check_native_library(self, basename):
     # TODO: Use $TARGET_ARCH (e.g. check whether it is "arm" or "arm64") to improve
     # the precision of this test?
-    return all([self.check_file('lib/%s' % (file)), self.check_file('lib64/%s' % (file))])
+    self.check_file('lib/%s.so' % basename)
+    self.check_file('lib64/%s.so' % basename)
 
-  def check_first_library(self, file):
-    return all([self.check_no_file('lib/%s' % (file)), self.check_file('lib64/%s' % (file))])
+  def check_optional_native_library(self, basename_glob):
+    self.ignore_path('lib/%s.so' % basename_glob)
+    self.ignore_path('lib64/%s.so' % basename_glob)
 
-  def check_prefer32_binary(self, file):
-    return self.check_binary('%s32' % (file))
+  def check_prefer64_library(self, basename):
+    self.check_file('lib64/%s.so' % basename)
 
 
 class ReleaseChecker:
   def __init__(self, checker):
     self._checker = checker
+
   def __str__(self):
     return 'Release Checker'
 
   def run(self):
-    # Check that the mounted image contains an APEX manifest.
+    # Check the APEX manifest.
     self._checker.check_file('apex_manifest.json')
 
-    # Check that the mounted image contains ART base binaries.
-    self._checker.check_multilib_binary('dalvikvm')
-    self._checker.check_binary('dex2oat')
-    self._checker.check_binary('dexoptanalyzer')
-    self._checker.check_binary('profman')
+    # Check binaries for ART.
+    self._checker.check_executable('dex2oat')
+    self._checker.check_executable('dexdump')
+    self._checker.check_executable('dexlist')
+    self._checker.check_executable('dexoptanalyzer')
+    self._checker.check_executable('profman')
+    self._checker.check_symlinked_multilib_executable('dalvikvm')
 
-    # oatdump is only in device apex's due to build rules
-    # TODO: Check for it when it is also built for host.
-    # self._checker.check_binary('oatdump')
+    # Check exported libraries for ART.
+    self._checker.check_native_library('libdexfile_external')
+    self._checker.check_native_library('libnativebridge')
+    self._checker.check_native_library('libnativehelper')
+    self._checker.check_native_library('libnativeloader')
 
-    # Check that the mounted image contains Android Runtime libraries.
-    self._checker.check_library('libart-compiler.so')
-    self._checker.check_library('libart-dexlayout.so')
-    self._checker.check_library('libart.so')
-    self._checker.check_library('libartbase.so')
-    self._checker.check_library('libartpalette.so')
-    self._checker.check_no_library('libartpalette-system.so')
-    self._checker.check_library('libdexfile.so')
-    self._checker.check_library('libdexfile_external.so')
-    self._checker.check_library('libnativebridge.so')
-    self._checker.check_library('libnativehelper.so')
-    self._checker.check_library('libnativeloader.so')
-    self._checker.check_library('libopenjdkjvm.so')
-    self._checker.check_library('libopenjdkjvmti.so')
-    self._checker.check_library('libprofile.so')
-    # Check that the mounted image contains Android Core libraries.
-    # Note: host vs target libs are checked elsewhere.
-    self._checker.check_library('libjavacore.so')
-    self._checker.check_library('libopenjdk.so')
-    self._checker.check_library('libziparchive.so')
-    # Check that the mounted image contains additional required libraries.
-    self._checker.check_library('libadbconnection.so')
+    # Check internal libraries for ART.
+    self._checker.check_native_library('libadbconnection')
+    self._checker.check_native_library('libart')
+    self._checker.check_native_library('libart-compiler')
+    self._checker.check_native_library('libart-dexlayout')
+    self._checker.check_native_library('libartbase')
+    self._checker.check_native_library('libartpalette')
+    self._checker.check_native_library('libdexfile')
+    self._checker.check_native_library('libdexfile_support')
+    self._checker.check_native_library('libopenjdkjvm')
+    self._checker.check_native_library('libopenjdkjvmti')
+    self._checker.check_native_library('libprofile')
+    self._checker.check_native_library('libsigchain')
 
-    # TODO: Should we check for other libraries, such as:
+    # Check java libraries for Managed Core Library.
+    self._checker.check_java_library('apache-xml')
+    self._checker.check_java_library('bouncycastle')
+    self._checker.check_java_library('core-libart')
+    self._checker.check_java_library('core-oj')
+    self._checker.check_java_library('okhttp')
+
+    # Check internal native libraries for Managed Core Library.
+    self._checker.check_native_library('libjavacore')
+    self._checker.check_native_library('libopenjdk')
+
+    # Check internal native library dependencies.
     #
-    #   libbacktrace.so
-    #   libbase.so
-    #   liblog.so
-    #   libsigchain.so
-    #   libtombstoned_client.so
-    #   libunwindstack.so
-    #   libvixl.so
-    #   libvixld.so
-    #   ...
-    #
-    # ?
+    # Any internal dependency not listed here will cause a failure in
+    # NoSuperfluousLibrariesChecker. Internal dependencies are generally just
+    # implementation details, but in the release package we want to track them
+    # because a) they add to the package size and the RAM usage (in particular
+    # if the library is also present in /system or another APEX and hence might
+    # get loaded twice through linker namespace separation), and b) we need to
+    # catch invalid dependencies on /system or other APEXes that should go
+    # through an exported library with stubs (b/128708192 tracks implementing a
+    # better approach for that).
+    self._checker.check_native_library('libbacktrace')
+    self._checker.check_native_library('libbase')
+    self._checker.check_native_library('libc++')
+    self._checker.check_native_library('libdt_fd_forward')
+    self._checker.check_native_library('libdt_socket')
+    self._checker.check_native_library('libjdwp')
+    self._checker.check_native_library('liblzma')
+    self._checker.check_native_library('libnpt')
+    self._checker.check_native_library('libunwindstack')
+    self._checker.check_native_library('libziparchive')
+    self._checker.check_optional_native_library('libvixl')  # Only on ARM/ARM64
 
-    self._checker.check_java_library('core-oj.jar')
-    self._checker.check_java_library('core-libart.jar')
-    self._checker.check_java_library('okhttp.jar')
-    self._checker.check_java_library('bouncycastle.jar')
-    self._checker.check_java_library('apache-xml.jar')
+    # Allow extra dependencies that appear in ASAN builds.
+    self._checker.check_optional_native_library('libclang_rt.asan*')
+    self._checker.check_optional_native_library('libclang_rt.hwasan*')
+    self._checker.check_optional_native_library('libclang_rt.ubsan*')
+
 
 class ReleaseTargetChecker:
   def __init__(self, checker):
     self._checker = checker
+
   def __str__(self):
     return 'Release (Target) Checker'
 
   def run(self):
-    # Check that the mounted image contains Android Core libraries.
-    self._checker.check_library('libexpat.so')
-    self._checker.check_library('libz.so')
+    # Check the APEX package scripts.
+    self._checker.check_executable('art_postinstall_hook')
+    self._checker.check_executable('art_preinstall_hook')
+    self._checker.check_executable('art_preinstall_hook_boot')
+    self._checker.check_executable('art_preinstall_hook_system_server')
+    self._checker.check_executable('art_prepostinstall_utils')
+
+    # Check binaries for ART.
+    self._checker.check_executable('oatdump')
+
+    # Check internal libraries for ART.
+    self._checker.check_prefer64_library('libart-disassembler')
+
+    # Check binaries for Bionic.
+    self._checker.check_multilib_executable('linker')
+    self._checker.check_multilib_executable('linker_asan')
+
+    # Check libraries for Bionic.
+    self._checker.check_native_library('bionic/libc')
+    self._checker.check_native_library('bionic/libdl')
+    self._checker.check_native_library('bionic/libm')
+    # ... and its internal dependencies
+    self._checker.check_native_library('libc_malloc_hooks')
+    self._checker.check_native_library('libc_malloc_debug')
+
+    # Check exported native libraries for Managed Core Library.
+    self._checker.check_native_library('libandroidicu')
+    self._checker.check_native_library('libandroidio')
+
+    # Check internal native library dependencies.
+    self._checker.check_native_library('libcrypto')
+    self._checker.check_native_library('libexpat')
+    self._checker.check_native_library('libicui18n')
+    self._checker.check_native_library('libicuuc')
+    self._checker.check_native_library('libpac')
+    self._checker.check_native_library('libz')
+
+    # TODO(b/124293228): Cuttlefish puts ARM libs in a lib/arm subdirectory.
+    # Check that properly on that arch, but for now just ignore the directory.
+    self._checker.ignore_path('lib/arm')
+    self._checker.ignore_path('lib/arm64')
+
 
 class ReleaseHostChecker:
   def __init__(self, checker):
-    self._checker = checker;
+    self._checker = checker
+
   def __str__(self):
     return 'Release (Host) Checker'
 
   def run(self):
-    # Check that the mounted image contains Android Core libraries.
-    self._checker.check_library('libexpat-host.so')
-    self._checker.check_library('libz-host.so')
+    # Check binaries for ART.
+    self._checker.check_executable('hprof-conv')
+    self._checker.check_symlinked_multilib_executable('dex2oatd')
+
+    # Check exported native libraries for Managed Core Library.
+    self._checker.check_native_library('libandroidicu-host')
+    self._checker.check_native_library('libandroidio')
+
+    # Check internal libraries for Managed Core Library.
+    self._checker.check_native_library('libexpat-host')
+    self._checker.check_native_library('libicui18n-host')
+    self._checker.check_native_library('libicuuc-host')
+    self._checker.check_native_library('libz-host')
+
 
 class DebugChecker:
   def __init__(self, checker):
     self._checker = checker
+
   def __str__(self):
     return 'Debug Checker'
 
   def run(self):
-    # Check that the mounted image contains ART tools binaries.
-    self._checker.check_binary('dexdiag')
-    self._checker.check_binary('dexdump')
-    self._checker.check_binary('dexlist')
+    # Check binaries for ART.
+    self._checker.check_executable('dexdiag')
 
-    # Check that the mounted image contains ART debug binaries.
-    self._checker.check_binary('dex2oatd')
-    self._checker.check_binary('dexoptanalyzerd')
-    self._checker.check_binary('profmand')
+    # Check debug binaries for ART.
+    self._checker.check_executable('dexoptanalyzerd')
+    self._checker.check_executable('profmand')
+    self._checker.check_symlinked_prefer32_executable('dex2oatd')
 
-    # Check that the mounted image contains Android Runtime debug libraries.
-    self._checker.check_library('libartbased.so')
-    self._checker.check_library('libartd-compiler.so')
-    self._checker.check_library('libartd-dexlayout.so')
-    self._checker.check_library('libartd.so')
-    self._checker.check_library('libdexfiled.so')
-    self._checker.check_library('libopenjdkjvmd.so')
-    self._checker.check_library('libopenjdkjvmtid.so')
-    self._checker.check_library('libprofiled.so')
-    # Check that the mounted image contains Android Core debug libraries.
-    self._checker.check_library('libopenjdkd.so')
-    # Check that the mounted image contains additional required debug libraries.
-    self._checker.check_library('libadbconnectiond.so')
+    # Check internal libraries for ART.
+    self._checker.check_native_library('libadbconnectiond')
+    self._checker.check_native_library('libartbased')
+    self._checker.check_native_library('libartd')
+    self._checker.check_native_library('libartd-compiler')
+    self._checker.check_native_library('libartd-dexlayout')
+    self._checker.check_native_library('libdexfiled')
+    self._checker.check_native_library('libopenjdkjvmd')
+    self._checker.check_native_library('libopenjdkjvmtid')
+    self._checker.check_native_library('libprofiled')
+
+    # Check internal libraries for Managed Core Library.
+    self._checker.check_native_library('libopenjdkd')
+
 
 class DebugTargetChecker:
   def __init__(self, checker):
     self._checker = checker
+
   def __str__(self):
     return 'Debug (Target) Checker'
 
   def run(self):
-    # Check for files pulled in from debug target-only oatdump.
-    self._checker.check_binary('oatdump')
-    self._checker.check_first_library('libart-disassembler.so')
+    # Check ART debug binaries.
+    self._checker.check_executable('oatdumpd')
 
-def print_list(provider):
-    def print_list_impl(provider, path):
-      map = provider.read_dir(path)
-      if map is None:
-        return
-      map = dict(map)
-      if '.' in map:
-        del map['.']
-      if '..' in map:
-        del map['..']
-      for (_, val) in sorted(map.items()):
-        new_path = os.path.join(path, val.name)
-        print(new_path)
-        if val.is_dir:
-          print_list_impl(provider, new_path)
-    print_list_impl(provider, '')
+    # Check ART internal libraries.
+    self._checker.check_prefer64_library('libartd-disassembler')
 
-def print_tree(provider, title):
-    def get_vertical(has_next_list):
-      str = ''
-      for v in has_next_list:
-        str += '%s   ' % ('│' if v else ' ')
-      return str
-    def get_last_vertical(last):
-      return '└── ' if last else '├── ';
-    def print_tree_impl(provider, path, has_next_list):
-      map = provider.read_dir(path)
-      if map is None:
-        return
-      map = dict(map)
-      if '.' in map:
-        del map['.']
-      if '..' in map:
-        del map['..']
-      key_list = list(sorted(map.keys()))
-      for i in range(0, len(key_list)):
-        val = map[key_list[i]]
-        prev = get_vertical(has_next_list)
-        last = get_last_vertical(i == len(key_list) - 1)
-        print('%s%s%s' % (prev, last, val.name))
-        if val.is_dir:
-          has_next_list.append(i < len(key_list) - 1)
-          print_tree_impl(provider, os.path.join(path, val.name), has_next_list)
-          has_next_list.pop()
-    print('%s' % (title))
-    print_tree_impl(provider, '', [])
+    # Check internal native library dependencies.
+    #
+    # Like in the release package, we check that we don't get other dependencies
+    # besides those listed here. In this case the concern is not bloat, but
+    # rather that we don't get behavioural differences between user (release)
+    # and userdebug/eng builds, which could happen if the debug package has
+    # duplicate library instances where releases don't. In other words, it's
+    # uncontroversial to add debug-only dependencies, as long as they don't make
+    # assumptions on having a single global state (ideally they should have
+    # double_loadable:true, cf. go/double_loadable). Also, like in the release
+    # package we need to look out for dependencies that should go through
+    # exported library stubs (until b/128708192 is fixed).
+    self._checker.check_optional_native_library('libvixld')  # Only on ARM/ARM64
+    self._checker.check_prefer64_library('libmeminfo')
+    self._checker.check_prefer64_library('libprocinfo')
+
+
+class NoSuperfluousBinariesChecker:
+  def __init__(self, checker):
+    self._checker = checker
+
+  def __str__(self):
+    return 'No superfluous binaries checker'
+
+  def run(self):
+    self._checker.check_no_superfluous_files('bin')
+
+
+class NoSuperfluousLibrariesChecker:
+  def __init__(self, checker):
+    self._checker = checker
+
+  def __str__(self):
+    return 'No superfluous libraries checker'
+
+  def run(self):
+    self._checker.check_no_superfluous_files('javalib')
+    self._checker.check_no_superfluous_files('lib')
+    self._checker.check_no_superfluous_files('lib/bionic')
+    self._checker.check_no_superfluous_files('lib64')
+    self._checker.check_no_superfluous_files('lib64/bionic')
+
+
+class List:
+  def __init__(self, provider):
+    self._provider = provider
+    self._path = ''
+
+  def print_list(self):
+    apex_map = self._provider.read_dir(self._path)
+    if apex_map is None:
+      return
+    apex_map = dict(apex_map)
+    if '.' in apex_map:
+      del apex_map['.']
+    if '..' in apex_map:
+      del apex_map['..']
+    for (_, val) in sorted(apex_map.items()):
+      self._path = os.path.join(self._path, val.name)
+      print(self._path)
+      if val.is_dir:
+        self.print_list()
+
+
+class Tree:
+  def __init__(self, provider, title):
+    print('%s' % title)
+    self._provider = provider
+    self._path = ''
+    self._has_next_list = []
+
+  @staticmethod
+  def get_vertical(has_next_list):
+    string = ''
+    for v in has_next_list:
+      string += '%s   ' % ('│' if v else ' ')
+    return string
+
+  @staticmethod
+  def get_last_vertical(last):
+    return '└── ' if last else '├── '
+
+  def print_tree(self):
+    apex_map = self._provider.read_dir(self._path)
+    if apex_map is None:
+      return
+    apex_map = dict(apex_map)
+    if '.' in apex_map:
+      del apex_map['.']
+    if '..' in apex_map:
+      del apex_map['..']
+    key_list = list(sorted(apex_map.keys()))
+    for i, key in enumerate(key_list):
+      prev = self.get_vertical(self._has_next_list)
+      last = self.get_last_vertical(i == len(key_list) - 1)
+      val = apex_map[key]
+      print('%s%s%s' % (prev, last, val.name))
+      if val.is_dir:
+        self._has_next_list.append(i < len(key_list) - 1)
+        saved_dir = self._path
+        self._path = os.path.join(self._path, val.name)
+        self.print_tree()
+        self._path = saved_dir
+        self._has_next_list.pop()
+
 
 # Note: do not sys.exit early, for __del__ cleanup.
-def artApexTestMain(args):
-  if args.tree and args.debug:
+def art_apex_test_main(test_args):
+  if test_args.tree and test_args.debug:
     logging.error("Both of --tree and --debug set")
     return 1
-  if args.list and args.debug:
+  if test_args.list and test_args.debug:
     logging.error("Both of --list and --debug set")
     return 1
-  if args.list and args.tree:
+  if test_args.list and test_args.tree:
     logging.error("Both of --list and --tree set")
     return 1
-  if not args.tmpdir:
+  if not test_args.tmpdir:
     logging.error("Need a tmpdir.")
     return 1
-  if not args.host and not args.debugfs:
+  if not test_args.host and not test_args.debugfs:
     logging.error("Need debugfs.")
     return 1
-  if args.bitness not in ['32', '64', 'multilib', 'auto']:
+  if test_args.bitness not in ['32', '64', 'multilib', 'auto']:
     logging.error('--bitness needs to be one of 32|64|multilib|auto')
 
   try:
-    if args.host:
-      apex_provider = HostApexProvider(args.apex, args.tmpdir)
+    if test_args.host:
+      apex_provider = HostApexProvider(test_args.apex, test_args.tmpdir)
     else:
-      apex_provider = TargetApexProvider(args.apex, args.tmpdir, args.debugfs)
-  except Exception as e:
+      apex_provider = TargetApexProvider(test_args.apex, test_args.tmpdir, test_args.debugfs)
+  except (zipfile.BadZipFile, zipfile.LargeZipFile) as e:
     logging.error('Failed to create provider: %s', e)
     return 1
 
-  if args.tree:
-    print_tree(apex_provider, args.apex)
+  if test_args.tree:
+    Tree(apex_provider, test_args.apex).print_tree()
     return 0
-  if args.list:
-    print_list(apex_provider)
+  if test_args.list:
+    List(apex_provider).print_list()
     return 0
 
   checkers = []
-  if args.bitness == 'auto':
-    logging.warn('--bitness=auto, trying to autodetect. This may be incorrect!')
+  if test_args.bitness == 'auto':
+    logging.warning('--bitness=auto, trying to autodetect. This may be incorrect!')
     has_32 = apex_provider.get('lib') is not None
     has_64 = apex_provider.get('lib64') is not None
     if has_32 and has_64:
-      logging.warn('  Detected multilib')
-      args.bitness = 'multilib'
+      logging.warning('  Detected multilib')
+      test_args.bitness = 'multilib'
     elif has_32:
-      logging.warn('  Detected 32-only')
-      args.bitness = '32'
+      logging.warning('  Detected 32-only')
+      test_args.bitness = '32'
     elif has_64:
-      logging.warn('  Detected 64-only')
-      args.bitness = '64'
+      logging.warning('  Detected 64-only')
+      test_args.bitness = '64'
     else:
       logging.error('  Could not detect bitness, neither lib nor lib64 contained.')
-      print('%s' % (apex_provider._folder_cache))
+      print('%s' % apex_provider.folder_cache)
       return 1
 
-  if args.bitness == '32':
+  if test_args.bitness == '32':
     base_checker = Arch32Checker(apex_provider)
-  elif args.bitness == '64':
+  elif test_args.bitness == '64':
     base_checker = Arch64Checker(apex_provider)
   else:
-    assert args.bitness == 'multilib'
+    assert test_args.bitness == 'multilib'
     base_checker = MultilibChecker(apex_provider)
 
   checkers.append(ReleaseChecker(base_checker))
-  if args.host:
+  if test_args.host:
     checkers.append(ReleaseHostChecker(base_checker))
   else:
     checkers.append(ReleaseTargetChecker(base_checker))
-  if args.debug:
+  if test_args.debug:
     checkers.append(DebugChecker(base_checker))
-  if args.debug and not args.host:
+  if test_args.debug and not test_args.host:
     checkers.append(DebugTargetChecker(base_checker))
+
+  # These checkers must be last.
+  checkers.append(NoSuperfluousBinariesChecker(base_checker))
+  if not test_args.host:
+    # We only care about superfluous libraries on target, where their absence
+    # can be vital to ensure they get picked up from the right package.
+    checkers.append(NoSuperfluousLibrariesChecker(base_checker))
 
   failed = False
   for checker in checkers:
@@ -585,31 +769,32 @@ def artApexTestMain(args):
 
   return 1 if failed else 0
 
-def artApexTestDefault(parser):
-  if not 'ANDROID_PRODUCT_OUT' in os.environ:
+
+def art_apex_test_default(test_parser):
+  if 'ANDROID_PRODUCT_OUT' not in os.environ:
     logging.error('No-argument use requires ANDROID_PRODUCT_OUT')
     sys.exit(1)
   product_out = os.environ['ANDROID_PRODUCT_OUT']
-  if not 'ANDROID_HOST_OUT' in os.environ:
+  if 'ANDROID_HOST_OUT' not in os.environ:
     logging.error('No-argument use requires ANDROID_HOST_OUT')
     sys.exit(1)
   host_out = os.environ['ANDROID_HOST_OUT']
 
-  args = parser.parse_args(['dummy'])  # For consistency.
-  args.debugfs = '%s/bin/debugfs' % (host_out)
-  args.tmpdir = '.'
-  args.tree = False
-  args.list = False
-  args.bitness = 'auto'
+  test_args = test_parser.parse_args(['dummy'])  # For consistency.
+  test_args.debugfs = '%s/bin/debugfs' % host_out
+  test_args.tmpdir = '.'
+  test_args.tree = False
+  test_args.list = False
+  test_args.bitness = 'auto'
   failed = False
 
-  if not os.path.exists(args.debugfs):
+  if not os.path.exists(test_args.debugfs):
     logging.error("Cannot find debugfs (default path %s). Please build it, e.g., m debugfs",
-                  args.debugfs)
+                  test_args.debugfs)
     sys.exit(1)
 
   # TODO: Add host support
-  configs= [
+  configs = [
     {'name': 'com.android.runtime.release', 'debug': False, 'host': False},
     {'name': 'com.android.runtime.debug', 'debug': True, 'host': False},
   ]
@@ -617,19 +802,18 @@ def artApexTestDefault(parser):
   for config in configs:
     logging.info(config['name'])
     # TODO: Host will need different path.
-    args.apex = '%s/system/apex/%s.apex' % (product_out, config['name'])
-    if not os.path.exists(args.apex):
+    test_args.apex = '%s/system/apex/%s.apex' % (product_out, config['name'])
+    if not os.path.exists(test_args.apex):
       failed = True
-      logging.error("Cannot find APEX %s. Please build it first.", args.apex)
+      logging.error("Cannot find APEX %s. Please build it first.", test_args.apex)
       continue
-    args.debug = config['debug']
-    args.host = config['host']
-    exit_code = artApexTestMain(args)
-    if exit_code != 0:
-      failed = True
+    test_args.debug = config['debug']
+    test_args.host = config['host']
+    failed = art_apex_test_main(test_args) != 0
 
   if failed:
     sys.exit(1)
+
 
 if __name__ == "__main__":
   parser = argparse.ArgumentParser(description='Check integrity of a Runtime APEX.')
@@ -649,12 +833,12 @@ if __name__ == "__main__":
   parser.add_argument('--bitness', help='Bitness to check, 32|64|multilib|auto', default='auto')
 
   if len(sys.argv) == 1:
-    artApexTestDefault(parser)
+    art_apex_test_default(parser)
   else:
     args = parser.parse_args()
 
     if args is None:
       sys.exit(1)
 
-    exit_code = artApexTestMain(args)
+    exit_code = art_apex_test_main(args)
     sys.exit(exit_code)

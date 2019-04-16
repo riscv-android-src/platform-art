@@ -41,11 +41,21 @@ namespace art {
 using LogSeverity = android::base::LogSeverity;
 using ScopedLogSeverity = android::base::ScopedLogSeverity;
 
+template<class MirrorType>
+static inline ObjPtr<MirrorType> MakeObjPtr(MirrorType* ptr) {
+  return ptr;
+}
+
+template<class MirrorType>
+static inline ObjPtr<MirrorType> MakeObjPtr(ObjPtr<MirrorType> ptr) {
+  return ptr;
+}
+
 // OBJ pointer helpers to avoid needing .Decode everywhere.
-#define EXPECT_OBJ_PTR_EQ(a, b) EXPECT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define ASSERT_OBJ_PTR_EQ(a, b) ASSERT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define EXPECT_OBJ_PTR_NE(a, b) EXPECT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define ASSERT_OBJ_PTR_NE(a, b) ASSERT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
+#define EXPECT_OBJ_PTR_EQ(a, b) EXPECT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
+#define ASSERT_OBJ_PTR_EQ(a, b) ASSERT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
+#define EXPECT_OBJ_PTR_NE(a, b) EXPECT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
+#define ASSERT_OBJ_PTR_NE(a, b) ASSERT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
 
 class ClassLinker;
 class CompilerCallbacks;
@@ -97,8 +107,11 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
     return true;
   }
 
-  static bool StartDex2OatCommandLine(/*out*/std::vector<std::string>* argv,
-                                      /*out*/std::string* error_msg);
+  void MakeInterpreted(ObjPtr<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  bool StartDex2OatCommandLine(/*out*/std::vector<std::string>* argv,
+                               /*out*/std::string* error_msg);
 
  protected:
   // Allow subclases such as CommonCompilerTest to add extra options.
@@ -122,6 +135,7 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
                                    jobject parent_loader,
                                    jobject shared_libraries = nullptr);
   jobject LoadDexInDelegateLastClassLoader(const std::string& dex_name, jobject parent_loader);
+  jobject LoadDexInInMemoryDexClassLoader(const std::string& dex_name, jobject parent_loader);
   jobject LoadDexInWellKnownClassLoader(const std::string& dex_name,
                                         jclass loader_class,
                                         jobject parent_loader,

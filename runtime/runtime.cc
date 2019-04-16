@@ -162,7 +162,7 @@
 #include "trace.h"
 #include "transaction.h"
 #include "vdex_file.h"
-#include "verifier/method_verifier.h"
+#include "verifier/class_verifier.h"
 #include "well_known_classes.h"
 
 #ifdef ART_TARGET_ANDROID
@@ -279,7 +279,7 @@ Runtime::Runtime()
       is_low_memory_mode_(false),
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
-      core_platform_api_policy_(hiddenapi::EnforcementPolicy::kJustWarn),
+      core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -364,16 +364,18 @@ Runtime::~Runtime() {
         << "\n";
   }
 
+  // Wait for the workers of thread pools to be created since there can't be any
+  // threads attaching during shutdown.
   WaitForThreadPoolWorkersToStart();
-
   if (jit_ != nullptr) {
-    // Wait for the workers to be created since there can't be any threads attaching during
-    // shutdown.
     jit_->WaitForWorkersToBeCreated();
     // Stop the profile saver thread before marking the runtime as shutting down.
     // The saver will try to dump the profiles before being sopped and that
     // requires holding the mutator lock.
     jit_->StopProfileSaver();
+  }
+  if (oat_file_manager_ != nullptr) {
+    oat_file_manager_->WaitForWorkersToBeCreated();
   }
 
   {
@@ -394,6 +396,7 @@ Runtime::~Runtime() {
                                             WellKnownClasses::java_lang_Daemons_stop);
   }
 
+  // Shutdown any trace running.
   Trace::Shutdown();
 
   // Report death. Clients me require a working thread, still, so do it before GC completes and
@@ -417,6 +420,9 @@ Runtime::~Runtime() {
     // Delete thread pool before the thread list since we don't want to wait forever on the
     // JIT compiler threads.
     jit_->DeleteThreadPool();
+  }
+  if (oat_file_manager_ != nullptr) {
+    oat_file_manager_->DeleteThreadPool();
   }
   DeleteThreadPool();
   CHECK(thread_pool_ == nullptr);
@@ -464,7 +470,7 @@ Runtime::~Runtime() {
   delete oat_file_manager_;
   Thread::Shutdown();
   QuasiAtomic::Shutdown();
-  verifier::MethodVerifier::Shutdown();
+  verifier::ClassVerifier::Shutdown();
 
   // Destroy allocators before shutting down the MemMap because they may use it.
   java_vm_.reset();
@@ -584,9 +590,12 @@ void Runtime::Abort(const char* msg) {
 #endif
   }
 
-  // Ensure that we don't have multiple threads trying to abort at once,
-  // which would result in significantly worse diagnostics.
-  MutexLock mu(Thread::Current(), *Locks::abort_lock_);
+  {
+    // Ensure that we don't have multiple threads trying to abort at once,
+    // which would result in significantly worse diagnostics.
+    ScopedThreadStateChange tsc(Thread::Current(), kNativeForAbort);
+    Locks::abort_lock_->ExclusiveLock(Thread::Current());
+  }
 
   // Get any pending output out of the way.
   fflush(nullptr);
@@ -756,8 +765,10 @@ std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
   }
-  std::string compiler_executable(GetAndroidRoot());
-  compiler_executable += (kIsDebugBuild ? "/bin/dex2oatd" : "/bin/dex2oat");
+  std::string compiler_executable = GetAndroidRuntimeBinDir() + "/dex2oat";
+  if (kIsDebugBuild) {
+    compiler_executable += 'd';
+  }
   return compiler_executable;
 }
 
@@ -1013,9 +1024,9 @@ void Runtime::StartDaemonThreads() {
   VLOG(startup) << "Runtime::StartDaemonThreads exiting";
 }
 
-static size_t OpenDexFiles(ArrayRef<const std::string> dex_filenames,
-                           ArrayRef<const std::string> dex_locations,
-                           std::vector<std::unique_ptr<const DexFile>>* dex_files) {
+static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
+                               ArrayRef<const std::string> dex_locations,
+                               std::vector<std::unique_ptr<const DexFile>>* dex_files) {
   DCHECK(dex_files != nullptr) << "OpenDexFiles: out-param is nullptr";
   size_t failure_count = 0;
   const ArtDexFileLoader dex_file_loader;
@@ -1028,9 +1039,15 @@ static size_t OpenDexFiles(ArrayRef<const std::string> dex_filenames,
       LOG(WARNING) << "Skipping non-existent dex file '" << dex_filename << "'";
       continue;
     }
+    // In the case we're not using the default boot image, we don't have support yet
+    // on reading vdex files of boot classpath. So just assume all boot classpath
+    // dex files have been verified (this should always be the case as the default boot
+    // image has been generated at build time).
+    bool verify = Runtime::Current()->IsVerificationEnabled() &&
+        (kIsDebugBuild || Runtime::Current()->IsUsingDefaultBootImageLocation());
     if (!dex_file_loader.Open(dex_filename,
                               dex_location,
-                              Runtime::Current()->IsVerificationEnabled(),
+                              verify,
                               kVerifyChecksum,
                               &error_msg,
                               dex_files)) {
@@ -1131,6 +1148,12 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                 runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
 
   image_location_ = runtime_options.GetOrDefault(Opt::Image);
+  {
+    std::string error_msg;
+    is_using_default_boot_image_location_ =
+        (image_location_.compare(GetDefaultBootImageLocation(&error_msg)) == 0);
+  }
+
   SetInstructionSet(runtime_options.GetOrDefault(Opt::ImageInstructionSet));
   boot_class_path_ = runtime_options.ReleaseOrDefault(Opt::BootClassPath);
   boot_class_path_locations_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathLocations);
@@ -1195,6 +1218,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   }
   image_compiler_options_ = runtime_options.ReleaseOrDefault(Opt::ImageCompilerOptions);
 
+  finalizer_timeout_ms_ = runtime_options.GetOrDefault(Opt::FinalizerTimeoutMs);
   max_spins_before_thin_lock_inflation_ =
       runtime_options.GetOrDefault(Opt::MaxSpinsBeforeThinLockInflation);
 
@@ -1208,18 +1232,21 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
 
-  // Check whether to enforce hidden API access checks. The checks are disabled
-  // by default and we only enable them if:
-  // (a) runtime was started with a flag that enables the checks, or
+  // Set hidden API enforcement policy. The checks are disabled by default and
+  // we only enable them if:
+  // (a) runtime was started with a command line flag that enables the checks, or
   // (b) Zygote forked a new process that is not exempt (see ZygoteHooks).
-  bool do_hidden_api_checks = runtime_options.Exists(Opt::HiddenApiChecks);
-  DCHECK(!is_zygote_ || !do_hidden_api_checks);
-  // TODO pass the actual enforcement policy in, rather than just a single bit.
-  // As is, we're encoding some logic here about which specific policy to use, which would be better
-  // controlled by the framework.
-  hidden_api_policy_ = do_hidden_api_checks
-      ? hiddenapi::EnforcementPolicy::kEnabled
-      : hiddenapi::EnforcementPolicy::kDisabled;
+  hidden_api_policy_ = runtime_options.GetOrDefault(Opt::HiddenApiPolicy);
+  DCHECK(!is_zygote_ || hidden_api_policy_ == hiddenapi::EnforcementPolicy::kDisabled);
+
+  // Set core platform API enforcement policy. The checks are disabled by default and
+  // can be enabled with a command line flag. AndroidRuntime will pass the flag if
+  // a system property is set.
+  core_platform_api_policy_ = runtime_options.GetOrDefault(Opt::CorePlatformApiPolicy);
+  if (core_platform_api_policy_ != hiddenapi::EnforcementPolicy::kDisabled) {
+    LOG(INFO) << "Core platform API reporting enabled, enforcing="
+        << (core_platform_api_policy_ == hiddenapi::EnforcementPolicy::kEnabled ? "true" : "false");
+  }
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
@@ -1258,6 +1285,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Generational CC collection is currently only compatible with Baker read barriers.
   bool use_generational_cc = kUseBakerReadBarrier && xgc_option.generational_cc;
 
+  image_space_loading_order_ = runtime_options.GetOrDefault(Opt::ImageSpaceLoadingOrder);
+
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1295,7 +1324,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        use_generational_cc,
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs),
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
-                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC));
+                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC),
+                       image_space_loading_order_);
 
   if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
     LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";
@@ -1487,9 +1517,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       if (runtime_options.Exists(Opt::BootClassPathDexList)) {
         extra_boot_class_path.swap(*runtime_options.GetOrDefault(Opt::BootClassPathDexList));
       } else {
-        OpenDexFiles(ArrayRef<const std::string>(GetBootClassPath()).SubArray(start),
-                     ArrayRef<const std::string>(GetBootClassPathLocations()).SubArray(start),
-                     &extra_boot_class_path);
+        OpenBootDexFiles(ArrayRef<const std::string>(GetBootClassPath()).SubArray(start),
+                         ArrayRef<const std::string>(GetBootClassPathLocations()).SubArray(start),
+                         &extra_boot_class_path);
       }
       class_linker_->AddExtraBootDexFiles(self, std::move(extra_boot_class_path));
     }
@@ -1505,9 +1535,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     if (runtime_options.Exists(Opt::BootClassPathDexList)) {
       boot_class_path.swap(*runtime_options.GetOrDefault(Opt::BootClassPathDexList));
     } else {
-      OpenDexFiles(ArrayRef<const std::string>(GetBootClassPath()),
-                   ArrayRef<const std::string>(GetBootClassPathLocations()),
-                   &boot_class_path);
+      OpenBootDexFiles(ArrayRef<const std::string>(GetBootClassPath()),
+                       ArrayRef<const std::string>(GetBootClassPathLocations()),
+                       &boot_class_path);
     }
     if (!class_linker_->InitWithoutImage(std::move(boot_class_path), &error_msg)) {
       LOG(ERROR) << "Could not initialize without image: " << error_msg;
@@ -1526,7 +1556,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   CHECK(class_linker_ != nullptr);
 
-  verifier::MethodVerifier::Init();
+  verifier::ClassVerifier::Init();
 
   if (runtime_options.Exists(Opt::MethodTrace)) {
     trace_config_.reset(new TraceConfig());
@@ -1677,8 +1707,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   VLOG(startup) << "Runtime::Init exiting";
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles();
+  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+    oat_file_manager_->SetOnlyUseSystemOatFiles(/*enforce=*/ true,
+                                                /*assert_no_files_loaded=*/ true);
   }
 
   return true;
@@ -2081,7 +2112,7 @@ void Runtime::VisitNonThreadRoots(RootVisitor* visitor) {
       .VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
   pre_allocated_NoClassDefFoundError_.VisitRootIfNonNull(visitor, RootInfo(kRootVMInternal));
   VisitImageRoots(visitor);
-  verifier::MethodVerifier::VisitStaticRoots(visitor);
+  verifier::ClassVerifier::VisitStaticRoots(visitor);
   VisitTransactionRoots(visitor);
 }
 
@@ -2759,6 +2790,75 @@ void Runtime::WaitForThreadPoolWorkersToStart() {
   if (stpu.GetThreadPool() != nullptr) {
     stpu.GetThreadPool()->WaitForWorkersToBeCreated();
   }
+}
+
+void Runtime::NotifyStartupCompleted() {
+  bool expected = false;
+  if (!startup_completed_.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
+    // Right now NotifyStartupCompleted will be called up to twice, once from profiler and up to
+    // once externally. For this reason there are no asserts.
+    return;
+  }
+  VLOG(startup) << "Startup completed notified";
+
+  {
+    ScopedTrace trace("Releasing app image spaces metadata");
+    ScopedObjectAccess soa(Thread::Current());
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->DisablePreResolvedStrings();
+        }
+      }
+    }
+    // Request empty checkpoint to make sure no threads are accessing the section when we madvise
+    // it. Avoid using RunEmptyCheckpoint since only one concurrent caller is supported. We could
+    // add a GC critical section here but that may cause significant jank if the GC is running.
+    {
+      class EmptyClosure : public Closure {
+       public:
+        explicit EmptyClosure(Barrier* barrier) : barrier_(barrier) {}
+        void Run(Thread* thread ATTRIBUTE_UNUSED) override {
+          barrier_->Pass(Thread::Current());
+        }
+
+       private:
+        Barrier* const barrier_;
+      };
+      Barrier barrier(0);
+      EmptyClosure closure(&barrier);
+      size_t threads_running_checkpoint = GetThreadList()->RunCheckpoint(&closure);
+      // Now that we have run our checkpoint, move to a suspended state and wait
+      // for other threads to run the checkpoint.
+      Thread* self = Thread::Current();
+      ScopedThreadSuspension sts(self, kSuspended);
+      if (threads_running_checkpoint != 0) {
+        barrier.Increment(self, threads_running_checkpoint);
+      }
+    }
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->ReleaseMetadata();
+        }
+      }
+    }
+  }
+
+  // Notify the profiler saver that startup is now completed.
+  ProfileSaver::NotifyStartupCompleted();
+
+  {
+    // Delete the thread pool used for app image loading startup is completed.
+    ScopedTrace trace2("Delete thread pool");
+    DeleteThreadPool();
+  }
+}
+
+bool Runtime::GetStartupCompleted() const {
+  return startup_completed_.load(std::memory_order_seq_cst);
 }
 
 }  // namespace art

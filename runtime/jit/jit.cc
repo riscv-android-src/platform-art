@@ -20,12 +20,15 @@
 
 #include "art_method-inl.h"
 #include "base/enums.h"
+#include "base/file_utils.h"
 #include "base/logging.h"  // For VLOG.
 #include "base/memory_tool.h"
 #include "base/runtime_debug.h"
+#include "base/scoped_flock.h"
 #include "base/utils.h"
 #include "class_root.h"
 #include "debugger.h"
+#include "dex/type_lookup_table.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "interpreter/interpreter.h"
 #include "jit-inl.h"
@@ -33,6 +36,7 @@
 #include "jni/java_vm_ext.h"
 #include "mirror/method_handle_impl.h"
 #include "mirror/var_handle.h"
+#include "oat_file.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
 #include "profile/profile_compilation_info.h"
@@ -559,16 +563,21 @@ class JitCompileTask final : public Task {
     kCompileOsr,
   };
 
-  JitCompileTask(ArtMethod* method, TaskKind kind) : method_(method), kind_(kind) {
+  JitCompileTask(ArtMethod* method, TaskKind kind) : method_(method), kind_(kind), klass_(nullptr) {
     ScopedObjectAccess soa(Thread::Current());
-    // Add a global ref to the class to prevent class unloading until compilation is done.
-    klass_ = soa.Vm()->AddGlobalRef(soa.Self(), method_->GetDeclaringClass());
-    CHECK(klass_ != nullptr);
+    // For a non-bootclasspath class, add a global ref to the class to prevent class unloading
+    // until compilation is done.
+    if (method->GetDeclaringClass()->GetClassLoader() != nullptr) {
+      klass_ = soa.Vm()->AddGlobalRef(soa.Self(), method_->GetDeclaringClass());
+      CHECK(klass_ != nullptr);
+    }
   }
 
   ~JitCompileTask() {
-    ScopedObjectAccess soa(Thread::Current());
-    soa.Vm()->DeleteGlobalRef(soa.Self(), klass_);
+    if (klass_ != nullptr) {
+      ScopedObjectAccess soa(Thread::Current());
+      soa.Vm()->DeleteGlobalRef(soa.Self(), klass_);
+    }
   }
 
   void Run(Thread* self) override {
@@ -606,6 +615,18 @@ class JitCompileTask final : public Task {
   DISALLOW_IMPLICIT_CONSTRUCTORS(JitCompileTask);
 };
 
+class ZygoteTask final : public Task {
+ public:
+  ZygoteTask() {}
+
+  void Run(Thread* self) override {
+    Runtime::Current()->GetJit()->AddNonAotBootMethodsToQueue(self);
+  }
+
+ private:
+  DISALLOW_COPY_AND_ASSIGN(ZygoteTask);
+};
+
 void Jit::CreateThreadPool() {
   // There is a DCHECK in the 'AddSamples' method to ensure the tread pool
   // is not null when we instrument.
@@ -616,6 +637,111 @@ void Jit::CreateThreadPool() {
 
   thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
   Start();
+
+  // If we're not using the default boot image location, request a JIT task to
+  // compile all methods in the boot image profile.
+  Runtime* runtime = Runtime::Current();
+  if (runtime->IsZygote() && !runtime->IsUsingDefaultBootImageLocation() && UseJitCompilation()) {
+    thread_pool_->AddTask(Thread::Current(), new ZygoteTask());
+  }
+}
+
+void Jit::AddNonAotBootMethodsToQueue(Thread* self) {
+  Runtime* runtime = Runtime::Current();
+  std::string profile_location;
+  for (const std::string& option : runtime->GetImageCompilerOptions()) {
+    if (android::base::StartsWith(option, "--profile-file=")) {
+      profile_location = option.substr(strlen("--profile-file="));
+      break;
+    }
+  }
+  if (profile_location.empty()) {
+    LOG(WARNING) << "Expected a profile location in JIT zygote mode";
+    return;
+  }
+
+  std::string error_msg;
+  ScopedFlock profile_file = LockedFile::Open(
+      profile_location.c_str(), O_RDONLY, true, &error_msg);
+
+  // Return early if we're unable to obtain a lock on the profile.
+  if (profile_file.get() == nullptr) {
+    LOG(ERROR) << "Cannot lock profile: " << error_msg;
+    return;
+  }
+
+  ProfileCompilationInfo profile_info;
+  if (!profile_info.Load(profile_file->Fd())) {
+    LOG(ERROR) << "Could not load profile file";
+    return;
+  }
+
+  const std::vector<const DexFile*>& boot_class_path =
+      runtime->GetClassLinker()->GetBootClassPath();
+  ScopedObjectAccess soa(self);
+  StackHandleScope<1> hs(self);
+  MutableHandle<mirror::DexCache> dex_cache = hs.NewHandle<mirror::DexCache>(nullptr);
+  ScopedNullHandle<mirror::ClassLoader> null_handle;
+  ClassLinker* class_linker = runtime->GetClassLinker();
+
+  for (const DexFile* dex_file : boot_class_path) {
+    if (LocationIsOnRuntimeModule(dex_file->GetLocation().c_str())) {
+      // The runtime module jars are already preopted.
+      continue;
+    }
+    // To speed up class lookups, generate a type lookup table for
+    // the dex file.
+    DCHECK(dex_file->GetOatDexFile() == nullptr);
+    TypeLookupTable type_lookup_table = TypeLookupTable::Create(*dex_file);
+    type_lookup_tables_.push_back(
+          std::make_unique<art::OatDexFile>(std::move(type_lookup_table)));
+    dex_file->SetOatDexFile(type_lookup_tables_.back().get());
+
+    std::set<dex::TypeIndex> class_types;
+    std::set<uint16_t> all_methods;
+    if (!profile_info.GetClassesAndMethods(*dex_file,
+                                           &class_types,
+                                           &all_methods,
+                                           &all_methods,
+                                           &all_methods)) {
+      // This means the profile file did not reference the dex file, which is the case
+      // if there's no classes and methods of that dex file in the profile.
+      continue;
+    }
+    dex_cache.Assign(class_linker->FindDexCache(self, *dex_file));
+    CHECK(dex_cache != nullptr) << "Could not find dex cache for " << dex_file->GetLocation();
+
+    for (uint16_t method_idx : all_methods) {
+      ArtMethod* method = class_linker->ResolveMethodWithoutInvokeType(
+          method_idx, dex_cache, null_handle);
+      if (method == nullptr) {
+        self->ClearException();
+        continue;
+      }
+      if (!method->IsCompilable() || !method->IsInvokable()) {
+        continue;
+      }
+      const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
+      if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
+          class_linker->IsQuickGenericJniStub(entry_point) ||
+          class_linker->IsQuickResolutionStub(entry_point)) {
+        if (!method->IsNative()) {
+          // The compiler requires a ProfilingInfo object for non-native methods.
+          ProfilingInfo::Create(self, method, /* retry_allocation= */ true);
+        }
+        // Special case ZygoteServer class so that it gets compiled before the
+        // zygote enters it. This avoids needing to do OSR during app startup.
+        // TODO: have a profile instead.
+        if (method->GetDeclaringClass()->DescriptorEquals(
+                "Lcom/android/internal/os/ZygoteServer;")) {
+          CompileMethod(method, self, /* baseline= */ false, /* osr= */ false);
+        } else {
+          thread_pool_->AddTask(self,
+              new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        }
+      }
+    }
+  }
 }
 
 static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -805,6 +931,9 @@ ScopedJitSuspend::~ScopedJitSuspend() {
 
 void Jit::PostForkChildAction(bool is_zygote) {
   if (is_zygote) {
+    // Remove potential tasks that have been inherited from the zygote. Child zygotes
+    // currently don't need the whole boot image compiled (ie webview_zygote).
+    thread_pool_->RemoveAllTasks(Thread::Current());
     // Don't transition if this is for a child zygote.
     return;
   }

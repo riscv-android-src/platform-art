@@ -26,6 +26,7 @@
 
 #include <android-base/logging.h>
 
+#include "base/file_utils.h"
 #include "base/globals.h"
 #include "base/mutex.h"
 #include "base/os.h"
@@ -37,12 +38,6 @@ namespace art {
 
 using LogSeverity = android::base::LogSeverity;
 using ScopedLogSeverity = android::base::ScopedLogSeverity;
-
-// OBJ pointer helpers to avoid needing .Decode everywhere.
-#define EXPECT_OBJ_PTR_EQ(a, b) EXPECT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define ASSERT_OBJ_PTR_EQ(a, b) ASSERT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define EXPECT_OBJ_PTR_NE(a, b) EXPECT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
-#define ASSERT_OBJ_PTR_NE(a, b) ASSERT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr());
 
 class DexFile;
 
@@ -85,8 +80,8 @@ class CommonArtTestImpl {
   CommonArtTestImpl() = default;
   virtual ~CommonArtTestImpl() = default;
 
-  // Set up ANDROID_BUILD_TOP, ANDROID_HOST_OUT, ANDROID_ROOT and ANDROID_RUNTIME_ROOT
-  // environment variables using sensible defaults if not already set.
+  // Set up ANDROID_BUILD_TOP, ANDROID_HOST_OUT, ANDROID_ROOT, ANDROID_RUNTIME_ROOT,
+  // and ANDROID_TZDATA_ROOT environment variables using sensible defaults if not already set.
   static void SetUpAndroidRootEnvVars();
 
   // Set up the ANDROID_DATA environment variable, creating the directory if required.
@@ -96,11 +91,20 @@ class CommonArtTestImpl {
 
   static void TearDownAndroidDataDir(const std::string& android_data, bool fail_on_error);
 
+  // Get the names of the libcore modules.
+  virtual std::vector<std::string> GetLibCoreModuleNames() const;
+
+  // Gets the paths of the libcore dex files for given modules.
+  std::vector<std::string> GetLibCoreDexFileNames(const std::vector<std::string>& modules) const;
+
   // Gets the paths of the libcore dex files.
-  static std::vector<std::string> GetLibCoreDexFileNames();
+  std::vector<std::string> GetLibCoreDexFileNames() const;
+
+  // Gets the locations of the libcore dex files for given modules.
+  std::vector<std::string> GetLibCoreDexLocations(const std::vector<std::string>& modules) const;
 
   // Gets the locations of the libcore dex files.
-  static std::vector<std::string> GetLibCoreDexLocations();
+  std::vector<std::string> GetLibCoreDexLocations() const;
 
   static std::string GetClassPathOption(const char* option,
                                         const std::vector<std::string>& class_path);
@@ -181,10 +185,12 @@ class CommonArtTestImpl {
 
   void ClearDirectory(const char* dirpath, bool recursive = true);
 
-  std::string GetTestAndroidRoot();
-
   // Open a file (allows reading of framework jars).
   std::vector<std::unique_ptr<const DexFile>> OpenDexFiles(const char* filename);
+
+  // Open a single dex file (aborts if there are more than one).
+  std::unique_ptr<const DexFile> OpenDexFile(const char* filename);
+
   // Open a test file (art-gtest-*.jar).
   std::vector<std::unique_ptr<const DexFile>> OpenTestDexFiles(const char* name);
 

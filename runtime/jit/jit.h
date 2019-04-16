@@ -29,6 +29,7 @@ namespace art {
 
 class ArtMethod;
 class ClassLinker;
+class OatDexFile;
 struct RuntimeArgumentMap;
 union JValue;
 
@@ -303,6 +304,10 @@ class Jit {
   // Adjust state after forking.
   void PostZygoteFork();
 
+  // In case the boot classpath is not fully AOTed, add methods from the boot profile to the
+  // compilation queue.
+  void AddNonAotBootMethodsToQueue(Thread* self);
+
  private:
   Jit(JitCodeCache* code_cache, JitOptions* options);
 
@@ -333,6 +338,7 @@ class Jit {
   const JitOptions* const options_;
 
   std::unique_ptr<ThreadPool> thread_pool_;
+  std::vector<std::unique_ptr<OatDexFile>> type_lookup_tables_;
 
   // Performance monitoring.
   CumulativeLogger cumulative_timings_;

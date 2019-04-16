@@ -61,13 +61,13 @@
 #include "compiler_callbacks.h"
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
-#include "dexlayout.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "dex2oat_options.h"
 #include "dex2oat_return_codes.h"
+#include "dexlayout.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
 #include "driver/compiler_options_map-inl.h"
@@ -77,10 +77,8 @@
 #include "gc/verification.h"
 #include "interpreter/unstarted_runtime.h"
 #include "jni/java_vm_ext.h"
-#include "linker/buffered_output_stream.h"
 #include "linker/elf_writer.h"
 #include "linker/elf_writer_quick.h"
-#include "linker/file_output_stream.h"
 #include "linker/image_writer.h"
 #include "linker/multi_oat_relative_patcher.h"
 #include "linker/oat_writer.h"
@@ -94,6 +92,8 @@
 #include "runtime.h"
 #include "runtime_options.h"
 #include "scoped_thread_state_change-inl.h"
+#include "stream/buffered_output_stream.h"
+#include "stream/file_output_stream.h"
 #include "vdex_file.h"
 #include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
@@ -460,13 +460,17 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      --dex-file=src.dex then dex2oat will setup a PathClassLoader with classpath ");
   UsageError("      'lib1.dex:src.dex' and set its parent to a DelegateLastClassLoader with ");
   UsageError("      classpath 'lib2.dex'.");
-  UsageError("      ");
+  UsageError("");
   UsageError("      Note that the compiler will be tolerant if the source dex files specified");
   UsageError("      with --dex-file are found in the classpath. The source dex files will be");
   UsageError("      removed from any class loader's classpath possibly resulting in empty");
   UsageError("      class loaders.");
   UsageError("");
   UsageError("      Example: --class-loader-context=PCL[lib1.dex:lib2.dex];DLC[lib3.dex]");
+  UsageError("");
+  UsageError("  --class-loader-context-fds=<fds>: a colon-separated list of file descriptors");
+  UsageError("      for dex files in --class-loader-context. Their order must be the same as");
+  UsageError("      dex files in flattened class loader context.");
   UsageError("");
   UsageError("  --dirty-image-objects=<directory-path>: list of known dirty objects in the image.");
   UsageError("      The image writer will group them together.");
@@ -544,6 +548,13 @@ class WatchDog {
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_destroy, (&mutex_), reason);
   }
 
+  static void SetRuntime(Runtime* runtime) {
+    const char* reason = "dex2oat watch dog set runtime";
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_lock, (&runtime_mutex_), reason);
+    runtime_ = runtime;
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_unlock, (&runtime_mutex_), reason);
+  }
+
   // TODO: tune the multiplier for GC verification, the following is just to make the timeout
   //       large.
   static constexpr int64_t kWatchdogVerifyMultiplier =
@@ -579,12 +590,13 @@ class WatchDog {
     // If we're on the host, try to dump all threads to get a sense of what's going on. This is
     // restricted to the host as the dump may itself go bad.
     // TODO: Use a double watchdog timeout, so we can enable this on-device.
-    if (!kIsTargetBuild && Runtime::Current() != nullptr) {
-      Runtime::Current()->AttachCurrentThread("Watchdog thread attached for dumping",
-                                              true,
-                                              nullptr,
-                                              false);
-      Runtime::Current()->DumpForSigQuit(std::cerr);
+    Runtime* runtime = GetRuntime();
+    if (!kIsTargetBuild && runtime != nullptr) {
+      runtime->AttachCurrentThread("Watchdog thread attached for dumping",
+                                   true,
+                                   nullptr,
+                                   false);
+      runtime->DumpForSigQuit(std::cerr);
     }
     exit(1);
   }
@@ -607,11 +619,22 @@ class WatchDog {
                            timeout_in_milliseconds_/1000));
       } else if (rc != 0) {
         std::string message(StringPrintf("pthread_cond_timedwait failed: %s", strerror(rc)));
-        Fatal(message.c_str());
+        Fatal(message);
       }
     }
     CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_unlock, (&mutex_), reason);
   }
+
+  static Runtime* GetRuntime() {
+    const char* reason = "dex2oat watch dog get runtime";
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_lock, (&runtime_mutex_), reason);
+    Runtime* runtime = runtime_;
+    CHECK_WATCH_DOG_PTHREAD_CALL(pthread_mutex_unlock, (&runtime_mutex_), reason);
+    return runtime;
+  }
+
+  static pthread_mutex_t runtime_mutex_;
+  static Runtime* runtime_;
 
   // TODO: Switch to Mutex when we can guarantee it won't prevent shutdown in error cases.
   pthread_mutex_t mutex_;
@@ -622,6 +645,9 @@ class WatchDog {
   const int64_t timeout_in_milliseconds_;
   bool shutting_down_;
 };
+
+pthread_mutex_t WatchDog::runtime_mutex_ = PTHREAD_MUTEX_INITIALIZER;
+Runtime* WatchDog::runtime_ = nullptr;
 
 class Dex2Oat final {
  public:
@@ -808,8 +834,7 @@ class Dex2Oat final {
     }
 
     if (!IsBootImage() && parser_options->boot_image_filename.empty()) {
-      parser_options->boot_image_filename += android_root_;
-      parser_options->boot_image_filename += "/framework/boot.art";
+      parser_options->boot_image_filename = GetDefaultBootImageLocation(android_root_);
     }
     if (!parser_options->boot_image_filename.empty()) {
       boot_image_filename_ = parser_options->boot_image_filename;
@@ -958,7 +983,7 @@ class Dex2Oat final {
     compiler_options_->passes_to_run_ = passes_to_run_.get();
     compiler_options_->compiling_with_core_image_ =
         !boot_image_filename_.empty() &&
-        CompilerDriver::IsCoreImageFilename(boot_image_filename_);
+        CompilerOptions::IsCoreImageFilename(boot_image_filename_);
   }
 
   static bool SupportsDeterministicCompilation() {
@@ -1172,6 +1197,17 @@ class Dex2Oat final {
         Usage("Option --class-loader-context has an incorrect format: %s",
               class_loader_context_arg.c_str());
       }
+      if (args.Exists(M::ClassLoaderContextFds)) {
+        std::string str_fds_arg = *args.Get(M::ClassLoaderContextFds);
+        std::vector<std::string> str_fds = android::base::Split(str_fds_arg, ":");
+        for (const std::string& str_fd : str_fds) {
+          class_loader_context_fds_.push_back(std::stoi(str_fd, nullptr, 0));
+          if (class_loader_context_fds_.back() < 0) {
+            Usage("Option --class-loader-context-fds has incorrect format: %s",
+                str_fds_arg.c_str());
+          }
+        }
+      }
       if (args.Exists(M::StoredClassLoaderContext)) {
         const std::string stored_context_arg = *args.Get(M::StoredClassLoaderContext);
         stored_class_loader_context_ = ClassLoaderContext::Create(stored_context_arg);
@@ -1324,9 +1360,9 @@ class Dex2Oat final {
     // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
     // the information to remain valid.
     if (update_input_vdex_) {
-      std::unique_ptr<linker::BufferedOutputStream> vdex_out =
-          std::make_unique<linker::BufferedOutputStream>(
-              std::make_unique<linker::FileOutputStream>(vdex_files_.back().get()));
+      std::unique_ptr<BufferedOutputStream> vdex_out =
+          std::make_unique<BufferedOutputStream>(
+              std::make_unique<FileOutputStream>(vdex_files_.back().get()));
       if (!vdex_out->WriteFully(&VdexFile::VerifierDepsHeader::kVdexInvalidMagic,
                                 arraysize(VdexFile::VerifierDepsHeader::kVdexInvalidMagic))) {
         PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
@@ -1507,7 +1543,9 @@ class Dex2Oat final {
       // (because the encoding adds the dex checksum...)
       // TODO(calin): consider redesigning this so we don't have to open the dex files before
       // creating the actual class loader.
-      if (!class_loader_context_->OpenDexFiles(runtime_->GetInstructionSet(), classpath_dir_)) {
+      if (!class_loader_context_->OpenDexFiles(runtime_->GetInstructionSet(),
+                                               classpath_dir_,
+                                               class_loader_context_fds_)) {
         // Do not abort if we couldn't open files from the classpath. They might be
         // apks without dex files and right now are opening flow will fail them.
         LOG(WARNING) << "Failed to open classpath dex files";
@@ -1963,9 +2001,9 @@ class Dex2Oat final {
       verifier::VerifierDeps* verifier_deps = callbacks_->GetVerifierDeps();
       for (size_t i = 0, size = oat_files_.size(); i != size; ++i) {
         File* vdex_file = vdex_files_[i].get();
-        std::unique_ptr<linker::BufferedOutputStream> vdex_out =
-            std::make_unique<linker::BufferedOutputStream>(
-                std::make_unique<linker::FileOutputStream>(vdex_file));
+        std::unique_ptr<BufferedOutputStream> vdex_out =
+            std::make_unique<BufferedOutputStream>(
+                std::make_unique<FileOutputStream>(vdex_file));
 
         if (!oat_writers_[i]->WriteVerifierDeps(vdex_out.get(), verifier_deps)) {
           LOG(ERROR) << "Failed to write verifier dependencies into VDEX " << vdex_file->GetPath();
@@ -2023,7 +2061,7 @@ class Dex2Oat final {
         debug::DebugInfo debug_info = oat_writer->GetDebugInfo();  // Keep the variable alive.
         elf_writer->PrepareDebugInfo(debug_info);  // Processes the data on background thread.
 
-        linker::OutputStream*& rodata = rodata_[i];
+        OutputStream*& rodata = rodata_[i];
         DCHECK(rodata != nullptr);
         if (!oat_writer->WriteRodata(rodata)) {
           LOG(ERROR) << "Failed to write .rodata section to the ELF file " << oat_file->GetPath();
@@ -2032,7 +2070,7 @@ class Dex2Oat final {
         elf_writer->EndRoData(rodata);
         rodata = nullptr;
 
-        linker::OutputStream* text = elf_writer->StartText();
+        OutputStream* text = elf_writer->StartText();
         if (!oat_writer->WriteCode(text)) {
           LOG(ERROR) << "Failed to write .text section to the ELF file " << oat_file->GetPath();
           return false;
@@ -2040,7 +2078,7 @@ class Dex2Oat final {
         elf_writer->EndText(text);
 
         if (oat_writer->GetDataBimgRelRoSize() != 0u) {
-          linker::OutputStream* data_bimg_rel_ro = elf_writer->StartDataBimgRelRo();
+          OutputStream* data_bimg_rel_ro = elf_writer->StartDataBimgRelRo();
           if (!oat_writer->WriteDataBimgRelRo(data_bimg_rel_ro)) {
             LOG(ERROR) << "Failed to write .data.bimg.rel.ro section to the ELF file "
                 << oat_file->GetPath();
@@ -2530,6 +2568,8 @@ class Dex2Oat final {
     // Runtime::Start, give it away now so that we don't starve GC.
     self->TransitionFromRunnableToSuspended(kNative);
 
+    WatchDog::SetRuntime(runtime_.get());
+
     return true;
   }
 
@@ -2691,6 +2731,10 @@ class Dex2Oat final {
   // The spec describing how the class loader should be setup for compilation.
   std::unique_ptr<ClassLoaderContext> class_loader_context_;
 
+  // Optional list of file descriptors corresponding to dex file locations in
+  // flattened `class_loader_context_`.
+  std::vector<int> class_loader_context_fds_;
+
   // The class loader context stored in the oat file. May be equal to class_loader_context_.
   std::unique_ptr<ClassLoaderContext> stored_class_loader_context_;
 
@@ -2735,8 +2779,8 @@ class Dex2Oat final {
 
   std::vector<std::unique_ptr<linker::ElfWriter>> elf_writers_;
   std::vector<std::unique_ptr<linker::OatWriter>> oat_writers_;
-  std::vector<linker::OutputStream*> rodata_;
-  std::vector<std::unique_ptr<linker::OutputStream>> vdex_out_;
+  std::vector<OutputStream*> rodata_;
+  std::vector<std::unique_ptr<OutputStream>> vdex_out_;
   std::unique_ptr<linker::ImageWriter> image_writer_;
   std::unique_ptr<CompilerDriver> driver_;
 

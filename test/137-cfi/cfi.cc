@@ -32,9 +32,11 @@
 #include "base/file_utils.h"
 #include "base/logging.h"
 #include "base/macros.h"
+#include "base/mutex.h"
 #include "base/utils.h"
 #include "gc/heap.h"
 #include "gc/space/image_space.h"
+#include "jit/debugger_interface.h"
 #include "oat_file.h"
 #include "runtime.h"
 
@@ -84,6 +86,7 @@ extern "C" JNIEXPORT jint JNICALL Java_Main_startSecondaryProcess(JNIEnv*, jclas
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_sigstop(JNIEnv*, jclass) {
 #if __linux__
+  MutexLock mu(Thread::Current(), *GetNativeDebugInfoLock());  // Avoid races with the JIT thread.
   raise(SIGSTOP);
 #endif
   return true;  // Prevent the compiler from tail-call optimizing this method away.
@@ -133,6 +136,8 @@ static void MoreErrorInfo(pid_t pid, bool sig_quit_on_fail) {
 
 extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(JNIEnv*, jclass) {
 #if __linux__
+  MutexLock mu(Thread::Current(), *GetNativeDebugInfoLock());  // Avoid races with the JIT thread.
+
   std::unique_ptr<Backtrace> bt(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, GetTid()));
   if (!bt->Unwind(0, nullptr)) {
     printf("Cannot unwind in process.\n");
@@ -149,7 +154,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindInProcess(JNIEnv*, jclass)
   std::vector<std::string> seq = {
       "Java_Main_unwindInProcess",       // This function.
       "java.util.Arrays.binarySearch0",  // Framework method.
-      "Base.runTest",                    // Method in other dex file.
+      "Base.$noinline$runTest",          // Method in other dex file.
       "Main.main"                        // The Java entry method.
   };
 
@@ -239,7 +244,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_unwindOtherProcess(JNIEnv*, jcla
     std::vector<std::string> seq = {
         "Java_Main_sigstop",                // The stop function in the other process.
         "java.util.Arrays.binarySearch0",   // Framework method.
-        "Base.runTest",                     // Method in other dex file.
+        "Base.$noinline$runTest",           // Method in other dex file.
         "Main.main"                         // The Java entry method.
     };
 

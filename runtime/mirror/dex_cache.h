@@ -209,9 +209,7 @@ class MANAGED DexCache final : public Object {
   void FixupResolvedCallSites(GcRoot<mirror::CallSite>* dest, const Visitor& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  String* GetLocation() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetFieldObject<String>(OFFSET_OF_OBJECT_MEMBER(DexCache, location_));
-  }
+  ObjPtr<String> GetLocation() REQUIRES_SHARED(Locks::mutator_lock_);
 
   static constexpr MemberOffset StringsOffset() {
     return OFFSET_OF_OBJECT_MEMBER(DexCache, strings_);
@@ -283,8 +281,7 @@ class MANAGED DexCache final : public Object {
                             ObjPtr<mirror::String> resolved)
       ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Clear the preresolved string cache to prevent further usage. Not thread safe, so should only
-  // be called when the string cache is guaranteed to not be accessed.
+  // Clear the preresolved string cache to prevent further usage.
   void ClearPreResolvedStrings()
       ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_);
 

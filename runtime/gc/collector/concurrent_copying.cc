@@ -705,7 +705,7 @@ class ConcurrentCopying::VerifyNoMissingCardMarkVisitor {
 
  private:
   ConcurrentCopying* const cc_;
-  ObjPtr<mirror::Object> const holder_;
+  const ObjPtr<mirror::Object> holder_;
 };
 
 void ConcurrentCopying::VerifyNoMissingCardMarks() {
@@ -1865,7 +1865,7 @@ class ConcurrentCopying::VerifyNoFromSpaceRefsFieldVisitor {
                   ObjPtr<mirror::Reference> ref) const
       REQUIRES_SHARED(Locks::mutator_lock_) ALWAYS_INLINE {
     CHECK(klass->IsTypeOfReferenceClass());
-    this->operator()(ObjPtr<mirror::Object>(ref), mirror::Reference::ReferentOffset(), false);
+    this->operator()(ref, mirror::Reference::ReferentOffset(), false);
   }
 
   void VisitRootIfNonNull(mirror::CompressedReference<mirror::Object>* root) const
@@ -2528,6 +2528,72 @@ void ConcurrentCopying::SweepLargeObjects(bool swap_bitmaps) {
   }
 }
 
+void ConcurrentCopying::CaptureRssAtPeak() {
+  using range_t = std::pair<void*, void*>;
+  // This operation is expensive as several calls to mincore() are performed.
+  // Also, this must be called before clearing regions in ReclaimPhase().
+  // Therefore, we make it conditional on the flag that enables dumping GC
+  // performance info on shutdown.
+  if (Runtime::Current()->GetDumpGCPerformanceOnShutdown()) {
+    std::list<range_t> gc_ranges;
+    auto add_gc_range = [&gc_ranges](void* start, size_t size) {
+      void* end = static_cast<char*>(start) + RoundUp(size, kPageSize);
+      gc_ranges.emplace_back(range_t(start, end));
+    };
+
+    // region space
+    DCHECK(IsAligned<kPageSize>(region_space_->Limit()));
+    gc_ranges.emplace_back(range_t(region_space_->Begin(), region_space_->Limit()));
+    // mark bitmap
+    add_gc_range(region_space_bitmap_->Begin(), region_space_bitmap_->Size());
+
+    // non-moving space
+    {
+      DCHECK(IsAligned<kPageSize>(heap_->non_moving_space_->Limit()));
+      gc_ranges.emplace_back(range_t(heap_->non_moving_space_->Begin(),
+                                     heap_->non_moving_space_->Limit()));
+      // mark bitmap
+      accounting::ContinuousSpaceBitmap *bitmap = heap_->non_moving_space_->GetMarkBitmap();
+      add_gc_range(bitmap->Begin(), bitmap->Size());
+      // live bitmap. Deal with bound bitmaps.
+      ReaderMutexLock mu(Thread::Current(), *Locks::heap_bitmap_lock_);
+      if (heap_->non_moving_space_->HasBoundBitmaps()) {
+        DCHECK_EQ(bitmap, heap_->non_moving_space_->GetLiveBitmap());
+        bitmap = heap_->non_moving_space_->GetTempBitmap();
+      } else {
+        bitmap = heap_->non_moving_space_->GetLiveBitmap();
+      }
+      add_gc_range(bitmap->Begin(), bitmap->Size());
+    }
+    // large-object space
+    if (heap_->GetLargeObjectsSpace()) {
+      heap_->GetLargeObjectsSpace()->ForEachMemMap([&add_gc_range](const MemMap& map) {
+        DCHECK(IsAligned<kPageSize>(map.BaseSize()));
+        add_gc_range(map.BaseBegin(), map.BaseSize());
+      });
+      // mark bitmap
+      accounting::LargeObjectBitmap* bitmap = heap_->GetLargeObjectsSpace()->GetMarkBitmap();
+      add_gc_range(bitmap->Begin(), bitmap->Size());
+      // live bitmap
+      bitmap = heap_->GetLargeObjectsSpace()->GetLiveBitmap();
+      add_gc_range(bitmap->Begin(), bitmap->Size());
+    }
+    // card table
+    add_gc_range(heap_->GetCardTable()->MemMapBegin(), heap_->GetCardTable()->MemMapSize());
+    // inter-region refs
+    if (use_generational_cc_ && !young_gen_) {
+      // region space
+      add_gc_range(region_space_inter_region_bitmap_->Begin(),
+                   region_space_inter_region_bitmap_->Size());
+      // non-moving space
+      add_gc_range(non_moving_space_inter_region_bitmap_->Begin(),
+                   non_moving_space_inter_region_bitmap_->Size());
+    }
+    // Extract RSS using mincore(). Updates the cummulative RSS counter.
+    ExtractRssFromMincore(&gc_ranges);
+  }
+}
+
 void ConcurrentCopying::ReclaimPhase() {
   TimingLogger::ScopedTiming split("ReclaimPhase", GetTimings());
   if (kVerboseMode) {
@@ -2551,6 +2617,14 @@ void ConcurrentCopying::ReclaimPhase() {
     }
     CheckEmptyMarkStack();
   }
+
+  // Capture RSS at the time when memory usage is at its peak. All GC related
+  // memory ranges like java heap, card table, bitmap etc. are taken into
+  // account.
+  // TODO: We can fetch resident memory for region space directly by going
+  // through list of allocated regions. This way we can avoid calling mincore on
+  // the biggest memory range, thereby reducing the cost of this function.
+  CaptureRssAtPeak();
 
   {
     // Record freed objects.
@@ -3146,7 +3220,7 @@ void ConcurrentCopying::FillWithDummyObject(Thread* const self,
   if (ReadBarrier::kEnableToSpaceInvariantChecks) {
     AssertToSpaceInvariant(nullptr, MemberOffset(0), int_array_class);
   }
-  size_t component_size = int_array_class->GetComponentSize<kWithoutReadBarrier>();
+  size_t component_size = int_array_class->GetComponentSize();
   CHECK_EQ(component_size, sizeof(int32_t));
   size_t data_offset = mirror::Array::DataOffset(component_size).SizeValue();
   if (data_offset > byte_size) {
@@ -3163,7 +3237,7 @@ void ConcurrentCopying::FillWithDummyObject(Thread* const self,
     dummy_obj->SetClass(int_array_class);
     CHECK(dummy_obj->IsArrayInstance<kVerifyNone>());
     int32_t length = (byte_size - data_offset) / component_size;
-    mirror::Array* dummy_arr = dummy_obj->AsArray<kVerifyNone>();
+    ObjPtr<mirror::Array> dummy_arr = dummy_obj->AsArray<kVerifyNone>();
     dummy_arr->SetLength(length);
     CHECK_EQ(dummy_arr->GetLength(), length)
         << "byte_size=" << byte_size << " length=" << length

@@ -21,6 +21,8 @@
 #include <sys/time.h>
 extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #endif
+#include <inttypes.h>
+#include <limits>
 #include <limits.h>
 #include "nativehelper/scoped_utf_chars.h"
 
@@ -271,22 +273,31 @@ static void VMRuntime_setTargetSdkVersionNative(JNIEnv*, jobject, jint target_sd
 #endif
 }
 
-static void VMRuntime_registerNativeAllocationInternal(JNIEnv* env, jobject, jint bytes) {
-  if (UNLIKELY(bytes < 0)) {
-    ScopedObjectAccess soa(env);
-    ThrowRuntimeException("allocation size negative %d", bytes);
-    return;
+static inline size_t clamp_to_size_t(jlong n) {
+  if (sizeof(jlong) > sizeof(size_t)
+      && UNLIKELY(n > static_cast<jlong>(std::numeric_limits<size_t>::max()))) {
+    return std::numeric_limits<size_t>::max();
+  } else {
+    return n;
   }
-  Runtime::Current()->GetHeap()->RegisterNativeAllocation(env, static_cast<size_t>(bytes));
 }
 
-static void VMRuntime_registerNativeFreeInternal(JNIEnv* env, jobject, jint bytes) {
+static void VMRuntime_registerNativeAllocation(JNIEnv* env, jobject, jlong bytes) {
   if (UNLIKELY(bytes < 0)) {
     ScopedObjectAccess soa(env);
-    ThrowRuntimeException("allocation size negative %d", bytes);
+    ThrowRuntimeException("allocation size negative %" PRId64, bytes);
     return;
   }
-  Runtime::Current()->GetHeap()->RegisterNativeFree(env, static_cast<size_t>(bytes));
+  Runtime::Current()->GetHeap()->RegisterNativeAllocation(env, clamp_to_size_t(bytes));
+}
+
+static void VMRuntime_registerNativeFree(JNIEnv* env, jobject, jlong bytes) {
+  if (UNLIKELY(bytes < 0)) {
+    ScopedObjectAccess soa(env);
+    ThrowRuntimeException("allocation size negative %" PRId64, bytes);
+    return;
+  }
+  Runtime::Current()->GetHeap()->RegisterNativeFree(env, clamp_to_size_t(bytes));
 }
 
 static jint VMRuntime_getNotifyNativeInterval(JNIEnv*, jclass) {
@@ -297,6 +308,10 @@ static void VMRuntime_notifyNativeAllocationsInternal(JNIEnv* env, jobject) {
   Runtime::Current()->GetHeap()->NotifyNativeAllocations(env);
 }
 
+static jlong VMRuntime_getFinalizerTimeoutMs(JNIEnv*, jobject) {
+  return Runtime::Current()->GetFinalizerTimeoutMs();
+}
+
 static void VMRuntime_registerSensitiveThread(JNIEnv*, jobject) {
   Runtime::Current()->RegisterSensitiveThread();
 }
@@ -304,6 +319,10 @@ static void VMRuntime_registerSensitiveThread(JNIEnv*, jobject) {
 static void VMRuntime_updateProcessState(JNIEnv*, jobject, jint process_state) {
   Runtime* runtime = Runtime::Current();
   runtime->UpdateProcessState(static_cast<ProcessState>(process_state));
+}
+
+static void VMRuntime_notifyStartupCompleted(JNIEnv*, jobject) {
+  Runtime::Current()->NotifyStartupCompleted();
 }
 
 static void VMRuntime_trimHeap(JNIEnv* env, jobject) {
@@ -504,7 +523,7 @@ static void PreloadDexCachesStatsFilled(DexCacheStats* filled)
     if (!class_linker->IsDexFileRegistered(self, *dex_file)) {
       continue;
     }
-    ObjPtr<mirror::DexCache> const dex_cache = class_linker->FindDexCache(self, *dex_file);
+    const ObjPtr<mirror::DexCache> dex_cache = class_linker->FindDexCache(self, *dex_file);
     DCHECK(dex_cache != nullptr);  // Boot class path dex caches are never unloaded.
     for (size_t j = 0, num_strings = dex_cache->NumStrings(); j < num_strings; ++j) {
       auto pair = dex_cache->GetStrings()[j].load(std::memory_order_relaxed);
@@ -649,8 +668,9 @@ static jboolean VMRuntime_isBootClassPathOnDisk(JNIEnv* env, jclass, jstring jav
     return JNI_FALSE;
   }
   std::string error_msg;
+  Runtime* runtime = Runtime::Current();
   std::unique_ptr<ImageHeader> image_header(gc::space::ImageSpace::ReadImageHeader(
-      Runtime::Current()->GetImageLocation().c_str(), isa, &error_msg));
+      runtime->GetImageLocation().c_str(), isa, runtime->GetImageSpaceLoadingOrder(), &error_msg));
   return image_header.get() != nullptr;
 }
 
@@ -693,6 +713,11 @@ static void VMRuntime_setProcessPackageName(JNIEnv* env,
   Runtime::Current()->SetProcessPackageName(package_name.c_str());
 }
 
+static void VMRuntime_setProcessDataDirectory(JNIEnv* env, jclass, jstring java_data_dir) {
+  ScopedUtfChars data_dir(env, java_data_dir);
+  Runtime::Current()->SetProcessDataDirectory(data_dir.c_str());
+}
+
 static jboolean VMRuntime_hasBootImageSpaces(JNIEnv* env ATTRIBUTE_UNUSED,
                                              jclass klass ATTRIBUTE_UNUSED) {
   return Runtime::Current()->GetHeap()->HasBootImageSpace() ? JNI_TRUE : JNI_FALSE;
@@ -718,10 +743,12 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, newUnpaddedArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
   NATIVE_METHOD(VMRuntime, properties, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, setTargetSdkVersionNative, "(I)V"),
-  NATIVE_METHOD(VMRuntime, registerNativeAllocationInternal, "(I)V"),
-  NATIVE_METHOD(VMRuntime, registerNativeFreeInternal, "(I)V"),
+  NATIVE_METHOD(VMRuntime, registerNativeAllocation, "(J)V"),
+  NATIVE_METHOD(VMRuntime, registerNativeFree, "(J)V"),
   NATIVE_METHOD(VMRuntime, getNotifyNativeInterval, "()I"),
+  NATIVE_METHOD(VMRuntime, getFinalizerTimeoutMs, "()J"),
   NATIVE_METHOD(VMRuntime, notifyNativeAllocationsInternal, "()V"),
+  NATIVE_METHOD(VMRuntime, notifyStartupCompleted, "()V"),
   NATIVE_METHOD(VMRuntime, registerSensitiveThread, "()V"),
   NATIVE_METHOD(VMRuntime, requestConcurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, requestHeapTrim, "()V"),
@@ -744,6 +771,7 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setSystemDaemonThreadPriority, "()V"),
   NATIVE_METHOD(VMRuntime, setDedupeHiddenApiWarnings, "(Z)V"),
   NATIVE_METHOD(VMRuntime, setProcessPackageName, "(Ljava/lang/String;)V"),
+  NATIVE_METHOD(VMRuntime, setProcessDataDirectory, "(Ljava/lang/String;)V"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

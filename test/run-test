@@ -306,6 +306,18 @@ while true; do
         run_args="${run_args} --gdb"
         dev_mode="yes"
         shift
+    elif [ "x$1" = "x--gdbserver-bin" ]; then
+        shift
+        run_args="${run_args} --gdbserver-bin $1"
+        shift
+    elif [ "x$1" = "x--gdbserver-port" ]; then
+        shift
+        run_args="${run_args} --gdbserver-port $1"
+        shift
+    elif [ "x$1" = "x--gdbserver" ]; then
+        run_args="${run_args} --gdbserver"
+        dev_mode="yes"
+        shift
     elif [ "x$1" = "x--strace" ]; then
         strace="yes"
         run_args="${run_args} --timeout 1800 --invoke-with strace --invoke-with -o --invoke-with $tmp_dir/$strace_output"
@@ -412,6 +424,15 @@ while true; do
         target_mode="no"
         DEX_LOCATION=$tmp_dir
         host_lib_root=$OUT_DIR/soong/host/linux_bionic-x86
+        shift
+    elif [ "x$1" = "x--runtime-extracted-zipapex" ]; then
+        shift
+        # TODO Should we allow the java.library.path to search the zipapex too?
+        # Not needed at the moment and adding it will be complicated so for now
+        # we'll ignore this.
+        run_args="${run_args} --host --runtime-extracted-zipapex $1"
+        target_mode="no"
+        DEX_LOCATION=$tmp_dir
         shift
     elif [ "x$1" = "x--runtime-zipapex" ]; then
         shift
@@ -716,7 +737,12 @@ if [ "$usage" = "yes" ]; then
         echo "    --with-agent <agent>  Run the test with the given agent loaded with -agentpath:"
         echo "    --debuggable          Whether to compile Java code for a debugger."
         echo "    --gdb                 Run under gdb; incompatible with some tests."
-        echo "    --gdb-arg             Pass an option to gdb."
+        echo "    --gdbserver           Start gdbserver (defaults to port :5039)."
+        echo "    --gdbserver-port <port>"
+        echo "                          Start gdbserver with the given COMM (see man gdbserver)."
+        echo "    --gdbserver-bin <binary>"
+        echo "                          Use the given binary as gdbserver."
+        echo "    --gdb-arg             Pass an option to gdb or gdbserver."
         echo "    --build-only          Build test files only (off by default)."
         echo "    --interpreter         Enable interpreter only mode (off by default)."
         echo "    --jit                 Enable jit (off by default)."
@@ -754,6 +780,9 @@ if [ "$usage" = "yes" ]; then
         echo "    --bionic              Use the (host, 64-bit only) linux_bionic libc runtime"
         echo "    --runtime-zipapex [file]"
         echo "                          Use the given zipapex file to provide runtime binaries"
+        echo "    --runtime-extracted-zipapex [dir]"
+        echo "                          Use the given extracted zipapex directory to provide"
+        echo "                          runtime binaries"
         echo "    --trace               Run with method tracing"
         echo "    --strace              Run with syscall tracing from strace."
         echo "    --stream              Run method tracing in streaming mode (requires --trace)"

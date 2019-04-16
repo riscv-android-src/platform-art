@@ -16,8 +16,8 @@
 
 #include "elf_writer_quick.h"
 
-#include <openssl/sha.h>
 #include <memory>
+#include <openssl/sha.h>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -31,25 +31,15 @@
 #include "debug/elf_debug_writer.h"
 #include "debug/method_debug_info.h"
 #include "driver/compiler_options.h"
-#include "elf.h"
-#include "elf_utils.h"
-#include "linker/buffered_output_stream.h"
-#include "linker/elf_builder.h"
-#include "linker/file_output_stream.h"
+#include "elf/elf_builder.h"
+#include "elf/elf_utils.h"
+#include "stream/buffered_output_stream.h"
+#include "stream/file_output_stream.h"
 #include "thread-current-inl.h"
 #include "thread_pool.h"
 
 namespace art {
 namespace linker {
-
-// .eh_frame and .debug_frame are almost identical.
-// Except for some minor formatting differences, the main difference
-// is that .eh_frame is allocated within the running program because
-// it is used by C++ exception handling (which we do not use so we
-// can choose either).  C++ compilers generally tend to use .eh_frame
-// because if they need it sometimes, they might as well always use it.
-// Let's use .debug_frame because it is easier to strip or compress.
-constexpr dwarf::CFIFormat kCFIFormat = dwarf::DW_DEBUG_FRAME_FORMAT;
 
 class DebugInfoTask : public Task {
  public:
@@ -168,7 +158,6 @@ ElfWriterQuick<ElfTypes>::ElfWriterQuick(const CompilerOptions& compiler_options
       output_stream_(
           std::make_unique<BufferedOutputStream>(std::make_unique<FileOutputStream>(elf_file))),
       builder_(new ElfBuilder<ElfTypes>(compiler_options_.GetInstructionSet(),
-                                        compiler_options_.GetInstructionSetFeatures(),
                                         output_stream_.get())) {}
 
 template <typename ElfTypes>
@@ -252,10 +241,6 @@ void ElfWriterQuick<ElfTypes>::EndDataBimgRelRo(OutputStream* data_bimg_rel_ro) 
 
 template <typename ElfTypes>
 void ElfWriterQuick<ElfTypes>::WriteDynamicSection() {
-  if (builder_->GetIsa() == InstructionSet::kMips ||
-      builder_->GetIsa() == InstructionSet::kMips64) {
-    builder_->WriteMIPSabiflagsSection();
-  }
   builder_->WriteDynamicSection();
 }
 
@@ -290,7 +275,7 @@ void ElfWriterQuick<ElfTypes>::WriteDebugInfo(const debug::DebugInfo& debug_info
   // The Strip method expects debug info to be last (mini-debug-info is not stripped).
   if (!debug_info.Empty() && compiler_options_.GetGenerateDebugInfo()) {
     // Generate all the debug information we can.
-    debug::WriteDebugInfo(builder_.get(), debug_info, kCFIFormat, true /* write_oat_patches */);
+    debug::WriteDebugInfo(builder_.get(), debug_info);
   }
 }
 

@@ -59,18 +59,15 @@
 #include "dex/type_lookup_table.h"
 #include "dexlayout.h"
 #include "disassembler.h"
+#include "elf/elf_builder.h"
 #include "gc/accounting/space_bitmap-inl.h"
 #include "gc/space/image_space.h"
 #include "gc/space/large_object_space.h"
 #include "gc/space/space-inl.h"
 #include "image-inl.h"
 #include "imtable-inl.h"
-#include "subtype_check.h"
 #include "index_bss_mapping.h"
 #include "interpreter/unstarted_runtime.h"
-#include "linker/buffered_output_stream.h"
-#include "linker/elf_builder.h"
-#include "linker/file_output_stream.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/dex_cache-inl.h"
@@ -82,6 +79,9 @@
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "stack_map.h"
+#include "stream/buffered_output_stream.h"
+#include "stream/file_output_stream.h"
+#include "subtype_check.h"
 #include "thread_list.h"
 #include "vdex_file.h"
 #include "verifier/method_verifier.h"
@@ -150,10 +150,10 @@ class OatSymbolizer final {
     if (elf_file == nullptr) {
       return false;
     }
-    std::unique_ptr<linker::BufferedOutputStream> output_stream =
-        std::make_unique<linker::BufferedOutputStream>(
-            std::make_unique<linker::FileOutputStream>(elf_file.get()));
-    builder_.reset(new linker::ElfBuilder<ElfTypes>(isa, features.get(), output_stream.get()));
+    std::unique_ptr<BufferedOutputStream> output_stream =
+        std::make_unique<BufferedOutputStream>(
+            std::make_unique<FileOutputStream>(elf_file.get()));
+    builder_.reset(new ElfBuilder<ElfTypes>(isa, output_stream.get()));
 
     builder_->Start();
 
@@ -176,9 +176,6 @@ class OatSymbolizer final {
       text->End();
     }
 
-    if (isa == InstructionSet::kMips || isa == InstructionSet::kMips64) {
-      builder_->WriteMIPSabiflagsSection();
-    }
     builder_->PrepareDynamicSection(elf_file->GetPath(),
                                     rodata_size,
                                     text_size,
@@ -202,8 +199,6 @@ class OatSymbolizer final {
         info.code_size = 0;  /* The symbol lasts until the next symbol. */        \
         method_debug_infos_.push_back(std::move(info));                           \
       }
-    DO_TRAMPOLINE(InterpreterToInterpreterBridge)
-    DO_TRAMPOLINE(InterpreterToCompiledCodeBridge)
     DO_TRAMPOLINE(JniDlsymLookup);
     DO_TRAMPOLINE(QuickGenericJniTrampoline);
     DO_TRAMPOLINE(QuickImtConflictTrampoline);
@@ -221,10 +216,7 @@ class OatSymbolizer final {
     debug::DebugInfo debug_info{};
     debug_info.compiled_methods = ArrayRef<const debug::MethodDebugInfo>(method_debug_infos_);
 
-    debug::WriteDebugInfo(builder_.get(),
-                          debug_info,
-                          dwarf::DW_DEBUG_FRAME_FORMAT,
-                          /* write_oat_patches= */ true);
+    debug::WriteDebugInfo(builder_.get(), debug_info);
 
     builder_->End();
 
@@ -335,7 +327,7 @@ class OatSymbolizer final {
 
  private:
   const OatFile* oat_file_;
-  std::unique_ptr<linker::ElfBuilder<ElfTypes>> builder_;
+  std::unique_ptr<ElfBuilder<ElfTypes>> builder_;
   std::vector<debug::MethodDebugInfo> method_debug_infos_;
   std::unordered_set<uint32_t> seen_offsets_;
   const std::string output_name_;
@@ -457,10 +449,6 @@ class OatDumper {
     os << StringPrintf("\n\n");
 
     DUMP_OAT_HEADER_OFFSET("EXECUTABLE", GetExecutableOffset);
-    DUMP_OAT_HEADER_OFFSET("INTERPRETER TO INTERPRETER BRIDGE",
-                           GetInterpreterToInterpreterBridgeOffset);
-    DUMP_OAT_HEADER_OFFSET("INTERPRETER TO COMPILED CODE BRIDGE",
-                           GetInterpreterToCompiledCodeBridgeOffset);
     DUMP_OAT_HEADER_OFFSET("JNI DLSYM LOOKUP",
                            GetJniDlsymLookupOffset);
     DUMP_OAT_HEADER_OFFSET("QUICK GENERIC JNI TRAMPOLINE",
@@ -1642,6 +1630,24 @@ class OatDumper {
     }
   }
 
+  std::pair<const uint8_t*, const uint8_t*> GetBootImageLiveObjectsDataRange(gc::Heap* heap) const
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    const std::vector<gc::space::ImageSpace*>& boot_image_spaces = heap->GetBootImageSpaces();
+    const ImageHeader& main_header = boot_image_spaces[0]->GetImageHeader();
+    ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
+        ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
+            main_header.GetImageRoot<kWithoutReadBarrier>(ImageHeader::kBootImageLiveObjects));
+    DCHECK(boot_image_live_objects != nullptr);
+    DCHECK(heap->ObjectIsInBootImageSpace(boot_image_live_objects));
+    const uint8_t* boot_image_live_objects_address =
+        reinterpret_cast<const uint8_t*>(boot_image_live_objects.Ptr());
+    uint32_t begin_offset = mirror::ObjectArray<mirror::Object>::OffsetOfElement(0).Uint32Value();
+    uint32_t end_offset = mirror::ObjectArray<mirror::Object>::OffsetOfElement(
+        boot_image_live_objects->GetLength()).Uint32Value();
+    return std::make_pair(boot_image_live_objects_address + begin_offset,
+                          boot_image_live_objects_address + end_offset);
+  }
+
   void DumpDataBimgRelRoEntries(std::ostream& os) {
     os << ".data.bimg.rel.ro: ";
     if (oat_file_.GetBootImageRelocations().empty()) {
@@ -1655,28 +1661,39 @@ class OatDumper {
       const std::vector<gc::space::ImageSpace*>& boot_image_spaces =
           runtime->GetHeap()->GetBootImageSpaces();
       ScopedObjectAccess soa(Thread::Current());
+      auto live_objects = GetBootImageLiveObjectsDataRange(runtime->GetHeap());
+      const uint8_t* live_objects_begin = live_objects.first;
+      const uint8_t* live_objects_end = live_objects.second;
       for (const uint32_t& object_offset : oat_file_.GetBootImageRelocations()) {
         uint32_t entry_index = &object_offset - oat_file_.GetBootImageRelocations().data();
         uint32_t entry_offset = entry_index * sizeof(oat_file_.GetBootImageRelocations()[0]);
         os << StringPrintf("  0x%x: 0x%08x", entry_offset, object_offset);
-        uint8_t* object = boot_image_spaces[0]->Begin() + object_offset;
+        uint8_t* address = boot_image_spaces[0]->Begin() + object_offset;
         bool found = false;
         for (gc::space::ImageSpace* space : boot_image_spaces) {
-          uint64_t local_offset = object - space->Begin();
+          uint64_t local_offset = address - space->Begin();
           if (local_offset < space->GetImageHeader().GetImageSize()) {
             if (space->GetImageHeader().GetObjectsSection().Contains(local_offset)) {
-              ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(object);
-              if (o->IsString()) {
-                os << "   String: " << o->AsString()->ToModifiedUtf8();
-              } else if (o->IsClass()) {
-                os << "   Class: " << o->AsClass()->PrettyDescriptor();
-              } else {
-                os << StringPrintf("   0x%08x %s",
+              if (address >= live_objects_begin && address < live_objects_end) {
+                size_t index =
+                    (address - live_objects_begin) / sizeof(mirror::HeapReference<mirror::Object>);
+                os << StringPrintf("   0x%08x BootImageLiveObject[%zu]",
                                    object_offset,
-                                   o->GetClass()->PrettyDescriptor().c_str());
+                                   index);
+              } else {
+                ObjPtr<mirror::Object> o = reinterpret_cast<mirror::Object*>(address);
+                if (o->IsString()) {
+                  os << "   String: " << o->AsString()->ToModifiedUtf8();
+                } else if (o->IsClass()) {
+                  os << "   Class: " << o->AsClass()->PrettyDescriptor();
+                } else {
+                  os << StringPrintf("   0x%08x %s",
+                                     object_offset,
+                                     o->GetClass()->PrettyDescriptor().c_str());
+                }
               }
             } else if (space->GetImageHeader().GetMethodsSection().Contains(local_offset)) {
-              ArtMethod* m = reinterpret_cast<ArtMethod*>(object);
+              ArtMethod* m = reinterpret_cast<ArtMethod*>(address);
               os << "   ArtMethod: " << m->PrettyMethod();
             } else {
               os << StringPrintf("   0x%08x <unexpected section in %s>",
@@ -1802,7 +1819,7 @@ class ImageDumper {
               = image_root_object->AsObjectArray<mirror::Object>();
           ScopedIndentation indent2(&vios_);
           for (int j = 0; j < image_root_object_array->GetLength(); j++) {
-            mirror::Object* value = image_root_object_array->Get(j);
+            ObjPtr<mirror::Object> value = image_root_object_array->Get(j);
             size_t run = 0;
             for (int32_t k = j + 1; k < image_root_object_array->GetLength(); k++) {
               if (value == image_root_object_array->Get(k)) {
@@ -1916,10 +1933,13 @@ class ImageDumper {
       indent_os << "\n";
       // TODO: Dump fields.
       // Dump methods after.
-      DumpArtMethodVisitor visitor(this);
-      image_header_.VisitPackedArtMethods(&visitor,
-                                          image_space_.Begin(),
-                                          image_header_.GetPointerSize());
+      image_header_.VisitPackedArtMethods([&](ArtMethod& method)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        std::ostream& indent_os = vios_.Stream();
+        indent_os << &method << " " << " ArtMethod: " << method.PrettyMethod() << "\n";
+        DumpMethod(&method, indent_os);
+        indent_os << "\n";
+      },  image_space_.Begin(), image_header_.GetPointerSize());
       // Dump the large objects separately.
       heap->GetLargeObjectsSpace()->GetLiveBitmap()->Walk(dump_visitor);
       indent_os << "\n";
@@ -2005,21 +2025,6 @@ class ImageDumper {
   }
 
  private:
-  class DumpArtMethodVisitor : public ArtMethodVisitor {
-   public:
-    explicit DumpArtMethodVisitor(ImageDumper* image_dumper) : image_dumper_(image_dumper) {}
-
-    void Visit(ArtMethod* method) override REQUIRES_SHARED(Locks::mutator_lock_) {
-      std::ostream& indent_os = image_dumper_->vios_.Stream();
-      indent_os << method << " " << " ArtMethod: " << ArtMethod::PrettyMethod(method) << "\n";
-      image_dumper_->DumpMethod(method, indent_os);
-      indent_os << "\n";
-    }
-
-   private:
-    ImageDumper* const image_dumper_;
-  };
-
   static void PrettyObjectValue(std::ostream& os,
                                 ObjPtr<mirror::Class> type,
                                 ObjPtr<mirror::Object> value)
@@ -2028,12 +2033,15 @@ class ImageDumper {
     if (value == nullptr) {
       os << StringPrintf("null   %s\n", type->PrettyDescriptor().c_str());
     } else if (type->IsStringClass()) {
-      mirror::String* string = value->AsString();
-      os << StringPrintf("%p   String: %s\n", string,
+      ObjPtr<mirror::String> string = value->AsString();
+      os << StringPrintf("%p   String: %s\n",
+                         string.Ptr(),
                          PrintableString(string->ToModifiedUtf8().c_str()).c_str());
     } else if (type->IsClassClass()) {
-      mirror::Class* klass = value->AsClass();
-      os << StringPrintf("%p   Class: %s\n", klass, mirror::Class::PrettyDescriptor(klass).c_str());
+      ObjPtr<mirror::Class> klass = value->AsClass();
+      os << StringPrintf("%p   Class: %s\n",
+                         klass.Ptr(),
+                         mirror::Class::PrettyDescriptor(klass).c_str());
     } else {
       os << StringPrintf("%p   %s\n", value.Ptr(), type->PrettyDescriptor().c_str());
     }
@@ -2111,7 +2119,11 @@ class ImageDumper {
   const void* GetQuickOatCodeBegin(ArtMethod* m) REQUIRES_SHARED(Locks::mutator_lock_) {
     const void* quick_code = m->GetEntryPointFromQuickCompiledCodePtrSize(
         image_header_.GetPointerSize());
-    if (Runtime::Current()->GetClassLinker()->IsQuickResolutionStub(quick_code)) {
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    if (class_linker->IsQuickResolutionStub(quick_code) ||
+        class_linker->IsQuickToInterpreterBridge(quick_code) ||
+        class_linker->IsQuickGenericJniStub(quick_code) ||
+        class_linker->IsJniDlsymLookupStub(quick_code)) {
       quick_code = oat_dumper_->GetQuickOatCode(m);
     }
     if (oat_dumper_->GetInstructionSet() == InstructionSet::kThumb2) {
@@ -2126,7 +2138,9 @@ class ImageDumper {
     if (oat_code_begin == nullptr) {
       return 0;
     }
-    return oat_code_begin[-1];
+    OatQuickMethodHeader* method_header = reinterpret_cast<OatQuickMethodHeader*>(
+        reinterpret_cast<uintptr_t>(oat_code_begin) - sizeof(OatQuickMethodHeader));
+    return method_header->GetCodeSize();
   }
 
   const void* GetQuickOatCodeEnd(ArtMethod* m)
@@ -2151,17 +2165,19 @@ class ImageDumper {
 
     std::ostream& os = vios_.Stream();
 
-    mirror::Class* obj_class = obj->GetClass();
+    ObjPtr<mirror::Class> obj_class = obj->GetClass();
     if (obj_class->IsArrayClass()) {
       os << StringPrintf("%p: %s length:%d\n", obj, obj_class->PrettyDescriptor().c_str(),
                          obj->AsArray()->GetLength());
     } else if (obj->IsClass()) {
-      mirror::Class* klass = obj->AsClass();
-      os << StringPrintf("%p: java.lang.Class \"%s\" (", obj,
+      ObjPtr<mirror::Class> klass = obj->AsClass();
+      os << StringPrintf("%p: java.lang.Class \"%s\" (",
+                         obj,
                          mirror::Class::PrettyDescriptor(klass).c_str())
          << klass->GetStatus() << ")\n";
     } else if (obj_class->IsStringClass()) {
-      os << StringPrintf("%p: java.lang.String %s\n", obj,
+      os << StringPrintf("%p: java.lang.String %s\n",
+                         obj,
                          PrintableString(obj->AsString()->ToModifiedUtf8().c_str()).c_str());
     } else {
       os << StringPrintf("%p: %s\n", obj, obj_class->PrettyDescriptor().c_str());
@@ -2170,9 +2186,9 @@ class ImageDumper {
     DumpFields(os, obj, obj_class);
     const PointerSize image_pointer_size = image_header_.GetPointerSize();
     if (obj->IsObjectArray()) {
-      auto* obj_array = obj->AsObjectArray<mirror::Object>();
+      ObjPtr<mirror::ObjectArray<mirror::Object>> obj_array = obj->AsObjectArray<mirror::Object>();
       for (int32_t i = 0, length = obj_array->GetLength(); i < length; i++) {
-        mirror::Object* value = obj_array->Get(i);
+        ObjPtr<mirror::Object> value = obj_array->Get(i);
         size_t run = 0;
         for (int32_t j = i + 1; j < length; j++) {
           if (value == obj_array->Get(j)) {
@@ -2187,7 +2203,7 @@ class ImageDumper {
           os << StringPrintf("%d to %zd: ", i, i + run);
           i = i + run;
         }
-        mirror::Class* value_class =
+        ObjPtr<mirror::Class> value_class =
             (value == nullptr) ? obj_class->GetComponentType() : value->GetClass();
         PrettyObjectValue(os, value_class, value);
       }
@@ -2322,12 +2338,9 @@ class ImageDumper {
   void DumpMethod(ArtMethod* method, std::ostream& indent_os)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK(method != nullptr);
-    const void* quick_oat_code_begin = GetQuickOatCodeBegin(method);
-    const void* quick_oat_code_end = GetQuickOatCodeEnd(method);
     const PointerSize pointer_size = image_header_.GetPointerSize();
-    OatQuickMethodHeader* method_header = reinterpret_cast<OatQuickMethodHeader*>(
-        reinterpret_cast<uintptr_t>(quick_oat_code_begin) - sizeof(OatQuickMethodHeader));
     if (method->IsNative()) {
+      const void* quick_oat_code_begin = GetQuickOatCodeBegin(method);
       bool first_occurrence;
       uint32_t quick_oat_code_size = GetQuickOatCodeSize(method);
       ComputeOatSize(quick_oat_code_begin, &first_occurrence);
@@ -2354,11 +2367,16 @@ class ImageDumper {
       size_t dex_instruction_bytes = code_item_accessor.InsnsSizeInCodeUnits() * 2;
       stats_.dex_instruction_bytes += dex_instruction_bytes;
 
+      const void* quick_oat_code_begin = GetQuickOatCodeBegin(method);
+      const void* quick_oat_code_end = GetQuickOatCodeEnd(method);
+
       bool first_occurrence;
       size_t vmap_table_bytes = 0u;
-      if (!method_header->IsOptimized()) {
-        // Method compiled with the optimizing compiler have no vmap table.
-        vmap_table_bytes = ComputeOatSize(method_header->GetVmapTable(), &first_occurrence);
+      if (quick_oat_code_begin != nullptr) {
+        OatQuickMethodHeader* method_header = reinterpret_cast<OatQuickMethodHeader*>(
+            reinterpret_cast<uintptr_t>(quick_oat_code_begin) - sizeof(OatQuickMethodHeader));
+        vmap_table_bytes = ComputeOatSize(method_header->GetOptimizedCodeInfoPtr(),
+                                          &first_occurrence);
         if (first_occurrence) {
           stats_.vmap_table_bytes += vmap_table_bytes;
         }
@@ -3197,9 +3215,9 @@ class IMTDumper {
 
     std::cerr << " Interfaces:" << std::endl;
     // Run through iftable, find methods that slot here, see if they fit.
-    mirror::IfTable* if_table = klass->GetIfTable();
+    ObjPtr<mirror::IfTable> if_table = klass->GetIfTable();
     for (size_t i = 0, num_interfaces = klass->GetIfTableCount(); i < num_interfaces; ++i) {
-      mirror::Class* iface = if_table->GetInterface(i);
+      ObjPtr<mirror::Class> iface = if_table->GetInterface(i);
       std::string iface_name;
       std::cerr << "  " << iface->GetDescriptor(&iface_name) << std::endl;
 
@@ -3278,9 +3296,9 @@ class IMTDumper {
           std::cerr << "    " << p_name << std::endl;
         } else {
           // Run through iftable, find methods that slot here, see if they fit.
-          mirror::IfTable* if_table = klass->GetIfTable();
+          ObjPtr<mirror::IfTable> if_table = klass->GetIfTable();
           for (size_t i = 0, num_interfaces = klass->GetIfTableCount(); i < num_interfaces; ++i) {
-            mirror::Class* iface = if_table->GetInterface(i);
+            ObjPtr<mirror::Class> iface = if_table->GetInterface(i);
             size_t num_methods = iface->NumDeclaredVirtualMethods();
             if (num_methods > 0) {
               for (ArtMethod& iface_method : iface->GetMethods(pointer_size)) {

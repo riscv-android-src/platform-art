@@ -20,18 +20,20 @@
 #include <vector>
 
 #include "arch/instruction_set.h"
-#include "debug/dwarf/debug_frame_opcode_writer.h"
-#include "debug/dwarf/dwarf_constants.h"
-#include "debug/dwarf/headers.h"
 #include "debug/method_debug_info.h"
-#include "linker/elf_builder.h"
+#include "dwarf/debug_frame_opcode_writer.h"
+#include "dwarf/dwarf_constants.h"
+#include "dwarf/headers.h"
+#include "elf/elf_builder.h"
 
 namespace art {
 namespace debug {
 
-static void WriteCIE(InstructionSet isa,
-                     dwarf::CFIFormat format,
-                     std::vector<uint8_t>* buffer) {
+// Binary search table is not useful if the number of entries is small.
+// In particular, this avoids it for the in-memory JIT mini-debug-info.
+static constexpr size_t kMinDebugFrameHdrEntries = 100;
+
+static void WriteCIE(InstructionSet isa, /*inout*/ std::vector<uint8_t>* buffer) {
   using Reg = dwarf::Reg;
   // Scratch registers should be marked as undefined.  This tells the
   // debugger that its value in the previous frame is not recoverable.
@@ -58,7 +60,7 @@ static void WriteCIE(InstructionSet isa,
         }
       }
       auto return_reg = Reg::ArmCore(14);  // R14(LR).
-      WriteCIE(is64bit, return_reg, opcodes, format, buffer);
+      WriteCIE(is64bit, return_reg, opcodes, buffer);
       return;
     }
     case InstructionSet::kArm64: {
@@ -81,7 +83,7 @@ static void WriteCIE(InstructionSet isa,
         }
       }
       auto return_reg = Reg::Arm64Core(30);  // R30(LR).
-      WriteCIE(is64bit, return_reg, opcodes, format, buffer);
+      WriteCIE(is64bit, return_reg, opcodes, buffer);
       return;
     }
     case InstructionSet::kMips:
@@ -105,7 +107,7 @@ static void WriteCIE(InstructionSet isa,
         }
       }
       auto return_reg = Reg::MipsCore(31);  // R31(RA).
-      WriteCIE(is64bit, return_reg, opcodes, format, buffer);
+      WriteCIE(is64bit, return_reg, opcodes, buffer);
       return;
     }
     case InstructionSet::kX86: {
@@ -131,7 +133,7 @@ static void WriteCIE(InstructionSet isa,
         }
       }
       auto return_reg = Reg::X86Core(8);  // R8(EIP).
-      WriteCIE(is64bit, return_reg, opcodes, format, buffer);
+      WriteCIE(is64bit, return_reg, opcodes, buffer);
       return;
     }
     case InstructionSet::kX86_64: {
@@ -157,7 +159,7 @@ static void WriteCIE(InstructionSet isa,
         }
       }
       auto return_reg = Reg::X86_64Core(16);  // R16(RIP).
-      WriteCIE(is64bit, return_reg, opcodes, format, buffer);
+      WriteCIE(is64bit, return_reg, opcodes, buffer);
       return;
     }
     case InstructionSet::kNone:
@@ -168,11 +170,8 @@ static void WriteCIE(InstructionSet isa,
 }
 
 template<typename ElfTypes>
-void WriteCFISection(linker::ElfBuilder<ElfTypes>* builder,
-                     const ArrayRef<const MethodDebugInfo>& method_infos,
-                     dwarf::CFIFormat format,
-                     bool write_oat_patches) {
-  CHECK(format == dwarf::DW_DEBUG_FRAME_FORMAT || format == dwarf::DW_EH_FRAME_FORMAT);
+void WriteCFISection(ElfBuilder<ElfTypes>* builder,
+                     const ArrayRef<const MethodDebugInfo>& method_infos) {
   typedef typename ElfTypes::Addr Elf_Addr;
 
   // The methods can be written in any order.
@@ -199,80 +198,53 @@ void WriteCFISection(linker::ElfBuilder<ElfTypes>* builder,
       });
 
   std::vector<uint32_t> binary_search_table;
-  std::vector<uintptr_t> patch_locations;
-  if (format == dwarf::DW_EH_FRAME_FORMAT) {
-    binary_search_table.reserve(2 * sorted_method_infos.size());
-  } else {
-    patch_locations.reserve(sorted_method_infos.size());
-  }
+  binary_search_table.reserve(2 * sorted_method_infos.size());
 
-  // Write .eh_frame/.debug_frame section.
-  const bool is_debug_frame = format == dwarf::DW_DEBUG_FRAME_FORMAT;
-  auto* cfi_section = (is_debug_frame ? builder->GetDebugFrame() : builder->GetEhFrame());
+  // Write .debug_frame section.
+  auto* cfi_section = builder->GetDebugFrame();
   {
     cfi_section->Start();
     const bool is64bit = Is64BitInstructionSet(builder->GetIsa());
-    const Elf_Addr cfi_address = (is_debug_frame ? 0 : cfi_section->GetAddress());
-    const Elf_Addr cie_address = cfi_address;
-    Elf_Addr buffer_address = cfi_address;
     std::vector<uint8_t> buffer;  // Small temporary buffer.
-    WriteCIE(builder->GetIsa(), format, &buffer);
+    WriteCIE(builder->GetIsa(), &buffer);
     cfi_section->WriteFully(buffer.data(), buffer.size());
-    buffer_address += buffer.size();
     buffer.clear();
     for (const MethodDebugInfo* mi : sorted_method_infos) {
       DCHECK(!mi->deduped);
       DCHECK(!mi->cfi.empty());
       const Elf_Addr code_address = mi->code_address +
           (mi->is_code_address_text_relative ? builder->GetText()->GetAddress() : 0);
-      if (format == dwarf::DW_EH_FRAME_FORMAT) {
-        binary_search_table.push_back(dchecked_integral_cast<uint32_t>(code_address));
-        binary_search_table.push_back(dchecked_integral_cast<uint32_t>(buffer_address));
-      }
-      WriteFDE(is64bit, cfi_address, cie_address,
-               code_address, mi->code_size,
-               mi->cfi, format, buffer_address, &buffer,
-               &patch_locations);
+      binary_search_table.push_back(dchecked_integral_cast<uint32_t>(code_address));
+      binary_search_table.push_back(cfi_section->GetPosition());
+      dwarf::WriteFDE(is64bit,
+                      /* cie_pointer= */ 0,
+                      code_address,
+                      mi->code_size,
+                      mi->cfi,
+                      &buffer);
       cfi_section->WriteFully(buffer.data(), buffer.size());
-      buffer_address += buffer.size();
       buffer.clear();
     }
     cfi_section->End();
   }
 
-  if (format == dwarf::DW_EH_FRAME_FORMAT) {
-    auto* header_section = builder->GetEhFrameHdr();
-    header_section->Start();
-    uint32_t header_address = dchecked_integral_cast<int32_t>(header_section->GetAddress());
-    // Write .eh_frame_hdr section.
-    std::vector<uint8_t> buffer;
-    dwarf::Writer<> header(&buffer);
+  if (method_infos.size() > kMinDebugFrameHdrEntries) {
+    std::sort(binary_search_table.begin(), binary_search_table.end());
+
+    // Custom Android section. It is very similar to the official .eh_frame_hdr format.
+    std::vector<uint8_t> header_buffer;
+    dwarf::Writer<> header(&header_buffer);
     header.PushUint8(1);  // Version.
-    // Encoding of .eh_frame pointer - libunwind does not honor datarel here,
-    // so we have to use pcrel which means relative to the pointer's location.
-    header.PushUint8(dwarf::DW_EH_PE_pcrel | dwarf::DW_EH_PE_sdata4);
-    // Encoding of binary search table size.
-    header.PushUint8(dwarf::DW_EH_PE_udata4);
-    // Encoding of binary search table addresses - libunwind supports only this
-    // specific combination, which means relative to the start of .eh_frame_hdr.
-    header.PushUint8(dwarf::DW_EH_PE_datarel | dwarf::DW_EH_PE_sdata4);
-    // .eh_frame pointer
-    header.PushInt32(cfi_section->GetAddress() - (header_address + 4u));
-    // Binary search table size (number of entries).
+    header.PushUint8(dwarf::DW_EH_PE_omit);    // Encoding of .eh_frame pointer - none.
+    header.PushUint8(dwarf::DW_EH_PE_udata4);  // Encoding of binary search table size.
+    header.PushUint8(dwarf::DW_EH_PE_udata4);  // Encoding of binary search table data.
     header.PushUint32(dchecked_integral_cast<uint32_t>(binary_search_table.size()/2));
-    header_section->WriteFully(buffer.data(), buffer.size());
-    // Binary search table.
-    for (size_t i = 0; i < binary_search_table.size(); i++) {
-      // Make addresses section-relative since we know the header address now.
-      binary_search_table[i] -= header_address;
-    }
+
+    auto* header_section = builder->GetDebugFrameHdr();
+    header_section->Start();
+    header_section->WriteFully(header_buffer.data(), header_buffer.size());
     header_section->WriteFully(binary_search_table.data(), binary_search_table.size());
     header_section->End();
-  } else {
-    if (write_oat_patches) {
-      builder->WritePatches(".debug_frame.oat_patches",
-                            ArrayRef<const uintptr_t>(patch_locations));
-    }
   }
 }
 

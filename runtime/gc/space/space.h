@@ -419,7 +419,7 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
   bool IsContinuousMemMapAllocSpace() const override {
     return true;
   }
-  ContinuousMemMapAllocSpace* AsContinuousMemMapAllocSpace() {
+  ContinuousMemMapAllocSpace* AsContinuousMemMapAllocSpace() override {
     return this;
   }
 
@@ -441,6 +441,10 @@ class ContinuousMemMapAllocSpace : public MemMapSpace, public AllocSpace {
 
   accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return mark_bitmap_.get();
+  }
+
+  accounting::ContinuousSpaceBitmap* GetTempBitmap() const {
+    return temp_bitmap_.get();
   }
 
   collector::ObjectBytePair Sweep(bool swap_bitmaps);

@@ -53,9 +53,9 @@ bool DexoptTest::Dex2Oat(const std::vector<std::string>& args, std::string* erro
   }
 
   Runtime* runtime = Runtime::Current();
-  if (runtime->GetHiddenApiEnforcementPolicy() != hiddenapi::EnforcementPolicy::kDisabled) {
+  if (runtime->GetHiddenApiEnforcementPolicy() == hiddenapi::EnforcementPolicy::kEnabled) {
     argv.push_back("--runtime-arg");
-    argv.push_back("-Xhidden-api-checks");
+    argv.push_back("-Xhidden-api-policy:enabled");
   }
 
   if (!kIsTargetBuild) {
@@ -120,7 +120,11 @@ void DexoptTest::GenerateOatForTest(const std::string& dex_location,
   EXPECT_EQ(filter, odex_file->GetCompilerFilter());
 
   std::string boot_image_checksums = gc::space::ImageSpace::GetBootClassPathChecksums(
-      Runtime::Current()->GetBootClassPath(), image_location, kRuntimeISA, &error_msg);
+      ArrayRef<const std::string>(Runtime::Current()->GetBootClassPath()),
+      image_location,
+      kRuntimeISA,
+      gc::space::ImageSpaceLoadingOrder::kSystemFirst,
+      &error_msg);
   ASSERT_FALSE(boot_image_checksums.empty()) << error_msg;
 
   const OatHeader& oat_header = odex_file->GetOatHeader();
@@ -170,8 +174,6 @@ void DexoptTest::ReserveImageSpace() {
   MemMap::Init();
 
   // Ensure a chunk of memory is reserved for the image space.
-  // The reservation_end includes room for the main space that has to come
-  // right after the image in case of the GSS collector.
   uint64_t reservation_start = ART_BASE_ADDRESS;
   uint64_t reservation_end = ART_BASE_ADDRESS + 384 * MB;
 

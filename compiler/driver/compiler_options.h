@@ -359,6 +359,10 @@ class CompilerOptions final {
     max_image_block_size_ = size;
   }
 
+  // Is `boot_image_filename` the name of a core image (small boot
+  // image used for ART testing only)?
+  static bool IsCoreImageFilename(const std::string& boot_image_filename);
+
  private:
   bool ParseDumpInitFailures(const std::string& option, std::string* error_msg);
   bool ParseRegisterAllocationStrategy(const std::string& option, std::string* error_msg);
@@ -459,6 +463,7 @@ class CompilerOptions final {
 
   friend class Dex2Oat;
   friend class DexToDexDecompilerTest;
+  friend class CommonCompilerDriverTest;
   friend class CommonCompilerTest;
   friend class jit::JitCompiler;
   friend class verifier::VerifierDepsTest;

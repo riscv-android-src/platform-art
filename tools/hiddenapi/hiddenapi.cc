@@ -88,6 +88,8 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("  Command \"list\": dump lists of public and private API");
   UsageError("    --boot-dex=<filename>: dex file which belongs to boot class path");
   UsageError("    --public-stub-classpath=<filenames>:");
+  UsageError("    --system-stub-classpath=<filenames>:");
+  UsageError("    --test-stub-classpath=<filenames>:");
   UsageError("    --core-platform-stub-classpath=<filenames>:");
   UsageError("        colon-separated list of dex/apk files which form API stubs of boot");
   UsageError("        classpath. Multiple classpaths can be specified");
@@ -113,12 +115,12 @@ class DexClass : public ClassAccessor {
 
   bool HasSuperclass() const { return dex_file_.IsTypeIndexValid(GetSuperclassIndex()); }
 
-  std::string GetSuperclassDescriptor() const {
+  std::string_view GetSuperclassDescriptor() const {
     return HasSuperclass() ? dex_file_.StringByTypeIdx(GetSuperclassIndex()) : "";
   }
 
-  std::set<std::string> GetInterfaceDescriptors() const {
-    std::set<std::string> list;
+  std::set<std::string_view> GetInterfaceDescriptors() const {
+    std::set<std::string_view> list;
     const dex::TypeList* ifaces = dex_file_.GetInterfacesList(GetClassDef());
     for (uint32_t i = 0; ifaces != nullptr && i < ifaces->Size(); ++i) {
       list.insert(dex_file_.StringByTypeIdx(ifaces->GetTypeItem(i).type_idx_));
@@ -131,24 +133,12 @@ class DexClass : public ClassAccessor {
 
   inline bool Equals(const DexClass& other) const {
     bool equals = strcmp(GetDescriptor(), other.GetDescriptor()) == 0;
+
     if (equals) {
-      // TODO(dbrazdil): Check that methods/fields match as well once b/111116543 is fixed.
-      CHECK_EQ(GetAccessFlags(), other.GetAccessFlags())
-          << "Inconsistent access flags of class " << GetDescriptor() << ": "
-          << "0x" << std::hex << GetAccessFlags() << std::dec << " (" << dex_file_.GetLocation()
-          << ") and 0x" << std::hex << other.GetAccessFlags() << std::dec << " ("
-          << other.dex_file_.GetLocation() << ")";
-      CHECK_EQ(GetSuperclassDescriptor(), other.GetSuperclassDescriptor())
-          << "Inconsistent superclass of class " << GetDescriptor() << ": "
-          << GetSuperclassDescriptor() << " (" << dex_file_.GetLocation()
-          << ") and " << other.GetSuperclassDescriptor() << " (" << other.dex_file_.GetLocation()
-          << ")";
-      CHECK(GetInterfaceDescriptors() == other.GetInterfaceDescriptors())
-          << "Inconsistent set of interfaces of class " << GetDescriptor() << ": "
-          << JoinStringSet(GetInterfaceDescriptors()) << " (" << dex_file_.GetLocation()
-          << ") and " << JoinStringSet(other.GetInterfaceDescriptors()) << " ("
-          << other.dex_file_.GetLocation() << ")";
+      LOG(FATAL) << "Class duplication: " << GetDescriptor() << " in " << dex_file_.GetLocation()
+          << " and " << other.dex_file_.GetLocation();
     }
+
     return equals;
   }
 
@@ -156,7 +146,7 @@ class DexClass : public ClassAccessor {
   uint32_t GetAccessFlags() const { return GetClassDef().access_flags_; }
   bool HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  static std::string JoinStringSet(const std::set<std::string>& s) {
+  static std::string JoinStringSet(const std::set<std::string_view>& s) {
     return "{" + ::android::base::Join(std::vector<std::string>(s.begin(), s.end()), ",") + "}";
   }
 };
@@ -209,7 +199,7 @@ class DexMember {
   inline uint32_t GetAccessFlags() const { return item_.GetAccessFlags(); }
   inline uint32_t HasAccessFlags(uint32_t mask) const { return (GetAccessFlags() & mask) == mask; }
 
-  inline std::string GetName() const {
+  inline std::string_view GetName() const {
     return IsMethod() ? item_.GetDexFile().GetMethodName(GetMethodId())
                       : item_.GetDexFile().GetFieldName(GetFieldId());
   }
@@ -508,7 +498,7 @@ class Hierarchy final {
   }
 
  private:
-  HierarchyClass* FindClass(const std::string& descriptor) {
+  HierarchyClass* FindClass(const std::string_view& descriptor) {
     auto it = classes_.find(descriptor);
     if (it == classes_.end()) {
       return nullptr;
@@ -539,7 +529,7 @@ class Hierarchy final {
       CHECK(superclass != nullptr);
       klass.AddExtends(*superclass);
 
-      for (const std::string& iface_desc : dex_klass.GetInterfaceDescriptors()) {
+      for (const std::string_view& iface_desc : dex_klass.GetInterfaceDescriptors()) {
         HierarchyClass* iface = FindClass(iface_desc);
         CHECK(iface != nullptr);
         klass.AddExtends(*iface);
@@ -548,7 +538,7 @@ class Hierarchy final {
   }
 
   ClassPath& classpath_;
-  std::map<std::string, HierarchyClass> classes_;
+  std::map<std::string_view, HierarchyClass> classes_;
 };
 
 // Builder of dex section containing hiddenapi flags.
@@ -918,11 +908,19 @@ class HiddenApi final {
           } else if (StartsWith(option, "--public-stub-classpath=")) {
             stub_classpaths_.push_back(std::make_pair(
                 std::string(option.substr(strlen("--public-stub-classpath="))),
-                ApiList::Whitelist()));
+                ApiStubs::Kind::kPublicApi));
+          } else if (StartsWith(option, "--system-stub-classpath=")) {
+            stub_classpaths_.push_back(std::make_pair(
+                std::string(option.substr(strlen("--system-stub-classpath="))),
+                ApiStubs::Kind::kSystemApi));
+          } else if (StartsWith(option, "--test-stub-classpath=")) {
+            stub_classpaths_.push_back(std::make_pair(
+                std::string(option.substr(strlen("--test-stub-classpath="))),
+                ApiStubs::Kind::kTestApi));
           } else if (StartsWith(option, "--core-platform-stub-classpath=")) {
             stub_classpaths_.push_back(std::make_pair(
                 std::string(option.substr(strlen("--core-platform-stub-classpath="))),
-                ApiList::CorePlatformApi()));
+                ApiStubs::Kind::kCorePlatformApi));
           } else if (StartsWith(option, "--out-api-flags=")) {
             api_flags_path_ = std::string(option.substr(strlen("--out-api-flags=")));
           } else {
@@ -995,15 +993,19 @@ class HiddenApi final {
 
     size_t line_number = 1;
     for (std::string line; std::getline(api_file, line); line_number++) {
+      // Every line contains a comma separated list with the signature as the
+      // first element and the api flags as the rest
       std::vector<std::string> values = android::base::Split(line, ",");
       CHECK_GT(values.size(), 1u) << path << ":" << line_number
           << ": No flags found: " << line << kErrorHelp;
 
       const std::string& signature = values[0];
+
       CHECK(api_flag_map.find(signature) == api_flag_map.end()) << path << ":" << line_number
           << ": Duplicate entry: " << signature << kErrorHelp;
 
       ApiList membership;
+
       bool success = ApiList::FromNames(values.begin() + 1, values.end(), &membership);
       CHECK(success) << path << ":" << line_number
           << ": Some flags were not recognized: " << line << kErrorHelp;
@@ -1028,7 +1030,7 @@ class HiddenApi final {
 
     // Complete list of boot class path members. The associated boolean states
     // whether it is public (true) or private (false).
-    std::map<std::string, ApiList> boot_members;
+    std::map<std::string, std::set<std::string_view>> boot_members;
 
     // Deduplicate errors before printing them.
     std::set<std::string> unresolved;
@@ -1039,7 +1041,7 @@ class HiddenApi final {
 
     // Mark all boot dex members private.
     boot_classpath.ForEachDexMember([&](const DexMember& boot_member) {
-      boot_members[boot_member.GetApiEntry()] = ApiList();
+      boot_members[boot_member.GetApiEntry()] = {};
     });
 
     // Resolve each SDK dex member against the framework and mark it white.
@@ -1047,7 +1049,7 @@ class HiddenApi final {
       ClassPath stub_classpath(android::base::Split(cp_entry.first, ":"),
                                /* open_writable= */ false);
       Hierarchy stub_hierarchy(stub_classpath);
-      const ApiList stub_api_list = cp_entry.second;
+      const ApiStubs::Kind stub_api = cp_entry.second;
 
       stub_classpath.ForEachDexMember(
           [&](const DexMember& stub_member) {
@@ -1061,7 +1063,7 @@ class HiddenApi final {
                   std::string entry = boot_member.GetApiEntry();
                   auto it = boot_members.find(entry);
                   CHECK(it != boot_members.end());
-                  it->second |= stub_api_list;
+                  it->second.insert(ApiStubs::ToString(stub_api));
                 });
             if (!resolved) {
               unresolved.insert(stub_member.GetApiEntry());
@@ -1077,10 +1079,11 @@ class HiddenApi final {
     // Write into public/private API files.
     std::ofstream file_flags(api_flags_path_.c_str());
     for (const auto& entry : boot_members) {
-      if (entry.second.IsEmpty()) {
+      if (entry.second.empty()) {
         file_flags << entry.first << std::endl;
       } else {
-        file_flags << entry.first << "," << entry.second << std::endl;
+        file_flags << entry.first << ",";
+        file_flags << android::base::Join(entry.second, ",") << std::endl;
       }
     }
     file_flags.close();
@@ -1098,7 +1101,7 @@ class HiddenApi final {
 
   // Set of public API stub classpaths. Each classpath is formed by a list
   // of DEX/APK files in the order they appear on the classpath.
-  std::vector<std::pair<std::string, ApiList>> stub_classpaths_;
+  std::vector<std::pair<std::string, ApiStubs::Kind>> stub_classpaths_;
 
   // Path to CSV file containing the list of API members and their flags.
   // This could be both an input and output path.

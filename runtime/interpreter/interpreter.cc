@@ -42,7 +42,7 @@ namespace interpreter {
 
 ALWAYS_INLINE static ObjPtr<mirror::Object> ObjArg(uint32_t arg)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  return ObjPtr<mirror::Object>(reinterpret_cast<mirror::Object*>(arg));
+  return reinterpret_cast<mirror::Object*>(arg);
 }
 
 static void InterpreterJni(Thread* self,
@@ -289,7 +289,7 @@ static inline JValue Execute(
       }
     }
 
-    if (!stay_in_interpreter) {
+    if (!stay_in_interpreter && !self->IsForceInterpreter()) {
       jit::Jit* jit = Runtime::Current()->GetJit();
       if (jit != nullptr) {
         jit->MethodEntered(self, shadow_frame.GetMethod());

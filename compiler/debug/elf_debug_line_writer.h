@@ -20,12 +20,12 @@
 #include <unordered_set>
 #include <vector>
 
-#include "debug/dwarf/debug_line_opcode_writer.h"
-#include "debug/dwarf/headers.h"
 #include "debug/elf_compilation_unit.h"
 #include "debug/src_map_elem.h"
 #include "dex/dex_file-inl.h"
-#include "linker/elf_builder.h"
+#include "dwarf/debug_line_opcode_writer.h"
+#include "dwarf/headers.h"
+#include "elf/elf_builder.h"
 #include "oat_file.h"
 #include "stack_map.h"
 
@@ -39,7 +39,7 @@ class ElfDebugLineWriter {
   using Elf_Addr = typename ElfTypes::Addr;
 
  public:
-  explicit ElfDebugLineWriter(linker::ElfBuilder<ElfTypes>* builder) : builder_(builder) {
+  explicit ElfDebugLineWriter(ElfBuilder<ElfTypes>* builder) : builder_(builder) {
   }
 
   void Start() {
@@ -263,23 +263,17 @@ class ElfDebugLineWriter {
     }
     std::vector<uint8_t> buffer;
     buffer.reserve(opcodes.data()->size() + KB);
-    size_t offset = builder_->GetDebugLine()->GetPosition();
-    WriteDebugLineTable(directories, files, opcodes, offset, &buffer, &debug_line_patches_);
+    WriteDebugLineTable(directories, files, opcodes, &buffer);
     builder_->GetDebugLine()->WriteFully(buffer.data(), buffer.size());
     return buffer.size();
   }
 
-  void End(bool write_oat_patches) {
+  void End() {
     builder_->GetDebugLine()->End();
-    if (write_oat_patches) {
-      builder_->WritePatches(".debug_line.oat_patches",
-                             ArrayRef<const uintptr_t>(debug_line_patches_));
-    }
   }
 
  private:
-  linker::ElfBuilder<ElfTypes>* builder_;
-  std::vector<uintptr_t> debug_line_patches_;
+  ElfBuilder<ElfTypes>* builder_;
 };
 
 }  // namespace debug
