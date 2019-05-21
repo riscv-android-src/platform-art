@@ -86,6 +86,11 @@ ART_TEST_TARGET_GTEST_MainUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST
 ART_TEST_HOST_GTEST_EmptyUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))EmptyUncompressed$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
 ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))EmptyUncompressed$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
 
+# Create rules for UncompressedEmptyAligned, a classes.dex that is empty, uncompressed,
+# and 4 byte aligned for the dex2oat tests.
+ART_TEST_HOST_GTEST_EmptyUncompressedAligned_DEX := $(basename $(ART_TEST_HOST_GTEST_Main_DEX))EmptyUncompressedAligned$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
+ART_TEST_TARGET_GTEST_EmptyUncompressedAligned_DEX := $(basename $(ART_TEST_TARGET_GTEST_Main_DEX))EmptyUncompressedAligned$(suffix $(ART_TEST_TARGET_GTEST_Main_DEX))
+
 # Create rules for MultiDexUncompressed, a copy of MultiDex with the classes.dex uncompressed
 # for the OatFile tests.
 ART_TEST_HOST_GTEST_MultiDexUncompressed_DEX := $(basename $(ART_TEST_HOST_GTEST_MultiDex_DEX))Uncompressed$(suffix $(ART_TEST_HOST_GTEST_MultiDex_DEX))
@@ -118,17 +123,35 @@ $(ART_TEST_TARGET_GTEST_MainUncompressed_DEX): $(ART_TEST_TARGET_GTEST_Main_DEX)
 endif
 
 ifdef ART_TEST_HOST_GTEST_Main_DEX
-$(ART_TEST_HOST_GTEST_EmptyUncompressed_DEX): $(ZIPALIGN)
-	touch $(dir $@)classes.dex
-	zip -j -qD -X -0 $@ $(dir $@)classes.dex
-	rm $(dir $@)classes.dex
+$(ART_TEST_HOST_GTEST_EmptyUncompressed_DEX):
+	touch $@_classes.dex
+	zip -j -qD -X -0 $@ $@_classes.dex
+	rm $@_classes.dex
 endif
 
 ifdef ART_TEST_TARGET_GTEST_Main_DEX
-$(ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX): $(ZIPALIGN)
-	touch $(dir $@)classes.dex
-	zip -j -qD -X -0 $@ $(dir $@)classes.dex
-	rm $(dir $@)classes.dex
+$(ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX):
+	touch $@_classes.dex
+	zip -j -qD -X -0 $@ $@_classes.dex
+	rm $@_classes.dex
+endif
+
+ifdef ART_TEST_HOST_GTEST_Main_DEX
+$(ART_TEST_HOST_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
+	touch $@_classes.dex
+	zip -j -0 $@_temp.zip $@_classes.dex
+	$(ZIPALIGN) -f 4 $@_temp.zip $@
+	rm $@_classes.dex
+	rm $@_temp.zip
+endif
+
+ifdef ART_TEST_TARGET_GTEST_Main_DEX
+$(ART_TEST_TARGET_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
+	touch $@_classes.dex
+	zip -j -0 $@_temp.zip $@_classes.dex
+	$(ZIPALIGN) -f 4 $@_temp.zip $@
+	rm $@_classes.dex
+	rm $@_temp.zip
 endif
 
 ifdef ART_TEST_HOST_GTEST_MultiDex_DEX
@@ -186,7 +209,7 @@ ART_GTEST_compiler_driver_test_DEX_DEPS := AbstractMethod StaticLeafMethods Prof
 ART_GTEST_dex_cache_test_DEX_DEPS := Main Packages MethodTypes
 ART_GTEST_dexanalyze_test_DEX_DEPS := MultiDex
 ART_GTEST_dexlayout_test_DEX_DEPS := ManyMethods
-ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed StringLiterals
+ART_GTEST_dex2oat_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) ManyMethods Statics VerifierDeps MainUncompressed EmptyUncompressed EmptyUncompressedAligned StringLiterals
 ART_GTEST_dex2oat_image_test_DEX_DEPS := $(ART_GTEST_dex2oat_environment_tests_DEX_DEPS) Statics VerifierDeps
 ART_GTEST_exception_test_DEX_DEPS := ExceptionHandle
 ART_GTEST_hiddenapi_test_DEX_DEPS := HiddenApi HiddenApiStubs
@@ -241,9 +264,11 @@ ART_GTEST_dex2oat_environment_tests_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_interpreter_32)
 
 ART_GTEST_oat_file_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
+  $(HOST_OUT_EXECUTABLES)/dex2oatd
 ART_GTEST_oat_file_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
+  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 
 ART_GTEST_oat_file_assistant_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
@@ -351,19 +376,19 @@ ART_GTEST_oatdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/oatdumpd \
   $(HOST_OUT_EXECUTABLES)/oatdumpds \
-  $(HOST_OUT_EXECUTABLES)/dexdump
+  $(HOST_OUT_EXECUTABLES)/dexdump \
+  $(HOST_OUT_EXECUTABLES)/dex2oatd \
+  $(HOST_OUT_EXECUTABLES)/dex2oatds
 ART_GTEST_oatdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
   $(TARGET_OUT_EXECUTABLES)/oatdumpd \
-  $(TARGET_OUT_EXECUTABLES)/dexdump
+  $(TARGET_OUT_EXECUTABLES)/dexdump \
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
 ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
-ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd \
-  $(HOST_OUT_EXECUTABLES)/dex2oatds
-ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS) \
-  $(TARGET_OUT_EXECUTABLES)/dex2oatd
+ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
+ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
 
 # Profile assistant tests requires profman utility.
 ART_GTEST_profile_assistant_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/profmand

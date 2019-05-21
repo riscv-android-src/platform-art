@@ -602,12 +602,14 @@ END art_quick_invoke_stub_internal
      */
 ENTRY art_quick_osr_stub
     SPILL_ALL_CALLEE_SAVE_GPRS             @ Spill regs (9)
-    SAVE_SIZE=9*4
+    vpush  {s16-s31}                       @ Spill fp-regs (16)
+    .cfi_adjust_cfa_offset 64
+    SAVE_SIZE=(9*4+16*4)
     mov    r11, sp                         @ Save the stack pointer
     .cfi_def_cfa r11, SAVE_SIZE            @ CFA = r11 + SAVE_SIZE
     .cfi_remember_state
     mov    r10, r1                         @ Save size of stack
-    ldr    r9, [r11, #40]                  @ Move managed thread pointer into r9
+    ldr    r9, [r11, #(SAVE_SIZE+4)]       @ Move managed thread pointer into r9
     REFRESH_MARKING_REGISTER
     mov    r6, r2                          @ Save the pc to call
     sub    r7, sp, #12                     @ Reserve space for stack pointer,
@@ -630,7 +632,7 @@ ENTRY art_quick_osr_stub
     ldr    r10, [sp, #8]                   @ Restore JValue* result
     ldr    sp, [sp, #4]                    @ Restore saved stack pointer
     .cfi_def_cfa sp, SAVE_SIZE             @ CFA = sp + SAVE_SIZE
-    ldr    r4, [sp, #36]                   @ load shorty
+    ldr    r4, [sp, #SAVE_SIZE]            @ load shorty
     ldrb   r4, [r4, #0]                    @ load return type
     cmp    r4, #68                         @ Test if result type char == 'D'.
     beq    .Losr_fp_result
@@ -641,6 +643,8 @@ ENTRY art_quick_osr_stub
 .Losr_fp_result:
     vstr d0, [r10]                         @ Store s0-s1/d0 into result pointer
 .Losr_exit:
+    vpop   {s16-s31}
+    .cfi_adjust_cfa_offset -64
     pop    {r4, r5, r6, r7, r8, r9, r10, r11, pc}
 .Losr_entry:
     .cfi_restore_state
@@ -2211,6 +2215,17 @@ ENTRY art_quick_l2f
     pop   {pc}
 END art_quick_l2f
 
+    .extern artStringBuilderAppend
+ENTRY art_quick_string_builder_append
+    SETUP_SAVE_REFS_ONLY_FRAME r2       @ save callee saves in case of GC
+    add    r1, sp, #(FRAME_SIZE_SAVE_REFS_ONLY + __SIZEOF_POINTER__)  @ pass args
+    mov    r2, rSELF                    @ pass Thread::Current
+    bl     artStringBuilderAppend       @ (uint32_t, const unit32_t*, Thread*)
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    REFRESH_MARKING_REGISTER
+    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
+END art_quick_string_builder_append
+
 .macro CONDITIONAL_CBZ reg, reg_if, dest
 .ifc \reg, \reg_if
     cbz \reg, \dest
@@ -2624,8 +2639,7 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
      *     (6 bytes). Loads the return register and jumps to the runtime call.
      */
 #if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
-    .balign 512
-ENTRY art_quick_read_barrier_mark_introspection
+ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
     // At this point, IP contains the reference, rMR is clobbered by the thunk
     // and can be freely used as it will be set back to 1 before returning.
     // For heap poisoning, the reference is poisoned, so unpoison it first.

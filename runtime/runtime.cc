@@ -189,6 +189,8 @@ static constexpr double kNormalMaxLoadFactor = 0.7;
 // barrier config.
 static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
 
+static constexpr const char* kApexBootImageLocation = "/system/framework/apex.art";
+
 Runtime* Runtime::instance_ = nullptr;
 
 struct TraceConfig {
@@ -227,6 +229,7 @@ Runtime::Runtime()
       instruction_set_(InstructionSet::kNone),
       compiler_callbacks_(nullptr),
       is_zygote_(false),
+      is_system_server_(false),
       must_relocate_(false),
       is_concurrent_gc_enabled_(true),
       is_explicit_gc_disabled_(false),
@@ -279,7 +282,7 @@ Runtime::Runtime()
       is_low_memory_mode_(false),
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
-      core_platform_api_policy_(hiddenapi::EnforcementPolicy::kJustWarn),
+      core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -489,6 +492,8 @@ Runtime::~Runtime() {
   // instance. We rely on a small initialization order issue in Runtime::Start() that requires
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
+
+  JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -765,8 +770,10 @@ std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
   }
-  std::string compiler_executable(GetAndroidRoot());
-  compiler_executable += (kIsDebugBuild ? "/bin/dex2oatd" : "/bin/dex2oat");
+  std::string compiler_executable = GetAndroidRuntimeBinDir() + "/dex2oat";
+  if (kIsDebugBuild) {
+    compiler_executable += 'd';
+  }
   return compiler_executable;
 }
 
@@ -1037,12 +1044,14 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
       LOG(WARNING) << "Skipping non-existent dex file '" << dex_filename << "'";
       continue;
     }
-    // In the case we're not using the default boot image, we don't have support yet
+    bool verify = Runtime::Current()->IsVerificationEnabled();
+    // In the case we're using the apex boot image, we don't have support yet
     // on reading vdex files of boot classpath. So just assume all boot classpath
     // dex files have been verified (this should always be the case as the default boot
     // image has been generated at build time).
-    bool verify = Runtime::Current()->IsVerificationEnabled() &&
-        (kIsDebugBuild || Runtime::Current()->IsUsingDefaultBootImageLocation());
+    if (Runtime::Current()->IsUsingApexBootImageLocation() && !kIsDebugBuild) {
+      verify = false;
+    }
     if (!dex_file_loader.Open(dex_filename,
                               dex_location,
                               verify,
@@ -1080,7 +1089,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   CHECK(klass != nullptr);
   gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
   ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
-      klass->Alloc</* kIsInstrumented= */ true>(self, allocator_type));
+      klass->Alloc(self, allocator_type));
   CHECK(exception_object != nullptr);
   *exception = GcRoot<mirror::Throwable>(exception_object);
   // Initialize the "detailMessage" field.
@@ -1148,8 +1157,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   image_location_ = runtime_options.GetOrDefault(Opt::Image);
   {
     std::string error_msg;
-    is_using_default_boot_image_location_ =
-        (image_location_.compare(GetDefaultBootImageLocation(&error_msg)) == 0);
+    is_using_apex_boot_image_location_ = (image_location_ == kApexBootImageLocation);
   }
 
   SetInstructionSet(runtime_options.GetOrDefault(Opt::ImageInstructionSet));
@@ -1230,18 +1238,21 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
 
-  // Check whether to enforce hidden API access checks. The checks are disabled
-  // by default and we only enable them if:
-  // (a) runtime was started with a flag that enables the checks, or
+  // Set hidden API enforcement policy. The checks are disabled by default and
+  // we only enable them if:
+  // (a) runtime was started with a command line flag that enables the checks, or
   // (b) Zygote forked a new process that is not exempt (see ZygoteHooks).
-  bool do_hidden_api_checks = runtime_options.Exists(Opt::HiddenApiChecks);
-  DCHECK(!is_zygote_ || !do_hidden_api_checks);
-  // TODO pass the actual enforcement policy in, rather than just a single bit.
-  // As is, we're encoding some logic here about which specific policy to use, which would be better
-  // controlled by the framework.
-  hidden_api_policy_ = do_hidden_api_checks
-      ? hiddenapi::EnforcementPolicy::kEnabled
-      : hiddenapi::EnforcementPolicy::kDisabled;
+  hidden_api_policy_ = runtime_options.GetOrDefault(Opt::HiddenApiPolicy);
+  DCHECK(!is_zygote_ || hidden_api_policy_ == hiddenapi::EnforcementPolicy::kDisabled);
+
+  // Set core platform API enforcement policy. The checks are disabled by default and
+  // can be enabled with a command line flag. AndroidRuntime will pass the flag if
+  // a system property is set.
+  core_platform_api_policy_ = runtime_options.GetOrDefault(Opt::CorePlatformApiPolicy);
+  if (core_platform_api_policy_ != hiddenapi::EnforcementPolicy::kDisabled) {
+    LOG(INFO) << "Core platform API reporting enabled, enforcing="
+        << (core_platform_api_policy_ == hiddenapi::EnforcementPolicy::kEnabled ? "true" : "false");
+  }
 
   no_sig_chain_ = runtime_options.Exists(Opt::NoSigChain);
   force_native_bridge_ = runtime_options.Exists(Opt::ForceNativeBridge);
@@ -1288,6 +1299,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::HeapMaxFree),
                        runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
                        foreground_heap_growth_multiplier,
+                       runtime_options.GetOrDefault(Opt::StopForNativeAllocs),
                        runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),
@@ -1481,10 +1493,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   GetHeap()->EnableObjectValidation();
 
   CHECK_GE(GetHeap()->GetContinuousSpaces().size(), 1U);
+
   if (UNLIKELY(IsAotCompiler())) {
     class_linker_ = new AotClassLinker(intern_table_);
   } else {
-    class_linker_ = new ClassLinker(intern_table_);
+    class_linker_ = new ClassLinker(
+        intern_table_,
+        runtime_options.GetOrDefault(Opt::FastClassNotFoundException));
   }
   if (GetHeap()->HasBootImageSpace()) {
     bool result = class_linker_->InitFromBootImage(&error_msg);
@@ -1810,6 +1825,10 @@ void Runtime::InitNativeMethods() {
 
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
+
+  // Having loaded native libraries for Managed Core library, enable field and
+  // method resolution checks via JNI from native code.
+  JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }

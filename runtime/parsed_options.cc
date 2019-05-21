@@ -57,6 +57,8 @@ bool ParsedOptions::Parse(const RuntimeOptions& options,
 }
 
 using RuntimeParser = CmdlineParser<RuntimeArgumentMap, RuntimeArgumentMap::Key>;
+using HiddenapiPolicyValueMap =
+    std::initializer_list<std::pair<const char*, hiddenapi::EnforcementPolicy>>;
 
 // Yes, the stack frame is huge. But we get called super early on (and just once)
 // to pass the command line arguments, so we'll probably be ok.
@@ -69,6 +71,13 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
 
   std::unique_ptr<RuntimeParser::Builder> parser_builder =
       std::make_unique<RuntimeParser::Builder>();
+
+  HiddenapiPolicyValueMap hiddenapi_policy_valuemap =
+      {{"disabled",  hiddenapi::EnforcementPolicy::kDisabled},
+       {"just-warn", hiddenapi::EnforcementPolicy::kJustWarn},
+       {"enabled",   hiddenapi::EnforcementPolicy::kEnabled}};
+  DCHECK_EQ(hiddenapi_policy_valuemap.size(),
+            static_cast<size_t>(hiddenapi::EnforcementPolicy::kMax) + 1);
 
   parser_builder->
        Define("-Xzygote")
@@ -129,6 +138,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:NonMovingSpaceCapacity=_")
           .WithType<MemoryKiB>()
           .IntoKey(M::NonMovingSpaceCapacity)
+      .Define("-XX:StopForNativeAllocs=_")
+          .WithType<MemoryKiB>()
+          .IntoKey(M::StopForNativeAllocs)
       .Define("-XX:HeapTargetUtilization=_")
           .WithType<double>().WithRange(0.1, 0.9)
           .IntoKey(M::HeapTargetUtilization)
@@ -334,8 +346,14 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xtarget-sdk-version:_")
           .WithType<unsigned int>()
           .IntoKey(M::TargetSdkVersion)
-      .Define("-Xhidden-api-checks")
-          .IntoKey(M::HiddenApiChecks)
+      .Define("-Xhidden-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::HiddenApiPolicy)
+      .Define("-Xcore-platform-api-policy:_")
+          .WithType<hiddenapi::EnforcementPolicy>()
+          .WithValueMap(hiddenapi_policy_valuemap)
+          .IntoKey(M::CorePlatformApiPolicy)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
       .Define("-Xonly-use-system-oat-files")
@@ -343,6 +361,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
+      .Define("-XX:FastClassNotFoundException=_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::FastClassNotFoundException)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -459,6 +481,7 @@ static void MaybeOverrideVerbosity() {
   //  gLogVerbosity.deopt = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!
   //  gLogVerbosity.heap = true;  // TODO: don't check this in!
+  //  gLogVerbosity.interpreter = true;  // TODO: don't check this in!
   //  gLogVerbosity.jdwp = true;  // TODO: don't check this in!
   //  gLogVerbosity.jit = true;  // TODO: don't check this in!
   //  gLogVerbosity.jni = true;  // TODO: don't check this in!
@@ -558,7 +581,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   MaybeOverrideVerbosity();
 
-  SetRuntimeDebugFlagsEnabled(args.Get(M::SlowDebug));
+  SetRuntimeDebugFlagsEnabled(args.GetOrDefault(M::SlowDebug));
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -569,7 +592,6 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   {
     // If not set, background collector type defaults to homogeneous compaction.
-    // If foreground is GSS, use GSS as background collector.
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
@@ -585,12 +607,8 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     }
 
     if (background_collector_type_ == gc::kCollectorTypeNone) {
-      if (collector_type_ != gc::kCollectorTypeGSS) {
-        background_collector_type_ = low_memory_mode_ ?
-            gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
-      } else {
-        background_collector_type_ = collector_type_;
-      }
+      background_collector_type_ = low_memory_mode_ ?
+          gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
     }
 
     args.Set(M::BackgroundGc, BackgroundGcOption { background_collector_type_ });
@@ -725,6 +743,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:BackgroundGC=none\n");
   UsageMessage(stream, "  -XX:LargeObjectSpace={disabled,map,freelist}\n");
   UsageMessage(stream, "  -XX:LargeObjectThreshold=N\n");
+  UsageMessage(stream, "  -XX:StopForNativeAllocs=N\n");
   UsageMessage(stream, "  -XX:DumpNativeStackOnSigQuit=booleanvalue\n");
   UsageMessage(stream, "  -XX:MadviseRandomAccess:booleanvalue\n");
   UsageMessage(stream, "  -XX:SlowDebug={false,true}\n");

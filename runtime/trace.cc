@@ -336,7 +336,7 @@ void Trace::Start(int trace_fd,
     Thread::Current()->ThrowNewException("Ljava/lang/RuntimeException;", msg.c_str());
     return;
   }
-  std::unique_ptr<File> file(new File(trace_fd, "tracefile"));
+  std::unique_ptr<File> file(new File(trace_fd, /* path= */ "tracefile", /* check_usage= */ true));
   Start(std::move(file), buffer_size, flags, output_mode, trace_mode, interval_us);
 }
 
@@ -478,11 +478,11 @@ void Trace::StopTracing(bool finish_tracing, bool flush_file) {
         MutexLock mu(self, *Locks::thread_list_lock_);
         runtime->GetThreadList()->ForEach(ClearThreadStackTraceAndClockBase, nullptr);
       } else {
-        runtime->GetInstrumentation()->DisableMethodTracing(kTracerInstrumentationKey);
         runtime->GetInstrumentation()->RemoveListener(
             the_trace, instrumentation::Instrumentation::kMethodEntered |
             instrumentation::Instrumentation::kMethodExited |
             instrumentation::Instrumentation::kMethodUnwind);
+        runtime->GetInstrumentation()->DisableMethodTracing(kTracerInstrumentationKey);
       }
     }
     // At this point, code may read buf_ as it's writers are shutdown

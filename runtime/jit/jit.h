@@ -21,6 +21,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/timing_logger.h"
+#include "handle.h"
 #include "jit/profile_saver_options.h"
 #include "obj_ptr.h"
 #include "thread_pool.h"
@@ -29,12 +30,15 @@ namespace art {
 
 class ArtMethod;
 class ClassLinker;
+class DexFile;
+class OatDexFile;
 struct RuntimeArgumentMap;
 union JValue;
 
 namespace mirror {
 class Object;
 class Class;
+class ClassLoader;
 }   // namespace mirror
 
 namespace jit {
@@ -295,7 +299,7 @@ class Jit {
   void Start();
 
   // Transition to a child state.
-  void PostForkChildAction(bool is_zygote);
+  void PostForkChildAction(bool is_system_server, bool is_zygote);
 
   // Prepare for forking.
   void PreZygoteFork();
@@ -303,9 +307,19 @@ class Jit {
   // Adjust state after forking.
   void PostZygoteFork();
 
-  // In case the boot classpath is not fully AOTed, add methods from the boot profile to the
-  // compilation queue.
-  void AddNonAotBootMethodsToQueue(Thread* self);
+  // Compile methods from the given profile. If `add_to_queue` is true, methods
+  // in the profile are added to the JIT queue. Otherwise they are compiled
+  // directly.
+  void CompileMethodsFromProfile(Thread* self,
+                                 const std::vector<const DexFile*>& dex_files,
+                                 const std::string& profile_path,
+                                 Handle<mirror::ClassLoader> class_loader,
+                                 bool add_to_queue);
+
+  // Register the dex files to the JIT. This is to perform any compilation/optimization
+  // at the point of loading the dex files.
+  void RegisterDexFiles(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
+                        ObjPtr<mirror::ClassLoader> class_loader);
 
  private:
   Jit(JitCodeCache* code_cache, JitOptions* options);
@@ -337,6 +351,7 @@ class Jit {
   const JitOptions* const options_;
 
   std::unique_ptr<ThreadPool> thread_pool_;
+  std::vector<std::unique_ptr<OatDexFile>> type_lookup_tables_;
 
   // Performance monitoring.
   CumulativeLogger cumulative_timings_;

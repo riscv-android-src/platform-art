@@ -120,7 +120,8 @@ class ClassLinker {
  public:
   static constexpr bool kAppImageMayContainStrings = true;
 
-  explicit ClassLinker(InternTable* intern_table);
+  explicit ClassLinker(InternTable* intern_table,
+                       bool fast_class_not_found_exceptions = true);
   virtual ~ClassLinker();
 
   // Initialize class linker by bootstraping from dex files.
@@ -944,9 +945,10 @@ class ClassLinker {
                                         ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Implementation of ResolveType() called when the type was not found in the dex cache.
-  template <typename T>
-  ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx, T referrer)
+  // Implementation of ResolveType() called when the type was not found in the dex cache. May be
+  // used with ArtField*, ArtMethod* or ObjPtr<Class>.
+  template <typename RefType>
+  ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx, RefType referrer)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
   ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx,
@@ -1366,6 +1368,8 @@ class ClassLinker {
   bool log_new_roots_ GUARDED_BY(Locks::classlinker_classes_lock_);
 
   InternTable* intern_table_;
+
+  const bool fast_class_not_found_exceptions_;
 
   // Trampolines within the image the bounce to runtime entrypoints. Done so that there is a single
   // patch point within the image. TODO: make these proper relocations.

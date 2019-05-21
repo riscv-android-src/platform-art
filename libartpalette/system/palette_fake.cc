@@ -19,6 +19,7 @@
 #include <map>
 #include <mutex>
 
+#include <android-base/logging.h>
 #include <android-base/macros.h>  // For ATTRIBUTE_UNUSED
 
 #include "palette_system.h"
@@ -49,6 +50,11 @@ enum PaletteStatus PaletteSchedGetPriority(int32_t tid,
     g_tid_priority_map[tid] = art::palette::kNormalManagedThreadPriority;
   }
   *priority = g_tid_priority_map[tid];
+  return PaletteStatus::kOkay;
+}
+
+enum PaletteStatus PaletteWriteCrashThreadStacks(/*in*/ const char* stacks, size_t stacks_len) {
+  LOG(INFO) << std::string_view(stacks, stacks_len);
   return PaletteStatus::kOkay;
 }
 

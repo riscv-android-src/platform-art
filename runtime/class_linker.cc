@@ -37,6 +37,7 @@
 #include "art_method-inl.h"
 #include "base/arena_allocator.h"
 #include "base/casts.h"
+#include "base/file_utils.h"
 #include "base/leb128.h"
 #include "base/logging.h"
 #include "base/os.h"
@@ -117,6 +118,7 @@
 #include "mirror/reference-inl.h"
 #include "mirror/stack_trace_element.h"
 #include "mirror/string-inl.h"
+#include "mirror/throwable.h"
 #include "mirror/var_handle.h"
 #include "native/dalvik_system_DexFile.h"
 #include "nativehelper/scoped_local_ref.h"
@@ -402,7 +404,7 @@ static void ShuffleForward(size_t* current_field_idx,
   }
 }
 
-ClassLinker::ClassLinker(InternTable* intern_table)
+ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_exceptions)
     : boot_class_table_(new ClassTable()),
       failed_dex_cache_class_lookups_(0),
       class_roots_(nullptr),
@@ -410,6 +412,7 @@ ClassLinker::ClassLinker(InternTable* intern_table)
       init_done_(false),
       log_new_roots_(false),
       intern_table_(intern_table),
+      fast_class_not_found_exceptions_(fast_class_not_found_exceptions),
       quick_resolution_trampoline_(nullptr),
       quick_imt_conflict_trampoline_(nullptr),
       quick_generic_jni_trampoline_(nullptr),
@@ -1076,6 +1079,14 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
                        /*out*/&dex_files,
                        error_msg)) {
       return false;
+    }
+    // Assert that if absolute boot classpath locations were provided, they were
+    // assigned to the loaded dex files.
+    if (kIsDebugBuild && IsAbsoluteLocation(boot_class_path_locations[i])) {
+      for (const auto& dex_file : dex_files) {
+        DCHECK_EQ(DexFileLoader::GetBaseLocation(dex_file->GetLocation()),
+                  boot_class_path_locations[i]);
+      }
     }
     // Append opened dex files at the end.
     boot_dex_files_.insert(boot_dex_files_.end(),
@@ -2027,10 +2038,11 @@ bool ClassLinker::AddImageSpace(
 
   for (int32_t i = 0; i < dex_caches->GetLength(); i++) {
     ObjPtr<mirror::DexCache> dex_cache = dex_caches->Get(i);
-    std::string dex_file_location(dex_cache->GetLocation()->ToModifiedUtf8());
-    // TODO: Only store qualified paths.
-    // If non qualified, qualify it.
-    dex_file_location = OatFile::ResolveRelativeEncodedDexLocation(dex_location, dex_file_location);
+    std::string dex_file_location = dex_cache->GetLocation()->ToModifiedUtf8();
+    if (class_loader == nullptr) {
+      // For app images, we'll see the relative location. b/130666977.
+      DCHECK_EQ(dex_location, DexFileLoader::GetBaseLocation(dex_file_location));
+    }
     std::unique_ptr<const DexFile> dex_file = OpenOatDexFile(oat_file,
                                                              dex_file_location.c_str(),
                                                              error_msg);
@@ -2738,7 +2750,7 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
 
     // Search the current class loader classpath.
     *result = FindClassInBaseDexClassLoaderClassPath(soa, descriptor, hash, class_loader);
-    return true;
+    return !soa.Self()->IsExceptionPending();
   }
 
   if (IsDelegateLastClassLoader(soa, class_loader)) {
@@ -2750,6 +2762,11 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     *result = FindClassInBootClassLoaderClassPath(self, descriptor, hash);
     if (*result != nullptr) {
       return true;  // The class is part of the boot class path.
+    }
+    if (self->IsExceptionPending()) {
+      // Pending exception means there was an error other than ClassNotFound that must be returned
+      // to the caller.
+      return false;
     }
 
     if (!FindClassInSharedLibraries(soa, self, descriptor, hash, class_loader, result)) {
@@ -2763,6 +2780,11 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
     if (*result != nullptr) {
       return true;  // Found the class in the current class loader
     }
+    if (self->IsExceptionPending()) {
+      // Pending exception means there was an error other than ClassNotFound that must be returned
+      // to the caller.
+      return false;
+    }
 
     // Handles as RegisterDexFile may allocate dex caches (and cause thread suspension).
     StackHandleScope<1> hs(self);
@@ -2774,6 +2796,31 @@ bool ClassLinker::FindClassInBaseDexClassLoader(ScopedObjectAccessAlreadyRunnabl
   *result = nullptr;
   return false;
 }
+
+namespace {
+
+// Matches exceptions caught in DexFile.defineClass.
+ALWAYS_INLINE bool MatchesDexFileCaughtExceptions(ObjPtr<mirror::Throwable> throwable,
+                                                  ClassLinker* class_linker)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  return
+      // ClassNotFoundException.
+      throwable->InstanceOf(GetClassRoot(ClassRoot::kJavaLangClassNotFoundException,
+                                         class_linker))
+      ||
+      // NoClassDefFoundError. TODO: Reconsider this. b/130746382.
+      throwable->InstanceOf(Runtime::Current()->GetPreAllocatedNoClassDefFoundError()->GetClass());
+}
+
+// Clear exceptions caught in DexFile.defineClass.
+ALWAYS_INLINE void FilterDexFileCaughtExceptions(Thread* self, ClassLinker* class_linker)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  if (MatchesDexFileCaughtExceptions(self->GetException(), class_linker)) {
+    self->ClearException();
+  }
+}
+
+}  // namespace
 
 // Finds the class in the boot class loader.
 // If the class is found the method returns the resolved class. Otherwise it returns null.
@@ -2796,7 +2843,7 @@ ObjPtr<mirror::Class> ClassLinker::FindClassInBootClassLoaderClassPath(Thread* s
     }
     if (result == nullptr) {
       CHECK(self->IsExceptionPending()) << descriptor;
-      self->ClearException();
+      FilterDexFileCaughtExceptions(self, this);
     }
   }
   return result;
@@ -2824,8 +2871,10 @@ ObjPtr<mirror::Class> ClassLinker::FindClassInBaseDexClassLoaderClassPath(
                                                 *dex_class_def);
       if (klass == nullptr) {
         CHECK(soa.Self()->IsExceptionPending()) << descriptor;
-        soa.Self()->ClearException();
+        FilterDexFileCaughtExceptions(soa.Self(), this);
         // TODO: Is it really right to break here, and not check the other dex files?
+      } else {
+        DCHECK(!soa.Self()->IsExceptionPending());
       }
       ret = klass;
       return false;  // Found a Class (or error == nullptr), stop visit.
@@ -2894,8 +2943,10 @@ ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
       DCHECK(known_hierarchy);
       DCHECK(result_ptr->DescriptorEquals(descriptor));
       descriptor_equals = true;
-    } else {
+    } else if (!self->IsExceptionPending()) {
       // Either the chain wasn't understood or the class wasn't found.
+      // If there is a pending exception we didn't clear, it is a not a ClassNotFoundException and
+      // we should return it instead of silently clearing and retrying.
       //
       // If the chain was understood but we did not find the class, let the Java-side
       // rediscover all this and throw the exception with the right stack trace. Note that
@@ -2926,34 +2977,47 @@ ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
         ThrowNoClassDefFoundError("Invalid descriptor: %s.", descriptor);
         return nullptr;
       }
+
       std::string class_name_string(descriptor + 1, descriptor_length - 2);
       std::replace(class_name_string.begin(), class_name_string.end(), '/', '.');
-
-      ScopedLocalRef<jobject> class_loader_object(
-          soa.Env(), soa.AddLocalReference<jobject>(class_loader.Get()));
-      ScopedLocalRef<jobject> result(soa.Env(), nullptr);
-      {
-        ScopedThreadStateChange tsc(self, kNative);
-        ScopedLocalRef<jobject> class_name_object(
-            soa.Env(), soa.Env()->NewStringUTF(class_name_string.c_str()));
-        if (class_name_object.get() == nullptr) {
-          DCHECK(self->IsExceptionPending());  // OOME.
+      if (known_hierarchy &&
+          fast_class_not_found_exceptions_ &&
+          !Runtime::Current()->IsJavaDebuggable()) {
+        // For known hierarchy, we know that the class is going to throw an exception. If we aren't
+        // debuggable, optimize this path by throwing directly here without going back to Java
+        // language. This reduces how many ClassNotFoundExceptions happen.
+        self->ThrowNewExceptionF("Ljava/lang/ClassNotFoundException;",
+                                 "%s",
+                                 class_name_string.c_str());
+      } else {
+        ScopedLocalRef<jobject> class_loader_object(
+            soa.Env(), soa.AddLocalReference<jobject>(class_loader.Get()));
+        ScopedLocalRef<jobject> result(soa.Env(), nullptr);
+        {
+          ScopedThreadStateChange tsc(self, kNative);
+          ScopedLocalRef<jobject> class_name_object(
+              soa.Env(), soa.Env()->NewStringUTF(class_name_string.c_str()));
+          if (class_name_object.get() == nullptr) {
+            DCHECK(self->IsExceptionPending());  // OOME.
+            return nullptr;
+          }
+          CHECK(class_loader_object.get() != nullptr);
+          result.reset(soa.Env()->CallObjectMethod(class_loader_object.get(),
+                                                   WellKnownClasses::java_lang_ClassLoader_loadClass,
+                                                   class_name_object.get()));
+        }
+        if (result.get() == nullptr && !self->IsExceptionPending()) {
+          // broken loader - throw NPE to be compatible with Dalvik
+          ThrowNullPointerException(StringPrintf("ClassLoader.loadClass returned null for %s",
+                                                 class_name_string.c_str()).c_str());
           return nullptr;
         }
-        CHECK(class_loader_object.get() != nullptr);
-        result.reset(soa.Env()->CallObjectMethod(class_loader_object.get(),
-                                                 WellKnownClasses::java_lang_ClassLoader_loadClass,
-                                                 class_name_object.get()));
+        result_ptr = soa.Decode<mirror::Class>(result.get());
+        // Check the name of the returned class.
+        descriptor_equals = (result_ptr != nullptr) && result_ptr->DescriptorEquals(descriptor);
       }
-      if (result.get() == nullptr && !self->IsExceptionPending()) {
-        // broken loader - throw NPE to be compatible with Dalvik
-        ThrowNullPointerException(StringPrintf("ClassLoader.loadClass returned null for %s",
-                                               class_name_string.c_str()).c_str());
-        return nullptr;
-      }
-      result_ptr = soa.Decode<mirror::Class>(result.get());
-      // Check the name of the returned class.
-      descriptor_equals = (result_ptr != nullptr) && result_ptr->DescriptorEquals(descriptor);
+    } else {
+      DCHECK(!MatchesDexFileCaughtExceptions(self->GetException(), this));
     }
   }
 
@@ -3373,6 +3437,10 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
     if (has_oat_class) {
       OatFile::OatMethod oat_method = oat_class.GetOatMethod(method_index);
       quick_code = oat_method.GetQuickCode();
+    }
+    // Check if we have JIT compiled code for it.
+    if (quick_code == nullptr && Runtime::Current()->GetJit() != nullptr) {
+      quick_code = Runtime::Current()->GetJit()->GetCodeCache()->GetZygoteSavedEntryPoint(method);
     }
     // Check whether the method is native, in which case it's generic JNI.
     if (quick_code == nullptr && method->IsNative()) {
@@ -4663,7 +4731,7 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
       // 1) updatable boot classpath classes, and
       // 2) classes in /system referencing updatable classes
       // will be verified at runtime.
-      if (!Runtime::Current()->IsUsingDefaultBootImageLocation()) {
+      if (Runtime::Current()->IsUsingApexBootImageLocation()) {
         oat_file_class_status = ClassStatus::kVerified;
         return true;
       }
@@ -8380,8 +8448,8 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
   return type;
 }
 
-template <typename T>
-ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx, T referrer) {
+template <typename RefType>
+ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx, RefType referrer) {
   StackHandleScope<2> hs(Thread::Current());
   Handle<mirror::DexCache> dex_cache(hs.NewHandle(referrer->GetDexCache()));
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(referrer->GetClassLoader()));

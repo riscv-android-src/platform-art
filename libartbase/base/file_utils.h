@@ -27,17 +27,38 @@
 
 namespace art {
 
-bool ReadFileToString(const std::string& file_name, std::string* result);
-
+// These methods return the Android Root, which is the historical location of
+// the Android "system" directory, containing the built Android artifacts. On
+// target, this is normally "/system". On host this is usually a directory under
+// the build tree, e.g. "$ANDROID_BUILD_TOP/out/host/linux-x86". The location of
+// the Android Root can be overriden using the ANDROID_ROOT environment
+// variable.
+//
 // Find $ANDROID_ROOT, /system, or abort.
 std::string GetAndroidRoot();
 // Find $ANDROID_ROOT, /system, or return an empty string.
-std::string GetAndroidRootSafe(std::string* error_msg);
+std::string GetAndroidRootSafe(/*out*/ std::string* error_msg);
+
+// These methods return the Android Runtime Root, which is the location of the
+// (activated) Android Runtime APEX module. On target, this is normally
+// "/apex/com.android.runtime". On host, this is usually a subdirectory of the
+// Android Root, e.g.
+// "$ANDROID_BUILD_TOP/out/host/linux-x86/com.android.runtime". The location of
+// the Android Runtime Root can be overriden using the ANDROID_RUNTIME_ROOT
+// environment variable.
+//
+// Find $ANDROID_RUNTIME_ROOT, /apex/com.android.runtime, or abort.
+std::string GetAndroidRuntimeRoot();
+// Find $ANDROID_RUNTIME_ROOT, /apex/com.android.runtime, or return an empty string.
+std::string GetAndroidRuntimeRootSafe(/*out*/ std::string* error_msg);
+
+// Return the path to the directory containing the Android Runtime binaries.
+std::string GetAndroidRuntimeBinDir();
 
 // Find $ANDROID_DATA, /data, or abort.
-const char* GetAndroidData();
-// Find $ANDROID_DATA, /data, or return null.
-const char* GetAndroidDataSafe(std::string* error_msg);
+std::string GetAndroidData();
+// Find $ANDROID_DATA, /data, or return an empty string.
+std::string GetAndroidDataSafe(/*out*/ std::string* error_msg);
 
 // Returns the default boot image location (ANDROID_ROOT/framework/boot.art).
 // Returns an empty string if ANDROID_ROOT is not set.
@@ -96,6 +117,9 @@ bool RuntimeModuleRootDistinctFromAndroidRoot();
 
 // dup(2), except setting the O_CLOEXEC flag atomically, when possible.
 int DupCloexec(int fd);
+
+// Returns true if `path` begins with a slash.
+inline bool IsAbsoluteLocation(const std::string& path) { return !path.empty() && path[0] == '/'; }
 
 }  // namespace art
 
