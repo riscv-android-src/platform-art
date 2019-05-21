@@ -124,15 +124,31 @@ static bool GenerateImage(const std::string& image_filename,
   std::string dex2oat(Runtime::Current()->GetCompilerExecutable());
   arg_vector.push_back(dex2oat);
 
+  char* dex2oat_bcp = getenv("DEX2OATBOOTCLASSPATH");
+  std::vector<std::string> dex2oat_bcp_vector;
+  if (dex2oat_bcp != nullptr) {
+    arg_vector.push_back("--runtime-arg");
+    arg_vector.push_back(StringPrintf("-Xbootclasspath:%s", dex2oat_bcp));
+    Split(dex2oat_bcp, ':', &dex2oat_bcp_vector);
+  }
+
   std::string image_option_string("--image=");
   image_option_string += image_filename;
   arg_vector.push_back(image_option_string);
 
-  const std::vector<std::string>& boot_class_path_locations = runtime->GetBootClassPathLocations();
-  DCHECK_EQ(boot_class_path.size(), boot_class_path_locations.size());
-  for (size_t i = 0u; i < boot_class_path.size(); i++) {
-    arg_vector.push_back(std::string("--dex-file=") + boot_class_path[i]);
-    arg_vector.push_back(std::string("--dex-location=") + boot_class_path_locations[i]);
+  if (!dex2oat_bcp_vector.empty()) {
+    for (size_t i = 0u; i < dex2oat_bcp_vector.size(); i++) {
+      arg_vector.push_back(std::string("--dex-file=") + dex2oat_bcp_vector[i]);
+      arg_vector.push_back(std::string("--dex-location=") + dex2oat_bcp_vector[i]);
+    }
+  } else {
+    const std::vector<std::string>& boot_class_path_locations =
+        runtime->GetBootClassPathLocations();
+    DCHECK_EQ(boot_class_path.size(), boot_class_path_locations.size());
+    for (size_t i = 0u; i < boot_class_path.size(); i++) {
+      arg_vector.push_back(std::string("--dex-file=") + boot_class_path[i]);
+      arg_vector.push_back(std::string("--dex-location=") + boot_class_path_locations[i]);
+    }
   }
 
   std::string oat_file_option_string("--oat-file=");
@@ -910,7 +926,8 @@ class ImageSpace::Loader {
                               int fd,
                               TimingLogger* logger,
                               /*inout*/MemMap* image_reservation,
-                              /*out*/std::string* error_msg) {
+                              /*out*/std::string* error_msg)
+        REQUIRES_SHARED(Locks::mutator_lock_) {
     TimingLogger::ScopedTiming timing("MapImageFile", logger);
     std::string temp_error_msg;
     const bool is_compressed = image_header.HasCompressedBlock();
@@ -979,6 +996,8 @@ class ImageSpace::Loader {
       }
       if (use_parallel) {
         ScopedTrace trace("Waiting for workers");
+        // Go to native since we don't want to suspend while holding the mutator lock.
+        ScopedThreadSuspension sts(Thread::Current(), kNative);
         pool->Wait(self, true, false);
       }
       const uint64_t time = NanoTime() - start;
@@ -1210,13 +1229,13 @@ class ImageSpace::Loader {
           ClassTable::ClassSet temp_set(data, /*make_copy_of_data=*/ false, &read_count);
           for (ClassTable::TableSlot& slot : temp_set) {
             slot.VisitRoot(class_table_visitor);
-            mirror::Class* klass = slot.Read<kWithoutReadBarrier>();
-            if (!app_image_objects.InDest(klass)) {
+            ObjPtr<mirror::Class> klass = slot.Read<kWithoutReadBarrier>();
+            if (!app_image_objects.InDest(klass.Ptr())) {
               continue;
             }
-            const bool already_marked = visited_bitmap->Set(klass);
+            const bool already_marked = visited_bitmap->Set(klass.Ptr());
             CHECK(!already_marked) << "App image class already visited";
-            patch_object_visitor.VisitClass(klass);
+            patch_object_visitor.VisitClass(klass.Ptr());
             // Then patch the non-embedded vtable and iftable.
             ObjPtr<mirror::PointerArray> vtable =
                 klass->GetVTable<kVerifyNone, kWithoutReadBarrier>();
@@ -1290,7 +1309,7 @@ class ImageSpace::Loader {
             method.SetEntryPointFromQuickCompiledCodePtrSize(new_code, kPointerSize);
           }
         } else {
-          method.UpdateObjectsForImageRelocation(forward_object);
+          patch_object_visitor.PatchGcRoot(&method.DeclaringClassRoot());
           method.UpdateEntrypoints(forward_code, kPointerSize);
         }
       }, target_base, kPointerSize);
@@ -1300,7 +1319,8 @@ class ImageSpace::Loader {
         // Only touches objects in the app image, no need for mutator lock.
         TimingLogger::ScopedTiming timing("Fixup fields", &logger);
         image_header.VisitPackedArtFields([&](ArtField& field) NO_THREAD_SAFETY_ANALYSIS {
-          field.UpdateObjects(forward_object);
+          patch_object_visitor.template PatchGcRoot</*kMayBeNull=*/ false>(
+              &field.DeclaringClassRoot());
         }, target_base);
       }
       {
@@ -1606,10 +1626,10 @@ class ImageSpace::BootImageLoader {
         ClassTableVisitor class_table_visitor(relocate_visitor);
         for (ClassTable::TableSlot& slot : temp_set) {
           slot.VisitRoot(class_table_visitor);
-          mirror::Class* klass = slot.Read<kWithoutReadBarrier>();
+          ObjPtr<mirror::Class> klass = slot.Read<kWithoutReadBarrier>();
           DCHECK(klass != nullptr);
-          patched_objects->Set(klass);
-          patch_object_visitor.VisitClass(klass);
+          patched_objects->Set(klass.Ptr());
+          patch_object_visitor.VisitClass(klass.Ptr());
           if (kIsDebugBuild) {
             mirror::Class* class_class = klass->GetClass<kVerifyNone, kWithoutReadBarrier>();
             if (dcheck_class_class == nullptr) {
@@ -2028,10 +2048,17 @@ bool ImageSpace::LoadBootImage(
   };
 
   auto try_load_from_system = [&]() {
-    return try_load_from(&BootImageLoader::HasSystem, &BootImageLoader::LoadFromSystem, false);
+    // Validate the oat files if the loading order checks data first. Otherwise assume system
+    // integrity.
+    return try_load_from(&BootImageLoader::HasSystem,
+                         &BootImageLoader::LoadFromSystem,
+                         /*validate_oat_file=*/ order != ImageSpaceLoadingOrder::kSystemFirst);
   };
   auto try_load_from_cache = [&]() {
-    return try_load_from(&BootImageLoader::HasCache, &BootImageLoader::LoadFromDalvikCache, true);
+    // Always validate oat files from the dalvik cache.
+    return try_load_from(&BootImageLoader::HasCache,
+                         &BootImageLoader::LoadFromDalvikCache,
+                         /*validate_oat_file=*/ true);
   };
 
   auto invoke_sequentially = [](auto first, auto second) {

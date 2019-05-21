@@ -169,10 +169,11 @@ Instrumentation::Instrumentation()
       deoptimization_enabled_(false),
       interpreter_handler_table_(kMainHandlerTable),
       quick_alloc_entry_points_instrumentation_counter_(0),
-      alloc_entrypoints_instrumented_(false) {
+      alloc_entrypoints_instrumented_(false),
+      can_use_instrumentation_trampolines_(true) {
 }
 
-void Instrumentation::InstallStubsForClass(mirror::Class* klass) {
+void Instrumentation::InstallStubsForClass(ObjPtr<mirror::Class> klass) {
   if (!klass->IsResolved()) {
     // We need the class to be resolved to install/uninstall stubs. Otherwise its methods
     // could not be initialized or linked with regards to class inheritance.
@@ -698,6 +699,19 @@ bool Instrumentation::RequiresInstrumentationInstallation(InstrumentationLevel n
   return GetCurrentInstrumentationLevel() != new_level;
 }
 
+void Instrumentation::UpdateInstrumentationLevels(InstrumentationLevel level) {
+  if (level == InstrumentationLevel::kInstrumentWithInterpreter) {
+    can_use_instrumentation_trampolines_ = false;
+  }
+  if (UNLIKELY(!can_use_instrumentation_trampolines_)) {
+    for (auto& p : requested_instrumentation_levels_) {
+      if (p.second == InstrumentationLevel::kInstrumentWithInstrumentationStubs) {
+        p.second = InstrumentationLevel::kInstrumentWithInterpreter;
+      }
+    }
+  }
+}
+
 void Instrumentation::ConfigureStubs(const char* key, InstrumentationLevel desired_level) {
   // Store the instrumentation level for this key or remove it.
   if (desired_level == InstrumentationLevel::kInstrumentNothing) {
@@ -708,11 +722,28 @@ void Instrumentation::ConfigureStubs(const char* key, InstrumentationLevel desir
     requested_instrumentation_levels_.Overwrite(key, desired_level);
   }
 
+  UpdateInstrumentationLevels(desired_level);
+  UpdateStubs();
+}
+
+void Instrumentation::EnableSingleThreadDeopt() {
+  // Single-thread deopt only uses interpreter.
+  can_use_instrumentation_trampolines_ = false;
+  UpdateInstrumentationLevels(InstrumentationLevel::kInstrumentWithInterpreter);
+  UpdateStubs();
+}
+
+void Instrumentation::UpdateStubs() {
   // Look for the highest required instrumentation level.
   InstrumentationLevel requested_level = InstrumentationLevel::kInstrumentNothing;
   for (const auto& v : requested_instrumentation_levels_) {
     requested_level = std::max(requested_level, v.second);
   }
+
+  DCHECK(can_use_instrumentation_trampolines_ ||
+         requested_level != InstrumentationLevel::kInstrumentWithInstrumentationStubs)
+      << "Use trampolines: " << can_use_instrumentation_trampolines_ << " level "
+      << requested_level;
 
   interpret_only_ = (requested_level == InstrumentationLevel::kInstrumentWithInterpreter) ||
                     forced_interpret_only_;
@@ -1161,7 +1192,7 @@ void Instrumentation::MethodExitEventImpl(Thread* thread,
 }
 
 void Instrumentation::MethodUnwindEvent(Thread* thread,
-                                        mirror::Object* this_object,
+                                        ObjPtr<mirror::Object> this_object,
                                         ArtMethod* method,
                                         uint32_t dex_pc) const {
   if (HasMethodUnwindListeners()) {
@@ -1250,7 +1281,7 @@ void Instrumentation::FieldWriteEventImpl(Thread* thread,
 }
 
 void Instrumentation::ExceptionThrownEvent(Thread* thread,
-                                           mirror::Throwable* exception_object) const {
+                                           ObjPtr<mirror::Throwable> exception_object) const {
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::Throwable> h_exception(hs.NewHandle(exception_object));
@@ -1269,7 +1300,7 @@ void Instrumentation::ExceptionThrownEvent(Thread* thread,
 }
 
 void Instrumentation::ExceptionHandledEvent(Thread* thread,
-                                            mirror::Throwable* exception_object) const {
+                                            ObjPtr<mirror::Throwable> exception_object) const {
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::Throwable> h_exception(hs.NewHandle(exception_object));
@@ -1305,9 +1336,11 @@ static void CheckStackDepth(Thread* self, const InstrumentationStackFrame& instr
   }
 }
 
-void Instrumentation::PushInstrumentationStackFrame(Thread* self, mirror::Object* this_object,
+void Instrumentation::PushInstrumentationStackFrame(Thread* self,
+                                                    ObjPtr<mirror::Object> this_object,
                                                     ArtMethod* method,
-                                                    uintptr_t lr, bool interpreter_entry) {
+                                                    uintptr_t lr,
+                                                    bool interpreter_entry) {
   DCHECK(!self->IsExceptionPending());
   std::deque<instrumentation::InstrumentationStackFrame>* stack = self->GetInstrumentationStack();
   if (kVerboseInstrumentation) {
@@ -1480,8 +1513,8 @@ TwoWordReturn Instrumentation::PopInstrumentationStackFrame(Thread* self,
   // TODO: improve the dex pc information here, requires knowledge of current PC as opposed to
   //       return_pc.
   uint32_t dex_pc = dex::kDexNoIndex;
-  mirror::Object* this_object = instrumentation_frame.this_object_;
   if (!method->IsRuntimeMethod() && !instrumentation_frame.interpreter_entry_) {
+    ObjPtr<mirror::Object> this_object = instrumentation_frame.this_object_;
     MethodExitEvent(self, this_object, instrumentation_frame.method_, dex_pc, return_value);
   }
 

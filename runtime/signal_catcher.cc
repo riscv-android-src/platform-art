@@ -27,6 +27,7 @@
 
 #include <sstream>
 
+#include <android-base/file.h>
 #include <android-base/stringprintf.h>
 
 #include "arch/instruction_set.h"
@@ -52,7 +53,7 @@ static void DumpCmdLine(std::ostream& os) {
   // On Android, /proc/self/cmdline will have been rewritten to something like "system_server".
   // Note: The string "Cmd line:" is chosen to match the format used by debuggerd.
   std::string current_cmd_line;
-  if (ReadFileToString("/proc/self/cmdline", &current_cmd_line)) {
+  if (android::base::ReadFileToString("/proc/self/cmdline", &current_cmd_line)) {
     current_cmd_line.resize(current_cmd_line.find_last_not_of('\0') + 1);  // trim trailing '\0's
     std::replace(current_cmd_line.begin(), current_cmd_line.end(), '\0', ' ');
 
@@ -103,19 +104,14 @@ bool SignalCatcher::ShouldHalt() {
 }
 
 void SignalCatcher::Output(const std::string& s) {
-#if defined(ART_TARGET_ANDROID)
   ScopedThreadStateChange tsc(Thread::Current(), kWaitingForSignalCatcherOutput);
-  PaletteStatus status = PaletteTombstonedMessage(s.data(), s.size());
+  PaletteStatus status = PaletteWriteCrashThreadStacks(s.data(), s.size());
   if (status == PaletteStatus::kOkay) {
     LOG(INFO) << "Wrote stack traces to tombstoned";
   } else {
-    CHECK(status == PaletteStatus::kCheckErrno);
+    CHECK(status == PaletteStatus::kFailedCheckLog);
     LOG(ERROR) << "Failed to write stack traces to tombstoned";
-    LOG(INFO) << s;
   }
-#else
-  LOG(INFO) << s;
-#endif
 }
 
 void SignalCatcher::HandleSigQuit() {
@@ -138,7 +134,7 @@ void SignalCatcher::HandleSigQuit() {
 
   if ((false)) {
     std::string maps;
-    if (ReadFileToString("/proc/self/maps", &maps)) {
+    if (android::base::ReadFileToString("/proc/self/maps", &maps)) {
       os << "/proc/self/maps:\n" << maps;
     }
   }

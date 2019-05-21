@@ -890,7 +890,7 @@ inline bool RosAlloc::Run::MergeThreadLocalFreeListToFreeList(bool* is_all_free_
   DCHECK(IsThreadLocal());
   // Merge the thread local free list into the free list and clear the thread local free list.
   const uint8_t idx = size_bracket_idx_;
-  bool thread_local_free_list_size = thread_local_free_list_.Size();
+  size_t thread_local_free_list_size = thread_local_free_list_.Size();
   const size_t size_before = free_list_.Size();
   free_list_.Merge(&thread_local_free_list_);
   const size_t size_after = free_list_.Size();
@@ -1000,7 +1000,7 @@ void RosAlloc::Run::InspectAllSlots(void (*handler)(void* start, void* end, size
 // If true, read the page map entries in BulkFree() without using the
 // lock for better performance, assuming that the existence of an
 // allocated chunk/pointer being freed in BulkFree() guarantees that
-// the page map entry won't change. Disabled for now.
+// the page map entry won't change.
 static constexpr bool kReadPageMapEntryWithoutLockInBulkFree = true;
 
 size_t RosAlloc::BulkFree(Thread* self, void** ptrs, size_t num_ptrs) {

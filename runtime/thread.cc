@@ -16,6 +16,7 @@
 
 #include "thread.h"
 
+#include <limits.h>  // for INT_MAX
 #include <pthread.h>
 #include <signal.h>
 #include <sys/resource.h>
@@ -34,6 +35,7 @@
 #include <list>
 #include <sstream>
 
+#include "android-base/file.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
@@ -1504,7 +1506,7 @@ bool Thread::PassActiveSuspendBarriers(Thread* self) {
         done = pending_threads->CompareAndSetWeakRelaxed(cur_val, cur_val - 1);
 #if ART_USE_FUTEXES
         if (done && (cur_val - 1) == 0) {  // Weak CAS may fail spuriously.
-          futex(pending_threads->Address(), FUTEX_WAKE_PRIVATE, -1, nullptr, nullptr, 0);
+          futex(pending_threads->Address(), FUTEX_WAKE_PRIVATE, INT_MAX, nullptr, nullptr, 0);
         }
 #endif
       } while (!done);
@@ -1772,7 +1774,8 @@ static std::string GetSchedulerGroupName(pid_t tid) {
   // 1:cpuacct,cpu:/
   // We want the third field from the line whose second field contains the "cpu" token.
   std::string cgroup_file;
-  if (!ReadFileToString(StringPrintf("/proc/self/task/%d/cgroup", tid), &cgroup_file)) {
+  if (!android::base::ReadFileToString(StringPrintf("/proc/self/task/%d/cgroup", tid),
+                                       &cgroup_file)) {
     return "";
   }
   std::vector<std::string> cgroup_lines;
@@ -1897,7 +1900,8 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
 
   // Grab the scheduler stats for this thread.
   std::string scheduler_stats;
-  if (ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid), &scheduler_stats)
+  if (android::base::ReadFileToString(StringPrintf("/proc/self/task/%d/schedstat", tid),
+                                      &scheduler_stats)
       && !scheduler_stats.empty()) {
     scheduler_stats = android::base::Trim(scheduler_stats);  // Lose the trailing '\n'.
   } else {
@@ -3535,7 +3539,7 @@ void Thread::QuickDeliverException() {
     // Instrumentation may cause GC so keep the exception object safe.
     StackHandleScope<1> hs(this);
     HandleWrapperObjPtr<mirror::Throwable> h_exception(hs.NewHandleWrapper(&exception));
-    instrumentation->ExceptionThrownEvent(this, exception.Ptr());
+    instrumentation->ExceptionThrownEvent(this, exception);
   }
   // Does instrumentation need to deoptimize the stack or otherwise go to interpreter for something?
   // Note: we do this *after* reporting the exception to instrumentation in case it now requires

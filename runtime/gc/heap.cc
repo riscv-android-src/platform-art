@@ -173,6 +173,7 @@ Heap::Heap(size_t initial_size,
            size_t max_free,
            double target_utilization,
            double foreground_heap_growth_multiplier,
+           size_t stop_for_native_allocs,
            size_t capacity,
            size_t non_moving_space_capacity,
            const std::vector<std::string>& boot_class_path,
@@ -272,6 +273,7 @@ Heap::Heap(size_t initial_size,
       max_free_(max_free),
       target_utilization_(target_utilization),
       foreground_heap_growth_multiplier_(foreground_heap_growth_multiplier),
+      stop_for_native_allocs_(stop_for_native_allocs),
       total_wait_time_(0),
       verify_object_mode_(kVerifyObjectModeDisabled),
       disable_moving_gc_count_(0),
@@ -1080,10 +1082,13 @@ void Heap::DumpGcPerformanceInfo(std::ostream& os) {
     collector->DumpPerformanceInfo(os);
   }
   if (total_duration != 0) {
-    const double total_seconds = static_cast<double>(total_duration / 1000) / 1000000.0;
+    const double total_seconds = total_duration / 1.0e9;
+    const double total_cpu_seconds = GetTotalGcCpuTime() / 1.0e9;
     os << "Total time spent in GC: " << PrettyDuration(total_duration) << "\n";
     os << "Mean GC size throughput: "
-       << PrettySize(GetBytesFreedEver() / total_seconds) << "/s\n";
+       << PrettySize(GetBytesFreedEver() / total_seconds) << "/s"
+       << " per cpu-time: "
+       << PrettySize(GetBytesFreedEver() / total_cpu_seconds) << "/s\n";
     os << "Mean GC object throughput: "
        << (GetObjectsFreedEver() / total_seconds) << " objects/s\n";
   }
@@ -1608,8 +1613,8 @@ void Heap::VerifyHeap() {
 
 void Heap::RecordFree(uint64_t freed_objects, int64_t freed_bytes) {
   // Use signed comparison since freed bytes can be negative when background compaction foreground
-  // transitions occurs. This is caused by the moving objects from a bump pointer space to a
-  // free list backed space typically increasing memory footprint due to padding and binning.
+  // transitions occurs. This is typically due to objects moving from a bump pointer space to a
+  // free list backed space, which may increase memory footprint due to padding and binning.
   RACING_DCHECK_LE(freed_bytes,
                    static_cast<int64_t>(num_bytes_allocated_.load(std::memory_order_relaxed)));
   // Note: This relies on 2s complement for handling negative freed_bytes.
@@ -2009,10 +2014,14 @@ HomogeneousSpaceCompactResult Heap::PerformHomogeneousSpaceCompact() {
                static_cast<double>(space_size_before_compaction);
   }
   // Finish GC.
-  reference_processor_->EnqueueClearedReferences(self);
+  // Get the references we need to enqueue.
+  SelfDeletingTask* clear = reference_processor_->CollectClearedReferences(self);
   GrowForUtilization(semi_space_collector_);
   LogGC(kGcCauseHomogeneousSpaceCompact, collector);
   FinishGC(self, collector::kGcTypeFull);
+  // Enqueue any references after losing the GC locks.
+  clear->Run(self);
+  clear->Finalize();
   {
     ScopedObjectAccess soa(self);
     soa.Vm()->UnloadNativeLibraries();
@@ -2540,12 +2549,16 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
   total_bytes_freed_ever_ += GetCurrentGcIteration()->GetFreedBytes() +
       GetCurrentGcIteration()->GetFreedLargeObjectBytes();
   RequestTrim(self);
-  // Enqueue cleared references.
-  reference_processor_->EnqueueClearedReferences(self);
+  // Collect cleared references.
+  SelfDeletingTask* clear = reference_processor_->CollectClearedReferences(self);
   // Grow the heap so that we know when to perform the next GC.
   GrowForUtilization(collector, bytes_allocated_before_gc);
   LogGC(gc_cause, collector);
   FinishGC(self, gc_type);
+  // Actually enqueue all cleared references. Do this after the GC has officially finished since
+  // otherwise we can deadlock.
+  clear->Run(self);
+  clear->Finalize();
   // Inform DDMS that a GC completed.
   Dbg::GcDidFinish();
 
@@ -3746,15 +3759,9 @@ static constexpr size_t kOldNativeDiscountFactor = 65536;  // Approximately infi
 static constexpr size_t kNewNativeDiscountFactor = 2;
 
 // If weighted java + native memory use exceeds our target by kStopForNativeFactor, and
-// newly allocated memory exceeds kHugeNativeAlloc, we wait for GC to complete to avoid
+// newly allocated memory exceeds stop_for_native_allocs_, we wait for GC to complete to avoid
 // running out of memory.
 static constexpr float kStopForNativeFactor = 4.0;
-// TODO: Allow this to be tuned. We want this much smaller for some apps, like Calculator.
-// But making it too small can cause jank in apps like launcher that intentionally allocate
-// large amounts of memory in rapid succession. (b/122099093)
-// For now, we punt, and use a value that should be easily large enough to disable this in all
-// questionable setting, but that is clearly too large to be effective for small memory devices.
-static constexpr size_t kHugeNativeAllocs = 1 * GB;
 
 // Return the ratio of the weighted native + java allocated bytes to its target value.
 // A return value > 1.0 means we should collect. Significantly larger values mean we're falling
@@ -3794,7 +3801,7 @@ inline void Heap::CheckGCForNative(Thread* self) {
     if (is_gc_concurrent) {
       RequestConcurrentGC(self, kGcCauseForNativeAlloc, /*force_full=*/true);
       if (gc_urgency > kStopForNativeFactor
-          && current_native_bytes > kHugeNativeAllocs) {
+          && current_native_bytes > stop_for_native_allocs_) {
         // We're in danger of running out of memory due to rampant native allocation.
         if (VLOG_IS_ON(heap) || VLOG_IS_ON(startup)) {
           LOG(INFO) << "Stopping for native allocation, urgency: " << gc_urgency;

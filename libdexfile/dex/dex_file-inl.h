@@ -27,9 +27,17 @@
 #include "compact_dex_file.h"
 #include "dex_instruction_iterator.h"
 #include "invoke_type.h"
+#include "signature.h"
 #include "standard_dex_file.h"
 
 namespace art {
+
+inline std::string_view StringViewFromUtf16Length(const char* utf8_data, size_t utf16_length) {
+  size_t utf8_length = LIKELY(utf8_data[utf16_length] == 0)  // Is ASCII?
+                           ? utf16_length
+                           : utf16_length + strlen(utf8_data + utf16_length);
+  return std::string_view(utf8_data, utf8_length);
+}
 
 inline int32_t DexFile::GetStringLength(const dex::StringId& string_id) const {
   const uint8_t* ptr = DataBegin() + string_id.string_data_off_;
@@ -62,6 +70,12 @@ inline const char* DexFile::StringDataAndUtf16LengthByIdx(dex::StringIndex idx,
 inline const char* DexFile::StringDataByIdx(dex::StringIndex idx) const {
   uint32_t unicode_length;
   return StringDataAndUtf16LengthByIdx(idx, &unicode_length);
+}
+
+inline std::string_view DexFile::StringViewByIdx(dex::StringIndex idx) const {
+  uint32_t unicode_length;
+  const char* data = StringDataAndUtf16LengthByIdx(idx, &unicode_length);
+  return data != nullptr ? StringViewFromUtf16Length(data, unicode_length) : std::string_view("");
 }
 
 inline const char* DexFile::StringByTypeIdx(dex::TypeIndex idx, uint32_t* unicode_length) const {

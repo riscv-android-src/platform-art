@@ -138,6 +138,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:NonMovingSpaceCapacity=_")
           .WithType<MemoryKiB>()
           .IntoKey(M::NonMovingSpaceCapacity)
+      .Define("-XX:StopForNativeAllocs=_")
+          .WithType<MemoryKiB>()
+          .IntoKey(M::StopForNativeAllocs)
       .Define("-XX:HeapTargetUtilization=_")
           .WithType<double>().WithRange(0.1, 0.9)
           .IntoKey(M::HeapTargetUtilization)
@@ -358,6 +361,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
+      .Define("-XX:FastClassNotFoundException=_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::FastClassNotFoundException)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -474,6 +481,7 @@ static void MaybeOverrideVerbosity() {
   //  gLogVerbosity.deopt = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!
   //  gLogVerbosity.heap = true;  // TODO: don't check this in!
+  //  gLogVerbosity.interpreter = true;  // TODO: don't check this in!
   //  gLogVerbosity.jdwp = true;  // TODO: don't check this in!
   //  gLogVerbosity.jit = true;  // TODO: don't check this in!
   //  gLogVerbosity.jni = true;  // TODO: don't check this in!
@@ -573,7 +581,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   MaybeOverrideVerbosity();
 
-  SetRuntimeDebugFlagsEnabled(args.Get(M::SlowDebug));
+  SetRuntimeDebugFlagsEnabled(args.GetOrDefault(M::SlowDebug));
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -735,6 +743,7 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:BackgroundGC=none\n");
   UsageMessage(stream, "  -XX:LargeObjectSpace={disabled,map,freelist}\n");
   UsageMessage(stream, "  -XX:LargeObjectThreshold=N\n");
+  UsageMessage(stream, "  -XX:StopForNativeAllocs=N\n");
   UsageMessage(stream, "  -XX:DumpNativeStackOnSigQuit=booleanvalue\n");
   UsageMessage(stream, "  -XX:MadviseRandomAccess:booleanvalue\n");
   UsageMessage(stream, "  -XX:SlowDebug={false,true}\n");

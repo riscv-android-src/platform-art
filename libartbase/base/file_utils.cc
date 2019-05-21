@@ -75,25 +75,6 @@ static constexpr const char* kAndroidRuntimeApexDefaultPath = "/apex/com.android
 static constexpr const char* kAndroidConscryptRootEnvVar = "ANDROID_CONSCRYPT_ROOT";
 static constexpr const char* kAndroidConscryptApexDefaultPath = "/apex/com.android.conscrypt";
 
-bool ReadFileToString(const std::string& file_name, std::string* result) {
-  File file(file_name, O_RDONLY, false);
-  if (!file.IsOpened()) {
-    return false;
-  }
-
-  std::vector<char> buf(8 * KB);
-  while (true) {
-    int64_t n = TEMP_FAILURE_RETRY(read(file.Fd(), &buf[0], buf.size()));
-    if (n == -1) {
-      return false;
-    }
-    if (n == 0) {
-      return true;
-    }
-    result->append(&buf[0], n);
-  }
-}
-
 // Get the "root" directory containing the "lib" directory where this instance
 // of the libartbase library (which contains `GetRootContainingLibartbase`) is
 // located:
@@ -441,19 +422,19 @@ static bool IsLocationOnModule(const char* full_path,
   }
 
   // Build the path which we will check is a prefix of `full_path`. The prefix must
-  // end with a slash, so that "/foo/bar" does not match "/foo/barz", but we assume
-  // `module_path` does not end with a slash. It will be appended at the very end.
-  DCHECK(StartsWithSlash(module_path) && !EndsWithSlash(module_path)) << module_path;
+  // end with a slash, so that "/foo/bar" does not match "/foo/barz".
+  DCHECK(StartsWithSlash(module_path)) << module_path;
   std::string path_prefix(module_path);
+  if (!EndsWithSlash(path_prefix.c_str())) {
+    path_prefix.append("/");
+  }
   if (subdir != nullptr) {
-    // If `subdir` is provided, we assume it is provided starting with a slash
-    // but ending without one, e.g. "/sub/dir". `path_prefix` does not end with
-    // a slash at this point, so we simply append `subdir`.
-    DCHECK(StartsWithSlash(subdir) && !EndsWithSlash(subdir)) << subdir;
+    // If `subdir` is provided, we assume it is provided without a starting slash
+    // but ending with one, e.g. "sub/dir/". `path_prefix` ends with a slash at
+    // this point, so we simply append `subdir`.
+    DCHECK(!StartsWithSlash(subdir) && EndsWithSlash(subdir)) << subdir;
     path_prefix.append(subdir);
   }
-  // Append final slash. `path_prefix` does not end with one at this point.
-  path_prefix.append("/");
 
   return android::base::StartsWith(full_path, path_prefix);
 }
@@ -462,7 +443,7 @@ bool LocationIsOnSystemFramework(const char* full_path) {
   return IsLocationOnModule(full_path,
                             kAndroidRootEnvVar,
                             kAndroidRootDefaultPath,
-                            /* subdir= */ "/framework");
+                            /* subdir= */ "framework/");
 }
 
 bool LocationIsOnConscryptModule(const char* full_path) {

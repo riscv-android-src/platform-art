@@ -189,6 +189,8 @@ static constexpr double kNormalMaxLoadFactor = 0.7;
 // barrier config.
 static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
 
+static constexpr const char* kApexBootImageLocation = "/system/framework/apex.art";
+
 Runtime* Runtime::instance_ = nullptr;
 
 struct TraceConfig {
@@ -227,6 +229,7 @@ Runtime::Runtime()
       instruction_set_(InstructionSet::kNone),
       compiler_callbacks_(nullptr),
       is_zygote_(false),
+      is_system_server_(false),
       must_relocate_(false),
       is_concurrent_gc_enabled_(true),
       is_explicit_gc_disabled_(false),
@@ -489,6 +492,8 @@ Runtime::~Runtime() {
   // instance. We rely on a small initialization order issue in Runtime::Start() that requires
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
+
+  JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -1039,12 +1044,14 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
       LOG(WARNING) << "Skipping non-existent dex file '" << dex_filename << "'";
       continue;
     }
-    // In the case we're not using the default boot image, we don't have support yet
+    bool verify = Runtime::Current()->IsVerificationEnabled();
+    // In the case we're using the apex boot image, we don't have support yet
     // on reading vdex files of boot classpath. So just assume all boot classpath
     // dex files have been verified (this should always be the case as the default boot
     // image has been generated at build time).
-    bool verify = Runtime::Current()->IsVerificationEnabled() &&
-        (kIsDebugBuild || Runtime::Current()->IsUsingDefaultBootImageLocation());
+    if (Runtime::Current()->IsUsingApexBootImageLocation() && !kIsDebugBuild) {
+      verify = false;
+    }
     if (!dex_file_loader.Open(dex_filename,
                               dex_location,
                               verify,
@@ -1082,7 +1089,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   CHECK(klass != nullptr);
   gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
   ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
-      klass->Alloc</* kIsInstrumented= */ true>(self, allocator_type));
+      klass->Alloc(self, allocator_type));
   CHECK(exception_object != nullptr);
   *exception = GcRoot<mirror::Throwable>(exception_object);
   // Initialize the "detailMessage" field.
@@ -1150,8 +1157,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   image_location_ = runtime_options.GetOrDefault(Opt::Image);
   {
     std::string error_msg;
-    is_using_default_boot_image_location_ =
-        (image_location_.compare(GetDefaultBootImageLocation(&error_msg)) == 0);
+    is_using_apex_boot_image_location_ = (image_location_ == kApexBootImageLocation);
   }
 
   SetInstructionSet(runtime_options.GetOrDefault(Opt::ImageInstructionSet));
@@ -1293,6 +1299,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::HeapMaxFree),
                        runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
                        foreground_heap_growth_multiplier,
+                       runtime_options.GetOrDefault(Opt::StopForNativeAllocs),
                        runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),
@@ -1486,10 +1493,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   GetHeap()->EnableObjectValidation();
 
   CHECK_GE(GetHeap()->GetContinuousSpaces().size(), 1U);
+
   if (UNLIKELY(IsAotCompiler())) {
     class_linker_ = new AotClassLinker(intern_table_);
   } else {
-    class_linker_ = new ClassLinker(intern_table_);
+    class_linker_ = new ClassLinker(
+        intern_table_,
+        runtime_options.GetOrDefault(Opt::FastClassNotFoundException));
   }
   if (GetHeap()->HasBootImageSpace()) {
     bool result = class_linker_->InitFromBootImage(&error_msg);
@@ -1815,6 +1825,10 @@ void Runtime::InitNativeMethods() {
 
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
+
+  // Having loaded native libraries for Managed Core library, enable field and
+  // method resolution checks via JNI from native code.
+  JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
