@@ -112,7 +112,7 @@ uint32_t StackVisitor::GetDexPc(bool abort_on_failure) const {
 extern "C" mirror::Object* artQuickGetProxyThisObject(ArtMethod** sp)
     REQUIRES_SHARED(Locks::mutator_lock_);
 
-mirror::Object* StackVisitor::GetThisObject() const {
+ObjPtr<mirror::Object> StackVisitor::GetThisObject() const {
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   ArtMethod* m = GetMethod();
   if (m->IsStatic()) {
@@ -816,8 +816,8 @@ void StackVisitor::WalkStack(bool include_transitions) {
         if ((walk_kind_ == StackWalkKind::kIncludeInlinedFrames)
             && (cur_oat_quick_method_header_ != nullptr)
             && cur_oat_quick_method_header_->IsOptimized()
-            // JNI methods cannot have any inlined frames.
-            && !method->IsNative()) {
+            && !method->IsNative()  // JNI methods cannot have any inlined frames.
+            && CodeInfo::HasInlineInfo(cur_oat_quick_method_header_->GetOptimizedCodeInfoPtr())) {
           DCHECK_NE(cur_quick_frame_pc_, 0u);
           current_code_info_ = CodeInfo(cur_oat_quick_method_header_,
                                         CodeInfo::DecodeFlags::InlineInfoOnly);
