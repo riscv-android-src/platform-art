@@ -467,7 +467,7 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   // Allocate the object as non-movable so that there are no cases where Object::IsClass returns
   // the incorrect result when comparing to-space vs from-space.
   Handle<mirror::Class> java_lang_Class(hs.NewHandle(ObjPtr<mirror::Class>::DownCast(
-      heap->AllocNonMovableObject<true>(self, nullptr, class_class_size, VoidFunctor()))));
+      heap->AllocNonMovableObject(self, nullptr, class_class_size, VoidFunctor()))));
   CHECK(java_lang_Class != nullptr);
   java_lang_Class->SetClassFlags(mirror::kClassFlagClass);
   java_lang_Class->SetClass(java_lang_Class.Get());
@@ -496,10 +496,10 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   java_lang_Object->SetObjectSize(sizeof(mirror::Object));
   // Allocate in non-movable so that it's possible to check if a JNI weak global ref has been
   // cleared without triggering the read barrier and unintentionally mark the sentinel alive.
-  runtime->SetSentinel(heap->AllocNonMovableObject<true>(self,
-                                                         java_lang_Object.Get(),
-                                                         java_lang_Object->GetObjectSize(),
-                                                         VoidFunctor()));
+  runtime->SetSentinel(heap->AllocNonMovableObject(self,
+                                                   java_lang_Object.Get(),
+                                                   java_lang_Object->GetObjectSize(),
+                                                   VoidFunctor()));
 
   // Initialize the SubtypeCheck bitstring for java.lang.Object and java.lang.Class.
   if (kBitstringSubtypeCheckEnabled) {
@@ -951,12 +951,12 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   gc::Heap* const heap = runtime->GetHeap();
   std::vector<gc::space::ImageSpace*> spaces = heap->GetBootImageSpaces();
   CHECK(!spaces.empty());
-  uint32_t pointer_size_unchecked = spaces[0]->GetImageHeader().GetPointerSizeUnchecked();
+  const ImageHeader& image_header = spaces[0]->GetImageHeader();
+  uint32_t pointer_size_unchecked = image_header.GetPointerSizeUnchecked();
   if (!ValidPointerSize(pointer_size_unchecked)) {
     *error_msg = StringPrintf("Invalid image pointer size: %u", pointer_size_unchecked);
     return false;
   }
-  const ImageHeader& image_header = spaces[0]->GetImageHeader();
   image_pointer_size_ = image_header.GetPointerSize();
   if (!runtime->IsAotCompiler()) {
     // Only the Aot compiler supports having an image with a different pointer size than the
@@ -1057,15 +1057,15 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
 
   class_roots_ = GcRoot<mirror::ObjectArray<mirror::Class>>(
       ObjPtr<mirror::ObjectArray<mirror::Class>>::DownCast(
-          spaces[0]->GetImageHeader().GetImageRoot(ImageHeader::kClassRoots)));
+          image_header.GetImageRoot(ImageHeader::kClassRoots)));
   DCHECK_EQ(GetClassRoot<mirror::Class>(this)->GetClassFlags(), mirror::kClassFlagClass);
 
-  ObjPtr<mirror::Class> java_lang_Object = GetClassRoot<mirror::Object>(this);
-  java_lang_Object->SetObjectSize(sizeof(mirror::Object));
-  // Allocate in non-movable so that it's possible to check if a JNI weak global ref has been
-  // cleared without triggering the read barrier and unintentionally mark the sentinel alive.
-  runtime->SetSentinel(heap->AllocNonMovableObject<true>(
-      self, java_lang_Object, java_lang_Object->GetObjectSize(), VoidFunctor()));
+  DCHECK_EQ(GetClassRoot<mirror::Object>(this)->GetObjectSize(), sizeof(mirror::Object));
+  ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
+      ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
+          image_header.GetImageRoot(ImageHeader::kBootImageLiveObjects));
+  runtime->SetSentinel(boot_image_live_objects->Get(ImageHeader::kClearedJniWeakSentinel));
+  DCHECK(runtime->GetSentinel().Read()->GetClass() == GetClassRoot<mirror::Object>(this));
 
   const std::vector<std::string>& boot_class_path_locations = runtime->GetBootClassPathLocations();
   CHECK_LE(spaces.size(), boot_class_path_locations.size());
@@ -1326,14 +1326,16 @@ class CHAOnDeleteUpdateClassVisitor {
 };
 
 /*
- * A class used to ensure that all strings in an AppImage have been properly
- * interned, and is only ever run in debug mode.
+ * A class used to ensure that all references to strings interned in an AppImage have been
+ * properly recorded in the interned references list, and is only ever run in debug mode.
  */
-class VerifyStringInterningVisitor {
+class CountInternedStringReferencesVisitor {
  public:
-  explicit VerifyStringInterningVisitor(const gc::space::ImageSpace& space) :
-      space_(space),
-      intern_table_(*Runtime::Current()->GetInternTable()) {}
+  CountInternedStringReferencesVisitor(const gc::space::ImageSpace& space,
+                                       const InternTable::UnorderedSet& image_interns)
+      : space_(space),
+        image_interns_(image_interns),
+        count_(0u) {}
 
   void TestObject(ObjPtr<mirror::Object> referred_obj) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1341,15 +1343,9 @@ class VerifyStringInterningVisitor {
         space_.HasAddress(referred_obj.Ptr()) &&
         referred_obj->IsString()) {
       ObjPtr<mirror::String> referred_str = referred_obj->AsString();
-
-      if (kIsDebugBuild) {
-        // Saved to temporary variables to aid in debugging.
-        ObjPtr<mirror::String> strong_lookup_result =
-            intern_table_.LookupStrong(Thread::Current(), referred_str);
-        ObjPtr<mirror::String> weak_lookup_result =
-            intern_table_.LookupWeak(Thread::Current(), referred_str);
-
-        DCHECK((strong_lookup_result == referred_str) || (weak_lookup_result == referred_str));
+      auto it = image_interns_.find(GcRoot<mirror::String>(referred_str));
+      if (it != image_interns_.end() && it->Read() == referred_str) {
+        ++count_;
       }
     }
   }
@@ -1372,33 +1368,35 @@ class VerifyStringInterningVisitor {
                   MemberOffset offset,
                   bool is_static ATTRIBUTE_UNUSED) const
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    // There could be overlap between ranges, we must avoid visiting the same reference twice.
-    // Avoid the class field since we already fixed it up in FixupClassVisitor.
-    if (offset.Uint32Value() != mirror::Object::ClassOffset().Uint32Value()) {
-      // Updating images, don't do a read barrier.
-      ObjPtr<mirror::Object> referred_obj =
-          obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(offset);
-
-      TestObject(referred_obj);
-    }
+    // References within image or across images don't need a read barrier.
+    ObjPtr<mirror::Object> referred_obj =
+        obj->GetFieldObject<mirror::Object, kVerifyNone, kWithoutReadBarrier>(offset);
+    TestObject(referred_obj);
   }
 
   void operator()(ObjPtr<mirror::Class> klass ATTRIBUTE_UNUSED,
                   ObjPtr<mirror::Reference> ref) const
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(Locks::heap_bitmap_lock_) {
-    operator()(ref, mirror::Reference::ReferentOffset(), false);
+    operator()(ref, mirror::Reference::ReferentOffset(), /*is_static=*/ false);
   }
 
+  size_t GetCount() const {
+    return count_;
+  }
+
+ private:
   const gc::space::ImageSpace& space_;
-  InternTable& intern_table_;
+  const InternTable::UnorderedSet& image_interns_;
+  mutable size_t count_;  // Modified from the `const` callbacks.
 };
 
 /*
- * This function verifies that string references in the AppImage have been
- * properly interned.  To be considered properly interned a reference must
- * point to the same version of the string that the intern table does.
+ * This function counts references to strings interned in the AppImage.
+ * This is used in debug build to check against the number of the recorded references.
  */
-void VerifyStringInterning(gc::space::ImageSpace& space) REQUIRES_SHARED(Locks::mutator_lock_) {
+size_t CountInternedStringReferences(gc::space::ImageSpace& space,
+                                     const InternTable::UnorderedSet& image_interns)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   const gc::accounting::ContinuousSpaceBitmap* bitmap = space.GetMarkBitmap();
   const ImageHeader& image_header = space.GetImageHeader();
   const uint8_t* target_base = space.GetMemMap()->Begin();
@@ -1407,7 +1405,7 @@ void VerifyStringInterning(gc::space::ImageSpace& space) REQUIRES_SHARED(Locks::
   auto objects_begin = reinterpret_cast<uintptr_t>(target_base + objects_section.Offset());
   auto objects_end = reinterpret_cast<uintptr_t>(target_base + objects_section.End());
 
-  VerifyStringInterningVisitor visitor(space);
+  CountInternedStringReferencesVisitor visitor(space, image_interns);
   bitmap->VisitMarkedRange(objects_begin,
                            objects_end,
                            [&space, &visitor](mirror::Object* obj)
@@ -1427,6 +1425,126 @@ void VerifyStringInterning(gc::space::ImageSpace& space) REQUIRES_SHARED(Locks::
       }
     }
   });
+  return visitor.GetCount();
+}
+
+template <typename Visitor>
+static void VisitInternedStringReferences(
+    gc::space::ImageSpace* space,
+    bool use_preresolved_strings,
+    const Visitor& visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
+  const uint8_t* target_base = space->Begin();
+  const ImageSection& sro_section =
+      space->GetImageHeader().GetImageStringReferenceOffsetsSection();
+  const size_t num_string_offsets = sro_section.Size() / sizeof(AppImageReferenceOffsetInfo);
+
+  VLOG(image)
+      << "ClassLinker:AppImage:InternStrings:imageStringReferenceOffsetCount = "
+      << num_string_offsets;
+
+  const auto* sro_base =
+      reinterpret_cast<const AppImageReferenceOffsetInfo*>(target_base + sro_section.Offset());
+
+  for (size_t offset_index = 0; offset_index < num_string_offsets; ++offset_index) {
+    uint32_t base_offset = sro_base[offset_index].first;
+
+    if (HasDexCacheStringNativeRefTag(base_offset)) {
+      base_offset = ClearDexCacheNativeRefTags(base_offset);
+      DCHECK_ALIGNED(base_offset, 2);
+
+      ObjPtr<mirror::DexCache> dex_cache =
+          reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
+      uint32_t string_slot_index = sro_base[offset_index].second;
+
+      mirror::StringDexCachePair source =
+          dex_cache->GetStrings()[string_slot_index].load(std::memory_order_relaxed);
+      ObjPtr<mirror::String> referred_string = source.object.Read();
+      DCHECK(referred_string != nullptr);
+
+      ObjPtr<mirror::String> visited = visitor(referred_string);
+      if (visited != referred_string) {
+        // Because we are not using a helper function we need to mark the GC card manually.
+        WriteBarrier::ForEveryFieldWrite(dex_cache);
+        dex_cache->GetStrings()[string_slot_index].store(
+            mirror::StringDexCachePair(visited, source.index), std::memory_order_relaxed);
+      }
+    } else if (HasDexCachePreResolvedStringNativeRefTag(base_offset)) {
+      if (use_preresolved_strings) {
+        base_offset = ClearDexCacheNativeRefTags(base_offset);
+        DCHECK_ALIGNED(base_offset, 2);
+
+        ObjPtr<mirror::DexCache> dex_cache =
+            reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
+        uint32_t string_index = sro_base[offset_index].second;
+
+        GcRoot<mirror::String>* preresolved_strings =
+            dex_cache->GetPreResolvedStrings();
+        // Handle calls to ClearPreResolvedStrings that might occur concurrently by the profile
+        // saver that runs shortly after startup. In case the strings are cleared, there is nothing
+        // to fix up.
+        if (preresolved_strings != nullptr) {
+          ObjPtr<mirror::String> referred_string =
+              preresolved_strings[string_index].Read();
+          if (referred_string != nullptr) {
+            ObjPtr<mirror::String> visited = visitor(referred_string);
+            if (visited != referred_string) {
+              // Because we are not using a helper function we need to mark the GC card manually.
+              WriteBarrier::ForEveryFieldWrite(dex_cache);
+              preresolved_strings[string_index] = GcRoot<mirror::String>(visited);
+            }
+          }
+        }
+      }
+    } else {
+      uint32_t raw_member_offset = sro_base[offset_index].second;
+      DCHECK_ALIGNED(base_offset, 2);
+      DCHECK_ALIGNED(raw_member_offset, 2);
+
+      ObjPtr<mirror::Object> obj_ptr =
+          reinterpret_cast<mirror::Object*>(space->Begin() + base_offset);
+      MemberOffset member_offset(raw_member_offset);
+      ObjPtr<mirror::String> referred_string =
+          obj_ptr->GetFieldObject<mirror::String,
+                                  kVerifyNone,
+                                  kWithoutReadBarrier,
+                                  /* kIsVolatile= */ false>(member_offset);
+      DCHECK(referred_string != nullptr);
+
+      ObjPtr<mirror::String> visited = visitor(referred_string);
+      if (visited != referred_string) {
+        obj_ptr->SetFieldObject</* kTransactionActive= */ false,
+                                /* kCheckTransaction= */ false,
+                                kVerifyNone,
+                                /* kIsVolatile= */ false>(member_offset, visited);
+      }
+    }
+  }
+}
+
+static void VerifyInternedStringReferences(gc::space::ImageSpace* space)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  InternTable::UnorderedSet image_interns;
+  const ImageSection& section = space->GetImageHeader().GetInternedStringsSection();
+  if (section.Size() > 0) {
+    size_t read_count;
+    const uint8_t* data = space->Begin() + section.Offset();
+    InternTable::UnorderedSet image_set(data, /*make_copy_of_data=*/ false, &read_count);
+    image_set.swap(image_interns);
+  }
+  size_t num_recorded_refs = 0u;
+  VisitInternedStringReferences(
+      space,
+      /*use_preresolved_strings=*/ true,
+      [&image_interns, &num_recorded_refs](ObjPtr<mirror::String> str)
+          REQUIRES_SHARED(Locks::mutator_lock_) {
+        auto it = image_interns.find(GcRoot<mirror::String>(str));
+        CHECK(it != image_interns.end());
+        CHECK(it->Read() == str);
+        ++num_recorded_refs;
+        return str;
+      });
+  size_t num_found_refs = CountInternedStringReferences(*space, image_interns);
+  CHECK_EQ(num_recorded_refs, num_found_refs);
 }
 
 // new_class_set is the set of classes that were read from the class table section in the image.
@@ -1445,12 +1563,6 @@ class AppImageLoadingHelper {
 
   static void HandleAppImageStrings(gc::space::ImageSpace* space)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  static void UpdateInternStrings(
-      gc::space::ImageSpace* space,
-      bool use_preresolved_strings,
-      const SafeMap<mirror::String*, mirror::String*>& intern_remap)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 };
 
 void AppImageLoadingHelper::Update(
@@ -1462,6 +1574,12 @@ void AppImageLoadingHelper::Update(
     REQUIRES(!Locks::dex_lock_)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   ScopedTrace app_image_timing("AppImage:Updating");
+
+  if (kIsDebugBuild && ClassLinker::kAppImageMayContainStrings) {
+    // In debug build, verify the string references before applying
+    // the Runtime::LoadAppImageStartupCache() option.
+    VerifyInternedStringReferences(space);
+  }
 
   Thread* const self = Thread::Current();
   Runtime* const runtime = Runtime::Current();
@@ -1535,10 +1653,6 @@ void AppImageLoadingHelper::Update(
 
   if (ClassLinker::kAppImageMayContainStrings) {
     HandleAppImageStrings(space);
-
-    if (kIsDebugBuild) {
-      VerifyStringInterning(*space);
-    }
   }
 
   if (kVerifyArtMethodDeclaringClasses) {
@@ -1552,104 +1666,6 @@ void AppImageLoadingHelper::Update(
         CHECK(live_bitmap->Test(klass.Ptr())) << "Image method has unmarked declaring class";
       }
     }, space->Begin(), kRuntimePointerSize);
-  }
-}
-
-void AppImageLoadingHelper::UpdateInternStrings(
-    gc::space::ImageSpace* space,
-    bool use_preresolved_strings,
-    const SafeMap<mirror::String*, mirror::String*>& intern_remap) {
-  const uint8_t* target_base = space->Begin();
-  const ImageSection& sro_section =
-      space->GetImageHeader().GetImageStringReferenceOffsetsSection();
-  const size_t num_string_offsets = sro_section.Size() / sizeof(AppImageReferenceOffsetInfo);
-  InternTable* const intern_table = Runtime::Current()->GetInternTable();
-
-  VLOG(image)
-      << "ClassLinker:AppImage:InternStrings:imageStringReferenceOffsetCount = "
-      << num_string_offsets;
-
-  const auto* sro_base =
-      reinterpret_cast<const AppImageReferenceOffsetInfo*>(target_base + sro_section.Offset());
-
-  for (size_t offset_index = 0; offset_index < num_string_offsets; ++offset_index) {
-    uint32_t base_offset = sro_base[offset_index].first;
-
-    if (HasDexCacheStringNativeRefTag(base_offset)) {
-      base_offset = ClearDexCacheNativeRefTags(base_offset);
-      DCHECK_ALIGNED(base_offset, 2);
-
-      ObjPtr<mirror::DexCache> dex_cache =
-          reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
-      uint32_t string_index = sro_base[offset_index].second;
-
-      mirror::StringDexCachePair source = dex_cache->GetStrings()[string_index].load();
-      ObjPtr<mirror::String> referred_string = source.object.Read();
-      DCHECK(referred_string != nullptr);
-
-      auto it = intern_remap.find(referred_string.Ptr());
-      if (it != intern_remap.end()) {
-        // This doesn't use SetResolvedString to maintain consistency with how
-        // we load the string.  The index from the source string must be
-        // re-used due to the circular nature of the cache.  Because we are not
-        // using a helper function we need to mark the GC card manually.
-        WriteBarrier::ForEveryFieldWrite(dex_cache);
-        dex_cache->GetStrings()[string_index].store(
-            mirror::StringDexCachePair(it->second, source.index));
-      } else if (!use_preresolved_strings) {
-        dex_cache->GetStrings()[string_index].store(
-            mirror::StringDexCachePair(intern_table->InternStrong(referred_string), source.index));
-      }
-    } else if (HasDexCachePreResolvedStringNativeRefTag(base_offset)) {
-      if (use_preresolved_strings) {
-        base_offset = ClearDexCacheNativeRefTags(base_offset);
-        DCHECK_ALIGNED(base_offset, 2);
-
-        ObjPtr<mirror::DexCache> dex_cache =
-            reinterpret_cast<mirror::DexCache*>(space->Begin() + base_offset);
-        uint32_t string_index = sro_base[offset_index].second;
-
-        ObjPtr<mirror::String> referred_string =
-            dex_cache->GetPreResolvedStrings()[string_index].Read();
-        DCHECK(referred_string != nullptr);
-
-        auto it = intern_remap.find(referred_string.Ptr());
-        if (it != intern_remap.end()) {
-          // Because we are not using a helper function we need to mark the GC card manually.
-          WriteBarrier::ForEveryFieldWrite(dex_cache);
-          dex_cache->GetPreResolvedStrings()[string_index] = GcRoot<mirror::String>(it->second);
-        }
-      }
-    } else {
-      uint32_t raw_member_offset = sro_base[offset_index].second;
-      DCHECK_ALIGNED(base_offset, 2);
-      DCHECK_ALIGNED(raw_member_offset, 2);
-
-      ObjPtr<mirror::Object> obj_ptr =
-          reinterpret_cast<mirror::Object*>(space->Begin() + base_offset);
-      MemberOffset member_offset(raw_member_offset);
-      ObjPtr<mirror::String> referred_string =
-          obj_ptr->GetFieldObject<mirror::String,
-                                  kVerifyNone,
-                                  kWithoutReadBarrier,
-                                  /* kIsVolatile= */ false>(member_offset);
-      DCHECK(referred_string != nullptr);
-
-      auto it = intern_remap.find(referred_string.Ptr());
-      if (it != intern_remap.end()) {
-        obj_ptr->SetFieldObject</* kTransactionActive= */ false,
-                                /* kCheckTransaction= */ false,
-                                kVerifyNone,
-                                /* kIsVolatile= */ false>(member_offset, it->second);
-      } else if (!use_preresolved_strings) {
-        obj_ptr->SetFieldObject</* kTransactionActive= */ false,
-                                /* kCheckTransaction= */ false,
-                                kVerifyNone,
-                                /* kIsVolatile= */ false>(
-            member_offset,
-            intern_table->InternStrong(referred_string));
-      }
-    }
   }
 }
 
@@ -1711,23 +1727,19 @@ void AppImageLoadingHelper::HandleAppImageStrings(gc::space::ImageSpace* space) 
       }
     }
   };
-
-  bool update_intern_strings;
-  if (load_startup_cache) {
-    VLOG(image) << "AppImage:load_startup_cache";
-    // Only add the intern table if we are using the startup cache. Otherwise,
-    // UpdateInternStrings adds the strings to the intern table.
-    intern_table->AddImageStringsToTable(space, func);
-    update_intern_strings = kIsDebugBuild || !intern_remap.empty();
+  intern_table->AddImageStringsToTable(space, func);
+  if (!intern_remap.empty()) {
     VLOG(image) << "AppImage:conflictingInternStrings = " << intern_remap.size();
-  } else {
-    update_intern_strings = true;
-  }
-
-  // For debug builds, always run the code below to get coverage.
-  if (update_intern_strings) {
-    // Slow path case is when there are conflicting intern strings to fix up.
-    UpdateInternStrings(space, /*use_preresolved_strings=*/ load_startup_cache, intern_remap);
+    VisitInternedStringReferences(
+        space,
+        load_startup_cache,
+        [&intern_remap](ObjPtr<mirror::String> str) REQUIRES_SHARED(Locks::mutator_lock_) {
+          auto it = intern_remap.find(str.Ptr());
+          if (it != intern_remap.end()) {
+            return ObjPtr<mirror::String>(it->second);
+          }
+          return str;
+        });
   }
 }
 
@@ -2526,7 +2538,9 @@ ObjPtr<mirror::DexCache> ClassLinker::AllocDexCache(/*out*/ ObjPtr<mirror::Strin
     self->AssertPendingOOMException();
     return nullptr;
   }
-  ObjPtr<mirror::String> location = intern_table_->InternStrong(dex_file.GetLocation().c_str());
+  // Use InternWeak() so that the location String can be collected when the ClassLoader
+  // with this DexCache is collected.
+  ObjPtr<mirror::String> location = intern_table_->InternWeak(dex_file.GetLocation().c_str());
   if (location == nullptr) {
     self->AssertPendingOOMException();
     return nullptr;
@@ -2561,8 +2575,8 @@ ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
   gc::Heap* heap = Runtime::Current()->GetHeap();
   mirror::Class::InitializeClassVisitor visitor(class_size);
   ObjPtr<mirror::Object> k = (kMovingClasses && kMovable) ?
-      heap->AllocObject<true>(self, java_lang_Class, class_size, visitor) :
-      heap->AllocNonMovableObject<true>(self, java_lang_Class, class_size, visitor);
+      heap->AllocObject(self, java_lang_Class, class_size, visitor) :
+      heap->AllocNonMovableObject(self, java_lang_Class, class_size, visitor);
   if (UNLIKELY(k == nullptr)) {
     self->AssertPendingOOMException();
     return nullptr;
@@ -5903,7 +5917,8 @@ bool ClassLinker::LinkClass(Thread* self,
     CHECK(!klass->IsResolved());
     // Retire the temporary class and create the correctly sized resolved class.
     StackHandleScope<1> hs(self);
-    auto h_new_class = hs.NewHandle(klass->CopyOf(self, class_size, imt, image_pointer_size_));
+    Handle<mirror::Class> h_new_class =
+        hs.NewHandle(mirror::Class::CopyOf(klass, self, class_size, imt, image_pointer_size_));
     // Set arrays to null since we don't want to have multiple classes with the same ArtField or
     // ArtMethod array pointers. If this occurs, it causes bugs in remembered sets since the GC
     // may not see any references to the target space and clean the card for a class if another
@@ -6265,7 +6280,7 @@ bool ClassLinker::LinkVirtualMethods(
   } else if (klass->HasSuperClass()) {
     const size_t super_vtable_length = klass->GetSuperClass()->GetVTableLength();
     const size_t max_count = num_virtual_methods + super_vtable_length;
-    StackHandleScope<2> hs(self);
+    StackHandleScope<3> hs(self);
     Handle<mirror::Class> super_class(hs.NewHandle(klass->GetSuperClass()));
     MutableHandle<mirror::PointerArray> vtable;
     if (super_class->ShouldHaveEmbeddedVTable()) {
@@ -6289,16 +6304,16 @@ bool ClassLinker::LinkVirtualMethods(
       }
     } else {
       DCHECK(super_class->IsAbstract() && !super_class->IsArrayClass());
-      ObjPtr<mirror::PointerArray> super_vtable = super_class->GetVTable();
+      Handle<mirror::PointerArray> super_vtable = hs.NewHandle(super_class->GetVTable());
       CHECK(super_vtable != nullptr) << super_class->PrettyClass();
       // We might need to change vtable if we have new virtual methods or new interfaces (since that
       // might give us new default methods). See comment above.
       if (num_virtual_methods == 0 && super_class->GetIfTableCount() == klass->GetIfTableCount()) {
-        klass->SetVTable(super_vtable);
+        klass->SetVTable(super_vtable.Get());
         return true;
       }
-      vtable = hs.NewHandle(
-          ObjPtr<mirror::PointerArray>::DownCast(super_vtable->CopyOf(self, max_count)));
+      vtable = hs.NewHandle(ObjPtr<mirror::PointerArray>::DownCast(
+          mirror::Array::CopyOf(super_vtable, self, max_count)));
       if (UNLIKELY(vtable == nullptr)) {
         self->AssertPendingOOMException();
         return false;
@@ -6434,7 +6449,8 @@ bool ClassLinker::LinkVirtualMethods(
     // Shrink vtable if possible
     CHECK_LE(actual_count, max_count);
     if (actual_count < max_count) {
-      vtable.Assign(ObjPtr<mirror::PointerArray>::DownCast(vtable->CopyOf(self, actual_count)));
+      vtable.Assign(ObjPtr<mirror::PointerArray>::DownCast(
+          mirror::Array::CopyOf(vtable, self, actual_count)));
       if (UNLIKELY(vtable == nullptr)) {
         self->AssertPendingOOMException();
         return false;
@@ -6692,8 +6708,10 @@ bool ClassLinker::AllocateIfTableMethodArrays(Thread* self,
         DCHECK(if_table != nullptr);
         DCHECK(if_table->GetMethodArray(i) != nullptr);
         // If we are working on a super interface, try extending the existing method array.
-        method_array = ObjPtr<mirror::PointerArray>::DownCast(
-            if_table->GetMethodArray(i)->Clone(self));
+        StackHandleScope<1u> hs(self);
+        Handle<mirror::PointerArray> old_array = hs.NewHandle(if_table->GetMethodArray(i));
+        method_array =
+            ObjPtr<mirror::PointerArray>::DownCast(mirror::Object::Clone(old_array, self));
       } else {
         method_array = AllocPointerArray(self, num_methods);
       }
@@ -7113,7 +7131,7 @@ bool ClassLinker::SetupInterfaceLookupTable(Thread* self, Handle<mirror::Class> 
   if (new_ifcount < ifcount) {
     DCHECK_NE(num_interfaces, 0U);
     iftable.Assign(ObjPtr<mirror::IfTable>::DownCast(
-        iftable->CopyOf(self, new_ifcount * mirror::IfTable::kMax)));
+        mirror::IfTable::CopyOf(iftable, self, new_ifcount * mirror::IfTable::kMax)));
     if (UNLIKELY(iftable == nullptr)) {
       self->AssertPendingOOMException();
       return false;
@@ -7431,7 +7449,7 @@ class ClassLinker::LinkInterfaceMethodsHelper {
 
   ObjPtr<mirror::PointerArray> UpdateVtable(
       const std::unordered_map<size_t, ClassLinker::MethodTranslation>& default_translations,
-      ObjPtr<mirror::PointerArray> old_vtable) REQUIRES_SHARED(Locks::mutator_lock_);
+      Handle<mirror::PointerArray> old_vtable) REQUIRES_SHARED(Locks::mutator_lock_);
 
   void UpdateIfTable(Handle<mirror::IfTable> iftable) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -7759,7 +7777,7 @@ void ClassLinker::LinkInterfaceMethodsHelper::ReallocMethods() {
 
 ObjPtr<mirror::PointerArray> ClassLinker::LinkInterfaceMethodsHelper::UpdateVtable(
     const std::unordered_map<size_t, ClassLinker::MethodTranslation>& default_translations,
-    ObjPtr<mirror::PointerArray> old_vtable) {
+    Handle<mirror::PointerArray> old_vtable) {
   // Update the vtable to the new method structures. We can skip this for interfaces since they
   // do not have vtables.
   const size_t old_vtable_count = old_vtable->GetLength();
@@ -7768,8 +7786,8 @@ ObjPtr<mirror::PointerArray> ClassLinker::LinkInterfaceMethodsHelper::UpdateVtab
                                   default_methods_.size() +
                                   default_conflict_methods_.size();
 
-  ObjPtr<mirror::PointerArray> vtable =
-      ObjPtr<mirror::PointerArray>::DownCast(old_vtable->CopyOf(self_, new_vtable_count));
+  ObjPtr<mirror::PointerArray> vtable = ObjPtr<mirror::PointerArray>::DownCast(
+      mirror::Array::CopyOf(old_vtable, self_, new_vtable_count));
   if (UNLIKELY(vtable == nullptr)) {
     self_->AssertPendingOOMException();
     return nullptr;
@@ -8103,7 +8121,7 @@ bool ClassLinker::LinkInterfaceMethods(
     self->EndAssertNoThreadSuspension(old_cause);
 
     if (fill_tables) {
-      vtable.Assign(helper.UpdateVtable(default_translations, vtable.Get()));
+      vtable.Assign(helper.UpdateVtable(default_translations, vtable));
       if (UNLIKELY(vtable == nullptr)) {
         // The helper has already called self->AssertPendingOOMException();
         return false;
@@ -9304,6 +9322,9 @@ void ClassLinker::DumpForSigQuit(std::ostream& os) {
     }
   }
   os << "Done dumping class loaders\n";
+  Runtime* runtime = Runtime::Current();
+  os << "Classes initialized: " << runtime->GetStat(KIND_GLOBAL_CLASS_INIT_COUNT) << " in "
+     << PrettyDuration(runtime->GetStat(KIND_GLOBAL_CLASS_INIT_TIME)) << "\n";
 }
 
 class CountClassesVisitor : public ClassLoaderVisitor {

@@ -1208,6 +1208,9 @@ void ConcurrentCopying::PushOntoLocalMarkStack(mirror::Object* ref) {
     DCHECK(self->GetThreadLocalMarkStack() == nullptr);
   }
   DCHECK_EQ(mark_stack_mode_.load(std::memory_order_relaxed), kMarkStackModeThreadLocal);
+  if (UNLIKELY(gc_mark_stack_->IsFull())) {
+    ExpandGcMarkStack();
+  }
   gc_mark_stack_->PushBack(ref);
 }
 
@@ -2624,6 +2627,20 @@ void ConcurrentCopying::ReclaimPhase() {
   // the biggest memory range, thereby reducing the cost of this function.
   CaptureRssAtPeak();
 
+  // Sweep the malloc spaces before clearing the from space since the memory tool mode might
+  // access the object classes in the from space for dead objects.
+  {
+    WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
+    Sweep(/* swap_bitmaps= */ false);
+    SwapBitmaps();
+    heap_->UnBindBitmaps();
+
+    // The bitmap was cleared at the start of the GC, there is nothing we need to do here.
+    DCHECK(region_space_bitmap_ != nullptr);
+    region_space_bitmap_ = nullptr;
+  }
+
+
   {
     // Record freed objects.
     TimingLogger::ScopedTiming split2("RecordFree", GetTimings());
@@ -2684,17 +2701,6 @@ void ConcurrentCopying::ReclaimPhase() {
 
     float reclaimed_bytes_ratio = static_cast<float>(freed_bytes) / num_bytes_allocated_before_gc_;
     reclaimed_bytes_ratio_sum_ += reclaimed_bytes_ratio;
-  }
-
-  {
-    WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
-    Sweep(/* swap_bitmaps= */ false);
-    SwapBitmaps();
-    heap_->UnBindBitmaps();
-
-    // The bitmap was cleared at the start of the GC, there is nothing we need to do here.
-    DCHECK(region_space_bitmap_ != nullptr);
-    region_space_bitmap_ = nullptr;
   }
 
   CheckEmptyMarkStack();

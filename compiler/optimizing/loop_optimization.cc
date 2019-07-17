@@ -351,7 +351,7 @@ static bool HasReductionFormat(HInstruction* reduction, HInstruction* phi) {
 
 // Translates vector operation to reduction kind.
 static HVecReduce::ReductionKind GetReductionKind(HVecOperation* reduction) {
-  if (reduction->IsVecAdd() ||
+  if (reduction->IsVecAdd()  ||
       reduction->IsVecSub() ||
       reduction->IsVecSADAccumulate() ||
       reduction->IsVecDotProd()) {

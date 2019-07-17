@@ -177,6 +177,8 @@ class LocationsBuilderX86_64 : public HGraphVisitor {
   void HandleShift(HBinaryOperation* operation);
   void HandleFieldSet(HInstruction* instruction, const FieldInfo& field_info);
   void HandleFieldGet(HInstruction* instruction);
+  bool CpuHasAvxFeatureFlag();
+  bool CpuHasAvx2FeatureFlag();
 
   CodeGeneratorX86_64* const codegen_;
   InvokeDexCallingConventionVisitorX86_64 parameter_visitor_;
@@ -286,6 +288,9 @@ class InstructionCodeGeneratorX86_64 : public InstructionCodeGenerator {
   void GenerateFPJumps(HCondition* cond, LabelType* true_label, LabelType* false_label);
 
   void HandleGoto(HInstruction* got, HBasicBlock* successor);
+
+  bool CpuHasAvxFeatureFlag();
+  bool CpuHasAvx2FeatureFlag();
 
   X86_64Assembler* const assembler_;
   CodeGeneratorX86_64* const codegen_;
@@ -613,8 +618,7 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   // Used for fixups to the constant area.
   int constant_area_start_;
 
-  // PC-relative method patch info for kBootImageLinkTimePcRelative/kBootImageRelRo.
-  // Also used for type/string patches for kBootImageRelRo (same linker patch as for methods).
+  // PC-relative method patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PatchInfo<Label>> boot_image_method_patches_;
   // PC-relative method patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> method_bss_entry_patches_;
@@ -626,8 +630,9 @@ class CodeGeneratorX86_64 : public CodeGenerator {
   ArenaDeque<PatchInfo<Label>> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<PatchInfo<Label>> string_bss_entry_patches_;
-  // PC-relative patch info for IntrinsicObjects.
-  ArenaDeque<PatchInfo<Label>> boot_image_intrinsic_patches_;
+  // PC-relative patch info for IntrinsicObjects for the boot image,
+  // and for method/type/string patches for kBootImageRelRo otherwise.
+  ArenaDeque<PatchInfo<Label>> boot_image_other_patches_;
 
   // Patches for string literals in JIT compiled code.
   ArenaDeque<PatchInfo<Label>> jit_string_patches_;

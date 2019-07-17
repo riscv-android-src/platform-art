@@ -1863,13 +1863,21 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
   }
 
   if (thread != nullptr) {
-    MutexLock mu(self, *Locks::thread_suspend_count_lock_);
-    os << "  | group=\"" << group_name << "\""
-       << " sCount=" << thread->tls32_.suspend_count
-       << " dsCount=" << thread->tls32_.debug_suspend_count
-       << " flags=" << thread->tls32_.state_and_flags.as_struct.flags
-       << " obj=" << reinterpret_cast<void*>(thread->tlsPtr_.opeer)
-       << " self=" << reinterpret_cast<const void*>(thread) << "\n";
+    auto suspend_log_fn = [&]() REQUIRES(Locks::thread_suspend_count_lock_) {
+      os << "  | group=\"" << group_name << "\""
+         << " sCount=" << thread->tls32_.suspend_count
+         << " dsCount=" << thread->tls32_.debug_suspend_count
+         << " flags=" << thread->tls32_.state_and_flags.as_struct.flags
+         << " obj=" << reinterpret_cast<void*>(thread->tlsPtr_.opeer)
+         << " self=" << reinterpret_cast<const void*>(thread) << "\n";
+    };
+    if (Locks::thread_suspend_count_lock_->IsExclusiveHeld(self)) {
+      Locks::thread_suspend_count_lock_->AssertExclusiveHeld(self);  // For annotalysis.
+      suspend_log_fn();
+    } else {
+      MutexLock mu(self, *Locks::thread_suspend_count_lock_);
+      suspend_log_fn();
+    }
   }
 
   os << "  | sysTid=" << tid
@@ -2133,20 +2141,7 @@ void Thread::DumpJavaStack(std::ostream& os, bool check_suspended, bool dump_loc
   // assumption that there is no exception pending on entry. Thus, stash any pending exception.
   // Thread::Current() instead of this in case a thread is dumping the stack of another suspended
   // thread.
-  struct ScopedExceptionStorage {
-    ScopedExceptionStorage() : scope(Thread::Current()) {
-      exc = scope.NewHandle(scope.Self()->GetException());
-      scope.Self()->ClearException();
-    }
-    ~ScopedExceptionStorage() {
-      if (exc != nullptr) {
-        scope.Self()->SetException(exc.Get());
-      }
-    }
-    StackHandleScope<1> scope;
-    Handle<mirror::Throwable> exc;
-  };
-  ScopedExceptionStorage ses;
+  ScopedExceptionStorage ses(Thread::Current());
 
   std::unique_ptr<Context> context(Context::Create());
   StackDumpVisitor dumper(os, const_cast<Thread*>(this), context.get(),
@@ -3278,7 +3273,7 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
       ++i;
     }
     ScopedLocalRef<jobject> ref(soa.Env(), soa.AddLocalReference<jobject>(exception.Get()));
-    InvokeWithJValues(soa, ref.get(), jni::EncodeArtMethod(exception_init_method), jv_args);
+    InvokeWithJValues(soa, ref.get(), exception_init_method, jv_args);
     if (LIKELY(!IsExceptionPending())) {
       SetException(exception.Get());
     }
@@ -3570,10 +3565,6 @@ void Thread::QuickDeliverException() {
       if (penultimate_frame == nullptr) {
         penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
       }
-      DCHECK(penultimate_frame != nullptr &&
-             penultimate_frame->GetForceRetryInstruction())
-          << "Force pop frame without retry instruction found. penultimate frame is null: "
-          << (penultimate_frame == nullptr ? "true" : "false");
     }
     force_deopt = force_frame_pop || force_retry_instr;
   }
@@ -3702,7 +3693,6 @@ class ReferenceMapVisitor : public StackVisitor {
     VisitDeclaringClass(m);
     DCHECK(m != nullptr);
     size_t num_regs = shadow_frame->NumberOfVRegs();
-    DCHECK(m->IsNative() || shadow_frame->HasReferenceArray());
     // handle scope for JNI or References for interpreter.
     for (size_t reg = 0; reg < num_regs; ++reg) {
       mirror::Object* ref = shadow_frame->GetVRegReference(reg);
@@ -3775,9 +3765,9 @@ class ReferenceMapVisitor : public StackVisitor {
       StackReference<mirror::Object>* vreg_base =
           reinterpret_cast<StackReference<mirror::Object>*>(cur_quick_frame);
       uintptr_t native_pc_offset = method_header->NativeQuickPcOffset(GetCurrentQuickFramePc());
-      CodeInfo code_info(method_header, kPrecise
-          ? CodeInfo::DecodeFlags::AllTables  // We will need dex register maps.
-          : CodeInfo::DecodeFlags::GcMasksOnly);
+      CodeInfo code_info = kPrecise
+          ? CodeInfo(method_header)  // We will need dex register maps.
+          : CodeInfo::DecodeGcMasksOnly(method_header);
       StackMap map = code_info.GetStackMapForNativePcOffset(native_pc_offset);
       DCHECK(map.IsValid());
 
@@ -3883,6 +3873,7 @@ class ReferenceMapVisitor : public StackVisitor {
             code_info(_code_info),
             dex_register_map(code_info.GetDexRegisterMapOf(map)),
             visitor(_visitor) {
+        DCHECK_EQ(dex_register_map.size(), number_of_dex_registers);
       }
 
       // TODO: If necessary, we should consider caching a reverse map instead of the linear
@@ -4282,6 +4273,26 @@ bool Thread::IsSystemDaemon() const {
   }
   return jni::DecodeArtField(
       WellKnownClasses::java_lang_Thread_systemDaemon)->GetBoolean(GetPeer());
+}
+
+ScopedExceptionStorage::ScopedExceptionStorage(art::Thread* self)
+    : self_(self), hs_(self_), excp_(hs_.NewHandle<art::mirror::Throwable>(self_->GetException())) {
+  self_->ClearException();
+}
+
+void ScopedExceptionStorage::SuppressOldException(const char* message) {
+  CHECK(self_->IsExceptionPending()) << *self_;
+  ObjPtr<mirror::Throwable> old_suppressed(excp_.Get());
+  excp_.Assign(self_->GetException());
+  LOG(WARNING) << message << "Suppressing old exception: " << old_suppressed->Dump();
+  self_->ClearException();
+}
+
+ScopedExceptionStorage::~ScopedExceptionStorage() {
+  CHECK(!self_->IsExceptionPending()) << *self_;
+  if (!excp_.IsNull()) {
+    self_->SetException(excp_.Get());
+  }
 }
 
 }  // namespace art

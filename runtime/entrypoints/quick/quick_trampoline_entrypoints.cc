@@ -343,7 +343,7 @@ class QuickArgumentVisitor {
     uintptr_t outer_pc_offset = current_code->NativeQuickPcOffset(outer_pc);
 
     if (current_code->IsOptimized()) {
-      CodeInfo code_info(current_code, CodeInfo::DecodeFlags::InlineInfoOnly);
+      CodeInfo code_info = CodeInfo::DecodeInlineInfoOnly(current_code);
       StackMap stack_map = code_info.GetStackMapForNativePcOffset(outer_pc_offset);
       DCHECK(stack_map.IsValid());
       BitTableRange<InlineInfo> inline_infos = code_info.GetInlineInfosOf(stack_map);
@@ -965,6 +965,7 @@ extern "C" uint64_t artQuickProxyInvokeHandler(
                            soa.Decode<mirror::Object>(rcvr_jobj),
                            proxy_method,
                            0,
+                           {},
                            result);
   }
   return result.GetJ();
@@ -1415,7 +1416,10 @@ extern "C" const void* artQuickResolutionTrampoline(
         DCHECK_GE(method_entry, oat_file->GetBssMethods().data());
         DCHECK_LT(method_entry,
                   oat_file->GetBssMethods().data() + oat_file->GetBssMethods().size());
-        *method_entry = called;
+        std::atomic<ArtMethod*>* atomic_entry =
+            reinterpret_cast<std::atomic<ArtMethod*>*>(method_entry);
+        static_assert(sizeof(*method_entry) == sizeof(*atomic_entry), "Size check.");
+        atomic_entry->store(called, std::memory_order_release);
       }
     }
   }
@@ -2302,11 +2306,7 @@ void BuildGenericJniFrameVisitor::FinalizeHandleScope(Thread* self) {
   }
 }
 
-#if defined(__arm__) || defined(__aarch64__)
-extern "C" const void* artFindNativeMethod();
-#else
 extern "C" const void* artFindNativeMethod(Thread* self);
-#endif
 
 static uint64_t artQuickGenericJniEndJNIRef(Thread* self,
                                             uint32_t cookie,
@@ -2421,11 +2421,7 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   // pointer.
   DCHECK(nativeCode != nullptr);
   if (nativeCode == GetJniDlsymLookupStub()) {
-#if defined(__arm__) || defined(__aarch64__)
-    nativeCode = artFindNativeMethod();
-#else
     nativeCode = artFindNativeMethod(self);
-#endif
 
     if (nativeCode == nullptr) {
       DCHECK(self->IsExceptionPending());    // There should be an exception pending now.

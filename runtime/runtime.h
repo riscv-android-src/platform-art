@@ -37,6 +37,8 @@
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jdwp_provider.h"
+#include "jni/jni_id_manager.h"
+#include "jni_id_type.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -163,6 +165,10 @@ class Runtime {
     return is_zygote_;
   }
 
+  bool IsPrimaryZygote() const {
+    return is_primary_zygote_;
+  }
+
   bool IsSystemServer() const {
     return is_system_server_;
   }
@@ -273,6 +279,10 @@ class Runtime {
 
   ClassLinker* GetClassLinker() const {
     return class_linker_;
+  }
+
+  jni::JniIdManager* GetJniIdManager() const {
+    return jni_id_manager_.get();
   }
 
   size_t GetDefaultStackSize() const {
@@ -682,6 +692,8 @@ class Runtime {
     is_native_debuggable_ = value;
   }
 
+  void SetSignalHookDebuggable(bool value);
+
   bool AreNonStandardExitsEnabled() const {
     return non_standard_exits_enabled_;
   }
@@ -715,7 +727,7 @@ class Runtime {
   }
 
   // Called from class linker.
-  void SetSentinel(mirror::Object* sentinel) REQUIRES_SHARED(Locks::mutator_lock_);
+  void SetSentinel(ObjPtr<mirror::Object> sentinel) REQUIRES_SHARED(Locks::mutator_lock_);
   // For testing purpose only.
   // TODO: Remove this when this is no longer needed (b/116087961).
   GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -830,6 +842,10 @@ class Runtime {
     return jdwp_provider_;
   }
 
+  bool JniIdsAreIndices() const {
+    return jni_ids_indirection_ != JniIdType::kPointer;
+  }
+
   uint32_t GetVerifierLoggingThresholdMs() const {
     return verifier_logging_threshold_ms_;
   }
@@ -863,6 +879,10 @@ class Runtime {
   void SetLoadAppImageStartupCacheEnabled(bool enabled) {
     load_app_image_startup_cache_ = enabled;
   }
+
+  // Reset the startup completed status so that we can call NotifyStartupCompleted again. Should
+  // only be used for testing.
+  void ResetStartupCompleted();
 
   // Notify the runtime that application startup is considered completed. Only has effect for the
   // first call.
@@ -944,6 +964,7 @@ class Runtime {
 
   CompilerCallbacks* compiler_callbacks_;
   bool is_zygote_;
+  bool is_primary_zygote_;
   bool is_system_server_;
   bool must_relocate_;
   bool is_concurrent_gc_enabled_;
@@ -995,6 +1016,8 @@ class Runtime {
   ClassLinker* class_linker_;
 
   SignalCatcher* signal_catcher_;
+
+  std::unique_ptr<jni::JniIdManager> jni_id_manager_;
 
   std::unique_ptr<JavaVMExt> java_vm_;
 
@@ -1178,6 +1201,10 @@ class Runtime {
 
   // The jdwp provider we were configured with.
   JdwpProvider jdwp_provider_;
+
+  // True if jmethodID and jfieldID are opaque Indices. When false (the default) these are simply
+  // pointers. This is set by -Xopaque-jni-ids:{true,false}.
+  JniIdType jni_ids_indirection_;
 
   // Saved environment.
   class EnvSnapshot {

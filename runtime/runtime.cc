@@ -94,7 +94,9 @@
 #include "jit/jit_code_cache.h"
 #include "jit/profile_saver.h"
 #include "jni/java_vm_ext.h"
+#include "jni/jni_id_manager.h"
 #include "jni/jni_internal.h"
+#include "jni_id_type.h"
 #include "linear_alloc.h"
 #include "memory_representation.h"
 #include "mirror/array.h"
@@ -150,6 +152,7 @@
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
 #include "runtime_callbacks.h"
+#include "runtime_common.h"
 #include "runtime_intrinsics.h"
 #include "runtime_options.h"
 #include "scoped_thread_state_change-inl.h"
@@ -229,6 +232,7 @@ Runtime::Runtime()
       instruction_set_(InstructionSet::kNone),
       compiler_callbacks_(nullptr),
       is_zygote_(false),
+      is_primary_zygote_(false),
       is_system_server_(false),
       must_relocate_(false),
       is_concurrent_gc_enabled_(true),
@@ -376,6 +380,10 @@ Runtime::~Runtime() {
     // The saver will try to dump the profiles before being sopped and that
     // requires holding the mutator lock.
     jit_->StopProfileSaver();
+    // Delete thread pool before the thread list since we don't want to wait forever on the
+    // JIT compiler threads. Also this should be run before marking the runtime
+    // as shutting down as some tasks may require mutator access.
+    jit_->DeleteThreadPool();
   }
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->WaitForWorkersToBeCreated();
@@ -417,13 +425,6 @@ Runtime::~Runtime() {
   // Make sure to let the GC complete if it is running.
   heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
   heap_->DeleteThreadPool();
-  if (jit_ != nullptr) {
-    ScopedTrace trace2("Delete jit");
-    VLOG(jit) << "Deleting jit thread pool";
-    // Delete thread pool before the thread list since we don't want to wait forever on the
-    // JIT compiler threads.
-    jit_->DeleteThreadPool();
-  }
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->DeleteThreadPool();
   }
@@ -549,13 +550,27 @@ struct AbortState {
     if (runtime != nullptr) {
       ThreadList* thread_list = runtime->GetThreadList();
       if (thread_list != nullptr) {
+        // Dump requires ThreadListLock and ThreadSuspendCountLock to not be held (they will be
+        // grabbed).
+        // TODO(b/134167395): Change Dump to work with the locks held, and have a loop with timeout
+        //                    acquiring the locks.
         bool tll_already_held = Locks::thread_list_lock_->IsExclusiveHeld(self);
+        bool tscl_already_held = Locks::thread_suspend_count_lock_->IsExclusiveHeld(self);
+        if (tll_already_held || tscl_already_held) {
+          os << "Skipping all-threads dump as locks are held:"
+             << (tll_already_held ? "" : " thread_list_lock")
+             << (tscl_already_held ? "" : " thread_suspend_count_lock")
+             << "\n";
+          return;
+        }
+        bool ml_already_exlusively_held = Locks::mutator_lock_->IsExclusiveHeld(self);
+        if (ml_already_exlusively_held) {
+          os << "Skipping all-threads dump as mutator lock is exclusively held.";
+          return;
+        }
         bool ml_already_held = Locks::mutator_lock_->IsSharedHeld(self);
-        if (!tll_already_held || !ml_already_held) {
-          os << "Dumping all threads without appropriate locks held:"
-              << (!tll_already_held ? " thread list lock" : "")
-              << (!ml_already_held ? " mutator lock" : "")
-              << "\n";
+        if (!ml_already_held) {
+          os << "Dumping all threads without mutator lock held\n";
         }
         os << "All threads:\n";
         thread_list->Dump(os);
@@ -595,6 +610,16 @@ void Runtime::Abort(const char* msg) {
 #endif
   }
 
+  // May be coming from an unattached thread.
+  if (Thread::Current() == nullptr) {
+    Runtime* current = Runtime::Current();
+    if (current != nullptr && current->IsStarted() && !current->IsShuttingDown(nullptr)) {
+      // We do not flag this to the unexpected-signal handler so that that may dump the stack.
+      abort();
+      UNREACHABLE();
+    }
+  }
+
   {
     // Ensure that we don't have multiple threads trying to abort at once,
     // which would result in significantly worse diagnostics.
@@ -624,6 +649,8 @@ void Runtime::Abort(const char* msg) {
     LOG(FATAL_WITHOUT_ABORT) << msg;
   }
 
+  FlagRuntimeAbort();
+
   // Call the abort hook if we have one.
   if (Runtime::Current() != nullptr && Runtime::Current()->abort_ != nullptr) {
     LOG(FATAL_WITHOUT_ABORT) << "Calling abort hook...";
@@ -647,6 +674,8 @@ void Runtime::PostZygoteFork() {
   if (GetJit() != nullptr) {
     GetJit()->PostZygoteFork();
   }
+  // Reset all stats.
+  ResetStats(0xFFFFFFFF);
 }
 
 void Runtime::CallExitHook(jint status) {
@@ -742,7 +771,7 @@ static jobject CreateSystemClassLoader(Runtime* runtime) {
 
   JValue result = InvokeWithJValues(soa,
                                     nullptr,
-                                    jni::EncodeArtMethod(getSystemClassLoader),
+                                    getSystemClassLoader,
                                     nullptr);
   JNIEnv* env = soa.Self()->GetJniEnv();
   ScopedLocalRef<jobject> system_class_loader(env, soa.AddLocalReference<jobject>(result.GetL()));
@@ -949,6 +978,7 @@ void Runtime::InitNonZygoteOrPostFork(
     const char* isa,
     bool profile_system_server) {
   is_zygote_ = false;
+  is_primary_zygote_ = false;
 
   if (is_native_bridge_loaded_) {
     switch (action) {
@@ -1065,7 +1095,7 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
   return failure_count;
 }
 
-void Runtime::SetSentinel(mirror::Object* sentinel) {
+void Runtime::SetSentinel(ObjPtr<mirror::Object> sentinel) {
   CHECK(sentinel_.Read() == nullptr);
   CHECK(sentinel != nullptr);
   CHECK(!heap_->IsMovableObject(sentinel));
@@ -1150,6 +1180,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   oat_file_manager_ = new OatFileManager;
 
+  jni_id_manager_.reset(new jni::JniIdManager);
+
   Thread::SetSensitiveThreadHook(runtime_options.GetOrDefault(Opt::HookIsSensitiveThread));
   Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold),
                 runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
@@ -1204,6 +1236,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   compiler_callbacks_ = runtime_options.GetOrDefault(Opt::CompilerCallbacksPtr);
   must_relocate_ = runtime_options.GetOrDefault(Opt::Relocate);
   is_zygote_ = runtime_options.Exists(Opt::Zygote);
+  is_primary_zygote_ = runtime_options.Exists(Opt::PrimaryZygote);
   is_explicit_gc_disabled_ = runtime_options.Exists(Opt::DisableExplicitGC);
   image_dex2oat_enabled_ = runtime_options.GetOrDefault(Opt::ImageDex2Oat);
   dump_native_stack_on_sig_quit_ = runtime_options.GetOrDefault(Opt::DumpNativeStackOnSigQuit);
@@ -1269,6 +1302,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   experimental_flags_ = runtime_options.GetOrDefault(Opt::Experimental);
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
+
+  if (!runtime_options.Exists(Opt::OpaqueJniIds)) {
+    jni_ids_indirection_ = JniIdType::kDefault;
+  } else {
+    jni_ids_indirection_ = *runtime_options.Get(Opt::OpaqueJniIds) ? JniIdType::kIndices
+                                                                   : JniIdType::kPointer;
+  }
 
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
   agent_specs_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
@@ -1384,7 +1424,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
   }
   callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
-  callbacks_->AddClassLoadCallback(Dbg::GetClassLoadCallback());
 
   jit_options_.reset(jit::JitOptions::CreateFromRuntimeArguments(runtime_options));
   if (IsAotCompiler()) {
@@ -1583,20 +1622,23 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   if (GetHeap()->HasBootImageSpace()) {
     const ImageHeader& image_header = GetHeap()->GetBootImageSpaces()[0]->GetImageHeader();
+    ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
+        ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
+            image_header.GetImageRoot(ImageHeader::kBootImageLiveObjects));
     pre_allocated_OutOfMemoryError_when_throwing_exception_ = GcRoot<mirror::Throwable>(
-        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingException)->AsThrowable());
+        boot_image_live_objects->Get(ImageHeader::kOomeWhenThrowingException)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_throwing_exception_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_OutOfMemoryError_when_throwing_oome_ = GcRoot<mirror::Throwable>(
-        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingOome)->AsThrowable());
+        boot_image_live_objects->Get(ImageHeader::kOomeWhenThrowingOome)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_throwing_oome_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_OutOfMemoryError_when_handling_stack_overflow_ = GcRoot<mirror::Throwable>(
-        image_header.GetImageRoot(ImageHeader::kOomeWhenHandlingStackOverflow)->AsThrowable());
+        boot_image_live_objects->Get(ImageHeader::kOomeWhenHandlingStackOverflow)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_handling_stack_overflow_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_NoClassDefFoundError_ = GcRoot<mirror::Throwable>(
-        image_header.GetImageRoot(ImageHeader::kNoClassDefFoundError)->AsThrowable());
+        boot_image_live_objects->Get(ImageHeader::kNoClassDefFoundError)->AsThrowable());
     DCHECK(pre_allocated_NoClassDefFoundError_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/NoClassDefFoundError;"));
   } else {
@@ -2806,6 +2848,10 @@ void Runtime::WaitForThreadPoolWorkersToStart() {
   }
 }
 
+void Runtime::ResetStartupCompleted() {
+  startup_completed_.store(false, std::memory_order_seq_cst);
+}
+
 void Runtime::NotifyStartupCompleted() {
   bool expected = false;
   if (!startup_completed_.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
@@ -2873,6 +2919,10 @@ void Runtime::NotifyStartupCompleted() {
 
 bool Runtime::GetStartupCompleted() const {
   return startup_completed_.load(std::memory_order_seq_cst);
+}
+
+void Runtime::SetSignalHookDebuggable(bool value) {
+  SkipAddSignalHandler(value);
 }
 
 }  // namespace art
