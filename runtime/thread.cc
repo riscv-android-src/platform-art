@@ -131,6 +131,9 @@ ConditionVariable* Thread::resume_cond_ = nullptr;
 const size_t Thread::kStackOverflowImplicitCheckSize = GetStackOverflowReservedBytes(kRuntimeISA);
 bool (*Thread::is_sensitive_thread_hook_)() = nullptr;
 Thread* Thread::jit_sensitive_thread_ = nullptr;
+#ifndef __BIONIC__
+thread_local Thread* Thread::self_tls_ = nullptr;
+#endif
 
 static constexpr bool kVerifyImageObjectsMarked = kIsDebugBuild;
 
@@ -933,10 +936,11 @@ bool Thread::Init(ThreadList* thread_list, JavaVMExt* java_vm, JNIEnvExt* jni_en
     interpreter::InitInterpreterTls(this);
   }
 
-#ifdef ART_TARGET_ANDROID
+#ifdef __BIONIC__
   __get_tls()[TLS_SLOT_ART_THREAD_SELF] = this;
 #else
   CHECK_PTHREAD_CALL(pthread_setspecific, (Thread::pthread_key_self_, this), "attach self");
+  Thread::self_tls_ = this;
 #endif
   DCHECK_EQ(Thread::Current(), this);
 
@@ -1835,8 +1839,11 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
           group_name_field->GetObject(thread_group)->AsString();
       group_name = (group_name_string != nullptr) ? group_name_string->ToModifiedUtf8() : "<null>";
     }
+  } else if (thread != nullptr) {
+    priority = thread->GetNativePriority();
   } else {
-    priority = GetNativePriority();
+    PaletteStatus status = PaletteSchedGetPriority(tid, &priority);
+    CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
   }
 
   std::string scheduler_group_name(GetSchedulerGroupName(tid));
@@ -2187,10 +2194,11 @@ void Thread::ThreadExitCallback(void* arg) {
     LOG(WARNING) << "Native thread exiting without having called DetachCurrentThread (maybe it's "
         "going to use a pthread_key_create destructor?): " << *self;
     CHECK(is_started_);
-#ifdef ART_TARGET_ANDROID
+#ifdef __BIONIC__
     __get_tls()[TLS_SLOT_ART_THREAD_SELF] = self;
 #else
     CHECK_PTHREAD_CALL(pthread_setspecific, (Thread::pthread_key_self_, self), "reattach self");
+    Thread::self_tls_ = self;
 #endif
     self->tls32_.thread_exit_check_count = 1;
   } else {
@@ -2221,6 +2229,9 @@ void Thread::Startup() {
   if (pthread_getspecific(pthread_key_self_) != nullptr) {
     LOG(FATAL) << "Newly-created pthread TLS slot is not nullptr";
   }
+#ifndef __BIONIC__
+  CHECK(Thread::self_tls_ == nullptr);
+#endif
 }
 
 void Thread::FinishStartup() {
@@ -3548,8 +3559,8 @@ void Thread::QuickDeliverException() {
   // instrumentation trampolines (for example with DDMS tracing). That forces us to do deopt later
   // and see every frame being popped. We don't need to handle it any differently.
   ShadowFrame* cf;
-  bool force_deopt;
-  {
+  bool force_deopt = false;
+  if (Runtime::Current()->AreNonStandardExitsEnabled() || kIsDebugBuild) {
     NthCallerVisitor visitor(this, 0, false);
     visitor.WalkStack();
     cf = visitor.GetCurrentShadowFrame();
@@ -3559,12 +3570,16 @@ void Thread::QuickDeliverException() {
     bool force_frame_pop = cf != nullptr && cf->GetForcePopFrame();
     bool force_retry_instr = cf != nullptr && cf->GetForceRetryInstruction();
     if (kIsDebugBuild && force_frame_pop) {
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
       NthCallerVisitor penultimate_visitor(this, 1, false);
       penultimate_visitor.WalkStack();
       ShadowFrame* penultimate_frame = penultimate_visitor.GetCurrentShadowFrame();
       if (penultimate_frame == nullptr) {
         penultimate_frame = FindDebuggerShadowFrame(penultimate_visitor.GetFrameId());
       }
+    }
+    if (force_retry_instr) {
+      DCHECK(Runtime::Current()->AreNonStandardExitsEnabled());
     }
     force_deopt = force_frame_pop || force_retry_instr;
   }
@@ -4254,15 +4269,13 @@ void Thread::ReleaseLongJumpContextInternal() {
 }
 
 void Thread::SetNativePriority(int new_priority) {
-  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
-  PaletteStatus status = PaletteSchedSetPriority(0, new_priority);
+  PaletteStatus status = PaletteSchedSetPriority(GetTid(), new_priority);
   CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
 }
 
-int Thread::GetNativePriority() {
+int Thread::GetNativePriority() const {
   int priority = 0;
-  // ART tests on JVM can reach this code path, use tid = 0 as shorthand for current thread.
-  PaletteStatus status = PaletteSchedGetPriority(0, &priority);
+  PaletteStatus status = PaletteSchedGetPriority(GetTid(), &priority);
   CHECK(status == PaletteStatus::kOkay || status == PaletteStatus::kCheckErrno);
   return priority;
 }

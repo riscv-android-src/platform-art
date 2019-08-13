@@ -20,6 +20,7 @@
 
 #include <algorithm>
 #include <deque>
+#include <forward_list>
 #include <iostream>
 #include <map>
 #include <memory>
@@ -35,11 +36,13 @@
 
 #include "art_field-inl.h"
 #include "art_method-inl.h"
+#include "barrier.h"
 #include "base/arena_allocator.h"
 #include "base/casts.h"
 #include "base/file_utils.h"
 #include "base/leb128.h"
 #include "base/logging.h"
+#include "base/mutex-inl.h"
 #include "base/os.h"
 #include "base/quasi_atomic.h"
 #include "base/scoped_arena_containers.h"
@@ -233,6 +236,188 @@ static void EnsureSkipAccessChecksMethods(Handle<mirror::Class> klass, PointerSi
   }
 }
 
+// Callback responsible for making a batch of classes visibly initialized
+// after all threads have called it from a checkpoint, ensuring visibility.
+class ClassLinker::VisiblyInitializedCallback final
+    : public Closure, public IntrusiveForwardListNode<VisiblyInitializedCallback> {
+ public:
+  explicit VisiblyInitializedCallback(ClassLinker* class_linker)
+      : class_linker_(class_linker),
+        num_classes_(0u),
+        thread_visibility_counter_(0),
+        barriers_() {
+    std::fill_n(classes_, kMaxClasses, nullptr);
+  }
+
+  bool IsEmpty() const {
+    DCHECK_LE(num_classes_, kMaxClasses);
+    return num_classes_ == 0u;
+  }
+
+  bool IsFull() const {
+    DCHECK_LE(num_classes_, kMaxClasses);
+    return num_classes_ == kMaxClasses;
+  }
+
+  void AddClass(Thread* self, ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK_EQ(klass->GetStatus(), ClassStatus::kInitialized);
+    DCHECK(!IsFull());
+    classes_[num_classes_] = self->GetJniEnv()->GetVm()->AddWeakGlobalRef(self, klass);
+    ++num_classes_;
+  }
+
+  void AddBarrier(Barrier* barrier) {
+    barriers_.push_front(barrier);
+  }
+
+  std::forward_list<Barrier*> GetAndClearBarriers() {
+    std::forward_list<Barrier*> result;
+    result.swap(barriers_);
+    result.reverse();  // Return barriers in insertion order.
+    return result;
+  }
+
+  void MakeVisible(Thread* self) {
+    DCHECK_EQ(thread_visibility_counter_.load(std::memory_order_relaxed), 0);
+    size_t count = Runtime::Current()->GetThreadList()->RunCheckpoint(this);
+    AdjustThreadVisibilityCounter(self, count);
+  }
+
+  void Run(Thread* self) override {
+    self->ClearMakeVisiblyInitializedCounter();
+    AdjustThreadVisibilityCounter(self, -1);
+  }
+
+ private:
+  void AdjustThreadVisibilityCounter(Thread* self, ssize_t adjustment) {
+    ssize_t old = thread_visibility_counter_.fetch_add(adjustment, std::memory_order_relaxed);
+    if (old + adjustment == 0) {
+      // All threads passed the checkpoint. Mark classes as visibly initialized.
+      {
+        ScopedObjectAccess soa(self);
+        StackHandleScope<1u> hs(self);
+        MutableHandle<mirror::Class> klass = hs.NewHandle<mirror::Class>(nullptr);
+        JavaVMExt* vm = self->GetJniEnv()->GetVm();
+        for (size_t i = 0, num = num_classes_; i != num; ++i) {
+          klass.Assign(ObjPtr<mirror::Class>::DownCast(self->DecodeJObject(classes_[i])));
+          vm->DeleteWeakGlobalRef(self, classes_[i]);
+          if (klass != nullptr) {
+            mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+          }
+        }
+        num_classes_ = 0u;
+      }
+      class_linker_->VisiblyInitializedCallbackDone(self, this);
+    }
+  }
+
+  static constexpr size_t kMaxClasses = 16;
+
+  ClassLinker* const class_linker_;
+  size_t num_classes_;
+  jweak classes_[kMaxClasses];
+
+  // The thread visibility counter starts at 0 and it is incremented by the number of
+  // threads that need to run this callback (by the thread that request the callback
+  // to be run) and decremented once for each `Run()` execution. When it reaches 0,
+  // whether after the increment or after a decrement, we know that `Run()` was executed
+  // for all threads and therefore we can mark the classes as visibly initialized.
+  std::atomic<ssize_t> thread_visibility_counter_;
+
+  // List of barries to `Pass()` for threads that wait for the callback to complete.
+  std::forward_list<Barrier*> barriers_;
+};
+
+void ClassLinker::MakeInitializedClassesVisiblyInitialized(Thread* self, bool wait) {
+  if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
+    return;  // Nothing to do. Thanks to the x86 memory model classes skip the initialized status.
+  }
+  std::optional<Barrier> maybe_barrier;  // Avoid constructing the Barrier for `wait == false`.
+  if (wait) {
+    maybe_barrier.emplace(0);
+  }
+  int wait_count = 0;
+  VisiblyInitializedCallback* callback = nullptr;
+  {
+    MutexLock lock(self, visibly_initialized_callback_lock_);
+    if (visibly_initialized_callback_ != nullptr && !visibly_initialized_callback_->IsEmpty()) {
+      callback = visibly_initialized_callback_.release();
+      running_visibly_initialized_callbacks_.push_front(*callback);
+    }
+    if (wait) {
+      DCHECK(maybe_barrier.has_value());
+      Barrier* barrier = std::addressof(*maybe_barrier);
+      for (VisiblyInitializedCallback& cb : running_visibly_initialized_callbacks_) {
+        cb.AddBarrier(barrier);
+        ++wait_count;
+      }
+    }
+  }
+  if (callback != nullptr) {
+    callback->MakeVisible(self);
+  }
+  if (wait_count != 0) {
+    DCHECK(maybe_barrier.has_value());
+    maybe_barrier->Increment(self, wait_count);
+  }
+}
+
+void ClassLinker::VisiblyInitializedCallbackDone(Thread* self,
+                                                 VisiblyInitializedCallback* callback) {
+  MutexLock lock(self, visibly_initialized_callback_lock_);
+  // Pass the barriers if requested.
+  for (Barrier* barrier : callback->GetAndClearBarriers()) {
+    barrier->Pass(self);
+  }
+  // Remove the callback from the list of running callbacks.
+  auto before = running_visibly_initialized_callbacks_.before_begin();
+  auto it = running_visibly_initialized_callbacks_.begin();
+  DCHECK(it != running_visibly_initialized_callbacks_.end());
+  while (std::addressof(*it) != callback) {
+    before = it;
+    ++it;
+    DCHECK(it != running_visibly_initialized_callbacks_.end());
+  }
+  running_visibly_initialized_callbacks_.erase_after(before);
+  // Reuse or destroy the callback object.
+  if (visibly_initialized_callback_ == nullptr) {
+    visibly_initialized_callback_.reset(callback);
+  } else {
+    delete callback;
+  }
+}
+
+ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
+    Thread* self, Handle<mirror::Class> klass) {
+  if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
+    // Thanks to the x86 memory model, we do not need any memory fences and
+    // we can immediately mark the class as visibly initialized.
+    mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+    return nullptr;
+  }
+  if (Runtime::Current()->IsActiveTransaction()) {
+    // Transactions are single-threaded, so we can mark the class as visibly intialized.
+    // (Otherwise we'd need to track the callback's entry in the transaction for rollback.)
+    mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
+    return nullptr;
+  }
+  mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
+  MutexLock lock(self, visibly_initialized_callback_lock_);
+  if (visibly_initialized_callback_ == nullptr) {
+    visibly_initialized_callback_.reset(new VisiblyInitializedCallback(this));
+  }
+  DCHECK(!visibly_initialized_callback_->IsFull());
+  visibly_initialized_callback_->AddClass(self, klass.Get());
+
+  if (visibly_initialized_callback_->IsFull()) {
+    VisiblyInitializedCallback* callback = visibly_initialized_callback_.release();
+    running_visibly_initialized_callbacks_.push_front(*callback);
+    return callback;
+  } else {
+    return nullptr;
+  }
+}
+
 void ClassLinker::ThrowEarlierClassFailure(ObjPtr<mirror::Class> c,
                                            bool wrap_in_no_class_def,
                                            bool log) {
@@ -418,6 +603,8 @@ ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_ex
       quick_generic_jni_trampoline_(nullptr),
       quick_to_interpreter_bridge_trampoline_(nullptr),
       image_pointer_size_(kRuntimePointerSize),
+      visibly_initialized_callback_lock_("visibly initialized callback lock"),
+      visibly_initialized_callback_(nullptr),
       cha_(Runtime::Current()->IsAotCompiler() ? nullptr : new ClassHierarchyAnalysis()) {
   // For CHA disabled during Aot, see b/34193647.
 
@@ -559,27 +746,27 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   DCHECK_EQ(GetArrayIfTable(), object_array_class->GetIfTable());
 
   // Setup the primitive type classes.
-  SetClassRoot(ClassRoot::kPrimitiveBoolean, CreatePrimitiveClass(self, Primitive::kPrimBoolean));
-  SetClassRoot(ClassRoot::kPrimitiveByte, CreatePrimitiveClass(self, Primitive::kPrimByte));
-  SetClassRoot(ClassRoot::kPrimitiveChar, CreatePrimitiveClass(self, Primitive::kPrimChar));
-  SetClassRoot(ClassRoot::kPrimitiveShort, CreatePrimitiveClass(self, Primitive::kPrimShort));
-  SetClassRoot(ClassRoot::kPrimitiveInt, CreatePrimitiveClass(self, Primitive::kPrimInt));
-  SetClassRoot(ClassRoot::kPrimitiveLong, CreatePrimitiveClass(self, Primitive::kPrimLong));
-  SetClassRoot(ClassRoot::kPrimitiveFloat, CreatePrimitiveClass(self, Primitive::kPrimFloat));
-  SetClassRoot(ClassRoot::kPrimitiveDouble, CreatePrimitiveClass(self, Primitive::kPrimDouble));
-  SetClassRoot(ClassRoot::kPrimitiveVoid, CreatePrimitiveClass(self, Primitive::kPrimVoid));
+  CreatePrimitiveClass(self, Primitive::kPrimBoolean, ClassRoot::kPrimitiveBoolean);
+  CreatePrimitiveClass(self, Primitive::kPrimByte, ClassRoot::kPrimitiveByte);
+  CreatePrimitiveClass(self, Primitive::kPrimChar, ClassRoot::kPrimitiveChar);
+  CreatePrimitiveClass(self, Primitive::kPrimShort, ClassRoot::kPrimitiveShort);
+  CreatePrimitiveClass(self, Primitive::kPrimInt, ClassRoot::kPrimitiveInt);
+  CreatePrimitiveClass(self, Primitive::kPrimLong, ClassRoot::kPrimitiveLong);
+  CreatePrimitiveClass(self, Primitive::kPrimFloat, ClassRoot::kPrimitiveFloat);
+  CreatePrimitiveClass(self, Primitive::kPrimDouble, ClassRoot::kPrimitiveDouble);
+  CreatePrimitiveClass(self, Primitive::kPrimVoid, ClassRoot::kPrimitiveVoid);
 
-  // Create int array type for native pointer arrays (for example vtables) on 32-bit archs.
-  Handle<mirror::Class> int_array_class(hs.NewHandle(
-      AllocPrimitiveArrayClass(self, java_lang_Class.Get())));
-  int_array_class->SetComponentType(GetClassRoot(ClassRoot::kPrimitiveInt, this));
-  SetClassRoot(ClassRoot::kIntArrayClass, int_array_class.Get());
-
-  // Create long array type for native pointer arrays (for example vtables) on 64-bit archs.
-  Handle<mirror::Class> long_array_class(hs.NewHandle(
-      AllocPrimitiveArrayClass(self, java_lang_Class.Get())));
-  long_array_class->SetComponentType(GetClassRoot(ClassRoot::kPrimitiveLong, this));
-  SetClassRoot(ClassRoot::kLongArrayClass, long_array_class.Get());
+  // Allocate the primitive array classes. We need only the native pointer
+  // array at this point (int[] or long[], depending on architecture) but
+  // we shall perform the same setup steps for all primitive array classes.
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveBoolean, ClassRoot::kBooleanArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveByte, ClassRoot::kByteArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveChar, ClassRoot::kCharArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveShort, ClassRoot::kShortArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveInt, ClassRoot::kIntArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveLong, ClassRoot::kLongArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveFloat, ClassRoot::kFloatArrayClass);
+  AllocPrimitiveArrayClass(self, ClassRoot::kPrimitiveDouble, ClassRoot::kDoubleArrayClass);
 
   // now that these are registered, we can use AllocClass() and AllocObjectArray
 
@@ -652,37 +839,23 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
   CheckSystemClass(self, dalvik_system_ClassExt, "Ldalvik/system/ClassExt;");
   CHECK_EQ(dalvik_system_ClassExt->GetObjectSize(), mirror::ClassExt::InstanceSize());
 
-  // Setup the primitive array type classes - can't be done until Object has a vtable.
-  AllocAndSetPrimitiveArrayClassRoot(self,
-                                     java_lang_Class.Get(),
-                                     ClassRoot::kBooleanArrayClass,
-                                     ClassRoot::kPrimitiveBoolean,
-                                     "[Z");
-
-  AllocAndSetPrimitiveArrayClassRoot(
-      self, java_lang_Class.Get(), ClassRoot::kByteArrayClass, ClassRoot::kPrimitiveByte, "[B");
-
-  AllocAndSetPrimitiveArrayClassRoot(
-      self, java_lang_Class.Get(), ClassRoot::kCharArrayClass, ClassRoot::kPrimitiveChar, "[C");
-
-  AllocAndSetPrimitiveArrayClassRoot(
-      self, java_lang_Class.Get(), ClassRoot::kShortArrayClass, ClassRoot::kPrimitiveShort, "[S");
-
-  CheckSystemClass(self, int_array_class, "[I");
-  CheckSystemClass(self, long_array_class, "[J");
-
-  AllocAndSetPrimitiveArrayClassRoot(
-      self, java_lang_Class.Get(), ClassRoot::kFloatArrayClass, ClassRoot::kPrimitiveFloat, "[F");
-
-  AllocAndSetPrimitiveArrayClassRoot(
-      self, java_lang_Class.Get(), ClassRoot::kDoubleArrayClass, ClassRoot::kPrimitiveDouble, "[D");
-
   // Run Class through FindSystemClass. This initializes the dex_cache_ fields and register it
   // in class_table_.
   CheckSystemClass(self, java_lang_Class, "Ljava/lang/Class;");
 
-  CheckSystemClass(self, class_array_class, "[Ljava/lang/Class;");
-  CheckSystemClass(self, object_array_class, "[Ljava/lang/Object;");
+  // Setup core array classes, i.e. Object[], String[] and Class[] and primitive
+  // arrays - can't be done until Object has a vtable and component classes are loaded.
+  FinishCoreArrayClassSetup(ClassRoot::kObjectArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kClassArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kJavaLangStringArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kBooleanArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kByteArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kCharArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kShortArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kIntArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kLongArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kFloatArrayClass);
+  FinishCoreArrayClassSetup(ClassRoot::kDoubleArrayClass);
 
   // Setup the single, global copy of "iftable".
   auto java_lang_Cloneable = hs.NewHandle(FindSystemClass(self, "Ljava/lang/Cloneable;"));
@@ -905,7 +1078,7 @@ void ClassLinker::FinishInit(Thread* self) {
   // initialize the StackOverflowError class (as it might require running the verifier). Instead,
   // ensure that the class will be initialized.
   if (kMemoryToolIsAvailable && !Runtime::Current()->IsAotCompiler()) {
-    verifier::ClassVerifier::Init();  // Need to prepare the verifier.
+    verifier::ClassVerifier::Init(this);  // Need to prepare the verifier.
 
     ObjPtr<mirror::Class> soe_klass = FindSystemClass(self, "Ljava/lang/StackOverflowError;");
     if (soe_klass == nullptr || !EnsureInitialized(self, hs.NewHandle(soe_klass), true, true)) {
@@ -2493,6 +2666,11 @@ ClassLinker::~ClassLinker() {
     DeleteClassLoader(self, data, /*cleanup_cha=*/ false);
   }
   class_loaders_.clear();
+  while (!running_visibly_initialized_callbacks_.empty()) {
+    std::unique_ptr<VisiblyInitializedCallback> callback(
+        std::addressof(running_visibly_initialized_callbacks_.front()));
+    running_visibly_initialized_callbacks_.pop_front();
+  }
 }
 
 void ClassLinker::DeleteClassLoader(Thread* self, const ClassLoaderData& data, bool cleanup_cha) {
@@ -2567,16 +2745,16 @@ ObjPtr<mirror::DexCache> ClassLinker::AllocAndInitializeDexCache(Thread* self,
   return dex_cache;
 }
 
-template <bool kMovable>
+template <bool kMovable, typename PreFenceVisitor>
 ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
                                               ObjPtr<mirror::Class> java_lang_Class,
-                                              uint32_t class_size) {
+                                              uint32_t class_size,
+                                              const PreFenceVisitor& pre_fence_visitor) {
   DCHECK_GE(class_size, sizeof(mirror::Class));
   gc::Heap* heap = Runtime::Current()->GetHeap();
-  mirror::Class::InitializeClassVisitor visitor(class_size);
   ObjPtr<mirror::Object> k = (kMovingClasses && kMovable) ?
-      heap->AllocObject(self, java_lang_Class, class_size, visitor) :
-      heap->AllocNonMovableObject(self, java_lang_Class, class_size, visitor);
+      heap->AllocObject(self, java_lang_Class, class_size, pre_fence_visitor) :
+      heap->AllocNonMovableObject(self, java_lang_Class, class_size, pre_fence_visitor);
   if (UNLIKELY(k == nullptr)) {
     self->AssertPendingOOMException();
     return nullptr;
@@ -2584,20 +2762,98 @@ ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
   return k->AsClass();
 }
 
+template <bool kMovable>
+ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self,
+                                              ObjPtr<mirror::Class> java_lang_Class,
+                                              uint32_t class_size) {
+  mirror::Class::InitializeClassVisitor visitor(class_size);
+  return AllocClass<kMovable>(self, java_lang_Class, class_size, visitor);
+}
+
 ObjPtr<mirror::Class> ClassLinker::AllocClass(Thread* self, uint32_t class_size) {
   return AllocClass(self, GetClassRoot<mirror::Class>(this), class_size);
 }
 
-ObjPtr<mirror::Class> ClassLinker::AllocPrimitiveArrayClass(Thread* self,
-                                                            ObjPtr<mirror::Class> java_lang_Class) {
+void ClassLinker::AllocPrimitiveArrayClass(Thread* self,
+                                           ClassRoot primitive_root,
+                                           ClassRoot array_root) {
   // We make this class non-movable for the unlikely case where it were to be
   // moved by a sticky-bit (minor) collection when using the Generational
   // Concurrent Copying (CC) collector, potentially creating a stale reference
   // in the `klass_` field of one of its instances allocated in the Large-Object
   // Space (LOS) -- see the comment about the dirty card scanning logic in
   // art::gc::collector::ConcurrentCopying::MarkingPhase.
-  return AllocClass</* kMovable= */ false>(
-      self, java_lang_Class, mirror::Array::ClassSize(image_pointer_size_));
+  ObjPtr<mirror::Class> array_class = AllocClass</* kMovable= */ false>(
+      self, GetClassRoot<mirror::Class>(this), mirror::Array::ClassSize(image_pointer_size_));
+  ObjPtr<mirror::Class> component_type = GetClassRoot(primitive_root, this);
+  DCHECK(component_type->IsPrimitive());
+  array_class->SetComponentType(component_type);
+  SetClassRoot(array_root, array_class);
+}
+
+void ClassLinker::FinishArrayClassSetup(ObjPtr<mirror::Class> array_class) {
+  ObjPtr<mirror::Class> java_lang_Object = GetClassRoot<mirror::Object>(this);
+  array_class->SetSuperClass(java_lang_Object);
+  array_class->SetVTable(java_lang_Object->GetVTable());
+  array_class->SetPrimitiveType(Primitive::kPrimNot);
+  ObjPtr<mirror::Class> component_type = array_class->GetComponentType();
+  array_class->SetClassFlags(component_type->IsPrimitive()
+                                 ? mirror::kClassFlagNoReferenceFields
+                                 : mirror::kClassFlagObjectArray);
+  array_class->SetClassLoader(component_type->GetClassLoader());
+  array_class->SetStatusForPrimitiveOrArray(ClassStatus::kLoaded);
+  array_class->PopulateEmbeddedVTable(image_pointer_size_);
+  ImTable* object_imt = java_lang_Object->GetImt(image_pointer_size_);
+  array_class->SetImt(object_imt, image_pointer_size_);
+  // Skip EnsureSkipAccessChecksMethods(). We can skip the verified status,
+  // the kAccVerificationAttempted flag is added below, and there are no
+  // methods that need the kAccSkipAccessChecks flag.
+  DCHECK_EQ(array_class->NumMethods(), 0u);
+
+  // don't need to set new_class->SetObjectSize(..)
+  // because Object::SizeOf delegates to Array::SizeOf
+
+  // All arrays have java/lang/Cloneable and java/io/Serializable as
+  // interfaces.  We need to set that up here, so that stuff like
+  // "instanceof" works right.
+
+  // Use the single, global copies of "interfaces" and "iftable"
+  // (remember not to free them for arrays).
+  {
+    ObjPtr<mirror::IfTable> array_iftable = GetArrayIfTable();
+    CHECK(array_iftable != nullptr);
+    array_class->SetIfTable(array_iftable);
+  }
+
+  // Inherit access flags from the component type.
+  int access_flags = component_type->GetAccessFlags();
+  // Lose any implementation detail flags; in particular, arrays aren't finalizable.
+  access_flags &= kAccJavaFlagsMask;
+  // Arrays can't be used as a superclass or interface, so we want to add "abstract final"
+  // and remove "interface".
+  access_flags |= kAccAbstract | kAccFinal;
+  access_flags &= ~kAccInterface;
+  // Arrays are access-checks-clean and preverified.
+  access_flags |= kAccVerificationAttempted;
+
+  array_class->SetAccessFlags(access_flags);
+
+  // Array classes are fully initialized either during single threaded startup,
+  // or from a pre-fence visitor, so visibly initialized.
+  array_class->SetStatusForPrimitiveOrArray(ClassStatus::kVisiblyInitialized);
+}
+
+void ClassLinker::FinishCoreArrayClassSetup(ClassRoot array_root) {
+  // Do not hold lock on the array class object, the initialization of
+  // core array classes is done while the process is still single threaded.
+  ObjPtr<mirror::Class> array_class = GetClassRoot(array_root, this);
+  FinishArrayClassSetup(array_class);
+
+  std::string temp;
+  const char* descriptor = array_class->GetDescriptor(&temp);
+  size_t hash = ComputeModifiedUtf8Hash(descriptor);
+  ObjPtr<mirror::Class> existing = InsertClass(descriptor, array_class, hash);
+  CHECK(existing == nullptr);
 }
 
 ObjPtr<mirror::ObjectArray<mirror::StackTraceElement>> ClassLinker::AllocStackTraceElementArray(
@@ -3152,7 +3408,11 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
     // Interface object should get the right size here. Regular class will
     // figure out the right size later and be replaced with one of the right
     // size when the class becomes resolved.
-    klass.Assign(AllocClass(self, SizeOfClassWithoutEmbeddedTables(dex_file, dex_class_def)));
+    if (CanAllocClass()) {
+      klass.Assign(AllocClass(self, SizeOfClassWithoutEmbeddedTables(dex_file, dex_class_def)));
+    } else {
+      return nullptr;
+    }
   }
   if (UNLIKELY(klass == nullptr)) {
     self->AssertPendingOOMException();
@@ -3345,10 +3605,19 @@ const void* ClassLinker::GetQuickOatCodeFor(ArtMethod* method) {
   if (method->IsProxyMethod()) {
     return GetQuickProxyInvokeHandler();
   }
-  auto* code = method->GetOatMethodQuickCode(GetImagePointerSize());
+  const void* code = method->GetOatMethodQuickCode(GetImagePointerSize());
   if (code != nullptr) {
     return code;
   }
+
+  jit::Jit* jit = Runtime::Current()->GetJit();
+  if (jit != nullptr) {
+    code = jit->GetCodeCache()->GetSavedEntryPointOfPreCompiledMethod(method);
+    if (code != nullptr) {
+      return code;
+    }
+  }
+
   if (method->IsNative()) {
     // No code and native? Use generic trampoline.
     return GetQuickGenericJniStub();
@@ -3453,8 +3722,9 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
       quick_code = oat_method.GetQuickCode();
     }
     // Check if we have JIT compiled code for it.
-    if (quick_code == nullptr && Runtime::Current()->GetJit() != nullptr) {
-      quick_code = Runtime::Current()->GetJit()->GetCodeCache()->GetZygoteSavedEntryPoint(method);
+    jit::Jit* jit = Runtime::Current()->GetJit();
+    if (quick_code == nullptr && jit != nullptr) {
+      quick_code = jit->GetCodeCache()->GetSavedEntryPointOfPreCompiledMethod(method);
     }
     // Check whether the method is native, in which case it's generic JNI.
     if (quick_code == nullptr && method->IsNative()) {
@@ -4067,28 +4337,30 @@ ClassLinker::DexCacheData ClassLinker::FindDexCacheDataLocked(const DexFile& dex
   return DexCacheData();
 }
 
-ObjPtr<mirror::Class> ClassLinker::CreatePrimitiveClass(Thread* self, Primitive::Type type) {
+void ClassLinker::CreatePrimitiveClass(Thread* self,
+                                       Primitive::Type type,
+                                       ClassRoot primitive_root) {
   ObjPtr<mirror::Class> primitive_class =
       AllocClass(self, mirror::Class::PrimitiveClassSize(image_pointer_size_));
-  if (UNLIKELY(primitive_class == nullptr)) {
-    self->AssertPendingOOMException();
-    return nullptr;
-  }
-  // Must hold lock on object when initializing.
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Class> h_class(hs.NewHandle(primitive_class));
-  ObjectLock<mirror::Class> lock(self, h_class);
-  h_class->SetAccessFlags(kAccPublic | kAccFinal | kAccAbstract);
-  h_class->SetPrimitiveType(type);
-  h_class->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
-  EnsureSkipAccessChecksMethods</* kNeedsVerified= */ true>(h_class, image_pointer_size_);
-  mirror::Class::SetStatus(h_class, ClassStatus::kInitialized, self);
+  CHECK(primitive_class != nullptr) << "OOM for primitive class " << type;
+  // Do not hold lock on the primitive class object, the initialization of
+  // primitive classes is done while the process is still single threaded.
+  primitive_class->SetAccessFlags(
+      kAccPublic | kAccFinal | kAccAbstract | kAccVerificationAttempted);
+  primitive_class->SetPrimitiveType(type);
+  primitive_class->SetIfTable(GetClassRoot<mirror::Object>(this)->GetIfTable());
+  // Skip EnsureSkipAccessChecksMethods(). We can skip the verified status,
+  // the kAccVerificationAttempted flag was added above, and there are no
+  // methods that need the kAccSkipAccessChecks flag.
+  DCHECK_EQ(primitive_class->NumMethods(), 0u);
+  // Primitive classes are initialized during single threaded startup, so visibly initialized.
+  primitive_class->SetStatusForPrimitiveOrArray(ClassStatus::kVisiblyInitialized);
   const char* descriptor = Primitive::Descriptor(type);
   ObjPtr<mirror::Class> existing = InsertClass(descriptor,
-                                               h_class.Get(),
+                                               primitive_class,
                                                ComputeModifiedUtf8Hash(descriptor));
   CHECK(existing == nullptr) << "InitPrimitiveClass(" << type << ") failed";
-  return h_class.Get();
+  SetClassRoot(primitive_root, primitive_class);
 }
 
 inline ObjPtr<mirror::IfTable> ClassLinker::GetArrayIfTable() {
@@ -4169,6 +4441,14 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
       return new_class;
     }
   }
+  // Core array classes, i.e. Object[], Class[], String[] and primitive
+  // arrays, have special initialization and they should be found above.
+  DCHECK(!component_type->IsObjectClass() ||
+         // Guard from false positives for errors before setting superclass.
+         component_type->IsErroneousUnresolved());
+  DCHECK(!component_type->IsStringClass());
+  DCHECK(!component_type->IsClassClass());
+  DCHECK(!component_type->IsPrimitive());
 
   // Fill out the fields in the Class.
   //
@@ -4178,92 +4458,26 @@ ObjPtr<mirror::Class> ClassLinker::CreateArrayClass(Thread* self,
   //
   // Array classes are simple enough that we don't need to do a full
   // link step.
-  auto new_class = hs.NewHandle<mirror::Class>(nullptr);
-  if (UNLIKELY(!init_done_)) {
-    // Classes that were hand created, ie not by FindSystemClass
-    if (strcmp(descriptor, "[Ljava/lang/Class;") == 0) {
-      new_class.Assign(GetClassRoot<mirror::ObjectArray<mirror::Class>>(this));
-    } else if (strcmp(descriptor, "[Ljava/lang/Object;") == 0) {
-      new_class.Assign(GetClassRoot<mirror::ObjectArray<mirror::Object>>(this));
-    } else if (strcmp(descriptor, "[Ljava/lang/String;") == 0) {
-      new_class.Assign(GetClassRoot<mirror::ObjectArray<mirror::String>>(this));
-    } else if (strcmp(descriptor, "[Z") == 0) {
-      new_class.Assign(GetClassRoot<mirror::BooleanArray>(this));
-    } else if (strcmp(descriptor, "[B") == 0) {
-      new_class.Assign(GetClassRoot<mirror::ByteArray>(this));
-    } else if (strcmp(descriptor, "[C") == 0) {
-      new_class.Assign(GetClassRoot<mirror::CharArray>(this));
-    } else if (strcmp(descriptor, "[S") == 0) {
-      new_class.Assign(GetClassRoot<mirror::ShortArray>(this));
-    } else if (strcmp(descriptor, "[I") == 0) {
-      new_class.Assign(GetClassRoot<mirror::IntArray>(this));
-    } else if (strcmp(descriptor, "[J") == 0) {
-      new_class.Assign(GetClassRoot<mirror::LongArray>(this));
-    } else if (strcmp(descriptor, "[F") == 0) {
-      new_class.Assign(GetClassRoot<mirror::FloatArray>(this));
-    } else if (strcmp(descriptor, "[D") == 0) {
-      new_class.Assign(GetClassRoot<mirror::DoubleArray>(this));
-    }
-  }
+  size_t array_class_size = mirror::Array::ClassSize(image_pointer_size_);
+  auto visitor = [this, array_class_size, component_type](ObjPtr<mirror::Object> obj,
+                                                          size_t usable_size)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+    mirror::Class::InitializeClassVisitor init_class(array_class_size);
+    init_class(obj, usable_size);
+    ObjPtr<mirror::Class> klass = ObjPtr<mirror::Class>::DownCast(obj);
+    klass->SetComponentType(component_type.Get());
+    // Do not hold lock for initialization, the fence issued after the visitor
+    // returns ensures memory visibility together with the implicit consume
+    // semantics (for all supported architectures) for any thread that loads
+    // the array class reference from any memory locations afterwards.
+    FinishArrayClassSetup(klass);
+  };
+  auto new_class = hs.NewHandle<mirror::Class>(
+      AllocClass(self, GetClassRoot<mirror::Class>(this), array_class_size, visitor));
   if (new_class == nullptr) {
-    new_class.Assign(AllocClass(self, mirror::Array::ClassSize(image_pointer_size_)));
-    if (new_class == nullptr) {
-      self->AssertPendingOOMException();
-      return nullptr;
-    }
-    new_class->SetComponentType(component_type.Get());
+    self->AssertPendingOOMException();
+    return nullptr;
   }
-  ObjectLock<mirror::Class> lock(self, new_class);  // Must hold lock on object when initializing.
-  DCHECK(new_class->GetComponentType() != nullptr);
-  ObjPtr<mirror::Class> java_lang_Object = GetClassRoot<mirror::Object>(this);
-  new_class->SetSuperClass(java_lang_Object);
-  new_class->SetVTable(java_lang_Object->GetVTable());
-  new_class->SetPrimitiveType(Primitive::kPrimNot);
-  new_class->SetClassLoader(component_type->GetClassLoader());
-  if (component_type->IsPrimitive()) {
-    new_class->SetClassFlags(mirror::kClassFlagNoReferenceFields);
-  } else {
-    new_class->SetClassFlags(mirror::kClassFlagObjectArray);
-  }
-  mirror::Class::SetStatus(new_class, ClassStatus::kLoaded, self);
-  new_class->PopulateEmbeddedVTable(image_pointer_size_);
-  ImTable* object_imt = java_lang_Object->GetImt(image_pointer_size_);
-  new_class->SetImt(object_imt, image_pointer_size_);
-  EnsureSkipAccessChecksMethods</* kNeedsVerified= */ true>(new_class, image_pointer_size_);
-  mirror::Class::SetStatus(new_class, ClassStatus::kInitialized, self);
-  // don't need to set new_class->SetObjectSize(..)
-  // because Object::SizeOf delegates to Array::SizeOf
-
-  // All arrays have java/lang/Cloneable and java/io/Serializable as
-  // interfaces.  We need to set that up here, so that stuff like
-  // "instanceof" works right.
-  //
-  // Note: The GC could run during the call to FindSystemClass,
-  // so we need to make sure the class object is GC-valid while we're in
-  // there.  Do this by clearing the interface list so the GC will just
-  // think that the entries are null.
-
-
-  // Use the single, global copies of "interfaces" and "iftable"
-  // (remember not to free them for arrays).
-  {
-    ObjPtr<mirror::IfTable> array_iftable = GetArrayIfTable();
-    CHECK(array_iftable != nullptr);
-    new_class->SetIfTable(array_iftable);
-  }
-
-  // Inherit access flags from the component type.
-  int access_flags = new_class->GetComponentType()->GetAccessFlags();
-  // Lose any implementation detail flags; in particular, arrays aren't finalizable.
-  access_flags &= kAccJavaFlagsMask;
-  // Arrays can't be used as a superclass or interface, so we want to add "abstract final"
-  // and remove "interface".
-  access_flags |= kAccAbstract | kAccFinal;
-  access_flags &= ~kAccInterface;
-  // Arrays are access-checks-clean and preverified.
-  access_flags |= kAccVerificationAttempted;
-
-  new_class->SetAccessFlags(access_flags);
 
   ObjPtr<mirror::Class> existing = InsertClass(descriptor, new_class.Get(), hash);
   if (existing == nullptr) {
@@ -4984,11 +5198,16 @@ ObjPtr<mirror::Class> ClassLinker::CreateProxyClass(ScopedObjectAccessAlreadyRun
     // TODO: Avoid taking subtype_check_lock_ if SubtypeCheck for j.l.r.Proxy is already assigned.
   }
 
+  VisiblyInitializedCallback* callback = nullptr;
   {
     // Lock on klass is released. Lock new class object.
     ObjectLock<mirror::Class> initialization_lock(self, klass);
     EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
-    mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
+    // Conservatively go through the ClassStatus::kInitialized state.
+    callback = MarkClassInitialized(self, klass);
+  }
+  if (callback != nullptr) {
+    callback->MakeVisible(self);
   }
 
   // sanity checks
@@ -5265,6 +5484,8 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     t0 = NanoTime();
   }
 
+  uint64_t t_sub = 0;
+
   // Initialize super classes, must be done while initializing for the JLS.
   if (!klass->IsInterface() && klass->HasSuperClass()) {
     ObjPtr<mirror::Class> super_class = klass->GetSuperClass();
@@ -5273,7 +5494,9 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       CHECK(can_init_parents);
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> handle_scope_super(hs.NewHandle(super_class));
+      uint64_t super_t0 = NanoTime();
       bool super_initialized = InitializeClass(self, handle_scope_super, can_init_statics, true);
+      uint64_t super_t1 = NanoTime();
       if (!super_initialized) {
         // The super class was verified ahead of entering initializing, we should only be here if
         // the super class became erroneous due to initialization.
@@ -5290,6 +5513,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
         return false;
       }
+      t_sub = super_t1 - super_t0;
     }
   }
 
@@ -5311,16 +5535,19 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         // We cannot just call initialize class directly because we need to ensure that ALL
         // interfaces with default methods are initialized. Non-default interface initialization
         // will not affect other non-default super-interfaces.
+        uint64_t inf_t0 = NanoTime();  // This is not very precise, misses all walking.
         bool iface_initialized = InitializeDefaultInterfaceRecursive(self,
                                                                      handle_scope_iface,
                                                                      can_init_statics,
                                                                      can_init_parents);
+        uint64_t inf_t1 = NanoTime();
         if (!iface_initialized) {
           ObjectLock<mirror::Class> lock(self, klass);
           // Initialization failed because one of our interfaces with default methods is erroneous.
           mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
           return false;
         }
+        t_sub += inf_t1 - inf_t0;
       }
     }
   }
@@ -5394,6 +5621,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
   self->AllowThreadSuspension();
   uint64_t t1 = NanoTime();
 
+  VisiblyInitializedCallback* callback = nullptr;
   bool success = true;
   {
     ObjectLock<mirror::Class> lock(self, klass);
@@ -5416,10 +5644,10 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       RuntimeStats* thread_stats = self->GetStats();
       ++global_stats->class_init_count;
       ++thread_stats->class_init_count;
-      global_stats->class_init_time_ns += (t1 - t0);
-      thread_stats->class_init_time_ns += (t1 - t0);
+      global_stats->class_init_time_ns += (t1 - t0 - t_sub);
+      thread_stats->class_init_time_ns += (t1 - t0 - t_sub);
       // Set the class as initialized except if failed to initialize static fields.
-      mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
+      callback = MarkClassInitialized(self, klass);
       if (VLOG_IS_ON(class_linker)) {
         std::string temp;
         LOG(INFO) << "Initialized class " << klass->GetDescriptor(&temp) << " from " <<
@@ -5428,6 +5656,9 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       // Opportunistically set static method trampolines to their destination.
       FixupStaticTrampolines(klass.Get());
     }
+  }
+  if (callback != nullptr) {
+    callback->MakeVisible(self);
   }
   return success;
 }
@@ -5731,6 +5962,16 @@ bool ClassLinker::EnsureInitialized(Thread* self,
   DCHECK(c != nullptr);
 
   if (c->IsInitialized()) {
+    // If we've seen an initialized but not visibly initialized class
+    // many times, request visible initialization.
+    if (kRuntimeISA == InstructionSet::kX86 || kRuntimeISA == InstructionSet::kX86_64) {
+      // Thanks to the x86 memory model classes skip the initialized status.
+      DCHECK(c->IsVisiblyInitialized());
+    } else if (UNLIKELY(!c->IsVisiblyInitialized())) {
+      if (self->IncrementMakeVisiblyInitializedCounter()) {
+        MakeInitializedClassesVisiblyInitialized(self, /*wait=*/ false);
+      }
+    }
     DCHECK(c->WasVerificationAttempted()) << c->PrettyClassAndClassLoader();
     return true;
   }
@@ -9382,19 +9623,6 @@ void ClassLinker::SetClassRoot(ClassRoot class_root, ObjPtr<mirror::Class> klass
   int32_t index = static_cast<int32_t>(class_root);
   DCHECK(class_roots->Get(index) == nullptr);
   class_roots->Set<false>(index, klass);
-}
-
-void ClassLinker::AllocAndSetPrimitiveArrayClassRoot(Thread* self,
-                                                     ObjPtr<mirror::Class> java_lang_Class,
-                                                     ClassRoot primitive_array_class_root,
-                                                     ClassRoot primitive_class_root,
-                                                     const char* descriptor) {
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Class> primitive_array_class(hs.NewHandle(
-      AllocPrimitiveArrayClass(self, java_lang_Class)));
-  primitive_array_class->SetComponentType(GetClassRoot(primitive_class_root, this));
-  SetClassRoot(primitive_array_class_root, primitive_array_class.Get());
-  CheckSystemClass(self, primitive_array_class, descriptor);
 }
 
 ObjPtr<mirror::ClassLoader> ClassLinker::CreateWellKnownClassLoader(

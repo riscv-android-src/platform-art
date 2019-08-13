@@ -64,7 +64,7 @@ done
 extra_args="SOONG_ALLOW_MISSING_DEPENDENCIES=true TEMPORARY_DISABLE_PATH_RESTRICTIONS=true"
 
 if [[ $mode == "host" ]]; then
-  make_command="make $j_arg $extra_args $showcommands build-art-host-tests $common_targets"
+  make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands build-art-host-tests $common_targets"
   make_command+=" dx-tests junit-host"
   mode_suffix="-host"
 elif [[ $mode == "target" ]]; then
@@ -72,7 +72,7 @@ elif [[ $mode == "target" ]]; then
     echo 'ANDROID_PRODUCT_OUT environment variable is empty; did you forget to run `lunch`?'
     exit 1
   fi
-  make_command="make $j_arg $extra_args $showcommands build-art-target-tests $common_targets"
+  make_command="build/soong/soong_ui.bash --make-mode $j_arg $extra_args $showcommands build-art-target-tests $common_targets"
   make_command+=" libjavacrypto-target libnetd_client-target toybox toolbox sh"
   make_command+=" debuggerd su"
   make_command+=" libstdc++ "
@@ -81,8 +81,8 @@ elif [[ $mode == "target" ]]; then
     # These targets are needed for the chroot environment.
     make_command+=" crash_dump event-log-tags"
   fi
-  # Build the Debug Runtime APEX (which is a superset of the Release Runtime APEX).
-  make_command+=" com.android.runtime.debug"
+  # Build the Testing Runtime APEX (which is a superset of the Release and Debug Runtime APEXes).
+  make_command+=" com.android.runtime.testing"
   # Build the system linker configuration, which is needed to use the
   # Runtime APEX's linker configuration.
   make_command+=" ld.config.txt "
@@ -91,6 +91,8 @@ elif [[ $mode == "target" ]]; then
   # - from /system/bin/linker(64) to /apex/com.android.runtime/bin/linker(64); and
   # - from /system/lib(64)/$lib to /apex/com.android.runtime/lib(64)/$lib.
   make_command+=" linker libc.bootstrap libdl.bootstrap libm.bootstrap"
+  # Build the i18n APEX.
+  make_command+=" com.android.i18n"
   # Build the Time Zone Data APEX.
   make_command+=" com.android.tzdata"
   mode_suffix="-target"

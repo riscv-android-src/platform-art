@@ -303,24 +303,21 @@ const void* JitCodeCache::FindCompiledCodeForInstrumentation(ArtMethod* method) 
   return info->GetSavedEntryPoint();
 }
 
-const void* JitCodeCache::GetZygoteSavedEntryPoint(ArtMethod* method) {
-  if (Runtime::Current()->IsUsingApexBootImageLocation() &&
-      // Currently only applies to boot classpath
-      method->GetDeclaringClass()->GetClassLoader() == nullptr) {
-    const void* entry_point = nullptr;
-    if (method->IsNative()) {
-      const void* code_ptr = GetJniStubCode(method);
-      if (code_ptr != nullptr) {
-        entry_point = OatQuickMethodHeader::FromCodePointer(code_ptr)->GetEntryPoint();
-      }
+const void* JitCodeCache::GetSavedEntryPointOfPreCompiledMethod(ArtMethod* method) {
+  if (Runtime::Current()->IsUsingApexBootImageLocation() && method->IsPreCompiled()) {
+    const void* code_ptr = nullptr;
+    if (method->GetDeclaringClass()->GetClassLoader() == nullptr) {
+      code_ptr = zygote_map_.GetCodeFor(method);
     } else {
-      ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
-      if (profiling_info != nullptr) {
-        entry_point = profiling_info->GetSavedEntryPoint();
+      MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+      auto it = saved_compiled_methods_map_.find(method);
+      if (it != saved_compiled_methods_map_.end()) {
+        code_ptr = it->second;
       }
     }
-    if (Runtime::Current()->IsZygote() || IsInZygoteExecSpace(entry_point)) {
-      return entry_point;
+    if (code_ptr != nullptr) {
+      OatQuickMethodHeader* method_header = OatQuickMethodHeader::FromCodePointer(code_ptr);
+      return method_header->GetEntryPoint();
     }
   }
   return nullptr;
@@ -751,7 +748,7 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         }
       }
     } else {
-      if (method->IsZygoteCompiled() && IsSharedRegion(*region)) {
+      if (method->IsPreCompiled() && IsSharedRegion(*region)) {
         zygote_map_.Put(code_ptr, method);
       } else {
         method_code_map_.Put(code_ptr, method);
@@ -764,13 +761,11 @@ uint8_t* JitCodeCache::CommitCodeInternal(Thread* self,
         // This situation currently only occurs in the jit-zygote mode.
         DCHECK(Runtime::Current()->IsUsingApexBootImageLocation());
         DCHECK(!garbage_collect_code_);
-        // TODO(ngeoffray): In most cases, the zygote will not have a profiling
-        // info for a compiled method. Use a map instead.
-        if (method->GetProfilingInfo(kRuntimePointerSize) != nullptr) {
-          // Save the entrypoint, so it can be fetched later once the class is
-          // initialized.
-          method->GetProfilingInfo(kRuntimePointerSize)->SetSavedEntryPoint(
-              method_header->GetEntryPoint());
+        DCHECK(method->IsPreCompiled());
+        // The shared region can easily be queried. For the private region, we
+        // use a side map.
+        if (!IsSharedRegion(*region)) {
+          saved_compiled_methods_map_.Put(method, code_ptr);
         }
       } else {
         Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
@@ -934,7 +929,7 @@ void JitCodeCache::ClearEntryPointsInZygoteExecSpace() {
 }
 
 size_t JitCodeCache::CodeCacheSizeLocked() {
-  return private_region_.GetUsedMemoryForCode();
+  return GetCurrentRegion()->GetUsedMemoryForCode();
 }
 
 size_t JitCodeCache::DataCacheSize() {
@@ -943,7 +938,7 @@ size_t JitCodeCache::DataCacheSize() {
 }
 
 size_t JitCodeCache::DataCacheSizeLocked() {
-  return private_region_.GetUsedMemoryForData();
+  return GetCurrentRegion()->GetUsedMemoryForData();
 }
 
 void JitCodeCache::ClearData(Thread* self,
@@ -1715,21 +1710,31 @@ void JitCodeCache::InvalidateCompiledCodeFor(ArtMethod* method,
     }
   }
 
-  // In case the method was compiled by the zygote, clear that information so we
+  // In case the method was pre-compiled, clear that information so we
   // can recompile it ourselves.
-  if (method->IsZygoteCompiled()) {
-    method->ClearZygoteCompiled();
+  if (method->IsPreCompiled()) {
+    method->ClearPreCompiled();
   }
 }
 
 void JitCodeCache::Dump(std::ostream& os) {
   MutexLock mu(Thread::Current(), *Locks::jit_lock_);
-  os << "Current JIT code cache size: " << PrettySize(private_region_.GetUsedMemoryForCode())
-                                        << "\n"
-     << "Current JIT data cache size: " << PrettySize(private_region_.GetUsedMemoryForData())
-                                        << "\n"
-     << "Current JIT mini-debug-info size: " << PrettySize(GetJitMiniDebugInfoMemUsage()) << "\n"
-     << "Current JIT capacity: " << PrettySize(private_region_.GetCurrentCapacity()) << "\n"
+  os << "Current JIT code cache size (used / resident): "
+     << GetCurrentRegion()->GetUsedMemoryForCode() / KB << "KB / "
+     << GetCurrentRegion()->GetResidentMemoryForCode() / KB << "KB\n"
+     << "Current JIT data cache size (used / resident): "
+     << GetCurrentRegion()->GetUsedMemoryForData() / KB << "KB / "
+     << GetCurrentRegion()->GetResidentMemoryForData() / KB << "KB\n";
+  if (!Runtime::Current()->IsZygote()) {
+    os << "Zygote JIT code cache size (at point of fork): "
+       << shared_region_.GetUsedMemoryForCode() / KB << "KB / "
+       << shared_region_.GetResidentMemoryForCode() / KB << "KB\n"
+       << "Zygote JIT data cache size (at point of fork): "
+       << shared_region_.GetUsedMemoryForData() / KB << "KB / "
+       << shared_region_.GetResidentMemoryForData() / KB << "KB\n";
+  }
+  os << "Current JIT mini-debug-info size: " << PrettySize(GetJitMiniDebugInfoMemUsage()) << "\n"
+     << "Current JIT capacity: " << PrettySize(GetCurrentRegion()->GetCurrentCapacity()) << "\n"
      << "Current number of JIT JNI stub entries: " << jni_stubs_map_.size() << "\n"
      << "Current number of JIT code cache entries: " << method_code_map_.size() << "\n"
      << "Total number of JIT compilations: " << number_of_compilations_ << "\n"
@@ -1769,6 +1774,9 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
   number_of_compilations_ = 0;
   number_of_osr_compilations_ = 0;
   number_of_collections_ = 0;
+  histogram_stack_map_memory_use_.Reset();
+  histogram_code_memory_use_.Reset();
+  histogram_profiling_info_memory_use_.Reset();
 
   size_t initial_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheInitialCapacity();
   size_t max_capacity = Runtime::Current()->GetJITOptions()->GetCodeCacheMaxCapacity();

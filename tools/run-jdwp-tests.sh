@@ -48,7 +48,7 @@ function boot_classpath_arg {
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
+BOOT_CLASSPATH_JARS="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
 
 vm_args=""
 art="$android_root/bin/art"
@@ -306,7 +306,7 @@ test_jar=$(jlib_name "${java_lib_location}/${make_target_name}_intermediates")
 
 if [[ ! -f $test_jar ]]; then
   echo "Before running, you must build jdwp tests and vogar:" \
-       "make ${make_target_name} vogar"
+       "m ${make_target_name} vogar"
   exit 1
 fi
 

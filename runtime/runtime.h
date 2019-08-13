@@ -451,7 +451,7 @@ class Runtime {
 
   ArtMethod* CreateCalleeSaveMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  int32_t GetStat(int kind);
+  uint64_t GetStat(int kind);
 
   RuntimeStats* GetStats() {
     return &stats_;
@@ -500,7 +500,6 @@ class Runtime {
 
   // Transaction support.
   bool IsActiveTransaction() const;
-  void EnterTransactionMode();
   void EnterTransactionMode(bool strict, mirror::Class* root);
   void ExitTransactionMode();
   void RollbackAllTransactions() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -842,9 +841,17 @@ class Runtime {
     return jdwp_provider_;
   }
 
-  bool JniIdsAreIndices() const {
-    return jni_ids_indirection_ != JniIdType::kPointer;
+  JniIdType GetJniIdType() const {
+    return jni_ids_indirection_;
   }
+
+  bool CanSetJniIdType() const {
+    return GetJniIdType() == JniIdType::kSwapablePointer;
+  }
+
+  // Changes the JniIdType to the given type. Only allowed if CanSetJniIdType(). All threads must be
+  // suspended to call this function.
+  void SetJniIdType(JniIdType t);
 
   uint32_t GetVerifierLoggingThresholdMs() const {
     return verifier_logging_threshold_ms_;
@@ -893,6 +900,10 @@ class Runtime {
 
   gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
     return image_space_loading_order_;
+  }
+
+  bool IsVerifierMissingKThrowFatal() const {
+    return verifier_missing_kthrow_fatal_;
   }
 
  private:
@@ -1239,6 +1250,8 @@ class Runtime {
 
   gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
       gc::space::ImageSpaceLoadingOrder::kSystemFirst;
+
+  bool verifier_missing_kthrow_fatal_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

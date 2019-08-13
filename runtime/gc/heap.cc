@@ -2005,10 +2005,7 @@ HomogeneousSpaceCompactResult Heap::PerformHomogeneousSpaceCompact() {
   count_requested_homogeneous_space_compaction_++;
   // Store performed homogeneous space compaction at a new request arrival.
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
-  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
-  // http://b/71769596
-  // Locks::mutator_lock_->AssertNotHeld(self);
+  Locks::mutator_lock_->AssertNotHeld(self);
   {
     ScopedThreadStateChange tsc2(self, kWaitingForGcToComplete);
     MutexLock mu(self, *gc_complete_lock_);
@@ -2230,7 +2227,7 @@ void Heap::UnBindBitmaps() {
   for (const auto& space : GetContinuousSpaces()) {
     if (space->IsContinuousMemMapAllocSpace()) {
       space::ContinuousMemMapAllocSpace* alloc_space = space->AsContinuousMemMapAllocSpace();
-      if (alloc_space->HasBoundBitmaps()) {
+      if (alloc_space->GetLiveBitmap() != nullptr && alloc_space->HasBoundBitmaps()) {
         alloc_space->UnBindBitmaps();
       }
     }
@@ -2357,12 +2354,7 @@ void Heap::PreZygoteFork() {
   if (set_mark_bit) {
     // Treat all of the objects in the zygote as marked to avoid unnecessary dirty pages. This is
     // safe since we mark all of the objects that may reference non immune objects as gray.
-    zygote_space_->GetLiveBitmap()->VisitMarkedRange(
-        reinterpret_cast<uintptr_t>(zygote_space_->Begin()),
-        reinterpret_cast<uintptr_t>(zygote_space_->Limit()),
-        [](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-      CHECK(obj->AtomicSetMarkBit(0, 1));
-    });
+    zygote_space_->SetMarkBitInLiveObjects();
   }
 
   // Create the zygote space mod union table.
@@ -2511,10 +2503,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
     }
   }
   ScopedThreadStateChange tsc(self, kWaitingPerformingGc);
-  // TODO: Clang prebuilt for r316199 produces bogus thread safety analysis warning for holding both
-  // exclusive and shared lock in the same scope. Remove the assertion as a temporary workaround.
-  // http://b/71769596
-  // Locks::mutator_lock_->AssertNotHeld(self);
+  Locks::mutator_lock_->AssertNotHeld(self);
   if (self->IsHandlingStackOverflow()) {
     // If we are throwing a stack overflow error we probably don't have enough remaining stack
     // space to run the GC.
@@ -3943,9 +3932,8 @@ void Heap::RemoveRememberedSet(space::Space* space) {
 void Heap::ClearMarkedObjects() {
   // Clear all of the spaces' mark bitmaps.
   for (const auto& space : GetContinuousSpaces()) {
-    accounting::ContinuousSpaceBitmap* mark_bitmap = space->GetMarkBitmap();
-    if (space->GetLiveBitmap() != mark_bitmap) {
-      mark_bitmap->Clear();
+    if (space->GetLiveBitmap() != nullptr && !space->HasBoundBitmaps()) {
+      space->GetMarkBitmap()->Clear();
     }
   }
   // Clear the marked objects in the discontinous space object sets.

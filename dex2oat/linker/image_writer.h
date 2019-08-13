@@ -40,6 +40,7 @@
 #include "base/safe_map.h"
 #include "base/utils.h"
 #include "class_table.h"
+#include "gc/accounting/space_bitmap.h"
 #include "image.h"
 #include "intern_table.h"
 #include "lock_word.h"
@@ -359,7 +360,7 @@ class ImageWriter final {
     uint32_t oat_checksum_ = 0u;
 
     // Image bitmap which lets us know where the objects inside of the image reside.
-    std::unique_ptr<gc::accounting::ContinuousSpaceBitmap> image_bitmap_;
+    gc::accounting::ContinuousSpaceBitmap image_bitmap_;
 
     // The start offsets of the dex cache arrays.
     SafeMap<const DexFile*, size_t> dex_cache_array_starts_;
@@ -561,17 +562,17 @@ class ImageWriter final {
   // Return true if klass is loaded by the boot class loader but not in the boot image.
   bool IsBootClassLoaderNonImageClass(mirror::Class* klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Return true if klass depends on a boot class loader non image class. We want to prune these
-  // classes since we do not want any boot class loader classes in the image. This means that
-  // we also cannot have any classes which refer to these boot class loader non image classes.
-  // PruneAppImageClass also prunes if klass depends on a non-image class according to the compiler
-  // options.
-  bool PruneAppImageClass(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
+  // Return true if `klass` depends on a class defined by the boot class path
+  // we're compiling against but not present in the boot image spaces. We want
+  // to prune these classes since we cannot guarantee that they will not be
+  // already loaded at run time when loading this image. This means that we
+  // also cannot have any classes which refer to these non image classes.
+  bool PruneImageClass(ObjPtr<mirror::Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // early_exit is true if we had a cyclic dependency anywhere down the chain.
-  bool PruneAppImageClassInternal(ObjPtr<mirror::Class> klass,
-                                  bool* early_exit,
-                                  std::unordered_set<mirror::Object*>* visited)
+  bool PruneImageClassInternal(ObjPtr<mirror::Class> klass,
+                               bool* early_exit,
+                               std::unordered_set<mirror::Object*>* visited)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool IsMultiImage() const {

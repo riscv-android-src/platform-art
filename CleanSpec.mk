@@ -79,6 +79,17 @@ $(call add-clean-step, rm -rf $(PRODUCT_OUT)/system/lib*)
 # `icu-data-art-test` Make rule.
 $(call add-clean-step, rm -rf $(PRODUCT_OUT)/system/etc/icu)
 
+# Remove ART test target artifacts.
+$(call add-clean-step, rm -rf $(PRODUCT_OUT)/data/nativetest*/)
+
+# Remove all APEX artifacts after the change to use the Testing
+# Runtime APEX in lieu of the Debug Runtime APEX for ART testing.
+$(call add-clean-step, rm -rf $(PRODUCT_OUT)/system/apex)
+
+# Remove the icu .dat file from /apex/com.android.runtime and the host equivalent.
+$(call add-clean-step, rm -rf $(PRODUCT_OUT)/system/apex)
+$(call add-clean-step, rm -rf $(HOST_OUT)/com.android.runtime/etc/icu/*)
+$(call add-clean-step, rm -rf $(PRODUCT_OUT)/system/etc/icu)
 # ************************************************
 # NEWER CLEAN STEPS MUST BE AT THE END OF THE LIST
 # ************************************************

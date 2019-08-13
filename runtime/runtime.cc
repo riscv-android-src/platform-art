@@ -86,6 +86,7 @@
 #include "gc/system_weak.h"
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
+#include "hidden_api_jni.h"
 #include "image-inl.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
@@ -95,7 +96,6 @@
 #include "jit/profile_saver.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_id_manager.h"
-#include "jni/jni_internal.h"
 #include "jni_id_type.h"
 #include "linear_alloc.h"
 #include "memory_representation.h"
@@ -294,7 +294,8 @@ Runtime::Runtime()
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
       zygote_no_threads_(false),
-      verifier_logging_threshold_ms_(100) {
+      verifier_logging_threshold_ms_(100),
+      verifier_missing_kthrow_fatal_(false) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
   CheckConstants();
@@ -494,7 +495,7 @@ Runtime::~Runtime() {
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
 
-  JniShutdownNativeCallerCheck();
+  hiddenapi::JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -1149,6 +1150,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   MemMap::Init();
 
+  verifier_missing_kthrow_fatal_ = runtime_options.GetOrDefault(Opt::VerifierMissingKThrowFatal);
+
   // Try to reserve a dedicated fault page. This is allocated for clobbered registers and sentinels.
   // If we cannot reserve it, log a warning.
   // Note: We allocate this first to have a good chance of grabbing the page. The address (0xebad..)
@@ -1303,12 +1306,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
 
-  if (!runtime_options.Exists(Opt::OpaqueJniIds)) {
-    jni_ids_indirection_ = JniIdType::kDefault;
-  } else {
-    jni_ids_indirection_ = *runtime_options.Get(Opt::OpaqueJniIds) ? JniIdType::kIndices
-                                                                   : JniIdType::kPointer;
-  }
+  jni_ids_indirection_ = runtime_options.GetOrDefault(Opt::OpaqueJniIds);
 
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
   agent_specs_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
@@ -1605,7 +1603,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   CHECK(class_linker_ != nullptr);
 
-  verifier::ClassVerifier::Init();
+  verifier::ClassVerifier::Init(class_linker_);
 
   if (runtime_options.Exists(Opt::MethodTrace)) {
     trace_config_.reset(new TraceConfig());
@@ -1870,7 +1868,7 @@ void Runtime::InitNativeMethods() {
 
   // Having loaded native libraries for Managed Core library, enable field and
   // method resolution checks via JNI from native code.
-  JniInitializeNativeCallerCheck();
+  hiddenapi::JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
@@ -2017,7 +2015,7 @@ void Runtime::ResetStats(int kinds) {
   Thread::Current()->GetStats()->Clear(kinds >> 16);
 }
 
-int32_t Runtime::GetStat(int kind) {
+uint64_t Runtime::GetStat(int kind) {
   RuntimeStats* stats;
   if (kind < (1<<16)) {
     stats = GetStats();
@@ -2039,8 +2037,7 @@ int32_t Runtime::GetStat(int kind) {
   case KIND_CLASS_INIT_COUNT:
     return stats->class_init_count;
   case KIND_CLASS_INIT_TIME:
-    // Convert ns to us, reduce to 32 bits.
-    return static_cast<int>(stats->class_init_time_ns / 1000);
+    return stats->class_init_time_ns;
   case KIND_EXT_ALLOCATED_OBJECTS:
   case KIND_EXT_ALLOCATED_BYTES:
   case KIND_EXT_FREED_OBJECTS:
@@ -2363,7 +2360,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
     return;
   }
   if (!OS::FileExists(profile_output_filename.c_str(), /*check_file_type=*/ false)) {
-    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exits.";
+    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exist.";
     return;
   }
   if (code_paths.empty()) {
@@ -2379,14 +2376,14 @@ bool Runtime::IsActiveTransaction() const {
   return !preinitialization_transactions_.empty() && !GetTransaction()->IsRollingBack();
 }
 
-void Runtime::EnterTransactionMode() {
-  DCHECK(IsAotCompiler());
-  DCHECK(!IsActiveTransaction());
-  preinitialization_transactions_.push_back(std::make_unique<Transaction>());
-}
-
 void Runtime::EnterTransactionMode(bool strict, mirror::Class* root) {
   DCHECK(IsAotCompiler());
+  if (preinitialization_transactions_.empty()) {  // Top-level transaction?
+    // Make initialized classes visibly initialized now. If that happened during the transaction
+    // and then the transaction was aborted, we would roll back the status update but not the
+    // ClassLinker's bookkeeping structures, so these classes would never be visibly initialized.
+    GetClassLinker()->MakeInitializedClassesVisiblyInitialized(Thread::Current(), /*wait=*/ true);
+  }
   preinitialization_transactions_.push_back(std::make_unique<Transaction>(strict, root));
 }
 
@@ -2923,6 +2920,16 @@ bool Runtime::GetStartupCompleted() const {
 
 void Runtime::SetSignalHookDebuggable(bool value) {
   SkipAddSignalHandler(value);
+}
+
+void Runtime::SetJniIdType(JniIdType t) {
+  CHECK(CanSetJniIdType()) << "Not allowed to change id type!";
+  if (t == GetJniIdType()) {
+    return;
+  }
+  jni_ids_indirection_ = t;
+  JNIEnvExt::ResetFunctionTable();
+  WellKnownClasses::HandleJniIdTypeChange(Thread::Current()->GetJniEnv());
 }
 
 }  // namespace art

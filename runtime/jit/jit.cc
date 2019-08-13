@@ -39,6 +39,7 @@
 #include "oat_file.h"
 #include "oat_file_manager.h"
 #include "oat_quick_method_header.h"
+#include "profile/profile_boot_info.h"
 #include "profile/profile_compilation_info.h"
 #include "profile_saver.h"
 #include "runtime.h"
@@ -58,24 +59,15 @@ static constexpr size_t kJitDefaultCompileThreshold           = 10000;  // Non-d
 static constexpr size_t kJitStressDefaultCompileThreshold     = 100;    // Fast-debug build.
 static constexpr size_t kJitSlowStressDefaultCompileThreshold = 2;      // Slow-debug build.
 
+DEFINE_RUNTIME_DEBUG_FLAG(Jit, kSlowMode);
+
 // JIT compiler
 void* Jit::jit_library_handle_ = nullptr;
-void* Jit::jit_compiler_handle_ = nullptr;
-void* (*Jit::jit_load_)(void) = nullptr;
-void (*Jit::jit_unload_)(void*) = nullptr;
-bool (*Jit::jit_compile_method_)(void*, JitMemoryRegion*, ArtMethod*, Thread*, bool, bool)
-    = nullptr;
-void (*Jit::jit_types_loaded_)(void*, mirror::Class**, size_t count) = nullptr;
-bool (*Jit::jit_generate_debug_info_)(void*) = nullptr;
-void (*Jit::jit_update_options_)(void*) = nullptr;
-
-struct StressModeHelper {
-  DECLARE_RUNTIME_DEBUG_FLAG(kSlowMode);
-};
-DEFINE_RUNTIME_DEBUG_FLAG(StressModeHelper, kSlowMode);
+JitCompilerInterface* Jit::jit_compiler_ = nullptr;
+JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
 
 uint32_t JitOptions::RoundUpThreshold(uint32_t threshold) {
-  if (threshold > kJitSamplesBatchSize) {
+  if (!Jit::kSlowMode) {
     threshold = RoundUp(threshold, kJitSamplesBatchSize);
   }
   CHECK_LE(threshold, std::numeric_limits<uint16_t>::max());
@@ -102,7 +94,7 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
   } else {
     jit_options->compile_threshold_ =
         kIsDebugBuild
-            ? (StressModeHelper::kSlowMode
+            ? (Jit::kSlowMode
                    ? kJitSlowStressDefaultCompileThreshold
                    : kJitStressDefaultCompileThreshold)
             : kJitDefaultCompileThreshold;
@@ -177,6 +169,7 @@ void Jit::AddTimingLogger(const TimingLogger& logger) {
 Jit::Jit(JitCodeCache* code_cache, JitOptions* options)
     : code_cache_(code_cache),
       options_(options),
+      boot_completed_lock_("Jit::boot_completed_lock_"),
       cumulative_timings_("JIT timings"),
       memory_use_("Memory used for compilation", 16),
       lock_("JIT memory use lock") {}
@@ -186,8 +179,8 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
     LOG(WARNING) << "Not creating JIT: library not loaded";
     return nullptr;
   }
-  jit_compiler_handle_ = (jit_load_)();
-  if (jit_compiler_handle_ == nullptr) {
+  jit_compiler_ = (jit_load_)();
+  if (jit_compiler_ == nullptr) {
     LOG(WARNING) << "Not creating JIT: failed to allocate a compiler";
     return nullptr;
   }
@@ -198,7 +191,7 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
   // We aren't able to keep method pointers live during the instrumentation method entry trampoline
   // so we will just disable jit-gc if we are doing that.
   if (code_cache->GetGarbageCollectCode()) {
-    code_cache->SetGarbageCollectCode(!jit_generate_debug_info_(jit_compiler_handle_) &&
+    code_cache->SetGarbageCollectCode(!jit_compiler_->GenerateDebugInfo() &&
         !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
   }
 
@@ -232,15 +225,7 @@ bool Jit::LoadCompilerLibrary(std::string* error_msg) {
     *error_msg = oss.str();
     return false;
   }
-  bool all_resolved = true;
-  all_resolved = all_resolved && LoadSymbol(&jit_load_, "jit_load", error_msg);
-  all_resolved = all_resolved && LoadSymbol(&jit_unload_, "jit_unload", error_msg);
-  all_resolved = all_resolved && LoadSymbol(&jit_compile_method_, "jit_compile_method", error_msg);
-  all_resolved = all_resolved && LoadSymbol(&jit_types_loaded_, "jit_types_loaded", error_msg);
-  all_resolved = all_resolved && LoadSymbol(&jit_update_options_, "jit_update_options", error_msg);
-  all_resolved = all_resolved &&
-      LoadSymbol(&jit_generate_debug_info_, "jit_generate_debug_info", error_msg);
-  if (!all_resolved) {
+  if (!LoadSymbol(&jit_load_, "jit_load", error_msg)) {
     dlclose(jit_library_handle_);
     return false;
   }
@@ -285,8 +270,7 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr
   VLOG(jit) << "Compiling method "
             << ArtMethod::PrettyMethod(method_to_compile)
             << " osr=" << std::boolalpha << osr;
-  bool success = jit_compile_method_(
-      jit_compiler_handle_, region, method_to_compile, self, baseline, osr);
+  bool success = jit_compiler_->CompileMethod(self, region, method_to_compile, baseline, osr);
   code_cache_->DoneCompiling(method_to_compile, self, osr);
   if (!success) {
     VLOG(jit) << "Failed to compile method "
@@ -362,9 +346,9 @@ Jit::~Jit() {
     Runtime::Current()->DumpDeoptimizations(LOG_STREAM(INFO));
   }
   DeleteThreadPool();
-  if (jit_compiler_handle_ != nullptr) {
-    jit_unload_(jit_compiler_handle_);
-    jit_compiler_handle_ = nullptr;
+  if (jit_compiler_ != nullptr) {
+    delete jit_compiler_;
+    jit_compiler_ = nullptr;
   }
   if (jit_library_handle_ != nullptr) {
     dlclose(jit_library_handle_);
@@ -378,9 +362,8 @@ void Jit::NewTypeLoadedIfUsingJit(mirror::Class* type) {
     return;
   }
   jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit_generate_debug_info_(jit->jit_compiler_handle_)) {
-    DCHECK(jit->jit_types_loaded_ != nullptr);
-    jit->jit_types_loaded_(jit->jit_compiler_handle_, &type, 1);
+  if (jit->jit_compiler_->GenerateDebugInfo()) {
+    jit_compiler_->TypesLoaded(&type, 1);
   }
 }
 
@@ -393,12 +376,12 @@ void Jit::DumpTypeInfoForLoadedTypes(ClassLinker* linker) {
     std::vector<mirror::Class*> classes_;
   };
 
-  if (jit_generate_debug_info_(jit_compiler_handle_)) {
+  if (jit_compiler_->GenerateDebugInfo()) {
     ScopedObjectAccess so(Thread::Current());
 
     CollectClasses visitor;
     linker->VisitClasses(&visitor);
-    jit_types_loaded_(jit_compiler_handle_, visitor.classes_.data(), visitor.classes_.size());
+    jit_compiler_->TypesLoaded(visitor.classes_.data(), visitor.classes_.size());
   }
 }
 
@@ -629,6 +612,20 @@ class JitCompileTask final : public Task {
   DISALLOW_IMPLICIT_CONSTRUCTORS(JitCompileTask);
 };
 
+static std::string GetProfileFile(const std::string& dex_location) {
+  // Hardcoded assumption where the profile file is.
+  // TODO(ngeoffray): this is brittle and we would need to change change if we
+  // wanted to do more eager JITting of methods in a profile. This is
+  // currently only for system server.
+  return dex_location + ".prof";
+}
+
+static std::string GetBootProfileFile(const std::string& profile) {
+  // The boot profile can be found next to the compilation profile, with a
+  // different extension.
+  return ReplaceFileExtension(profile, "bprof");
+}
+
 class ZygoteTask final : public Task {
  public:
   ZygoteTask() {}
@@ -646,9 +643,17 @@ class ZygoteTask final : public Task {
     const std::vector<const DexFile*>& boot_class_path =
         runtime->GetClassLinker()->GetBootClassPath();
     ScopedNullHandle<mirror::ClassLoader> null_handle;
+    std::string boot_profile = GetBootProfileFile(profile_file);
     // We add to the queue for zygote so that we can fork processes in-between
     // compilations.
-    uint32_t added_to_queue = runtime->GetJit()->CompileMethodsFromProfile(
+    uint32_t added_to_queue = 0;
+    if (Runtime::Current()->IsPrimaryZygote()) {
+      // We avoid doing compilation at boot for the secondary zygote, as apps
+      // forked from it are not critical for boot.
+      added_to_queue += runtime->GetJit()->CompileMethodsFromBootProfile(
+          self, boot_class_path, boot_profile, null_handle, /* add_to_queue= */ true);
+    }
+    added_to_queue += runtime->GetJit()->CompileMethodsFromProfile(
         self, boot_class_path, profile_file, null_handle, /* add_to_queue= */ true);
 
     JitCodeCache* code_cache = runtime->GetJit()->GetCodeCache();
@@ -662,14 +667,6 @@ class ZygoteTask final : public Task {
  private:
   DISALLOW_COPY_AND_ASSIGN(ZygoteTask);
 };
-
-static std::string GetProfileFile(const std::string& dex_location) {
-  // Hardcoded assumption where the profile file is.
-  // TODO(ngeoffray): this is brittle and we would need to change change if we
-  // wanted to do more eager JITting of methods in a profile. This is
-  // currently only for system server.
-  return dex_location + ".prof";
-}
 
 class JitProfileTask final : public Task {
  public:
@@ -695,12 +692,23 @@ class JitProfileTask final : public Task {
     StackHandleScope<1> hs(self);
     Handle<mirror::ClassLoader> loader = hs.NewHandle<mirror::ClassLoader>(
         soa.Decode<mirror::ClassLoader>(class_loader_));
+
+    std::string profile = GetProfileFile(dex_files_[0]->GetLocation());
+    std::string boot_profile = GetBootProfileFile(profile);
+
+    Runtime::Current()->GetJit()->CompileMethodsFromBootProfile(
+        self,
+        dex_files_,
+        boot_profile,
+        loader,
+        /* add_to_queue= */ false);
+
     Runtime::Current()->GetJit()->CompileMethodsFromProfile(
         self,
         dex_files_,
-        GetProfileFile(dex_files_[0]->GetLocation()),
+        profile,
         loader,
-        /* add_to_queue= */ false);
+        /* add_to_queue= */ true);
   }
 
   void Finalize() override {
@@ -749,6 +757,92 @@ void Jit::RegisterDexFiles(const std::vector<std::unique_ptr<const DexFile>>& de
   }
 }
 
+bool Jit::CompileMethodFromProfile(Thread* self,
+                                   ClassLinker* class_linker,
+                                   uint32_t method_idx,
+                                   Handle<mirror::DexCache> dex_cache,
+                                   Handle<mirror::ClassLoader> class_loader,
+                                   bool add_to_queue,
+                                   bool compile_after_boot) {
+  ArtMethod* method = class_linker->ResolveMethodWithoutInvokeType(
+      method_idx, dex_cache, class_loader);
+  if (method == nullptr) {
+    self->ClearException();
+    return false;
+  }
+  if (!method->IsCompilable() || !method->IsInvokable()) {
+    return false;
+  }
+  if (method->IsPreCompiled()) {
+    // Already seen by another profile.
+    return false;
+  }
+  const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
+  if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
+      class_linker->IsQuickGenericJniStub(entry_point) ||
+      class_linker->IsQuickResolutionStub(entry_point)) {
+    method->SetPreCompiled();
+    if (!add_to_queue) {
+      CompileMethod(method, self, /* baseline= */ false, /* osr= */ false, /* prejit= */ true);
+    } else {
+      Task* task = new JitCompileTask(method, JitCompileTask::TaskKind::kPreCompile);
+      if (compile_after_boot) {
+        MutexLock mu(Thread::Current(), boot_completed_lock_);
+        if (!boot_completed_) {
+          tasks_after_boot_.push_back(task);
+          return true;
+        }
+        DCHECK(tasks_after_boot_.empty());
+      }
+      thread_pool_->AddTask(self, task);
+      return true;
+    }
+  }
+  return false;
+}
+
+uint32_t Jit::CompileMethodsFromBootProfile(
+    Thread* self,
+    const std::vector<const DexFile*>& dex_files,
+    const std::string& profile_file,
+    Handle<mirror::ClassLoader> class_loader,
+    bool add_to_queue) {
+  unix_file::FdFile profile(profile_file.c_str(), O_RDONLY, true);
+
+  if (profile.Fd() == -1) {
+    PLOG(WARNING) << "No boot profile: " << profile_file;
+    return 0u;
+  }
+
+  ProfileBootInfo profile_info;
+  if (!profile_info.Load(profile.Fd(), dex_files)) {
+    LOG(ERROR) << "Could not load profile file: " << profile_file;
+    return 0u;
+  }
+
+  ScopedObjectAccess soa(self);
+  VariableSizedHandleScope handles(self);
+  std::vector<Handle<mirror::DexCache>> dex_caches;
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+  for (const DexFile* dex_file : profile_info.GetDexFiles()) {
+    dex_caches.push_back(handles.NewHandle(class_linker->FindDexCache(self, *dex_file)));
+  }
+
+  uint32_t added_to_queue = 0;
+  for (const std::pair<uint32_t, uint32_t>& pair : profile_info.GetMethods()) {
+    if (CompileMethodFromProfile(self,
+                                 class_linker,
+                                 pair.second,
+                                 dex_caches[pair.first],
+                                 class_loader,
+                                 add_to_queue,
+                                 /*compile_after_boot=*/false)) {
+      ++added_to_queue;
+    }
+  }
+  return added_to_queue;
+}
+
 uint32_t Jit::CompileMethodsFromProfile(
     Thread* self,
     const std::vector<const DexFile*>& dex_files,
@@ -761,18 +855,17 @@ uint32_t Jit::CompileMethodsFromProfile(
     return 0u;
   }
 
-  std::string error_msg;
-  ScopedFlock profile = LockedFile::Open(
-      profile_file.c_str(), O_RDONLY, /* block= */ false, &error_msg);
+  // We don't generate boot profiles on device, therefore we don't
+  // need to lock the file.
+  unix_file::FdFile profile(profile_file.c_str(), O_RDONLY, true);
 
-  // Return early if we're unable to obtain a lock on the profile.
-  if (profile.get() == nullptr) {
-    LOG(ERROR) << "Cannot lock profile: " << error_msg;
+  if (profile.Fd() == -1) {
+    PLOG(WARNING) << "No profile: " << profile_file;
     return 0u;
   }
 
   ProfileCompilationInfo profile_info;
-  if (!profile_info.Load(profile->Fd())) {
+  if (!profile_info.Load(profile.Fd())) {
     LOG(ERROR) << "Could not load profile file";
     return 0u;
   }
@@ -810,33 +903,14 @@ uint32_t Jit::CompileMethodsFromProfile(
     CHECK(dex_cache != nullptr) << "Could not find dex cache for " << dex_file->GetLocation();
 
     for (uint16_t method_idx : all_methods) {
-      ArtMethod* method = class_linker->ResolveMethodWithoutInvokeType(
-          method_idx, dex_cache, class_loader);
-      if (method == nullptr) {
-        self->ClearException();
-        continue;
-      }
-      if (!method->IsCompilable() || !method->IsInvokable()) {
-        continue;
-      }
-      const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
-      if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
-          class_linker->IsQuickGenericJniStub(entry_point) ||
-          class_linker->IsQuickResolutionStub(entry_point)) {
-        // Special case ZygoteServer class so that it gets compiled before the
-        // zygote enters it. This avoids needing to do OSR during app startup.
-        // TODO: have a profile instead.
-        if (!add_to_queue || method->GetDeclaringClass()->DescriptorEquals(
-                "Lcom/android/internal/os/ZygoteServer;")) {
-          CompileMethod(method, self, /* baseline= */ false, /* osr= */ false, /* prejit= */ true);
-        } else {
-          ++added_to_queue;
-          thread_pool_->AddTask(self,
-              new JitCompileTask(method, JitCompileTask::TaskKind::kPreCompile));
-          if (Runtime::Current()->IsZygote()) {
-            method->SetZygoteCompiled();
-          }
-        }
+      if (CompileMethodFromProfile(self,
+                                   class_linker,
+                                   method_idx,
+                                   dex_cache,
+                                   class_loader,
+                                   add_to_queue,
+                                   /*compile_after_boot=*/true)) {
+        ++added_to_queue;
       }
     }
   }
@@ -844,7 +918,7 @@ uint32_t Jit::CompileMethodsFromProfile(
 }
 
 static bool IgnoreSamplesForMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (method->IsClassInitializer() || !method->IsCompilable() || method->IsZygoteCompiled()) {
+  if (method->IsClassInitializer() || !method->IsCompilable() || method->IsPreCompiled()) {
     // We do not want to compile such methods.
     return true;
   }
@@ -871,6 +945,13 @@ bool Jit::MaybeCompileMethod(Thread* self,
                              bool with_backedges) {
   if (thread_pool_ == nullptr) {
     return false;
+  }
+  if (UNLIKELY(method->IsPreCompiled()) && !with_backedges /* don't check for OSR */) {
+    const void* code_ptr = code_cache_->GetZygoteMap()->GetCodeFor(method);
+    if (code_ptr != nullptr) {
+      Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, code_ptr);
+      return true;
+    }
   }
   if (IgnoreSamplesForMethod(method)) {
     return false;
@@ -973,14 +1054,6 @@ void Jit::MethodEntered(Thread* thread, ArtMethod* method) {
     return;
   }
 
-  if (UNLIKELY(method->IsZygoteCompiled())) {
-    const void* code_ptr = code_cache_->GetZygoteMap()->GetCodeFor(method);
-    if (code_ptr != nullptr) {
-      Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, code_ptr);
-      return;
-    }
-  }
-
   ProfilingInfo* profiling_info = method->GetProfilingInfo(kRuntimePointerSize);
   // Update the entrypoint if the ProfilingInfo has one. The interpreter will call it
   // instead of interpreting the method. We don't update it for instrumentation as the entrypoint
@@ -1049,10 +1122,10 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
   }
   // At this point, the compiler options have been adjusted to the particular configuration
   // of the forked child. Parse them again.
-  jit_update_options_(jit_compiler_handle_);
+  jit_compiler_->ParseCompilerOptions();
 
   // Adjust the status of code cache collection: the status from zygote was to not collect.
-  code_cache_->SetGarbageCollectCode(!jit_generate_debug_info_(jit_compiler_handle_) &&
+  code_cache_->SetGarbageCollectCode(!jit_compiler_->GenerateDebugInfo() &&
       !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
 
   if (thread_pool_ != nullptr) {
@@ -1082,6 +1155,19 @@ void Jit::PostZygoteFork() {
     return;
   }
   thread_pool_->CreateThreads();
+}
+
+void Jit::BootCompleted() {
+  Thread* self = Thread::Current();
+  std::deque<Task*> tasks;
+  {
+    MutexLock mu(self, boot_completed_lock_);
+    tasks = std::move(tasks_after_boot_);
+    boot_completed_ = true;
+  }
+  for (Task* task : tasks) {
+    thread_pool_->AddTask(self, task);
+  }
 }
 
 bool Jit::CanEncodeMethod(ArtMethod* method, bool is_for_shared_region) const {

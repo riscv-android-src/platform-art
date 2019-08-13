@@ -20,6 +20,7 @@
 #include "base/histogram-inl.h"
 #include "base/macros.h"
 #include "base/mutex.h"
+#include "base/runtime_debug.h"
 #include "base/timing_logger.h"
 #include "handle.h"
 #include "jit/profile_saver_options.h"
@@ -39,6 +40,7 @@ namespace mirror {
 class Object;
 class Class;
 class ClassLoader;
+class DexCache;
 class String;
 }   // namespace mirror
 
@@ -53,7 +55,9 @@ static constexpr int16_t kJitHotnessDisabled = -2;
 // At what priority to schedule jit threads. 9 is the lowest foreground priority on device.
 // See android/os/Process.java.
 static constexpr int kJitPoolThreadPthreadDefaultPriority = 9;
-static constexpr uint32_t kJitSamplesBatchSize = 32;  // Must be power of 2.
+// We check whether to jit-compile the method every Nth invoke.
+// The tests often use threshold of 1000 (and thus 500 to start profiling).
+static constexpr uint32_t kJitSamplesBatchSize = 512;  // Must be power of 2.
 
 class JitOptions {
  public:
@@ -160,12 +164,27 @@ class JitOptions {
   DISALLOW_COPY_AND_ASSIGN(JitOptions);
 };
 
+// Implemented and provided by the compiler library.
+class JitCompilerInterface {
+ public:
+  virtual ~JitCompilerInterface() {}
+  virtual bool CompileMethod(
+      Thread* self, JitMemoryRegion* region, ArtMethod* method, bool baseline, bool osr)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+  virtual void TypesLoaded(mirror::Class**, size_t count)
+      REQUIRES_SHARED(Locks::mutator_lock_) = 0;
+  virtual bool GenerateDebugInfo() = 0;
+  virtual void ParseCompilerOptions() = 0;
+};
+
 class Jit {
  public:
   static constexpr size_t kDefaultPriorityThreadWeightRatio = 1000;
   static constexpr size_t kDefaultInvokeTransitionWeightRatio = 500;
   // How frequently should the interpreter check to see if OSR compilation is ready.
   static constexpr int16_t kJitRecheckOSRThreshold = 101;  // Prime number to avoid patterns.
+
+  DECLARE_RUNTIME_DEBUG_FLAG(kSlowMode);
 
   virtual ~Jit();
 
@@ -310,8 +329,11 @@ class Jit {
   // Adjust state after forking.
   void PostZygoteFork();
 
-  // Compile methods from the given profile. If `add_to_queue` is true, methods
-  // in the profile are added to the JIT queue. Otherwise they are compiled
+  // Called when system finishes booting.
+  void BootCompleted();
+
+  // Compile methods from the given profile (.prof extension). If `add_to_queue`
+  // is true, methods in the profile are added to the JIT queue. Otherwise they are compiled
   // directly.
   // Return the number of methods added to the queue.
   uint32_t CompileMethodsFromProfile(Thread* self,
@@ -319,6 +341,16 @@ class Jit {
                                      const std::string& profile_path,
                                      Handle<mirror::ClassLoader> class_loader,
                                      bool add_to_queue);
+
+  // Compile methods from the given boot profile (.bprof extension). If `add_to_queue`
+  // is true, methods in the profile are added to the JIT queue. Otherwise they are compiled
+  // directly.
+  // Return the number of methods added to the queue.
+  uint32_t CompileMethodsFromBootProfile(Thread* self,
+                                         const std::vector<const DexFile*>& dex_files,
+                                         const std::string& profile_path,
+                                         Handle<mirror::ClassLoader> class_loader,
+                                         bool add_to_queue);
 
   // Register the dex files to the JIT. This is to perform any compilation/optimization
   // at the point of loading the dex files.
@@ -339,6 +371,17 @@ class Jit {
  private:
   Jit(JitCodeCache* code_cache, JitOptions* options);
 
+  // Compile an individual method listed in a profile. If `add_to_queue` is
+  // true and the method was resolved, return true. Otherwise return false.
+  bool CompileMethodFromProfile(Thread* self,
+                                ClassLinker* linker,
+                                uint32_t method_idx,
+                                Handle<mirror::DexCache> dex_cache,
+                                Handle<mirror::ClassLoader> class_loader,
+                                bool add_to_queue,
+                                bool compile_after_boot)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Compile the method if the number of samples passes a threshold.
   // Returns false if we can not compile now - don't increment the counter and retry later.
   bool MaybeCompileMethod(Thread* self,
@@ -352,13 +395,8 @@ class Jit {
 
   // JIT compiler
   static void* jit_library_handle_;
-  static void* jit_compiler_handle_;
-  static void* (*jit_load_)(void);
-  static void (*jit_unload_)(void*);
-  static bool (*jit_compile_method_)(void*, JitMemoryRegion*, ArtMethod*, Thread*, bool, bool);
-  static void (*jit_types_loaded_)(void*, mirror::Class**, size_t count);
-  static void (*jit_update_options_)(void*);
-  static bool (*jit_generate_debug_info_)(void*);
+  static JitCompilerInterface* jit_compiler_;
+  static JitCompilerInterface* (*jit_load_)(void);
   template <typename T> static bool LoadSymbol(T*, const char* symbol, std::string* error_msg);
 
   // JIT resources owned by runtime.
@@ -367,6 +405,10 @@ class Jit {
 
   std::unique_ptr<ThreadPool> thread_pool_;
   std::vector<std::unique_ptr<OatDexFile>> type_lookup_tables_;
+
+  Mutex boot_completed_lock_;
+  bool boot_completed_ GUARDED_BY(boot_completed_lock_) = false;
+  std::deque<Task*> tasks_after_boot_ GUARDED_BY(boot_completed_lock_);
 
   // Performance monitoring.
   CumulativeLogger cumulative_timings_;

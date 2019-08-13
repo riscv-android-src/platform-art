@@ -14,6 +14,7 @@ msg() {
 }
 
 ANDROID_ROOT="/system"
+ANDROID_I18N_ROOT="/apex/com.android.i18n"
 ANDROID_RUNTIME_ROOT="/apex/com.android.runtime"
 ANDROID_TZDATA_ROOT="/apex/com.android.tzdata"
 ARCHITECTURES_32="(arm|x86|mips|none)"
@@ -232,6 +233,7 @@ while true; do
     elif [ "x$1" = "x--host" ]; then
         HOST="y"
         ANDROID_ROOT="${ANDROID_HOST_OUT}"
+        ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
         ANDROID_RUNTIME_ROOT="${ANDROID_HOST_OUT}/com.android.runtime"
         ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
         shift
@@ -305,6 +307,7 @@ while true; do
         TIME_OUT="n"
         HOST="y"
         ANDROID_ROOT="${ANDROID_HOST_OUT}"
+        ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
         ANDROID_RUNTIME_ROOT="${ANDROID_HOST_OUT}/com.android.runtime"
         ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
         shift
@@ -366,6 +369,10 @@ while true; do
     elif [ "x$1" = "x--android-root" ]; then
         shift
         ANDROID_ROOT="$1"
+        shift
+    elif [ "x$1" = "x--android-i18n-root" ]; then
+        shift
+        ANDROID_I18N_ROOT="$1"
         shift
     elif [ "x$1" = "x--android-runtime-root" ]; then
         shift
@@ -632,7 +639,7 @@ fi
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-bpath_modules="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
+bpath_modules="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
 if [ "${HOST}" = "y" ]; then
     framework="${ANDROID_HOST_OUT}/framework"
     if [ "${ANDROID_HOST_OUT:0:${#ANDROID_BUILD_TOP}+1}" = "${ANDROID_BUILD_TOP}/" ]; then
@@ -1048,6 +1055,7 @@ if [ "$HOST" = "n" ]; then
              export ANDROID_ADDITIONAL_PUBLIC_LIBRARIES=$PUBLIC_LIBS && \
              export DEX_LOCATION=$DEX_LOCATION && \
              export ANDROID_ROOT=$ANDROID_ROOT && \
+             export ANDROID_I18N_ROOT=$ANDROID_I18N_ROOT && \
              export ANDROID_RUNTIME_ROOT=$ANDROID_RUNTIME_ROOT && \
              export ANDROID_TZDATA_ROOT=$ANDROID_TZDATA_ROOT && \
              export ANDROID_LOG_TAGS=$ANDROID_LOG_TAGS && \
@@ -1094,6 +1102,7 @@ else
 
     export ANDROID_DATA="$DEX_LOCATION"
     export ANDROID_ROOT="${ANDROID_ROOT}"
+    export ANDROID_I18N_ROOT="${ANDROID_I18N_ROOT}"
     export ANDROID_RUNTIME_ROOT="${ANDROID_RUNTIME_ROOT}"
     export ANDROID_TZDATA_ROOT="${ANDROID_TZDATA_ROOT}"
     if [ "$USE_ZIPAPEX" = "y" ] || [ "$USE_EXRACTED_ZIPAPEX" = "y" ]; then
@@ -1141,7 +1150,7 @@ else
     fi
 
     if [ "$DEV_MODE" = "y" ]; then
-      for var in ANDROID_PRINTF_LOG ANDROID_DATA ANDROID_ROOT ANDROID_TZDATA_ROOT ANDROID_RUNTIME_ROOT LD_LIBRARY_PATH DYLD_LIBRARY_PATH PATH LD_USE_LOAD_BIAS; do
+      for var in ANDROID_PRINTF_LOG ANDROID_DATA ANDROID_ROOT ANDROID_I18N_ROOT ANDROID_TZDATA_ROOT ANDROID_RUNTIME_ROOT LD_LIBRARY_PATH DYLD_LIBRARY_PATH PATH LD_USE_LOAD_BIAS; do
         echo EXPORT $var=${!var}
       done
       echo "$(declare -f linkdirs)"
