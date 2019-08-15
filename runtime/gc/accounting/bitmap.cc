@@ -21,7 +21,7 @@
 #include "base/bit_utils.h"
 #include "base/mem_map.h"
 #include "card_table.h"
-#include "jit/jit_code_cache.h"
+#include "jit/jit_memory_region.h"
 
 namespace art {
 namespace gc {
@@ -97,7 +97,7 @@ MemoryRangeBitmap<kAlignment>* MemoryRangeBitmap<kAlignment>::CreateFromMemMap(
 }
 
 template class MemoryRangeBitmap<CardTable::kCardSize>;
-template class MemoryRangeBitmap<jit::kJitCodeAlignment>;
+template class MemoryRangeBitmap<jit::kJitCodeAccountingBytes>;
 
 }  // namespace accounting
 }  // namespace gc
