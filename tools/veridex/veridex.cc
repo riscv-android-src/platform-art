@@ -71,17 +71,17 @@ static const char* kStubsOption = "--core-stubs=";
 static const char* kFlagsOption = "--api-flags=";
 static const char* kImprecise = "--imprecise";
 static const char* kTargetSdkVersion = "--target-sdk-version=";
-static const char* kOnlyReportSdkUses = "--only-report-sdk-uses";
 static const char* kAppClassFilter = "--app-class-filter=";
+static const char* kExcludeApiListsOption = "--exclude-api-lists=";
 
 struct VeridexOptions {
   const char* dex_file = nullptr;
   const char* core_stubs = nullptr;
   const char* flags_file = nullptr;
   bool precise = true;
-  int target_sdk_version = 28; /* P */
-  bool only_report_sdk_uses = false;
+  int target_sdk_version = 29; /* Q */
   std::vector<std::string> app_class_name_filter;
+  std::vector<std::string> exclude_api_lists;
 };
 
 static const char* Substr(const char* str, int index) {
@@ -108,13 +108,14 @@ static void ParseArgs(VeridexOptions* options, int argc, char** argv) {
       options->precise = false;
     } else if (StartsWith(argv[i], kTargetSdkVersion)) {
       options->target_sdk_version = atoi(Substr(argv[i], strlen(kTargetSdkVersion)));
-    } else if (strcmp(argv[i], kOnlyReportSdkUses) == 0) {
-      options->only_report_sdk_uses = true;
     } else if (StartsWith(argv[i], kAppClassFilter)) {
       options->app_class_name_filter = android::base::Split(
           Substr(argv[i], strlen(kAppClassFilter)), ",");
+    } else if (StartsWith(argv[i], kExcludeApiListsOption)) {
+      options->exclude_api_lists = android::base::Split(
+          Substr(argv[i], strlen(kExcludeApiListsOption)), ",");
     } else {
-      LOG(WARNING) << "Unknown command line argument: " << argv[i];
+      LOG(ERROR) << "Unknown command line argument: " << argv[i];
     }
   }
 }
@@ -192,44 +193,46 @@ class Veridex {
     std::vector<std::unique_ptr<VeridexResolver>> boot_resolvers;
     Resolve(boot_dex_files, resolver_map, type_map, &boot_resolvers);
 
-    // Now that boot classpath has been resolved, fill classes and reflection
-    // methods.
-    VeriClass::object_ = type_map["Ljava/lang/Object;"];
-    VeriClass::class_ = type_map["Ljava/lang/Class;"];
-    VeriClass::class_loader_ = type_map["Ljava/lang/ClassLoader;"];
-    VeriClass::string_ = type_map["Ljava/lang/String;"];
-    VeriClass::throwable_ = type_map["Ljava/lang/Throwable;"];
-    VeriClass::forName_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_, "forName", "(Ljava/lang/String;)Ljava/lang/Class;");
-    VeriClass::getField_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_, "getField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
-    VeriClass::getDeclaredField_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_, "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
-    VeriClass::getMethod_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_,
-        "getMethod",
-        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
-    VeriClass::getDeclaredMethod_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_,
-        "getDeclaredMethod",
-        "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
-    VeriClass::getClass_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::object_, "getClass", "()Ljava/lang/Class;");
-    VeriClass::loadClass_ = boot_resolvers[0]->LookupDeclaredMethodIn(
-        *VeriClass::class_loader_, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
+    if (options.precise) {
+      // For precise mode we expect core-stubs to contain java.lang classes.
+      VeriClass::object_ = type_map["Ljava/lang/Object;"];
+      VeriClass::class_ = type_map["Ljava/lang/Class;"];
+      VeriClass::class_loader_ = type_map["Ljava/lang/ClassLoader;"];
+      VeriClass::string_ = type_map["Ljava/lang/String;"];
+      VeriClass::throwable_ = type_map["Ljava/lang/Throwable;"];
+      VeriClass::forName_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_, "forName", "(Ljava/lang/String;)Ljava/lang/Class;");
+      VeriClass::getField_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_, "getField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
+      VeriClass::getDeclaredField_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_, "getDeclaredField", "(Ljava/lang/String;)Ljava/lang/reflect/Field;");
+      VeriClass::getMethod_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_,
+          "getMethod",
+          "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+      VeriClass::getDeclaredMethod_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_,
+          "getDeclaredMethod",
+          "(Ljava/lang/String;[Ljava/lang/Class;)Ljava/lang/reflect/Method;");
+      VeriClass::getClass_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::object_, "getClass", "()Ljava/lang/Class;");
+      VeriClass::loadClass_ = boot_resolvers[0]->LookupDeclaredMethodIn(
+          *VeriClass::class_loader_, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;");
 
-    VeriClass* version = type_map["Landroid/os/Build$VERSION;"];
-    if (version != nullptr) {
-      VeriClass::sdkInt_ = boot_resolvers[0]->LookupFieldIn(*version, "SDK_INT", "I");
+      VeriClass* version = type_map["Landroid/os/Build$VERSION;"];
+      if (version != nullptr) {
+        VeriClass::sdkInt_ = boot_resolvers[0]->LookupFieldIn(*version, "SDK_INT", "I");
+      }
     }
 
     std::vector<std::unique_ptr<VeridexResolver>> app_resolvers;
     Resolve(app_dex_files, resolver_map, type_map, &app_resolvers);
 
     ClassFilter app_class_filter(options.app_class_name_filter);
+    ApiListFilter api_list_filter(options.exclude_api_lists);
 
     // Find and log uses of hidden APIs.
-    HiddenApi hidden_api(options.flags_file, options.only_report_sdk_uses);
+    HiddenApi hidden_api(options.flags_file, api_list_filter);
     HiddenApiStats stats;
 
     HiddenApiFinder api_finder(hidden_api);
@@ -242,7 +245,7 @@ class Veridex {
       precise_api_finder.Dump(std::cout, &stats);
     }
 
-    DumpSummaryStats(std::cout, stats, options);
+    DumpSummaryStats(std::cout, stats, api_list_filter);
 
     if (options.precise) {
       std::cout << "To run an analysis that can give more reflection accesses, " << std::endl
@@ -255,20 +258,15 @@ class Veridex {
  private:
   static void DumpSummaryStats(std::ostream& os,
                                const HiddenApiStats& stats,
-                               const VeridexOptions& options) {
+                               const ApiListFilter& api_list_filter) {
     static const char* kPrefix = "       ";
-    if (options.only_report_sdk_uses) {
-      os << stats.api_counts[hiddenapi::ApiList::Whitelist().GetIntValue()]
-         << " SDK API uses." << std::endl;
-    } else {
-      os << stats.count << " hidden API(s) used: "
-         << stats.linking_count << " linked against, "
-         << stats.reflection_count << " through reflection" << std::endl;
-      for (size_t i = 0; i < hiddenapi::ApiList::kValueCount; ++i) {
-        hiddenapi::ApiList api_list = hiddenapi::ApiList(i);
-        if (api_list != hiddenapi::ApiList::Whitelist()) {
-          os << kPrefix << stats.api_counts[i] << " in " << api_list << std::endl;
-        }
+    os << stats.count << " hidden API(s) used: "
+       << stats.linking_count << " linked against, "
+       << stats.reflection_count << " through reflection" << std::endl;
+    for (size_t i = 0; i < hiddenapi::ApiList::kValueCount; ++i) {
+      hiddenapi::ApiList api_list = hiddenapi::ApiList(i);
+      if (api_list_filter.Matches(api_list)) {
+        os << kPrefix << stats.api_counts[i] << " in " << api_list << std::endl;
       }
     }
   }

@@ -58,6 +58,12 @@ art_global_defaults {
     // Additional flags are computed by art.go
 
     name: "art_defaults",
+
+    // This is the default visibility for the //art package, but we repeat it
+    // here so that it gets merged with other visibility rules in modules
+    // extending these defaults.
+    visibility: ["//art:__subpackages__"],
+
     cflags: [
         // Base set of cflags used by all things ART.
         "-fno-rtti",
@@ -108,6 +114,25 @@ art_global_defaults {
         "-D_LIBCPP_ENABLE_THREAD_SAFETY_ANNOTATIONS",
     ],
 
+    arch: {
+        x86: {
+            avx2: {
+                cflags: [
+                    "-mavx2",
+                    "-mfma",
+                ],
+            },
+        },
+        x86_64: {
+            avx2: {
+                cflags: [
+                    "-mavx2",
+                    "-mfma",
+                ],
+            },
+        },
+    },
+
     target: {
         android: {
             cflags: [
@@ -121,8 +146,8 @@ art_global_defaults {
             ],
             header_libs: [
                 // We optimize Thread::Current() with a direct TLS access. This requires access to a
-                //  private Bionic header.
-                "bionic_libc_private_headers",
+                //  platform specific Bionic header.
+                "bionic_libc_platform_headers",
             ],
         },
         linux: {
@@ -135,8 +160,8 @@ art_global_defaults {
         linux_bionic: {
             header_libs: [
                 // We optimize Thread::Current() with a direct TLS access. This requires access to a
-                //  private Bionic header.
-                "bionic_libc_private_headers",
+                //  platform specific Bionic header.
+                "bionic_libc_platform_headers",
             ],
         },
         darwin: {
@@ -202,6 +227,7 @@ art_global_defaults {
 
 art_debug_defaults {
     name: "art_debug_defaults",
+    visibility: ["//art:__subpackages__"],
     cflags: [
         "-DDYNAMIC_ANNOTATIONS_ENABLED=1",
         "-DVIXL_DEBUG",

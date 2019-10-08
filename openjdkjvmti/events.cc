@@ -64,6 +64,8 @@
 #include "mirror/object-inl.h"
 #include "monitor-inl.h"
 #include "nativehelper/scoped_local_ref.h"
+#include "reflective_handle.h"
+#include "reflective_handle_scope-inl.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "scoped_thread_state_change.h"
@@ -92,6 +94,9 @@ void ArtJvmtiEventCallbacks::CopyExtensionsFrom(const ArtJvmtiEventCallbacks* cb
 
 jvmtiError ArtJvmtiEventCallbacks::Set(jint index, jvmtiExtensionEvent cb) {
   switch (index) {
+    case static_cast<jint>(ArtJvmtiEvent::kObsoleteObjectCreated):
+      ObsoleteObjectCreated = reinterpret_cast<ArtJvmtiEventObsoleteObjectCreated>(cb);
+      return OK;
     case static_cast<jint>(ArtJvmtiEvent::kDdmPublishChunk):
       DdmPublishChunk = reinterpret_cast<ArtJvmtiEventDdmPublishChunk>(cb);
       return OK;
@@ -110,6 +115,7 @@ bool IsExtensionEvent(jint e) {
 bool IsExtensionEvent(ArtJvmtiEvent e) {
   switch (e) {
     case ArtJvmtiEvent::kDdmPublishChunk:
+    case ArtJvmtiEvent::kObsoleteObjectCreated:
       return true;
     default:
       return false;
@@ -243,6 +249,7 @@ static bool IsThreadControllable(ArtJvmtiEvent event) {
     case ArtJvmtiEvent::kCompiledMethodUnload:
     case ArtJvmtiEvent::kDynamicCodeGenerated:
     case ArtJvmtiEvent::kDataDumpRequest:
+    case ArtJvmtiEvent::kObsoleteObjectCreated:
       return false;
 
     default:
@@ -795,11 +802,14 @@ class JvmtiMethodTraceListener final : public art::instrumentation::Instrumentat
   // Call-back for when we read from a field.
   void FieldRead(art::Thread* self,
                  art::Handle<art::mirror::Object> this_object,
-                 art::ArtMethod* method,
+                 art::ArtMethod* method_p,
                  uint32_t dex_pc,
-                 art::ArtField* field)
+                 art::ArtField* field_p)
       REQUIRES_SHARED(art::Locks::mutator_lock_) override {
     if (event_handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kFieldAccess)) {
+      art::StackReflectiveHandleScope<1, 1> rhs(self);
+      art::ReflectiveHandle<art::ArtField> field(rhs.NewHandle(field_p));
+      art::ReflectiveHandle<art::ArtMethod> method(rhs.NewHandle(method_p));
       art::JNIEnvExt* jnienv = self->GetJniEnv();
       // DCHECK(!self->IsExceptionPending());
       ScopedLocalRef<jobject> this_ref(jnienv, AddLocalRef<jobject>(jnienv, this_object.Get()));
@@ -819,13 +829,16 @@ class JvmtiMethodTraceListener final : public art::instrumentation::Instrumentat
 
   void FieldWritten(art::Thread* self,
                     art::Handle<art::mirror::Object> this_object,
-                    art::ArtMethod* method,
+                    art::ArtMethod* method_p,
                     uint32_t dex_pc,
-                    art::ArtField* field,
+                    art::ArtField* field_p,
                     art::Handle<art::mirror::Object> new_val)
       REQUIRES_SHARED(art::Locks::mutator_lock_) override {
     if (event_handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kFieldModification)) {
       art::JNIEnvExt* jnienv = self->GetJniEnv();
+      art::StackReflectiveHandleScope<1, 1> rhs(self);
+      art::ReflectiveHandle<art::ArtField> field(rhs.NewHandle(field_p));
+      art::ReflectiveHandle<art::ArtMethod> method(rhs.NewHandle(method_p));
       // DCHECK(!self->IsExceptionPending());
       ScopedLocalRef<jobject> this_ref(jnienv, AddLocalRef<jobject>(jnienv, this_object.Get()));
       ScopedLocalRef<jobject> fklass(jnienv,
@@ -851,13 +864,16 @@ class JvmtiMethodTraceListener final : public art::instrumentation::Instrumentat
   // Call-back for when we write into a field.
   void FieldWritten(art::Thread* self,
                     art::Handle<art::mirror::Object> this_object,
-                    art::ArtMethod* method,
+                    art::ArtMethod* method_p,
                     uint32_t dex_pc,
-                    art::ArtField* field,
+                    art::ArtField* field_p,
                     const art::JValue& field_value)
       REQUIRES_SHARED(art::Locks::mutator_lock_) override {
     if (event_handler_->IsEventEnabledAnywhere(ArtJvmtiEvent::kFieldModification)) {
       art::JNIEnvExt* jnienv = self->GetJniEnv();
+      art::StackReflectiveHandleScope<1, 1> rhs(self);
+      art::ReflectiveHandle<art::ArtField> field(rhs.NewHandle(field_p));
+      art::ReflectiveHandle<art::ArtMethod> method(rhs.NewHandle(method_p));
       DCHECK(!self->IsExceptionPending());
       ScopedLocalRef<jobject> this_ref(jnienv, AddLocalRef<jobject>(jnienv, this_object.Get()));
       ScopedLocalRef<jobject> fklass(jnienv,
@@ -1158,6 +1174,7 @@ static DeoptRequirement GetDeoptRequirement(ArtJvmtiEvent event, jthread thread)
     case ArtJvmtiEvent::kVmObjectAlloc:
     case ArtJvmtiEvent::kClassFileLoadHookRetransformable:
     case ArtJvmtiEvent::kDdmPublishChunk:
+    case ArtJvmtiEvent::kObsoleteObjectCreated:
       return DeoptRequirement::kNone;
   }
 }

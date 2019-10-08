@@ -2087,8 +2087,12 @@ void CodeGeneratorARMVIXL::GenerateFrameEntry() {
   if (GetCompilerOptions().CountHotnessInCompiledCode()) {
     UseScratchRegisterScope temps(GetVIXLAssembler());
     vixl32::Register temp = temps.Acquire();
+    static_assert(ArtMethod::MaxCounter() == 0xFFFF, "asm is probably wrong");
+    // Load with sign extend to set the high bits for integer overflow check.
     __ Ldrh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
     __ Add(temp, temp, 1);
+    // Subtract one if the counter would overflow.
+    __ Sub(temp, temp, Operand(temp, ShiftType::LSR, 16));
     __ Strh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
   }
 
@@ -2497,8 +2501,11 @@ void InstructionCodeGeneratorARMVIXL::HandleGoto(HInstruction* got, HBasicBlock*
       vixl32::Register temp = temps.Acquire();
       __ Push(vixl32::Register(kMethodRegister));
       GetAssembler()->LoadFromOffset(kLoadWord, kMethodRegister, sp, kArmWordSize);
+      // Load with sign extend to set the high bits for integer overflow check.
       __ Ldrh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
       __ Add(temp, temp, 1);
+      // Subtract one if the counter would overflow.
+      __ Sub(temp, temp, Operand(temp, ShiftType::LSR, 16));
       __ Strh(temp, MemOperand(kMethodRegister, ArtMethod::HotnessCountOffset().Int32Value()));
       __ Pop(vixl32::Register(kMethodRegister));
     }
@@ -9455,9 +9462,12 @@ void CodeGeneratorARMVIXL::CompileBakerReadBarrierThunk(ArmVIXLAssembler& assemb
       BakerReadBarrierWidth width = BakerReadBarrierWidthField::Decode(encoded_data);
       UseScratchRegisterScope temps(assembler.GetVIXLAssembler());
       temps.Exclude(ip);
-      // If base_reg differs from holder_reg, the offset was too large and we must have emitted
-      // an explicit null check before the load. Otherwise, for implicit null checks, we need to
-      // null-check the holder as we do not necessarily do that check before going to the thunk.
+      // In the case of a field load, if `base_reg` differs from
+      // `holder_reg`, the offset was too large and we must have emitted (during the construction
+      // of the HIR graph, see `art::HInstructionBuilder::BuildInstanceFieldAccess`) and preserved
+      // (see `art::PrepareForRegisterAllocation::VisitNullCheck`) an explicit null check before
+      // the load. Otherwise, for implicit null checks, we need to null-check the holder as we do
+      // not necessarily do that check before going to the thunk.
       vixl32::Label throw_npe_label;
       vixl32::Label* throw_npe = nullptr;
       if (GetCompilerOptions().GetImplicitNullChecks() && holder_reg.Is(base_reg)) {

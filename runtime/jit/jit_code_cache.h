@@ -88,7 +88,7 @@ using CodeCacheBitmap = gc::accounting::MemoryRangeBitmap<kJitCodeAccountingByte
 // This map is writable only by the zygote, and readable by all children.
 class ZygoteMap {
  public:
-  explicit ZygoteMap(JitMemoryRegion* region) : map_(), region_(region) {}
+  explicit ZygoteMap(JitMemoryRegion* region) : map_(), region_(region), done_(nullptr) {}
 
   // Initialize the data structure so it can hold `number_of_methods` mappings.
   // Note that the map is fixed size and never grows.
@@ -106,6 +106,14 @@ class ZygoteMap {
     return GetCodeFor(method) != nullptr;
   }
 
+  void SetCompilationDone() {
+    region_->WriteData(done_, true);
+  }
+
+  bool IsCompilationDone() const {
+    return *done_;
+  }
+
  private:
   struct Entry {
     ArtMethod* method;
@@ -116,10 +124,12 @@ class ZygoteMap {
   };
 
   // The map allocated with `region_`.
-  ArrayRef<Entry> map_;
+  ArrayRef<const Entry> map_;
 
   // The region in which the map is allocated.
   JitMemoryRegion* const region_;
+
+  const bool* done_;
 
   DISALLOW_COPY_AND_ASSIGN(ZygoteMap);
 };
@@ -183,7 +193,7 @@ class JitCodeCache {
                       size_t code_size,
                       const uint8_t* stack_map,
                       size_t stack_map_size,
-                      uint8_t* roots_data,
+                      const uint8_t* roots_data,
                       const std::vector<Handle<mirror::Object>>& roots,
                       bool osr,
                       bool has_should_deoptimize_flag,
@@ -207,17 +217,17 @@ class JitCodeCache {
   // Allocate a region of data that will contain a stack map of size `stack_map_size` and
   // `number_of_roots` roots accessed by the JIT code.
   // Return a pointer to where roots will be stored.
-  uint8_t* ReserveData(Thread* self,
-                       JitMemoryRegion* region,
-                       size_t stack_map_size,
-                       size_t number_of_roots,
-                       ArtMethod* method)
+  const uint8_t* ReserveData(Thread* self,
+                             JitMemoryRegion* region,
+                             size_t stack_map_size,
+                             size_t number_of_roots,
+                             ArtMethod* method)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::jit_lock_);
 
   // Clear data from the data portion of the code cache.
   void ClearData(
-      Thread* self, JitMemoryRegion* region, uint8_t* roots_data)
+      Thread* self, JitMemoryRegion* region, const uint8_t* roots_data)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::jit_lock_);
 
@@ -271,6 +281,10 @@ class JitCodeCache {
   // Adds to `methods` all profiled methods which are part of any of the given dex locations.
   void GetProfiledMethods(const std::set<std::string>& dex_base_locations,
                           std::vector<ProfileMethodInfo>& methods)
+      REQUIRES(!Locks::jit_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void InvalidateAllCompiledCode()
       REQUIRES(!Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -351,7 +365,7 @@ class JitCodeCache {
                               size_t code_size,
                               const uint8_t* stack_map,
                               size_t stack_map_size,
-                              uint8_t* roots_data,
+                              const uint8_t* roots_data,
                               const std::vector<Handle<mirror::Object>>& roots,
                               bool osr,
                               bool has_should_deoptimize_flag,
@@ -388,7 +402,8 @@ class JitCodeCache {
       REQUIRES(Locks::mutator_lock_);
 
   // Free code and data allocations for `code_ptr`.
-  void FreeCodeAndData(const void* code_ptr) REQUIRES(Locks::jit_lock_);
+  void FreeCodeAndData(const void* code_ptr, bool free_debug_info = true)
+      REQUIRES(Locks::jit_lock_);
 
   // Number of bytes allocated in the code cache.
   size_t CodeCacheSize() REQUIRES(!Locks::jit_lock_);

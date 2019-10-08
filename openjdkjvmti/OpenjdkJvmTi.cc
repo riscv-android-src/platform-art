@@ -1418,6 +1418,7 @@ class JvmtiFunctions {
       art::gLogVerbosity.verifier = val;
       // Do not set verifier-debug.
       art::gLogVerbosity.image = val;
+      art::gLogVerbosity.plugin = val;
 
       // Note: can't switch systrace_lock_logging. That requires changing entrypoints.
 
@@ -1532,8 +1533,11 @@ extern "C" bool ArtPlugin_Initialize() {
   ClassUtil::Register(gEventHandler);
   DumpUtil::Register(gEventHandler);
   MethodUtil::Register(gEventHandler);
+  HeapExtensions::Register(gEventHandler);
   SearchUtil::Register();
   HeapUtil::Register();
+  FieldUtil::Register(gEventHandler);
+  BreakpointUtil::Register(gEventHandler);
   Transformer::Setup();
 
   {
@@ -1557,6 +1561,8 @@ extern "C" bool ArtPlugin_Deinitialize() {
   MethodUtil::Unregister();
   SearchUtil::Unregister();
   HeapUtil::Unregister();
+  FieldUtil::Unregister();
+  BreakpointUtil::Unregister();
 
   // TODO It would be good to delete the gEventHandler and gDeoptManager here but we cannot since
   // daemon threads might be suspended and we want to make sure that even if they wake up briefly

@@ -51,6 +51,7 @@ class ConditionVariable;
 enum class InstructionSet;
 class IsMarkedVisitor;
 class Mutex;
+class ReflectiveValueVisitor;
 class RootVisitor;
 class StackVisitor;
 class Thread;
@@ -162,7 +163,7 @@ class Heap {
   static constexpr uint32_t kNotifyNativeInterval = 32;
 #else
   // Some host mallinfo() implementations are slow. And memory is less scarce.
-  static constexpr uint32_t kNotifyNativeInterval = 128;
+  static constexpr uint32_t kNotifyNativeInterval = 512;
 #endif
 
   // RegisterNativeAllocation checks immediately whether GC is needed if size exceeds the
@@ -284,6 +285,9 @@ class Heap {
       REQUIRES(!Locks::heap_bitmap_lock_, !*gc_complete_lock_);
   template <typename Visitor>
   ALWAYS_INLINE void VisitObjectsPaused(Visitor&& visitor)
+      REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
+
+  void VisitReflectiveTargets(ReflectiveValueVisitor* visitor)
       REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
 
   void CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte_count)
@@ -902,6 +906,8 @@ class Heap {
 
   void PostForkChildAction(Thread* self);
 
+  void TraceHeapSize(size_t heap_size);
+
  private:
   class ConcurrentGCTask;
   class CollectorTransitionTask;
@@ -1179,8 +1185,6 @@ class Heap {
   }
 
   ALWAYS_INLINE void IncrementNumberOfBytesFreedRevoke(size_t freed_bytes_revoke);
-
-  void TraceHeapSize(size_t heap_size);
 
   // Remove a vlog code from heap-inl.h which is transitively included in half the world.
   static void VlogHeapGrowth(size_t max_allowed_footprint, size_t new_footprint, size_t alloc_size);

@@ -43,6 +43,7 @@
 #include "offsets.h"
 #include "process_state.h"
 #include "quick/quick_method_frame_info.h"
+#include "reflective_value_visitor.h"
 #include "runtime_stats.h"
 
 namespace art {
@@ -125,6 +126,9 @@ class Runtime {
   static bool Create(const RuntimeOptions& raw_options, bool ignore_unrecognized)
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
 
+  bool EnsurePluginLoaded(const char* plugin_name, std::string* error_msg);
+  bool EnsurePerfettoPlugin(std::string* error_msg);
+
   // IsAotCompiler for compilers that don't have a running runtime. Only dex2oat currently.
   bool IsAotCompiler() const {
     return !UseJitCompilation() && IsCompiler();
@@ -173,8 +177,17 @@ class Runtime {
     return is_system_server_;
   }
 
-  void SetSystemServer(bool value) {
-    is_system_server_ = value;
+  void SetAsSystemServer() {
+    is_system_server_ = true;
+    is_zygote_ = false;
+    is_primary_zygote_ = false;
+  }
+
+  void SetAsZygoteChild(bool is_system_server, bool is_zygote) {
+    // System server should have been set earlier in SetAsSystemServer.
+    CHECK_EQ(is_system_server_, is_system_server);
+    is_zygote_ = is_zygote;
+    is_primary_zygote_ = false;
   }
 
   bool IsExplicitGcDisabled() const {
@@ -385,6 +398,17 @@ class Runtime {
   void SweepSystemWeaks(IsMarkedVisitor* visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Walk all reflective objects and visit their targets as well as any method/fields held by the
+  // runtime threads that are marked as being reflective.
+  void VisitReflectiveTargets(ReflectiveValueVisitor* visitor) REQUIRES(Locks::mutator_lock_);
+  // Helper for visiting reflective targets with lambdas for both field and method reflective
+  // targets.
+  template <typename FieldVis, typename MethodVis>
+  void VisitReflectiveTargets(FieldVis&& fv, MethodVis&& mv) REQUIRES(Locks::mutator_lock_) {
+    FunctionReflectiveValueVisitor frvv(fv, mv);
+    VisitReflectiveTargets(&frvv);
+  }
+
   // Returns a special method that calls into a trampoline for runtime method resolution
   ArtMethod* GetResolutionMethod();
 
@@ -473,6 +497,10 @@ class Runtime {
 
   jit::Jit* GetJit() const {
     return jit_.get();
+  }
+
+  jit::JitCodeCache* GetJitCodeCache() const {
+    return jit_code_cache_.get();
   }
 
   // Returns true if JIT compilations are enabled. GetJit() will be not null in this case.
@@ -676,6 +704,14 @@ class Runtime {
 
   bool IsJavaDebuggable() const {
     return is_java_debuggable_;
+  }
+
+  void SetProfileableFromShell(bool value) {
+    is_profileable_from_shell_ = value;
+  }
+
+  bool IsProfileableFromShell() const {
+    return is_profileable_from_shell_;
   }
 
   void SetJavaDebuggable(bool value);
@@ -1143,6 +1179,8 @@ class Runtime {
 
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
+
+  bool is_profileable_from_shell_ = false;
 
   // The maximum number of failed boots we allow before pruning the dalvik cache
   // and trying again. This option is only inspected when we're running as a

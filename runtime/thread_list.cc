@@ -162,7 +162,6 @@ static void DumpUnattachedThread(std::ostream& os, pid_t tid, bool dump_native_s
   // TODO: No thread safety analysis as DumpState with a null thread won't access fields, should
   // refactor DumpState to avoid skipping analysis.
   Thread::DumpState(os, nullptr, tid);
-  DumpKernelStack(os, tid, "  kernel: ", false);
   if (dump_native_stack) {
     DumpNativeStack(os, tid, nullptr, "  native: ");
   }
@@ -1540,6 +1539,13 @@ void ThreadList::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) const {
   MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
   for (const auto& thread : list_) {
     thread->VisitRoots(visitor, flags);
+  }
+}
+
+void ThreadList::VisitReflectiveTargets(ReflectiveValueVisitor *visitor) const {
+  MutexLock mu(Thread::Current(), *Locks::thread_list_lock_);
+  for (const auto& thread : list_) {
+    thread->VisitReflectiveTargets(visitor);
   }
 }
 

@@ -73,7 +73,7 @@ bool JitMemoryRegion::Initialize(size_t initial_capacity,
     }
   } else {
     // Bionic supports memfd_create, but the call may fail on older kernels.
-    mem_fd = unique_fd(art::memfd_create("/jit-cache", /* flags= */ 0));
+    mem_fd = unique_fd(art::memfd_create("jit-cache", /* flags= */ 0));
     if (mem_fd.get() < 0) {
       std::ostringstream oss;
       oss << "Failed to initialize dual view JIT. memfd_create() error: " << strerror(errno);
@@ -114,12 +114,14 @@ bool JitMemoryRegion::Initialize(size_t initial_capacity,
     //       +---------------+
     //       | non exec code |\
     //       +---------------+ \
-    //       :               :\ \
-    //       +---------------+.\.+---------------+
-    //       |  exec code    |  \|     code      |
-    //       +---------------+...+---------------+
-    //       |      data     |   |     data      |
-    //       +---------------+...+---------------+
+    //       | writable data |\ \
+    //       +---------------+ \ \
+    //       :               :\ \ \
+    //       +---------------+.\.\.+---------------+
+    //       |  exec code    |  \ \|     code      |
+    //       +---------------+...\.+---------------+
+    //       | readonly data |    \|     data      |
+    //       +---------------+.....+---------------+
     //
     // In this configuration code updates are written to the non-executable view of the code
     // cache, and the executable view of the code cache has fixed RX memory protections.
@@ -132,7 +134,7 @@ bool JitMemoryRegion::Initialize(size_t initial_capacity,
     base_flags = MAP_SHARED;
     data_pages = MemMap::MapFile(
         data_capacity + exec_capacity,
-        is_zygote ? kProtR : kProtRW,
+        kProtR,
         base_flags,
         mem_fd,
         /* start= */ 0,
@@ -214,36 +216,34 @@ bool JitMemoryRegion::Initialize(size_t initial_capacity,
           return false;
         }
       }
-      // For the zygote, create a dual view of the data cache.
-      if (is_zygote) {
-        name = data_cache_name + "-rw";
-        writable_data_pages = MemMap::MapFile(data_capacity,
-                                              kProtRW,
-                                              base_flags,
-                                              mem_fd,
-                                              /* start= */ 0,
-                                              /* low_4GB= */ false,
-                                              name.c_str(),
-                                              &error_str);
-        if (!writable_data_pages.IsValid()) {
-          std::ostringstream oss;
-          oss << "Failed to create dual data view for zygote: " << error_str;
-          *error_msg = oss.str();
-          return false;
-        }
-        if (writable_data_pages.MadviseDontFork() != 0) {
-          *error_msg = "Failed to madvise dont fork the writable data view";
-          return false;
-        }
-        if (non_exec_pages.MadviseDontFork() != 0) {
-          *error_msg = "Failed to madvise dont fork the writable code view";
-          return false;
-        }
-        // Now that we have created the writable and executable mappings, prevent creating any new
-        // ones.
-        if (!ProtectZygoteMemory(mem_fd.get(), error_msg)) {
-          return false;
-        }
+      // Create a dual view of the data cache.
+      name = data_cache_name + "-rw";
+      writable_data_pages = MemMap::MapFile(data_capacity,
+                                            kProtRW,
+                                            base_flags,
+                                            mem_fd,
+                                            /* start= */ 0,
+                                            /* low_4GB= */ false,
+                                            name.c_str(),
+                                            &error_str);
+      if (!writable_data_pages.IsValid()) {
+        std::ostringstream oss;
+        oss << "Failed to create dual data view: " << error_str;
+        *error_msg = oss.str();
+        return false;
+      }
+      if (writable_data_pages.MadviseDontFork() != 0) {
+        *error_msg = "Failed to madvise dont fork the writable data view";
+        return false;
+      }
+      if (non_exec_pages.MadviseDontFork() != 0) {
+        *error_msg = "Failed to madvise dont fork the writable code view";
+        return false;
+      }
+      // Now that we have created the writable and executable mappings, prevent creating any new
+      // ones.
+      if (is_zygote && !ProtectZygoteMemory(mem_fd.get(), error_msg)) {
+        return false;
       }
     }
   } else {
@@ -269,6 +269,11 @@ bool JitMemoryRegion::Initialize(size_t initial_capacity,
       data_end_,
       /* locked= */ false);
   CHECK(data_mspace_ != nullptr) << "create_mspace_with_base (data) failed";
+
+  // Allow mspace to use the full data capacity.
+  // It will still only use as litle memory as possible and ask for MoreCore as needed.
+  CHECK(IsAlignedParam(data_capacity, kPageSize));
+  mspace_set_footprint_limit(data_mspace_, data_capacity);
 
   // Initialize the code heap.
   MemMap* code_heap = nullptr;
@@ -298,7 +303,6 @@ void JitMemoryRegion::SetFootprintLimit(size_t new_footprint) {
   size_t data_space_footprint = new_footprint / kCodeAndDataCapacityDivider;
   DCHECK(IsAlignedParam(data_space_footprint, kPageSize));
   DCHECK_EQ(data_space_footprint * kCodeAndDataCapacityDivider, new_footprint);
-  mspace_set_footprint_limit(data_mspace_, data_space_footprint);
   if (HasCodeMapping()) {
     ScopedCodeCacheWrite scc(*this);
     mspace_set_footprint_limit(exec_mspace_, new_footprint - data_space_footprint);
@@ -363,7 +367,7 @@ const uint8_t* JitMemoryRegion::AllocateCode(const uint8_t* code,
   DCHECK_GT(total_size, header_size);
   uint8_t* w_memory = reinterpret_cast<uint8_t*>(
       mspace_memalign(exec_mspace_, alignment, total_size));
-  if (w_memory == nullptr) {
+  if (UNLIKELY(w_memory == nullptr)) {
     return nullptr;
   }
   uint8_t* x_memory = GetExecutableAddress(w_memory);
@@ -448,11 +452,11 @@ static void FillRootTable(uint8_t* roots_data, const std::vector<Handle<mirror::
   reinterpret_cast<uint32_t*>(roots_data)[length] = length;
 }
 
-bool JitMemoryRegion::CommitData(uint8_t* roots_data,
+bool JitMemoryRegion::CommitData(const uint8_t* readonly_roots_data,
                                  const std::vector<Handle<mirror::Object>>& roots,
                                  const uint8_t* stack_map,
                                  size_t stack_map_size) {
-  roots_data = GetWritableDataAddress(roots_data);
+  uint8_t* roots_data = GetWritableDataAddress(readonly_roots_data);
   size_t root_table_size = ComputeRootTableSize(roots.size());
   uint8_t* stack_map_data = roots_data + root_table_size;
   FillRootTable(roots_data, roots);
@@ -472,16 +476,22 @@ void JitMemoryRegion::FreeCode(const uint8_t* code) {
   mspace_free(exec_mspace_, const_cast<uint8_t*>(code));
 }
 
-uint8_t* JitMemoryRegion::AllocateData(size_t data_size) {
+const uint8_t* JitMemoryRegion::AllocateData(size_t data_size) {
   void* result = mspace_malloc(data_mspace_, data_size);
+  if (UNLIKELY(result == nullptr)) {
+    return nullptr;
+  }
   used_memory_for_data_ += mspace_usable_size(result);
   return reinterpret_cast<uint8_t*>(GetNonWritableDataAddress(result));
 }
 
-void JitMemoryRegion::FreeData(uint8_t* data) {
-  data = GetWritableDataAddress(data);
-  used_memory_for_data_ -= mspace_usable_size(data);
-  mspace_free(data_mspace_, data);
+void JitMemoryRegion::FreeData(const uint8_t* data) {
+  FreeWritableData(GetWritableDataAddress(data));
+}
+
+void JitMemoryRegion::FreeWritableData(uint8_t* writable_data) REQUIRES(Locks::jit_lock_) {
+  used_memory_for_data_ -= mspace_usable_size(writable_data);
+  mspace_free(data_mspace_, writable_data);
 }
 
 #if defined(__BIONIC__) && defined(ART_TARGET)
@@ -495,7 +505,7 @@ int JitMemoryRegion::CreateZygoteMemory(size_t capacity, std::string* error_msg)
     return -1;
   }
   /* Check if kernel support exists, otherwise fall back to ashmem */
-  static const char* kRegionName = "/jit-zygote-cache";
+  static const char* kRegionName = "jit-zygote-cache";
   if (art::IsSealFutureWriteSupported()) {
     int fd = art::memfd_create(kRegionName, MFD_ALLOW_SEALING);
     if (fd == -1) {

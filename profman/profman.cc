@@ -159,9 +159,6 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("      the file passed with --profile-fd(file) to the profile passed with");
   UsageError("      --reference-profile-fd(file) and update at the same time the profile-key");
   UsageError("      of entries corresponding to the apks passed with --apk(-fd).");
-  UsageError("  --store-aggregation-counters: if present, profman will compute and store");
-  UsageError("      the aggregation counters of classes and methods in the output profile.");
-  UsageError("      In this case the profile will have a different version.");
   UsageError("");
 
   exit(EXIT_FAILURE);
@@ -233,8 +230,7 @@ class ProfMan final {
       test_profile_class_percentage_(kDefaultTestProfileClassPercentage),
       test_profile_seed_(NanoTime()),
       start_ns_(NanoTime()),
-      copy_and_update_profile_key_(false),
-      store_aggregation_counters_(false) {}
+      copy_and_update_profile_key_(false) {}
 
   ~ProfMan() {
     LogCompletionTime();
@@ -318,8 +314,6 @@ class ProfMan final {
         ParseUintOption(raw_option, "--generate-test-profile-seed=", &test_profile_seed_);
       } else if (option == "--copy-and-update-profile-key") {
         copy_and_update_profile_key_ = true;
-      } else if (option == "--store-aggregation-counters") {
-        store_aggregation_counters_ = true;
       } else {
         Usage("Unknown argument '%s'", raw_option);
       }
@@ -396,14 +390,12 @@ class ProfMan final {
       File file(reference_profile_file_fd_, false);
       result = ProfileAssistant::ProcessProfiles(profile_files_fd_,
                                                  reference_profile_file_fd_,
-                                                 filter_fn,
-                                                 store_aggregation_counters_);
+                                                 filter_fn);
       CloseAllFds(profile_files_fd_, "profile_files_fd_");
     } else {
       result = ProfileAssistant::ProcessProfiles(profile_files_,
                                                  reference_profile_file_,
-                                                 filter_fn,
-                                                 store_aggregation_counters_);
+                                                 filter_fn);
     }
     return result;
   }
@@ -412,7 +404,7 @@ class ProfMan final {
     auto process_fn = [profile_filter_keys](std::unique_ptr<const DexFile>&& dex_file) {
       // Store the profile key of the location instead of the location itself.
       // This will make the matching in the profile filter method much easier.
-      profile_filter_keys->emplace(ProfileCompilationInfo::GetProfileDexFileKey(
+      profile_filter_keys->emplace(ProfileCompilationInfo::GetProfileDexFileBaseKey(
           dex_file->GetLocation()), dex_file->GetLocationChecksum());
     };
     return OpenApkFilesFromLocations(process_fn);
@@ -804,7 +796,8 @@ class ProfMan final {
 
   // Find class klass_descriptor in the given dex_files and store its reference
   // in the out parameter class_ref.
-  // Return true if the definition of the class was found in any of the dex_files.
+  // Return true if the definition or a reference of the class was found in any
+  // of the dex_files.
   bool FindClass(const std::vector<std::unique_ptr<const DexFile>>& dex_files,
                  const std::string& klass_descriptor,
                  /*out*/TypeReference* class_ref) {
@@ -829,14 +822,22 @@ class ProfMan final {
         continue;
       }
       dex::TypeIndex type_index = dex_file->GetIndexForTypeId(*type_id);
+      *class_ref = TypeReference(dex_file, type_index);
+
       if (dex_file->FindClassDef(type_index) == nullptr) {
         // Class is only referenced in the current dex file but not defined in it.
+        // We use its current type reference, but keep looking for its
+        // definition.
+        // Note that array classes fall into that category, as they do not have
+        // a class definition.
         continue;
       }
-      *class_ref = TypeReference(dex_file, type_index);
       return true;
     }
-    return false;
+    // If we arrive here, we haven't found a class definition. If the dex file
+    // of the class reference is not null, then we have found a type reference,
+    // and we return that to the caller.
+    return (class_ref->dex_file != nullptr);
   }
 
   // Find the method specified by method_spec in the class class_ref.
@@ -983,14 +984,7 @@ class ProfMan final {
 
     if (method_str.empty() || method_str == kClassAllMethods) {
       // Start by adding the class.
-      std::set<DexCacheResolvedClasses> resolved_class_set;
       const DexFile* dex_file = class_ref.dex_file;
-      const auto& dex_resolved_classes = resolved_class_set.emplace(
-            dex_file->GetLocation(),
-            DexFileLoader::GetBaseLocation(dex_file->GetLocation()),
-            dex_file->GetLocationChecksum(),
-            dex_file->NumMethodIds());
-      dex_resolved_classes.first->AddClass(class_ref.TypeIndex());
       std::vector<ProfileMethodInfo> methods;
       if (method_str == kClassAllMethods) {
         ClassAccessor accessor(
@@ -1005,7 +999,9 @@ class ProfMan final {
       }
       // TODO: Check return values?
       profile->AddMethods(methods, static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags));
-      profile->AddClasses(resolved_class_set);
+      std::set<dex::TypeIndex> classes;
+      classes.insert(class_ref.TypeIndex());
+      profile->AddClassesForDex(dex_file, classes.begin(), classes.end());
       return true;
     }
 
@@ -1060,8 +1056,8 @@ class ProfMan final {
           static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags));
     }
     if (flags != 0) {
-      if (!profile->AddMethodIndex(
-          static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags), ref)) {
+      if (!profile->AddMethod(ProfileMethodInfo(ref),
+                              static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags))) {
         return false;
       }
       DCHECK(profile->GetMethodHotness(ref).IsInProfile());
@@ -1413,7 +1409,6 @@ class ProfMan final {
   uint32_t test_profile_seed_;
   uint64_t start_ns_;
   bool copy_and_update_profile_key_;
-  bool store_aggregation_counters_;
 };
 
 // See ProfileAssistant::ProcessingResult for return codes.

@@ -1960,7 +1960,8 @@ void IntrinsicCodeGeneratorARM64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   Register tmp2 = temps.AcquireX();
 
   vixl::aarch64::Label done;
-  vixl::aarch64::Label compressed_string_loop;
+  vixl::aarch64::Label compressed_string_vector_loop;
+  vixl::aarch64::Label compressed_string_remainder;
   __ Sub(num_chr, srcEnd, srcBegin);
   // Early out for valid zero-length retrievals.
   __ Cbz(num_chr, &done);
@@ -2013,16 +2014,39 @@ void IntrinsicCodeGeneratorARM64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   __ B(&done);
 
   if (mirror::kUseStringCompression) {
+    // For compressed strings, acquire a SIMD temporary register.
+    FPRegister vtmp1 = temps.AcquireVRegisterOfSize(kQRegSize);
     const size_t c_char_size = DataType::Size(DataType::Type::kInt8);
     DCHECK_EQ(c_char_size, 1u);
     __ Bind(&compressed_string_preloop);
     __ Add(src_ptr, src_ptr, Operand(srcBegin));
-    // Copy loop for compressed src, copying 1 character (8-bit) to (16-bit) at a time.
-    __ Bind(&compressed_string_loop);
+
+    // Save repairing the value of num_chr on the < 8 character path.
+    __ Subs(tmp1, num_chr, 8);
+    __ B(lt, &compressed_string_remainder);
+
+    // Keep the result of the earlier subs, we are going to fetch at least 8 characters.
+    __ Mov(num_chr, tmp1);
+
+    // Main loop for compressed src, copying 8 characters (8-bit) to (16-bit) at a time.
+    // Uses SIMD instructions.
+    __ Bind(&compressed_string_vector_loop);
+    __ Ld1(vtmp1.V8B(), MemOperand(src_ptr, c_char_size * 8, PostIndex));
+    __ Subs(num_chr, num_chr, 8);
+    __ Uxtl(vtmp1.V8H(), vtmp1.V8B());
+    __ St1(vtmp1.V8H(), MemOperand(dst_ptr, char_size * 8, PostIndex));
+    __ B(ge, &compressed_string_vector_loop);
+
+    __ Adds(num_chr, num_chr, 8);
+    __ B(eq, &done);
+
+    // Loop for < 8 character case and remainder handling with a compressed src.
+    // Copies 1 character (8-bit) to (16-bit) at a time.
+    __ Bind(&compressed_string_remainder);
     __ Ldrb(tmp1, MemOperand(src_ptr, c_char_size, PostIndex));
     __ Strh(tmp1, MemOperand(dst_ptr, char_size, PostIndex));
     __ Subs(num_chr, num_chr, Operand(1));
-    __ B(gt, &compressed_string_loop);
+    __ B(gt, &compressed_string_remainder);
   }
 
   __ Bind(&done);
@@ -3167,6 +3191,29 @@ void IntrinsicCodeGeneratorARM64::VisitCRC32UpdateByteBuffer(HInvoke* invoke) {
   Register length = WRegisterFrom(locations->InAt(3));
   Register out = WRegisterFrom(locations->Out());
   GenerateCodeForCalculationCRC32ValueOfBytes(masm, crc, ptr, length, out);
+}
+
+void IntrinsicLocationsBuilderARM64::VisitFP16ToFloat(HInvoke* invoke) {
+  if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
+    return;
+  }
+
+  LocationSummary* locations = new (allocator_) LocationSummary(invoke,
+                                                                LocationSummary::kNoCall,
+                                                                kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetOut(Location::RequiresFpuRegister());
+}
+
+void IntrinsicCodeGeneratorARM64::VisitFP16ToFloat(HInvoke* invoke) {
+  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
+  MacroAssembler* masm = GetVIXLAssembler();
+  UseScratchRegisterScope scratch_scope(masm);
+  Register bits = InputRegisterAt(invoke, 0);
+  FPRegister out = SRegisterFrom(invoke->GetLocations()->Out());
+  FPRegister half = scratch_scope.AcquireH();
+  __ Fmov(half, bits);  // ARMv8.2
+  __ Fcvt(out, half);
 }
 
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)

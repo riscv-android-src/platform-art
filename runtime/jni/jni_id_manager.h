@@ -17,39 +17,62 @@
 #ifndef ART_RUNTIME_JNI_JNI_ID_MANAGER_H_
 #define ART_RUNTIME_JNI_JNI_ID_MANAGER_H_
 
-#include <atomic>
 #include <jni.h>
+
+#include <atomic>
 #include <vector>
 
 #include "art_field.h"
 #include "art_method.h"
 #include "base/mutex.h"
 #include "jni_id_type.h"
+#include "reflective_value_visitor.h"
 
 namespace art {
+template<typename RT> class ReflectiveHandle;
+
 namespace jni {
 
 class ScopedEnableSuspendAllJniIdQueries;
 class JniIdManager {
  public:
+  template <typename T,
+            typename = typename std::enable_if<std::is_same_v<T, jmethodID> ||
+                                               std::is_same_v<T, jfieldID>>>
+  static constexpr bool IsIndexId(T val) {
+    return val == nullptr || reinterpret_cast<uintptr_t>(val) % 2 == 1;
+  }
+
   ArtMethod* DecodeMethodId(jmethodID method) REQUIRES(!Locks::jni_id_lock_);
   ArtField* DecodeFieldId(jfieldID field) REQUIRES(!Locks::jni_id_lock_);
+  jmethodID EncodeMethodId(ReflectiveHandle<ArtMethod> method) REQUIRES(!Locks::jni_id_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   jmethodID EncodeMethodId(ArtMethod* method) REQUIRES(!Locks::jni_id_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  jfieldID EncodeFieldId(ReflectiveHandle<ArtField> field) REQUIRES(!Locks::jni_id_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
   jfieldID EncodeFieldId(ArtField* field) REQUIRES(!Locks::jni_id_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  void VisitReflectiveTargets(ReflectiveValueVisitor* rvv)
+      REQUIRES(Locks::mutator_lock_, !Locks::jni_id_lock_);
+
  private:
   template <typename ArtType>
-  uintptr_t EncodeGenericId(ArtType* t) REQUIRES(!Locks::jni_id_lock_)
+  uintptr_t EncodeGenericId(ReflectiveHandle<ArtType> t) REQUIRES(!Locks::jni_id_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
   template <typename ArtType>
   ArtType* DecodeGenericId(uintptr_t input) REQUIRES(!Locks::jni_id_lock_);
-  template <typename ArtType> std::vector<ArtType*>& GetGenericMap() REQUIRES(Locks::jni_id_lock_);
+  template <typename ArtType> std::vector<ArtType*>& GetGenericMap()
+      REQUIRES(Locks::jni_id_lock_);
   template <typename ArtType>
-  uintptr_t GetNextId(JniIdType id, ArtType* t) REQUIRES(Locks::jni_id_lock_);
+  uintptr_t GetNextId(JniIdType id, ReflectiveHandle<ArtType> t)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(Locks::jni_id_lock_);
   template <typename ArtType>
-  size_t GetLinearSearchStartId(ArtType* t) REQUIRES(Locks::jni_id_lock_);
+  size_t GetLinearSearchStartId(ReflectiveHandle<ArtType> t)
+      REQUIRES(Locks::jni_id_lock_)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void StartDefer() REQUIRES(!Locks::jni_id_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
   void EndDefer() REQUIRES(!Locks::jni_id_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
