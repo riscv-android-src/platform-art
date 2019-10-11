@@ -79,22 +79,25 @@ class JitMemoryRegion {
   // Set the footprint limit of the code cache.
   void SetFootprintLimit(size_t new_footprint) REQUIRES(Locks::jit_lock_);
 
-  // Copy the code into the region, and allocate an OatQuickMethodHeader.
-  // Callers should not write into the returned memory, as it may be read-only.
-  const uint8_t* AllocateCode(const uint8_t* code,
-                              size_t code_size,
-                              const uint8_t* stack_map,
-                              bool has_should_deoptimize_flag)
-      REQUIRES(Locks::jit_lock_);
+  const uint8_t* AllocateCode(size_t code_size) REQUIRES(Locks::jit_lock_);
   void FreeCode(const uint8_t* code) REQUIRES(Locks::jit_lock_);
-  uint8_t* AllocateData(size_t data_size) REQUIRES(Locks::jit_lock_);
-  void FreeData(uint8_t* data) REQUIRES(Locks::jit_lock_);
+  const uint8_t* AllocateData(size_t data_size) REQUIRES(Locks::jit_lock_);
+  void FreeData(const uint8_t* data) REQUIRES(Locks::jit_lock_);
+  void FreeData(uint8_t* writable_data) REQUIRES(Locks::jit_lock_) = delete;
+  void FreeWritableData(uint8_t* writable_data) REQUIRES(Locks::jit_lock_);
 
-  // Emit roots and stack map into the memory pointed by `roots_data`.
-  bool CommitData(uint8_t* roots_data,
+  // Emit header and code into the memory pointed by `reserved_code` (despite it being const).
+  // Returns pointer to copied code (within reserved_code region; after OatQuickMethodHeader).
+  const uint8_t* CommitCode(ArrayRef<const uint8_t> reserved_code,
+                            ArrayRef<const uint8_t> code,
+                            const uint8_t* stack_map,
+                            bool has_should_deoptimize_flag)
+      REQUIRES(Locks::jit_lock_);
+
+  // Emit roots and stack map into the memory pointed by `roots_data` (despite it being const).
+  bool CommitData(ArrayRef<const uint8_t> reserved_data,
                   const std::vector<Handle<mirror::Object>>& roots,
-                  const uint8_t* stack_map,
-                  size_t stack_map_size)
+                  ArrayRef<const uint8_t> stack_map)
       REQUIRES(Locks::jit_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -112,14 +115,14 @@ class JitMemoryRegion {
   }
 
   template <typename T>
-  void FillData(T* address, size_t n, const T& t)  REQUIRES(Locks::jit_lock_) {
+  void FillData(const T* address, size_t n, const T& t)  REQUIRES(Locks::jit_lock_) {
     std::fill_n(GetWritableDataAddress(address), n, t);
   }
 
   // Generic helper for writing abritrary data in the data portion of the
   // region.
   template <typename T>
-  void WriteData(T* address, const T& value) {
+  void WriteData(const T* address, const T& value) {
     *GetWritableDataAddress(address) = value;
   }
 
@@ -177,6 +180,13 @@ class JitMemoryRegion {
     return data_end_;
   }
 
+  template <typename T> T* GetWritableDataAddress(const T* src_ptr) {
+    if (!HasDualDataMapping()) {
+      return const_cast<T*>(src_ptr);
+    }
+    return const_cast<T*>(TranslateAddress(src_ptr, data_pages_, writable_data_pages_));
+  }
+
  private:
   template <typename T>
   T* TranslateAddress(T* src_ptr, const MemMap& src, const MemMap& dst) {
@@ -208,13 +218,6 @@ class JitMemoryRegion {
       return src_ptr;
     }
     return TranslateAddress(src_ptr, writable_data_pages_, data_pages_);
-  }
-
-  template <typename T> T* GetWritableDataAddress(T* src_ptr) {
-    if (!HasDualDataMapping()) {
-      return src_ptr;
-    }
-    return TranslateAddress(src_ptr, data_pages_, writable_data_pages_);
   }
 
   template <typename T> T* GetExecutableAddress(T* src_ptr) {

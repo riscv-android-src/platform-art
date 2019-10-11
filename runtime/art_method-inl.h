@@ -405,7 +405,7 @@ inline CodeItemDebugInfoAccessor ArtMethod::DexInstructionDebugInfo() {
   return CodeItemDebugInfoAccessor(*GetDexFile(), GetCodeItem(), GetDexMethodIndex());
 }
 
-inline void ArtMethod::SetCounter(int16_t hotness_count) {
+inline void ArtMethod::SetCounter(uint16_t hotness_count) {
   DCHECK(!IsAbstract()) << PrettyMethod();
   hotness_count_ = hotness_count;
 }
@@ -428,6 +428,16 @@ inline uint32_t ArtMethod::GetImtIndex() {
 inline void ArtMethod::CalculateAndSetImtIndex() {
   DCHECK(IsAbstract()) << PrettyMethod();
   imt_index_ = ~ImTable::GetImtIndex(this);
+}
+
+template <ReadBarrierOption kReadBarrierOption>
+bool ArtMethod::NeedsInitializationCheck() {
+  // Knowing if the class is visibly initialized is only for JIT/AOT compiled
+  // code to avoid the memory barrier. For callers of `NeedsInitializationCheck`
+  // it's enough to just check whether the class is initialized.
+  return IsStatic() &&
+      !IsConstructor() &&
+      !GetDeclaringClass<kReadBarrierOption>()->IsInitialized();
 }
 
 }  // namespace art

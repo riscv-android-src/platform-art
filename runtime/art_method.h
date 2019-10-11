@@ -18,6 +18,7 @@
 #define ART_RUNTIME_ART_METHOD_H_
 
 #include <cstddef>
+#include <limits>
 
 #include <android-base/logging.h>
 #include <jni.h>
@@ -364,6 +365,11 @@ class ArtMethod final {
     AddAccessFlags(kAccMustCountLocks);
   }
 
+  // Returns whether the method can be invoked directly or needs a
+  // class initialization check.
+  template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
+  bool NeedsInitializationCheck() REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Returns true if this method could be overridden by a default method.
   bool IsOverridableByDefaultMethod() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -673,9 +679,13 @@ class ArtMethod final {
   void CopyFrom(ArtMethod* src, PointerSize image_pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void SetCounter(int16_t hotness_count) REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE void SetCounter(uint16_t hotness_count) REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE uint16_t GetCounter() REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ALWAYS_INLINE static constexpr uint16_t MaxCounter() {
+    return std::numeric_limits<decltype(hotness_count_)>::max();
+  }
 
   ALWAYS_INLINE uint32_t GetImtIndex() REQUIRES_SHARED(Locks::mutator_lock_);
 

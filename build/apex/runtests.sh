@@ -15,7 +15,7 @@
 # limitations under the License.
 #
 
-# Run Android Runtime APEX tests.
+# Run ART APEX tests.
 
 SCRIPT_DIR=$(dirname $0)
 
@@ -45,7 +45,7 @@ flattened_apex_p=$($ANDROID_BUILD_TOP/build/soong/soong_ui.bash --dumpvar-mode T
   || setup_die
 
 have_debugfs_p=false
-if [ ! $flattened_apex_p ]; then
+if $flattened_apex_p; then :; else
   if [ ! -e "$ANDROID_HOST_OUT/bin/debugfs" ] ; then
     say "Could not find debugfs, building now."
     build/soong/soong_ui.bash --make-mode debugfs-host || die "Cannot build debugfs"
@@ -64,7 +64,7 @@ print_file_sizes_p=false
 function usage {
   cat <<EOF
 Usage: $0 [OPTION]
-Build (optional) and run tests on Android Runtime APEX package (on host).
+Build (optional) and run tests on ART APEX package (on host).
 
   -B, --skip-build    skip the build step
   -l, --list-files    list the contents of the ext4 image (\`find\`-like style)
@@ -127,10 +127,10 @@ function fail_check {
 # Test all modules
 
 apex_modules=(
-  "com.android.runtime.release"
-  "com.android.runtime.debug"
-  "com.android.runtime.testing"
-  "com.android.runtime.host"
+  "com.android.art.release"
+  "com.android.art.debug"
+  "com.android.art.testing"
+  "com.android.art.host"
 )
 
 # Build the APEX packages (optional).
@@ -159,7 +159,7 @@ for apex_module in ${apex_modules[@]}; do
   if [[ $apex_module = *.host ]]; then
     apex_path="$ANDROID_HOST_OUT/apex/${apex_module}.zipapex"
     art_apex_test_args="$art_apex_test_args --host"
-    test_only_args="--debug"
+    test_only_args="--flavor debug"
   else
     if $flattened_apex_p; then
       apex_path="$ANDROID_PRODUCT_OUT/system/apex/${apex_module}"
@@ -171,8 +171,9 @@ for apex_module in ${apex_modules[@]}; do
       art_apex_test_args="$art_apex_test_args --debugfs $ANDROID_HOST_OUT/bin/debugfs"
     fi
     case $apex_module in
-      (*.debug)   test_only_args="--debug";;
-      (*.testing) test_only_args="--testing";;
+      (*.release) test_only_args="--flavor release";;
+      (*.debug)   test_only_args="--flavor debug";;
+      (*.testing) test_only_args="--flavor testing";;
     esac
   fi
   say "APEX package path: $apex_path"
@@ -192,6 +193,6 @@ for apex_module in ${apex_modules[@]}; do
   echo
 done
 
-[[ "$exit_status" = 0 ]] && say "All Android Runtime APEX tests passed"
+[[ "$exit_status" = 0 ]] && say "All ART APEX tests passed"
 
 exit $exit_status

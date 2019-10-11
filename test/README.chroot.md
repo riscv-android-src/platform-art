@@ -38,7 +38,9 @@ Note that using this chroot-based approach requires root access to the device
    ```bash
    unset ART_TEST_ANDROID_ROOT
    unset CUSTOM_TARGET_LINKER
+   unset ART_TEST_ANDROID_ART_ROOT
    unset ART_TEST_ANDROID_RUNTIME_ROOT
+   unset ART_TEST_ANDROID_I18N_ROOT
    unset ART_TEST_ANDROID_TZDATA_ROOT
    ```
 1. Set the chroot directory in `ART_TEST_CHROOT`:
@@ -56,13 +58,14 @@ Note that using this chroot-based approach requires root access to the device
         ```
     * With a full Android (AOSP) `aosp/master` tree:
         ```bash
+        export OVERRIDE_TARGET_FLATTEN_APEX=true
         . ./build/envsetup.sh
         lunch aosp_arm64-eng  # or aosp_arm-eng for 32-bit ARM
         m adb
         ```
 3. Build ART and required dependencies:
     ```bash
-    art/tools/buildbot-build.sh --target -j40
+    art/tools/buildbot-build.sh --target
     ```
 4. Clean up the device:
     ```bash
@@ -85,7 +88,7 @@ Note that using this chroot-based approach requires root access to the device
     `test-art-target-gtest-image_space_test{32,64}` when using the full AOSP
     tree (b/119815008).
         * Workaround: Run `m clean-oat-host` before the build step
-        (`art/tools/buildbot-build.sh --target -j40`) above.
+        (`art/tools/buildbot-build.sh --target`) above.
     * Note: The `-j` option is not honored yet (b/129930445).
     * Specific tests to run can be passed on the command line, specified by
     their absolute paths beginning with "/apex/".

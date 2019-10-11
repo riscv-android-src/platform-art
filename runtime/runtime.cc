@@ -521,7 +521,6 @@ struct AbortState {
 
     if (self == nullptr) {
       os << "(Aborting thread was not attached to runtime!)\n";
-      DumpKernelStack(os, GetTid(), "  kernel: ", false);
       DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
     } else {
       os << "Aborting thread:\n";
@@ -800,7 +799,7 @@ std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
   }
-  std::string compiler_executable = GetAndroidRuntimeBinDir() + "/dex2oat";
+  std::string compiler_executable = GetArtBinDir() + "/dex2oat";
   if (kIsDebugBuild) {
     compiler_executable += 'd';
   }
@@ -1003,7 +1002,9 @@ void Runtime::InitNonZygoteOrPostFork(
 
   // Create the thread pools.
   heap_->CreateThreadPool();
-  {
+  // Avoid creating the runtime thread pool for system server since it will not be used and would
+  // waste memory.
+  if (!is_system_server) {
     ScopedTrace timing("CreateThreadPool");
     constexpr size_t kStackSize = 64 * KB;
     constexpr size_t kMaxRuntimeWorkers = 4u;
@@ -1026,6 +1027,14 @@ void Runtime::InitNonZygoteOrPostFork(
   // this to come last.
   ScopedObjectAccess soa(Thread::Current());
   GetRuntimeCallbacks()->StartDebugger();
+
+  if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable()) {
+    std::string err;
+    ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
+    if (!EnsurePerfettoPlugin(&err)) {
+      LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
+    }
+  }
 }
 
 void Runtime::StartSignalCatcher() {
@@ -1569,9 +1578,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       }
       class_linker_->AddExtraBootDexFiles(self, std::move(extra_boot_class_path));
     }
-    if (IsJavaDebuggable()) {
-      // Now that we have loaded the boot image, deoptimize its methods if we are running
-      // debuggable, as the code may have been compiled non-debuggable.
+    if (IsJavaDebuggable() || jit_options_->GetProfileSaverOptions().GetProfileBootClassPath()) {
+      // Deoptimize the boot image if debuggable  as the code may have been compiled non-debuggable.
+      // Also deoptimize if we are profiling the boot class path.
       ScopedThreadSuspension sts(self, ThreadState::kNative);
       ScopedSuspendAll ssa(__FUNCTION__);
       DeoptimizeBootImage();
@@ -1764,18 +1773,30 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
-static bool EnsureJvmtiPlugin(Runtime* runtime,
-                              std::vector<Plugin>* plugins,
-                              std::string* error_msg) {
-  constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
-
+bool Runtime::EnsurePluginLoaded(const char* plugin_name, std::string* error_msg) {
   // Is the plugin already loaded?
-  for (const Plugin& p : *plugins) {
+  for (const Plugin& p : plugins_) {
     if (p.GetLibrary() == plugin_name) {
       return true;
     }
   }
+  Plugin new_plugin = Plugin::Create(plugin_name);
 
+  if (!new_plugin.Load(error_msg)) {
+    return false;
+  }
+  plugins_.push_back(std::move(new_plugin));
+  return true;
+}
+
+bool Runtime::EnsurePerfettoPlugin(std::string* error_msg) {
+  constexpr const char* plugin_name = kIsDebugBuild ?
+    "libperfetto_hprofd.so" : "libperfetto_hprof.so";
+  return EnsurePluginLoaded(plugin_name, error_msg);
+}
+
+static bool EnsureJvmtiPlugin(Runtime* runtime,
+                              std::string* error_msg) {
   // TODO Rename Dbg::IsJdwpAllowed is IsDebuggingAllowed.
   DCHECK(Dbg::IsJdwpAllowed() || !runtime->IsJavaDebuggable())
       << "Being debuggable requires that jdwp (i.e. debugging) is allowed.";
@@ -1786,14 +1807,8 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
     return false;
   }
 
-  Plugin new_plugin = Plugin::Create(plugin_name);
-
-  if (!new_plugin.Load(error_msg)) {
-    return false;
-  }
-
-  plugins->push_back(std::move(new_plugin));
-  return true;
+  constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
+  return runtime->EnsurePluginLoaded(plugin_name, error_msg);
 }
 
 // Attach a new agent and add it to the list of runtime agents
@@ -1804,7 +1819,7 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
 //
 void Runtime::AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader) {
   std::string error_msg;
-  if (!EnsureJvmtiPlugin(this, &plugins_, &error_msg)) {
+  if (!EnsureJvmtiPlugin(this, &error_msg)) {
     LOG(WARNING) << "Could not load plugin: " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());
@@ -2180,6 +2195,13 @@ void Runtime::VisitThreadRoots(RootVisitor* visitor, VisitRootFlags flags) {
 void Runtime::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   VisitNonConcurrentRoots(visitor, flags);
   VisitConcurrentRoots(visitor, flags);
+}
+
+void Runtime::VisitReflectiveTargets(ReflectiveValueVisitor *visitor) {
+  thread_list_->VisitReflectiveTargets(visitor);
+  heap_->VisitReflectiveTargets(visitor);
+  jni_id_manager_->VisitReflectiveTargets(visitor);
+  callbacks_->VisitReflectiveTargets(visitor);
 }
 
 void Runtime::VisitImageRoots(RootVisitor* visitor) {

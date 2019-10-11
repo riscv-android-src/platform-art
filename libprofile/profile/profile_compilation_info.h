@@ -73,7 +73,7 @@ class ProfileCompilationInfo {
  public:
   static const uint8_t kProfileMagic[];
   static const uint8_t kProfileVersion[];
-  static const uint8_t kProfileVersionWithCounters[];
+  static const uint8_t kProfileVersionForBootImage[];
   static const char kDexMetadataProfileEntry[];
 
   static constexpr size_t kProfileVersionSize = 4;
@@ -83,25 +83,25 @@ class ProfileCompilationInfo {
   // This is exposed as public in order to make it available to dex2oat compilations
   // (see compiler/optimizing/inliner.cc).
 
-  // A dex location together with its checksum.
+  // A profile reference to the dex file (profile key, dex checksum and number of methods).
   struct DexReference {
     DexReference() : dex_checksum(0), num_method_ids(0) {}
 
-    DexReference(const std::string& location, uint32_t checksum, uint32_t num_methods)
-        : dex_location(location), dex_checksum(checksum), num_method_ids(num_methods) {}
+    DexReference(const std::string& key, uint32_t checksum, uint32_t num_methods)
+        : profile_key(key), dex_checksum(checksum), num_method_ids(num_methods) {}
 
     bool operator==(const DexReference& other) const {
       return dex_checksum == other.dex_checksum &&
-          dex_location == other.dex_location &&
+          profile_key == other.profile_key &&
           num_method_ids == other.num_method_ids;
     }
 
     bool MatchesDex(const DexFile* dex_file) const {
       return dex_checksum == dex_file->GetLocationChecksum() &&
-           dex_location == GetProfileDexFileKey(dex_file->GetLocation());
+           profile_key == GetProfileDexFileBaseKey(dex_file->GetLocation());
     }
 
-    std::string dex_location;
+    std::string profile_key;
     uint32_t dex_checksum;
     uint32_t num_method_ids;
   };
@@ -181,9 +181,42 @@ class ProfileCompilationInfo {
   class MethodHotness {
    public:
     enum Flag {
-      kFlagHot = 0x1,
-      kFlagStartup = 0x2,
-      kFlagPostStartup = 0x4,
+      // Marker flag used to simplify iterations.
+      kFlagFirst = 1 << 0,
+      // The method is profile-hot (this is implementation specific, e.g. equivalent to JIT-warm)
+      kFlagHot = 1 << 0,
+      // Executed during the app startup as determined by the runtime.
+      kFlagStartup = 1 << 1,
+      // Executed after app startup as determined by the runtime.
+      kFlagPostStartup = 1 << 2,
+      // Marker flag used to simplify iterations.
+      kFlagLastRegular = 1 << 2,
+      // Executed during the app startup as determined by the framework (equivalent to am start).
+      kFlagAmStartup = 1 << 3,
+      // Executed after the app startup as determined by the framework (equivalent to am start).
+      kFlagAmPostStartup = 1 << 4,
+      // Executed during system boot.
+      kFlagBoot = 1 << 5,
+      // Executed after the system has booted.
+      kFlagPostBoot = 1 << 6,
+      // Executed while the app is in foreground.
+      kFlagForeground = 1 << 7,
+      // Executed while the app is in background.
+      kFlagBackground = 1 << 8,
+      // Executed by a 32bit process.
+      kFlag32bit = 1 << 9,
+      // Executed by a 64bit process.
+      kFlag64bit = 1 << 10,
+      // The startup bins captured the relative order of when a method become hot. There are 8
+      // total bins supported and each hot method will have at least one bit set. If the profile was
+      // merged multiple times more than one bit may be set as a given method may become hot at
+      // various times during subsequent executions.
+      // The granularity of the bins is unspecified (i.e. the runtime is free to change the
+      // values it uses - this may be 100ms, 200ms etc...).
+      kFlagStartupBin = 1 << 11,
+      kFlagStartupMaxBin = 1 << 18,
+      // Marker flag used to simplify iterations.
+      kFlagLastBoot = 1 << 18,
     };
 
     bool IsHot() const {
@@ -202,8 +235,12 @@ class ProfileCompilationInfo {
       flags_ |= flag;
     }
 
-    uint8_t GetFlags() const {
+    uint32_t GetFlags() const {
       return flags_;
+    }
+
+    bool HasFlagSet(MethodHotness::Flag flag) {
+      return (flags_ & flag ) != 0;
     }
 
     bool IsInProfile() const {
@@ -212,7 +249,7 @@ class ProfileCompilationInfo {
 
    private:
     const InlineCacheMap* inline_cache_map_ = nullptr;
-    uint8_t flags_ = 0;
+    uint32_t flags_ = 0;
 
     const InlineCacheMap* GetInlineCacheMap() const {
       return inline_cache_map_;
@@ -234,65 +271,90 @@ class ProfileCompilationInfo {
         : inline_caches(inline_cache_map) {}
 
     bool operator==(const OfflineProfileMethodInfo& other) const;
+    // Checks that this offline representation of inline caches matches the runtime view of the
+    // data.
+    bool operator==(const std::vector<ProfileMethodInfo::ProfileInlineCache>& other) const;
 
     const InlineCacheMap* const inline_caches;
     std::vector<DexReference> dex_references;
   };
 
+  // Encapsulates metadata that can be associated with the methods and classes added to the profile.
+  // The additional metadata is serialized in the profile and becomes part of the profile key
+  // representation. It can be used to differentiate the samples that are added to the profile
+  // based on the supported criteria (e.g. keep track of which app generated what sample when
+  // constructing a boot profile.).
+  class ProfileSampleAnnotation {
+   public:
+    explicit ProfileSampleAnnotation(const std::string& package_name) :
+        origin_package_name_(package_name) {}
+
+    const std::string& GetOriginPackageName() const { return origin_package_name_; }
+
+    bool operator==(const ProfileSampleAnnotation& other) const;
+
+    // A convenient empty annotation object that can be used to denote that no annotation should
+    // be associated with the profile samples.
+    static const ProfileSampleAnnotation kNone;
+
+   private:
+    // The name of the package that generated the samples.
+    const std::string origin_package_name_;
+  };
+
   // Public methods to create, extend or query the profile.
   ProfileCompilationInfo();
+  explicit ProfileCompilationInfo(bool for_boot_image);
   explicit ProfileCompilationInfo(ArenaPool* arena_pool);
+  ProfileCompilationInfo(ArenaPool* arena_pool, bool for_boot_image);
 
   ~ProfileCompilationInfo();
 
   // Add the given methods to the current profile object.
-  bool AddMethods(const std::vector<ProfileMethodInfo>& methods, MethodHotness::Flag flags);
-
-  // Add the given classes to the current profile object.
-  bool AddClasses(const std::set<DexCacheResolvedClasses>& resolved_classes);
+  //
+  // Note: if an annotation is provided, the methods/classes will be associated with the group
+  // (dex_file, sample_annotation). Each group keeps its unique set of methods/classes.
+  bool AddMethods(const std::vector<ProfileMethodInfo>& methods,
+                  MethodHotness::Flag flags,
+                  const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone);
 
   // Add multiple type ids for classes in a single dex file. Iterator is for type_ids not
   // class_defs.
+  //
+  // Note: see AddMethods docs for the handling of annotations.
   template <class Iterator>
-  bool AddClassesForDex(const DexFile* dex_file, Iterator index_begin, Iterator index_end) {
-    DexFileData* data = GetOrAddDexFileData(dex_file);
+  bool AddClassesForDex(
+      const DexFile* dex_file,
+      Iterator index_begin,
+      Iterator index_end,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) {
+    DexFileData* data = GetOrAddDexFileData(dex_file, annotation);
     if (data == nullptr) {
       return false;
     }
     data->class_set.insert(index_begin, index_end);
     return true;
   }
-  // Add a single type id for a dex file.
-  bool AddClassForDex(const TypeReference& ref) {
-    DexFileData* data = GetOrAddDexFileData(ref.dex_file);
-    if (data == nullptr) {
-      return false;
-    }
-    data->class_set.insert(ref.TypeIndex());
-    return true;
-  }
-
-
-  // Add a method index to the profile (without inline caches). The method flags determine if it is
-  // hot, startup, or post startup, or a combination of the previous.
-  bool AddMethodIndex(MethodHotness::Flag flags,
-                      const std::string& dex_location,
-                      uint32_t checksum,
-                      uint16_t method_idx,
-                      uint32_t num_method_ids);
-  bool AddMethodIndex(MethodHotness::Flag flags, const MethodReference& ref);
 
   // Add a method to the profile using its online representation (containing runtime structures).
-  bool AddMethod(const ProfileMethodInfo& pmi, MethodHotness::Flag flags);
+  //
+  // Note: see AddMethods docs for the handling of annotations.
+  bool AddMethod(const ProfileMethodInfo& pmi,
+                 MethodHotness::Flag flags,
+                 const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone);
 
   // Bulk add sampled methods and/or hot methods for a single dex, fast since it only has one
   // GetOrAddDexFileData call.
+  //
+  // Note: see AddMethods docs for the handling of annotations.
   template <class Iterator>
-  bool AddMethodsForDex(MethodHotness::Flag flags,
-                        const DexFile* dex_file,
-                        Iterator index_begin,
-                        Iterator index_end) {
-    DexFileData* data = GetOrAddDexFileData(dex_file);
+  bool AddMethodsForDex(
+      MethodHotness::Flag flags,
+      const DexFile* dex_file,
+      Iterator index_begin,
+      Iterator index_end,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) {
+    DexFileData* data = GetOrAddDexFileData(dex_file, annotation);
     if (data == nullptr) {
       return false;
     }
@@ -304,9 +366,6 @@ class ProfileCompilationInfo {
     }
     return true;
   }
-
-  // Add hotness flags for a simple method.
-  bool AddMethodHotness(const MethodReference& method_ref, const MethodHotness& hotness);
 
   // Load or Merge profile information from the given file descriptor.
   // If the current profile is non-empty the load will fail.
@@ -361,21 +420,35 @@ class ProfileCompilationInfo {
   uint32_t GetNumberOfResolvedClasses() const;
 
   // Returns the profile method info for a given method reference.
-  MethodHotness GetMethodHotness(const MethodReference& method_ref) const;
-  MethodHotness GetMethodHotness(const std::string& dex_location,
-                                 uint32_t dex_checksum,
-                                 uint16_t dex_method_index) const;
+  //
+  // Note that if the profile was built with annotations, the same dex file may be
+  // represented multiple times in the profile (due to different annotation associated with it).
+  // If so, and if no annotation is passed to this method, then only the first dex file is searched.
+  //
+  // Implementation details: It is suitable to pass kNone for regular profile guided compilation
+  // because during compilation we generally don't care about annotations. The metadata is
+  // useful for boot profiles which need the extra information.
+  MethodHotness GetMethodHotness(
+      const MethodReference& method_ref,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) const;
 
   // Return true if the class's type is present in the profiling info.
-  bool ContainsClass(const DexFile& dex_file, dex::TypeIndex type_idx) const;
+  //
+  // Note: see GetMethodHotness docs for the handling of annotations.
+  bool ContainsClass(
+      const DexFile& dex_file,
+      dex::TypeIndex type_idx,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) const;
 
-  // Return the method data for the given location and index from the profiling info.
+  // Return the hot method info for the given location and index from the profiling info.
   // If the method index is not found or the checksum doesn't match, null is returned.
   // Note: the inline cache map is a pointer to the map stored in the profile and
   // its allocation will go away if the profile goes out of scope.
-  std::unique_ptr<OfflineProfileMethodInfo> GetMethod(const std::string& dex_location,
-                                                      uint32_t dex_checksum,
-                                                      uint16_t dex_method_index) const;
+  //
+  // Note: see GetMethodHotness docs for the handling of annotations.
+  std::unique_ptr<OfflineProfileMethodInfo> GetHotMethodInfo(
+      const MethodReference& method_ref,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) const;
 
   // Dump all the loaded profile info into a string and returns it.
   // If dex_files is not empty then the method indices will be resolved to their
@@ -387,21 +460,27 @@ class ProfileCompilationInfo {
   // Return the classes and methods for a given dex file through out args. The out args are the set
   // of class as well as the methods and their associated inline caches. Returns true if the dex
   // file is register and has a matching checksum, false otherwise.
-  bool GetClassesAndMethods(const DexFile& dex_file,
-                            /*out*/std::set<dex::TypeIndex>* class_set,
-                            /*out*/std::set<uint16_t>* hot_method_set,
-                            /*out*/std::set<uint16_t>* startup_method_set,
-                            /*out*/std::set<uint16_t>* post_startup_method_method_set) const;
+  //
+  // Note: see GetMethodHotness docs for the handling of annotations.
+  bool GetClassesAndMethods(
+      const DexFile& dex_file,
+      /*out*/std::set<dex::TypeIndex>* class_set,
+      /*out*/std::set<uint16_t>* hot_method_set,
+      /*out*/std::set<uint16_t>* startup_method_set,
+      /*out*/std::set<uint16_t>* post_startup_method_method_set,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone) const;
+
+  // Returns true iff both profiles have the same version.
+  bool SameVersion(const ProfileCompilationInfo& other) const;
 
   // Perform an equality test with the `other` profile information.
   bool Equals(const ProfileCompilationInfo& other);
 
-  // Return the class descriptors for all of the classes in the profiles' class sets.
-  std::set<DexCacheResolvedClasses> GetResolvedClasses(
-      const std::vector<const DexFile*>& dex_files_) const;
-
-  // Return the profile key associated with the given dex location.
-  static std::string GetProfileDexFileKey(const std::string& dex_location);
+  // Return the base profile key associated with the given dex location. The base profile key
+  // is solely constructed based on the dex location (as opposed to the one produced by
+  // GetProfileDexFileAugmentedKey which may include additional metadata like the origin
+  // package name)
+  static std::string GetProfileDexFileBaseKey(const std::string& dex_location);
 
   // Generate a test profile which will contain a percentage of the total maximum
   // number of methods and classes (method_ratio and class_ratio).
@@ -426,7 +505,10 @@ class ProfileCompilationInfo {
   ArenaAllocator* GetAllocator() { return &allocator_; }
 
   // Return all of the class descriptors in the profile for a set of dex files.
-  HashSet<std::string> GetClassDescriptors(const std::vector<const DexFile*>& dex_files);
+  // Note: see GetMethodHotness docs for the handling of annotations..
+  HashSet<std::string> GetClassDescriptors(
+      const std::vector<const DexFile*>& dex_files,
+      const ProfileSampleAnnotation& annotation = ProfileSampleAnnotation::kNone);
 
   // Return true if the fd points to a profile file.
   bool IsProfileFile(int fd);
@@ -455,19 +537,7 @@ class ProfileCompilationInfo {
   void PrepareForAggregationCounters();
 
   // Returns true if the profile is configured to store aggregation counters.
-  bool StoresAggregationCounters() const;
-
-  // Returns the aggregation counter for the given method.
-  // Returns -1 if the method is not in the profile.
-  // CHECKs that the profile is configured to store aggregations counters.
-  int32_t GetMethodAggregationCounter(const MethodReference& method_ref) const;
-  // Returns the aggregation counter for the given class.
-  // Returns -1 if the class is not in the profile.
-  // CHECKs that the profile is configured to store aggregations counters.
-  int32_t GetClassAggregationCounter(const TypeReference& type_ref) const;
-  // Returns the number of times the profile was merged.
-  // CHECKs that the profile is configured to store aggregations counters.
-  uint16_t GetAggregationCounter() const;
+  bool IsForBootImage() const;
 
   // Return the version of this profile.
   const uint8_t* GetVersion() const;
@@ -481,9 +551,6 @@ class ProfileCompilationInfo {
     kProfileLoadSuccess
   };
 
-  const uint32_t kProfileSizeWarningThresholdInBytes = 500000U;
-  const uint32_t kProfileSizeErrorThresholdInBytes = 1000000U;
-
   // Internal representation of the profile information belonging to a dex file.
   // Note that we could do without profile_key (the key used to encode the dex
   // file in the profile) and profile_index (the index of the dex file in the
@@ -496,7 +563,7 @@ class ProfileCompilationInfo {
                 uint32_t location_checksum,
                 uint16_t index,
                 uint32_t num_methods,
-                bool store_aggregation_counters)
+                bool for_boot_image)
         : allocator_(allocator),
           profile_key(key),
           profile_index(index),
@@ -505,24 +572,27 @@ class ProfileCompilationInfo {
           class_set(std::less<dex::TypeIndex>(), allocator->Adapter(kArenaAllocProfile)),
           num_method_ids(num_methods),
           bitmap_storage(allocator->Adapter(kArenaAllocProfile)),
-          method_counters(allocator->Adapter(kArenaAllocProfile)),
-          class_counters(allocator->Adapter(kArenaAllocProfile)) {
-      bitmap_storage.resize(ComputeBitmapStorage(num_method_ids));
+          is_for_boot_image(for_boot_image) {
+      bitmap_storage.resize(ComputeBitmapStorage(is_for_boot_image, num_method_ids));
       if (!bitmap_storage.empty()) {
         method_bitmap =
             BitMemoryRegion(MemoryRegion(
-                &bitmap_storage[0], bitmap_storage.size()), 0, ComputeBitmapBits(num_method_ids));
-      }
-      if (store_aggregation_counters) {
-        PrepareForAggregationCounters();
+                &bitmap_storage[0],
+                bitmap_storage.size()),
+                0,
+                ComputeBitmapBits(is_for_boot_image, num_method_ids));
       }
     }
 
-    static size_t ComputeBitmapBits(uint32_t num_method_ids) {
-      return num_method_ids * kBitmapIndexCount;
+    static size_t ComputeBitmapBits(bool is_for_boot_image, uint32_t num_method_ids) {
+      size_t flag_bitmap_index = FlagBitmapIndex(is_for_boot_image
+          ? MethodHotness::kFlagLastBoot
+          : MethodHotness::kFlagLastRegular);
+      return num_method_ids * (flag_bitmap_index + 1);
     }
-    static size_t ComputeBitmapStorage(uint32_t num_method_ids) {
-      return RoundUp(ComputeBitmapBits(num_method_ids), kBitsPerByte) / kBitsPerByte;
+    static size_t ComputeBitmapStorage(bool is_for_boot_image, uint32_t num_method_ids) {
+      return RoundUp(ComputeBitmapBits(is_for_boot_image, num_method_ids), kBitsPerByte) /
+          kBitsPerByte;
     }
 
     bool operator==(const DexFileData& other) const {
@@ -530,9 +600,7 @@ class ProfileCompilationInfo {
           num_method_ids == other.num_method_ids &&
           method_map == other.method_map &&
           class_set == other.class_set &&
-          (BitMemoryRegion::Compare(method_bitmap, other.method_bitmap) == 0) &&
-          class_counters == other.class_counters &&
-          method_counters == other.method_counters;
+          (BitMemoryRegion::Compare(method_bitmap, other.method_bitmap) == 0);
     }
 
     // Mark a method as executed at least once.
@@ -547,12 +615,6 @@ class ProfileCompilationInfo {
 
     void SetMethodHotness(size_t index, MethodHotness::Flag flags);
     MethodHotness GetHotnessInfo(uint32_t dex_method_index) const;
-    void PrepareForAggregationCounters();
-
-    int32_t GetMethodAggregationCounter(uint16_t method_index) const;
-    int32_t GetClassAggregationCounter(uint16_t type_index) const;
-
-    uint16_t GetNumMethodCounters() const;
 
     bool ContainsClass(const dex::TypeIndex type_index) const;
 
@@ -571,30 +633,16 @@ class ProfileCompilationInfo {
     ArenaSet<dex::TypeIndex> class_set;
     // Find the inline caches of the the given method index. Add an empty entry if
     // no previous data is found.
-    InlineCacheMap* FindOrAddMethod(uint16_t method_index);
+    InlineCacheMap* FindOrAddHotMethod(uint16_t method_index);
     // Num method ids.
     uint32_t num_method_ids;
     ArenaVector<uint8_t> bitmap_storage;
     BitMemoryRegion method_bitmap;
-    ArenaVector<uint16_t> method_counters;
-    ArenaVector<uint16_t> class_counters;
+    bool is_for_boot_image;
 
    private:
-    enum BitmapIndex {
-      kBitmapIndexStartup,
-      kBitmapIndexPostStartup,
-      kBitmapIndexCount,
-    };
-
-    size_t MethodBitIndex(bool startup, size_t index) const {
-      DCHECK_LT(index, num_method_ids);
-      // The format is [startup bitmap][post startup bitmap]
-      // This compresses better than ([startup bit][post statup bit])*
-
-      return index + (startup
-          ? kBitmapIndexStartup * num_method_ids
-          : kBitmapIndexPostStartup * num_method_ids);
-    }
+    size_t MethodFlagBitmapIndex(MethodHotness::Flag flag, size_t method_index) const;
+    static size_t FlagBitmapIndex(MethodHotness::Flag flag);
   };
 
   // Return the profile data for the given profile key or null if the dex location
@@ -603,29 +651,12 @@ class ProfileCompilationInfo {
                                    uint32_t checksum,
                                    uint32_t num_method_ids);
 
-  DexFileData* GetOrAddDexFileData(const DexFile* dex_file) {
-    return GetOrAddDexFileData(GetProfileDexFileKey(dex_file->GetLocation()),
+  DexFileData* GetOrAddDexFileData(const DexFile* dex_file,
+                                   const ProfileSampleAnnotation& annotation) {
+    return GetOrAddDexFileData(GetProfileDexFileAugmentedKey(dex_file->GetLocation(), annotation),
                                dex_file->GetLocationChecksum(),
                                dex_file->NumMethodIds());
   }
-
-  // Add a method to the profile using its offline representation.
-  // This is mostly used to facilitate testing.
-  bool AddMethod(const std::string& dex_location,
-                 uint32_t dex_checksum,
-                 uint16_t method_index,
-                 uint32_t num_method_ids,
-                 const OfflineProfileMethodInfo& pmi,
-                 MethodHotness::Flag flags);
-
-  // Add a class index to the profile.
-  bool AddClassIndex(const std::string& dex_location,
-                     uint32_t checksum,
-                     dex::TypeIndex type_idx,
-                     uint32_t num_method_ids);
-
-  // Add all classes from the given dex cache to the the profile.
-  bool AddResolvedClasses(const DexCacheResolvedClasses& classes);
 
   // Encode the known dex_files into a vector. The index of a dex_reference will
   // be the same as the profile index of the dex file (used to encode the ClassReferences).
@@ -636,10 +667,14 @@ class ProfileCompilationInfo {
   const DexFileData* FindDexData(const std::string& profile_key,
                                  uint32_t checksum,
                                  bool verify_checksum = true) const;
-
-  // Return the dex data associated with the given dex file or null if the profile doesn't contain
-  // the key or the checksum mismatches.
-  const DexFileData* FindDexData(const DexFile* dex_file) const;
+  // Same as FindDexData but performs the searching using the given annotation:
+  //   - If the annotation is kNone then the search ignores it and only looks at the base keys.
+  //     In this case only the first matching dex is searched.
+  //   - If the annotation is not kNone, the augmented key is constructed and used to invoke
+  //     the regular FindDexData.
+  const DexFileData* FindDexDataUsingAnnotations(
+      const DexFile* dex_file,
+      const ProfileSampleAnnotation& annotation) const;
 
   // Inflate the input buffer (in_buffer) of size in_size. It returns a buffer of
   // compressed data for the input buffer of "compressed_data_size" size.
@@ -660,7 +695,7 @@ class ProfileCompilationInfo {
 
   // The information present in the header of each profile line.
   struct ProfileLineHeader {
-    std::string dex_location;
+    std::string profile_key;
     uint16_t class_set_size;
     uint32_t method_region_size_bytes;
     uint32_t checksum;
@@ -808,11 +843,6 @@ class ProfileCompilationInfo {
                    const SafeMap<uint8_t, uint8_t>& dex_profile_index_remap,
                    /*out*/std::string* error);
 
-  // Read the aggregation counters from the buffer.
-  bool ReadAggregationCounters(SafeBuffer& buffer,
-                               DexFileData& dex_data,
-                               /*out*/std::string* error);
-
   // The method generates mapping of profile indices while merging a new profile
   // data into current data. It returns true, if the mapping was successful.
   bool RemapProfileIndex(const std::vector<ProfileLineHeader>& profile_line_headers,
@@ -847,6 +877,26 @@ class ProfileCompilationInfo {
   // Initializes the profile version to the desired one.
   void InitProfileVersionInternal(const uint8_t version[]);
 
+  // Returns the threshold size (in bytes) which will trigger save/load warnings.
+  size_t GetSizeWarningThresholdBytes() const;
+  // Returns the threshold size (in bytes) which will cause save/load failures.
+  size_t GetSizeErrorThresholdBytes() const;
+
+
+  // Returns the augmented profile key associated with the given dex location.
+  // The return key will contain a serialized form of the information from the provided
+  // annotation. If the annotation is ProfileSampleAnnotation::kNone then no extra info is
+  // added to the key and this method is equivalent to GetProfileDexFileBaseKey.
+  static std::string GetProfileDexFileAugmentedKey(const std::string& dex_location,
+                                                   const ProfileSampleAnnotation& annotation);
+
+  // Returns a base key without the annotation information.
+  static std::string GetBaseKeyFromAugmentedKey(const std::string& profile_key);
+
+  // Migrates the annotation from an augmented key to a base key.
+  static std::string MigrateAnnotationInfo(const std::string& base_key,
+                                           const std::string& augmented_key);
+
   friend class ProfileCompilationInfoTest;
   friend class CompilerDriverProfileTest;
   friend class ProfileAssistantTest;
@@ -866,14 +916,11 @@ class ProfileCompilationInfo {
   ArenaSafeMap<const std::string, uint8_t> profile_key_map_;
 
   // The version of the profile.
-  // This may change if a "normal" profile is transformed to keep track
-  // of aggregation counters.
   uint8_t version_[kProfileVersionSize];
-
-  // Stored only when the profile is configured to keep track of aggregation counters.
-  uint16_t aggregation_count_;
 };
 
+std::ostream& operator<<(std::ostream& stream,
+                         const ProfileCompilationInfo::DexReference& dex_ref);
 }  // namespace art
 
 #endif  // ART_LIBPROFILE_PROFILE_PROFILE_COMPILATION_INFO_H_
