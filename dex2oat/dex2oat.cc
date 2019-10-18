@@ -1484,6 +1484,34 @@ class Dex2Oat final {
     compiler_options_->dex_files_for_oat_file_ = MakeNonOwningPointerVector(opened_dex_files_);
     const std::vector<const DexFile*>& dex_files = compiler_options_->dex_files_for_oat_file_;
 
+    // Check if we need to downgrade the compiler-filter for size reasons.
+    // Note: This does not affect the compiler filter already stored in the key-value
+    //       store which is used for determining whether the oat file is up to date,
+    //       together with the boot class path locations and checksums stored below.
+    CompilerFilter::Filter original_compiler_filter = compiler_options_->GetCompilerFilter();
+    if (!IsBootImage() && IsVeryLarge(dex_files)) {
+      // Disable app image to make sure dex2oat unloading is enabled.
+      compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
+
+      // If we need to downgrade the compiler-filter for size reasons, do that early before we read
+      // it below for creating verification callbacks.
+      if (!CompilerFilter::IsAsGoodAs(kLargeAppFilter, compiler_options_->GetCompilerFilter())) {
+        LOG(INFO) << "Very large app, downgrading to verify.";
+        compiler_options_->SetCompilerFilter(kLargeAppFilter);
+      }
+    }
+
+    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter())) {
+      // Only modes with compilation require verification results, do this here instead of when we
+      // create the compilation callbacks since the compilation mode may have been changed by the
+      // very large app logic.
+      // Avoiding setting the verification results saves RAM by not adding the dex files later in
+      // the function.
+      // Note: When compiling boot image, this must be done before creating the Runtime.
+      verification_results_.reset(new VerificationResults(compiler_options_.get()));
+      callbacks_->SetVerificationResults(verification_results_.get());
+    }
+
     if (IsBootImage()) {
       // For boot image, pass opened dex files to the Runtime::Create().
       // Note: Runtime acquires ownership of these dex files.
@@ -1504,7 +1532,7 @@ class Dex2Oat final {
     }
 
     if (!IsBootImage()) {
-      if (CompilerFilter::DependsOnImageChecksum(compiler_options_->GetCompilerFilter())) {
+      if (CompilerFilter::DependsOnImageChecksum(original_compiler_filter)) {
         TimingLogger::ScopedTiming t3("Loading image checksum", timings_);
         Runtime* runtime = Runtime::Current();
         key_value_store_->Put(OatHeader::kBootClassPathKey,
@@ -1555,33 +1583,6 @@ class Dex2Oat final {
           class_loader_context_->EncodeContextForOatFile(classpath_dir_,
                                                          stored_class_loader_context_.get());
       key_value_store_->Put(OatHeader::kClassPathKey, class_path_key);
-    }
-
-    // If we need to downgrade the compiler-filter for size reasons.
-    if (!IsBootImage() && IsVeryLarge(dex_files)) {
-      // Disable app image to make sure dex2oat unloading is enabled.
-      compiler_options_->image_type_ = CompilerOptions::ImageType::kNone;
-
-      // If we need to downgrade the compiler-filter for size reasons, do that early before we read
-      // it below for creating verification callbacks.
-      if (!CompilerFilter::IsAsGoodAs(kLargeAppFilter, compiler_options_->GetCompilerFilter())) {
-        LOG(INFO) << "Very large app, downgrading to verify.";
-        // Note: this change won't be reflected in the key-value store, as that had to be
-        //       finalized before loading the dex files. This setup is currently required
-        //       to get the size from the DexFile objects.
-        // TODO: refactor. b/29790079
-        compiler_options_->SetCompilerFilter(kLargeAppFilter);
-      }
-    }
-
-    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter())) {
-      // Only modes with compilation require verification results, do this here instead of when we
-      // create the compilation callbacks since the compilation mode may have been changed by the
-      // very large app logic.
-      // Avoiding setting the verification results saves RAM by not adding the dex files later in
-      // the function.
-      verification_results_.reset(new VerificationResults(compiler_options_.get()));
-      callbacks_->SetVerificationResults(verification_results_.get());
     }
 
     // We had to postpone the swap decision till now, as this is the point when we actually
