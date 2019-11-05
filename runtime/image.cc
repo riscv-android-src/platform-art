@@ -29,7 +29,7 @@
 namespace art {
 
 const uint8_t ImageHeader::kImageMagic[] = { 'a', 'r', 't', '\n' };
-const uint8_t ImageHeader::kImageVersion[] = { '0', '7', '8', '\0' };  // FP16ToFloat intrinsic
+const uint8_t ImageHeader::kImageVersion[] = { '0', '7', '9', '\0' };  // FP16ToHalf intrinsic
 
 ImageHeader::ImageHeader(uint32_t image_reservation_size,
                          uint32_t component_count,
@@ -91,6 +91,13 @@ void ImageHeader::RelocateBootImageReferences(int64_t delta) {
   for (size_t i = 0; i < kImageMethodsCount; ++i) {
     image_methods_[i] += delta;
   }
+}
+
+bool ImageHeader::IsAppImage() const {
+  // Unlike boot image and boot image extensions which include address space for
+  // oat files in their reservation size, app images are loaded separately from oat
+  // files and their reservation size is the image size rounded up to full page.
+  return image_reservation_size_ == RoundUp(image_size_, kPageSize);
 }
 
 bool ImageHeader::IsValid() const {

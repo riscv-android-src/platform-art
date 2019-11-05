@@ -986,7 +986,6 @@ void Runtime::InitNonZygoteOrPostFork(
         UnloadNativeBridge();
         is_native_bridge_loaded_ = false;
         break;
-
       case NativeBridgeAction::kInitialize:
         InitializeNativeBridge(env, isa);
         break;
@@ -2231,7 +2230,8 @@ void Runtime::VisitImageRoots(RootVisitor* visitor) {
   }
 }
 
-static ArtMethod* CreateRuntimeMethod(ClassLinker* class_linker, LinearAlloc* linear_alloc) {
+static ArtMethod* CreateRuntimeMethod(ClassLinker* class_linker, LinearAlloc* linear_alloc)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
   const PointerSize image_pointer_size = class_linker->GetImagePointerSize();
   const size_t method_alignment = ArtMethod::Alignment(image_pointer_size);
   const size_t method_size = ArtMethod::Size(image_pointer_size);
@@ -2962,6 +2962,10 @@ void Runtime::SetJniIdType(JniIdType t) {
   jni_ids_indirection_ = t;
   JNIEnvExt::ResetFunctionTable();
   WellKnownClasses::HandleJniIdTypeChange(Thread::Current()->GetJniEnv());
+}
+
+bool Runtime::GetOatFilesExecutable() const {
+  return !IsAotCompiler() && !(IsSystemServer() && jit_options_->GetSaveProfilingInfo());
 }
 
 }  // namespace art
