@@ -31,6 +31,7 @@
 #include "debugger.h"
 #include "dex/type_lookup_table.h"
 #include "gc/space/image_space.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "image-inl.h"
 #include "interpreter/interpreter.h"
@@ -214,7 +215,10 @@ Jit::Jit(JitCodeCache* code_cache, JitOptions* options)
       boot_completed_lock_("Jit::boot_completed_lock_"),
       cumulative_timings_("JIT timings"),
       memory_use_("Memory used for compilation", 16),
-      lock_("JIT memory use lock") {}
+      lock_("JIT memory use lock"),
+      zygote_mapping_methods_(),
+      fd_methods_(-1),
+      fd_methods_size_(0) {}
 
 Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
   if (jit_load_ == nullptr) {
@@ -588,6 +592,135 @@ void Jit::AddMemoryUsage(ArtMethod* method, size_t bytes) {
   memory_use_.AddValue(bytes);
 }
 
+void Jit::NotifyZygoteCompilationDone() {
+  if (fd_methods_ == -1) {
+    return;
+  }
+
+  size_t offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      memcpy(zygote_mapping_methods_.Begin() + offset, page_start, capacity);
+      offset += capacity;
+    }
+  }
+
+  // Do an msync to ensure we are not affected by writes still being in caches.
+  if (msync(zygote_mapping_methods_.Begin(), fd_methods_size_, MS_SYNC) != 0) {
+    PLOG(WARNING) << "Failed to sync boot image methods memory";
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  // We don't need the shared mapping anymore, and we need to drop it in case
+  // the file hasn't been sealed writable.
+  zygote_mapping_methods_ = MemMap::Invalid();
+
+  // Seal writes now. Zygote and children will map the memory private in order
+  // to write to it.
+  if (fcntl(fd_methods_, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_WRITE) == -1) {
+    PLOG(WARNING) << "Failed to seal boot image methods file descriptor";
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  std::string error_str;
+  MemMap child_mapping_methods = MemMap::MapFile(
+      fd_methods_size_,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE,
+      fd_methods_,
+      /* start= */ 0,
+      /* low_4gb= */ false,
+      "boot-image-methods",
+      &error_str);
+
+  if (!child_mapping_methods.IsValid()) {
+    LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  // Ensure the contents are the same as before: there was a window between
+  // the memcpy and the sealing where other processes could have changed the
+  // contents.
+  // Note this would not be needed if we could have used F_SEAL_FUTURE_WRITE,
+  // see b/143833776.
+  offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      if (memcmp(child_mapping_methods.Begin() + offset, page_start, capacity) != 0) {
+        LOG(WARNING) << "Contents differ in boot image methods data";
+        code_cache_->GetZygoteMap()->SetCompilationState(
+            ZygoteCompilationState::kNotifiedFailure);
+        return;
+      }
+      offset += capacity;
+    }
+  }
+
+  // Future spawned processes don't need the fd anymore.
+  fd_methods_.reset();
+
+  // In order to have the zygote and children share the memory, we also remap
+  // the memory into the zygote process.
+  offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      if (mremap(child_mapping_methods.Begin() + offset,
+                 capacity,
+                 capacity,
+                 MREMAP_FIXED | MREMAP_MAYMOVE,
+                 page_start) == MAP_FAILED) {
+        // Failing to remap is safe as the process will just use the old
+        // contents.
+        PLOG(WARNING) << "Failed mremap of boot image methods of " << space->GetImageFilename();
+      }
+      offset += capacity;
+    }
+  }
+
+  LOG(INFO) << "Successfully notified child processes on sharing boot image methods";
+
+  // Mark that compilation of boot classpath is done, and memory can now be
+  // shared. Other processes will pick up this information.
+  code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedOk);
+
+  // The private mapping created for this process has been mremaped. We can
+  // reset it.
+  child_mapping_methods.Reset();
+}
+
 class JitCompileTask final : public Task {
  public:
   enum class TaskKind {
@@ -690,38 +823,9 @@ class JitDoneCompilingProfileTask final : public SelfDeletingTask {
     }
 
     if (Runtime::Current()->IsZygote()) {
-      // Copy the boot image methods data to the mappings we created to share
-      // with the children.
-      Jit* jit = Runtime::Current()->GetJit();
-      size_t offset = 0;
-      for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
-        const ImageHeader& header = space->GetImageHeader();
-        const ImageSection& section = header.GetMethodsSection();
-        // Because mremap works at page boundaries, we can only handle methods
-        // within a page range. For methods that falls above or below the range,
-        // the child processes will copy their contents to their private mapping
-        // in `child_mapping_methods_`. See `MapBootImageMethods`.
-        uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
-        uint8_t* page_end =
-            AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
-        if (page_end > page_start) {
-          uint64_t capacity = page_end - page_start;
-          memcpy(jit->GetZygoteMappingMethods().Begin() + offset, page_start, capacity);
-          // So the memory is shared, also map the memory into the zygote
-          // process.
-          if (mremap(jit->GetChildMappingMethods().Begin() + offset,
-                     capacity,
-                     capacity,
-                     MREMAP_FIXED | MREMAP_MAYMOVE,
-                     page_start) == MAP_FAILED) {
-            PLOG(WARNING) << "Failed mremap of boot image methods of " << space->GetImageFilename();
-          }
-          offset += capacity;
-        }
-      }
-      // Mark that compilation of boot classpath is done. Other processes will
-      // pick up this boolean.
-      jit->GetCodeCache()->GetZygoteMap()->SetCompilationDone();
+      // Record that we are done compiling the profile.
+      Runtime::Current()->GetJit()->GetCodeCache()->GetZygoteMap()->SetCompilationState(
+          ZygoteCompilationState::kDone);
     }
   }
 
@@ -841,7 +945,28 @@ static void CopyIfDifferent(void* s1, const void* s2, size_t n) {
 }
 
 void Jit::MapBootImageMethods() {
-  if (!GetChildMappingMethods().IsValid()) {
+  CHECK_NE(fd_methods_.get(), -1);
+  if (!code_cache_->GetZygoteMap()->CanMapBootImageMethods()) {
+    LOG(WARNING) << "Not mapping boot image methods due to error from zygote";
+    return;
+  }
+
+  std::string error_str;
+  MemMap child_mapping_methods = MemMap::MapFile(
+      fd_methods_size_,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE,
+      fd_methods_,
+      /* start= */ 0,
+      /* low_4gb= */ false,
+      "boot-image-methods",
+      &error_str);
+
+  // We don't need the fd anymore.
+  fd_methods_.reset();
+
+  if (!child_mapping_methods.IsValid()) {
+    LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
     return;
   }
   size_t offset = 0;
@@ -862,6 +987,10 @@ void Jit::MapBootImageMethods() {
     // such methods, we need their entrypoints to be stubs that do the
     // initialization check.
     header.VisitPackedArtMethods([&](ArtMethod& method) NO_THREAD_SAFETY_ANALYSIS {
+      // Methods in the boot image should never have their single
+      // implementation flag set (and therefore never have a `data_` pointing
+      // to an ArtMethod for single implementation).
+      CHECK(method.IsIntrinsic() || !method.HasSingleImplementationFlag());
       if (method.IsRuntimeMethod()) {
         return;
       }
@@ -897,7 +1026,7 @@ void Jit::MapBootImageMethods() {
         // For all the methods in the mapping, put the entrypoint to the
         // resolution stub.
         ArtMethod* new_method = reinterpret_cast<ArtMethod*>(
-            GetChildMappingMethods().Begin() + offset + (pointer - page_start));
+            child_mapping_methods.Begin() + offset + (pointer - page_start));
         const void* code = new_method->GetEntryPointFromQuickCompiledCode();
         if (!class_linker->IsQuickGenericJniStub(code) &&
             !class_linker->IsQuickToInterpreterBridge(code) &&
@@ -917,7 +1046,7 @@ void Jit::MapBootImageMethods() {
         //                            |/////////| -> copy -> |/////////|
         //                            |         |            |         |
         //
-        CopyIfDifferent(GetChildMappingMethods().Begin() + offset,
+        CopyIfDifferent(child_mapping_methods.Begin() + offset,
                         page_start,
                         pointer + sizeof(ArtMethod) - page_start);
       } else if (pointer < page_end && (pointer + sizeof(ArtMethod)) > page_end) {
@@ -932,14 +1061,14 @@ void Jit::MapBootImageMethods() {
         //         section end   -->  -----------
         //
         size_t bytes_to_copy = (page_end - pointer);
-        CopyIfDifferent(GetChildMappingMethods().Begin() + offset + capacity - bytes_to_copy,
+        CopyIfDifferent(child_mapping_methods.Begin() + offset + capacity - bytes_to_copy,
                         page_end - bytes_to_copy,
                         bytes_to_copy);
       }
     }, space->Begin(), kRuntimePointerSize);
 
     // Map the memory in the boot image range.
-    if (mremap(GetChildMappingMethods().Begin() + offset,
+    if (mremap(child_mapping_methods.Begin() + offset,
                capacity,
                capacity,
                MREMAP_FIXED | MREMAP_MAYMOVE,
@@ -948,6 +1077,11 @@ void Jit::MapBootImageMethods() {
     }
     offset += capacity;
   }
+
+  // The private mapping created for this process has been mremaped. We can
+  // reset it.
+  child_mapping_methods.Reset();
+  LOG(INFO) << "Successfully mapped boot image methods";
 }
 
 void Jit::CreateThreadPool() {
@@ -989,7 +1123,7 @@ void Jit::CreateThreadPool() {
       // Start with '/boot' and end with '.art' to match the pattern recognized
       // by android_os_Debug.cpp for boot images.
       const char* name = "/boot-image-methods.art";
-      unique_fd mem_fd = unique_fd(art::memfd_create(name, /* flags= */ 0));
+      unique_fd mem_fd = unique_fd(art::memfd_create(name, /* flags= */ MFD_ALLOW_SEALING));
       if (mem_fd.get() == -1) {
         PLOG(WARNING) << "Could not create boot image methods file descriptor";
         return;
@@ -999,6 +1133,9 @@ void Jit::CreateThreadPool() {
         return;
       }
       std::string error_str;
+
+      // Create the shared mapping eagerly, as this prevents other processes
+      // from adding the writable seal.
       zygote_mapping_methods_ = MemMap::MapFile(
         total_capacity,
         PROT_READ | PROT_WRITE,
@@ -1019,21 +1156,17 @@ void Jit::CreateThreadPool() {
         return;
       }
 
-      child_mapping_methods_ = MemMap::MapFile(
-        total_capacity,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE,
-        mem_fd,
-        /* start= */ 0,
-        /* low_4gb= */ true,
-        "boot-image-methods",
-        &error_str);
-
-      if (!child_mapping_methods_.IsValid()) {
-        LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
+      // We should use the F_SEAL_FUTURE_WRITE flag, but this has unexpected
+      // behavior on private mappings after fork (the mapping becomes shared between
+      // parent and children), see b/143833776.
+      // We will seal the write once we are done writing to the shared mapping.
+      if (fcntl(mem_fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == -1) {
+        PLOG(WARNING) << "Failed to seal boot image methods file descriptor";
         zygote_mapping_methods_ = MemMap();
         return;
       }
+      fd_methods_ = unique_fd(mem_fd.release());
+      fd_methods_size_ = total_capacity;
     }
   }
 }
@@ -1249,7 +1382,8 @@ bool Jit::MaybeCompileMethod(Thread* self,
     return false;
   }
   if (UNLIKELY(method->IsPreCompiled()) && !with_backedges /* don't check for OSR */) {
-    if (!method->NeedsInitializationCheck()) {
+    if (!NeedsClinitCheckBeforeCall(method) ||
+        method->GetDeclaringClass()->IsVisiblyInitialized()) {
       const void* entry_point = code_cache_->GetSavedEntryPointOfPreCompiledMethod(method);
       if (entry_point != nullptr) {
         Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, entry_point);
@@ -1423,8 +1557,27 @@ static void* RunPollingThread(void* arg) {
   Jit* jit = reinterpret_cast<Jit*>(arg);
   do {
     sleep(10);
-  } while (!jit->GetCodeCache()->GetZygoteMap()->IsCompilationDone());
-  jit->MapBootImageMethods();
+  } while (!jit->GetCodeCache()->GetZygoteMap()->IsCompilationNotified());
+
+  // We will suspend other threads: we can only do that if we're attached to the
+  // runtime.
+  Runtime* runtime = Runtime::Current();
+  bool thread_attached = runtime->AttachCurrentThread(
+      "BootImagePollingThread",
+      /* as_daemon= */ true,
+      /* thread_group= */ nullptr,
+      /* create_peer= */ false);
+  CHECK(thread_attached);
+
+  {
+    // Prevent other threads from running while we are remapping the boot image
+    // ArtMethod's. Native threads might still be running, but they cannot
+    // change the contents of ArtMethod's.
+    ScopedSuspendAll ssa(__FUNCTION__);
+    runtime->GetJit()->MapBootImageMethods();
+  }
+
+  Runtime::Current()->DetachCurrentThread();
   return nullptr;
 }
 
@@ -1435,8 +1588,7 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
     tasks_after_boot_.clear();
   }
 
-  if (Runtime::Current()->IsUsingApexBootImageLocation() &&
-      !GetCodeCache()->GetZygoteMap()->IsCompilationDone()) {
+  if (Runtime::Current()->IsUsingApexBootImageLocation() && fd_methods_ != -1) {
     // Create a thread that will poll the status of zygote compilation, and map
     // the private mapping of boot image methods.
     zygote_mapping_methods_.ResetInForkedProcess();
@@ -1488,6 +1640,15 @@ void Jit::PreZygoteFork() {
 void Jit::PostZygoteFork() {
   if (thread_pool_ == nullptr) {
     return;
+  }
+  if (Runtime::Current()->IsZygote() &&
+      code_cache_->GetZygoteMap()->IsCompilationDoneButNotNotified()) {
+    // Copy the boot image methods data to the mappings we created to share
+    // with the children. We do this here as we are the only thread running and
+    // we don't risk other threads concurrently updating the ArtMethod's.
+    CHECK_EQ(GetTaskCount(), 1);
+    NotifyZygoteCompilationDone();
+    CHECK(code_cache_->GetZygoteMap()->IsCompilationNotified());
   }
   thread_pool_->CreateThreads();
 }

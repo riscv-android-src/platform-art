@@ -376,7 +376,7 @@ jvmtiError Redefiner::GetClassRedefinitionError(jclass klass, /*out*/ std::strin
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
-  return Redefiner::GetClassRedefinitionError(h_klass, error_msg);
+  return Redefiner::GetClassRedefinitionError<kType>(h_klass, error_msg);
 }
 
 template <RedefinitionType kType>
@@ -574,9 +574,10 @@ Redefiner::ClassRedefinition::~ClassRedefinition() {
   }
 }
 
-jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
-                                      jint class_count,
-                                      const jvmtiClassDefinition* definitions) {
+template<RedefinitionType kType>
+jvmtiError Redefiner::RedefineClassesGeneric(jvmtiEnv* jenv,
+                                             jint class_count,
+                                             const jvmtiClassDefinition* definitions) {
   art::Runtime* runtime = art::Runtime::Current();
   art::Thread* self = art::Thread::Current();
   ArtJvmTiEnv* env = ArtJvmTiEnv::AsArtJvmTiEnv(jenv);
@@ -597,7 +598,8 @@ jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
   std::vector<ArtClassDefinition> def_vector;
   def_vector.reserve(class_count);
   for (jint i = 0; i < class_count; i++) {
-    jvmtiError res = Redefiner::GetClassRedefinitionError(definitions[i].klass, &error_msg);
+    jvmtiError res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(
+        definitions[i].klass, &error_msg);
     if (res != OK) {
       JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE " << error_msg;
       return res;
@@ -611,19 +613,33 @@ jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
     def_vector.push_back(std::move(def));
   }
   // Call all the transformation events.
-  jvmtiError res = Transformer::RetransformClassesDirect(self,
-                                                         &def_vector);
-  if (res != OK) {
-    // Something went wrong with transformation!
-    JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE unable to retransform classes";
-    return res;
+  Transformer::RetransformClassesDirect<kType>(self, &def_vector);
+  if (kType == RedefinitionType::kStructural) {
+    Transformer::RetransformClassesDirect<RedefinitionType::kNormal>(self, &def_vector);
   }
-  res = RedefineClassesDirect(
-      env, runtime, self, def_vector, RedefinitionType::kNormal, &error_msg);
+  jvmtiError res = RedefineClassesDirect(env, runtime, self, def_vector, kType, &error_msg);
   if (res != OK) {
     JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE " << error_msg;
   }
   return res;
+}
+
+jvmtiError Redefiner::StructurallyRedefineClasses(jvmtiEnv* jenv,
+                                                  jint class_count,
+                                                  const jvmtiClassDefinition* definitions) {
+  ArtJvmTiEnv* art_env = ArtJvmTiEnv::AsArtJvmTiEnv(jenv);
+  if (art_env == nullptr) {
+    return ERR(INVALID_ENVIRONMENT);
+  } else if (art_env->capabilities.can_redefine_classes != 1) {
+    return ERR(MUST_POSSESS_CAPABILITY);
+  }
+  return RedefineClassesGeneric<RedefinitionType::kStructural>(jenv, class_count, definitions);
+}
+
+jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
+                                      jint class_count,
+                                      const jvmtiClassDefinition* definitions) {
+  return RedefineClassesGeneric<RedefinitionType::kNormal>(jenv, class_count, definitions);
 }
 
 jvmtiError Redefiner::StructurallyRedefineClassDirect(jvmtiEnv* env,
@@ -669,6 +685,11 @@ jvmtiError Redefiner::RedefineClassesDirect(ArtJvmTiEnv* env,
     // We don't actually need to do anything. Just return OK.
     return OK;
   }
+  // We need to fiddle with the verification class flags. To do this we need to make sure there are
+  // no concurrent redefinitions of the same class at the same time. For simplicity and because
+  // this is not expected to be a common occurrence we will just wrap the whole thing in a TOP-level
+  // lock.
+
   // Stop JIT for the duration of this redefine since the JIT might concurrently compile a method we
   // are going to redefine.
   // TODO We should prevent user-code suspensions to make sure this isn't held for too long.
@@ -1155,13 +1176,10 @@ bool Redefiner::ClassRedefinition::CheckRedefinable() {
 
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
   jvmtiError res;
-  switch (driver_->type_) {
-  case RedefinitionType::kNormal:
-    res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(h_klass, &err);
-    break;
-  case RedefinitionType::kStructural:
+  if (driver_->type_ == RedefinitionType::kStructural && this->IsStructuralRedefinition()) {
     res = Redefiner::GetClassRedefinitionError<RedefinitionType::kStructural>(h_klass, &err);
-    break;
+  } else {
+    res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(h_klass, &err);
   }
   if (res != OK) {
     RecordFailure(res, err);
@@ -1172,7 +1190,7 @@ bool Redefiner::ClassRedefinition::CheckRedefinable() {
 }
 
 bool Redefiner::ClassRedefinition::CheckRedefinitionIsValid() {
-  return CheckRedefinable() && CheckClass() && CheckFields() && CheckMethods();
+  return CheckClass() && CheckFields() && CheckMethods() && CheckRedefinable();
 }
 
 class RedefinitionDataIter;
@@ -1502,7 +1520,14 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
                                                 &error);
   switch (failure) {
     case art::verifier::FailureKind::kNoFailure:
+      // TODO It is possible that by doing redefinition previous NO_COMPILE verification failures
+      // were fixed. It would be nice to reflect this in the new implementations.
+      return true;
     case art::verifier::FailureKind::kSoftFailure:
+      // Soft failures might require interpreter on some methods. It won't prevent redefinition but
+      // it does mean we need to run the verifier again and potentially update method flags after
+      // performing the swap.
+      needs_reverify_ = true;
       return true;
     case art::verifier::FailureKind::kHardFailure: {
       RecordFailure(ERR(FAILS_VERIFICATION), "Failed to verify class. Error was: " + error);
@@ -1862,32 +1887,61 @@ jvmtiError Redefiner::Run() {
   }
   UnregisterAllBreakpoints();
 
-  // Disable GC and wait for it to be done if we are a moving GC.  This is fine since we are done
-  // allocating so no deadlocks.
-  ScopedDisableConcurrentAndMovingGc sdcamgc(runtime_->GetHeap(), self_);
+  {
+    // Disable GC and wait for it to be done if we are a moving GC.  This is fine since we are done
+    // allocating so no deadlocks.
+    ScopedDisableConcurrentAndMovingGc sdcamgc(runtime_->GetHeap(), self_);
 
-  // Do transition to final suspension
-  // TODO We might want to give this its own suspended state!
-  // TODO This isn't right. We need to change state without any chance of suspend ideally!
-  art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
-  art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend=*/true);
-  for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
-    art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
-    ClassRedefinition& redef = data.GetRedefinition();
-    if (data.GetSourceClassLoader() != nullptr) {
-      ClassLoaderHelper::UpdateJavaDexFile(data.GetJavaDexFile(), data.GetNewDexFileCookie());
+    // Do transition to final suspension
+    // TODO We might want to give this its own suspended state!
+    // TODO This isn't right. We need to change state without any chance of suspend ideally!
+    art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
+    art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend=*/true);
+    for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
+      art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
+      ClassRedefinition& redef = data.GetRedefinition();
+      if (data.GetSourceClassLoader() != nullptr) {
+        ClassLoaderHelper::UpdateJavaDexFile(data.GetJavaDexFile(), data.GetNewDexFileCookie());
+      }
+      redef.UpdateClass(data);
     }
-    redef.UpdateClass(data);
+    RestoreObsoleteMethodMapsIfUnneeded(holder);
+    // TODO We should check for if any of the redefined methods are intrinsic methods here and, if
+    // any are, force a full-world deoptimization before finishing redefinition. If we don't do this
+    // then methods that have been jitted prior to the current redefinition being applied might
+    // continue to use the old versions of the intrinsics!
+    // TODO Do the dex_file release at a more reasonable place. This works but it muddles who really
+    // owns the DexFile and when ownership is transferred.
+    ReleaseAllDexFiles();
   }
-  RestoreObsoleteMethodMapsIfUnneeded(holder);
-  // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any
-  // are, force a full-world deoptimization before finishing redefinition. If we don't do this then
-  // methods that have been jitted prior to the current redefinition being applied might continue
-  // to use the old versions of the intrinsics!
-  // TODO Do the dex_file release at a more reasonable place. This works but it muddles who really
-  // owns the DexFile and when ownership is transferred.
-  ReleaseAllDexFiles();
+  // By now the class-linker knows about all the classes so we can safetly retry verification and
+  // update method flags.
+  ReverifyClasses(holder);
   return OK;
+}
+
+void Redefiner::ReverifyClasses(RedefinitionDataHolder& holder) {
+  for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
+    data.GetRedefinition().ReverifyClass(data);
+  }
+}
+
+void Redefiner::ClassRedefinition::ReverifyClass(const RedefinitionDataIter &cur_data) {
+  if (!needs_reverify_) {
+    return;
+  }
+  VLOG(plugin) << "Reverifying " << class_sig_ << " due to soft failures";
+  std::string error;
+  // TODO Make verification log level lower
+  art::verifier::FailureKind failure =
+      art::verifier::ClassVerifier::ReverifyClass(driver_->self_,
+                                                  cur_data.GetMirrorClass(),
+                                                  /*log_level=*/
+                                                  art::verifier::HardFailLogMode::kLogWarning,
+                                                  /*api_level=*/
+                                                  art::Runtime::Current()->GetTargetSdkVersion(),
+                                                  &error);
+  CHECK_NE(failure, art::verifier::FailureKind::kHardFailure);
 }
 
 void Redefiner::ClassRedefinition::UpdateMethods(art::ObjPtr<art::mirror::Class> mclass,
@@ -2179,6 +2233,25 @@ void Redefiner::ClassRedefinition::UpdateClass(const RedefinitionDataIter& holde
   } else {
     UpdateClassInPlace(holder);
   }
+  UpdateClassCommon(holder);
+}
+
+void Redefiner::ClassRedefinition::UpdateClassCommon(const RedefinitionDataIter &cur_data) {
+  // NB This is after we've already replaced all old-refs with new-refs in the structural case.
+  art::ObjPtr<art::mirror::Class> klass(cur_data.GetMirrorClass());
+  DCHECK(!IsStructuralRedefinition() || klass == cur_data.GetNewClassObject());
+  if (!needs_reverify_) {
+    return;
+  }
+  // Force the most restrictive interpreter environment. We don't know what the final verification
+  // will allow. We will clear these after retrying verification once we drop the mutator-lock.
+  klass->VisitMethods([](art::ArtMethod* m) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (!m->IsNative() && m->IsInvokable() && !m->IsObsolete()) {
+      m->ClearSkipAccessChecks();
+      m->SetDontCompile();
+      m->SetMustCountLocks();
+    }
+  }, art::kRuntimePointerSize);
 }
 
 // Restores the old obsolete methods maps if it turns out they weren't needed (ie there were no new

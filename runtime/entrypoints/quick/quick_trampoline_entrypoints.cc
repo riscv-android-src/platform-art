@@ -774,7 +774,7 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
     self->PushShadowFrame(shadow_frame);
     self->EndAssertNoThreadSuspension(old_cause);
 
-    if (method->IsStatic()) {
+    if (NeedsClinitCheckBeforeCall(method)) {
       ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
       if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
         // Ensure static method's class is initialized.
@@ -1456,10 +1456,13 @@ extern "C" const void* artQuickResolutionTrampoline(
                                << invoke_type << " " << orig_called->GetVtableIndex();
     }
 
-    // Ensure that the called method's class is initialized.
-    StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::Class> called_class(hs.NewHandle(called->GetDeclaringClass()));
-    linker->EnsureInitialized(soa.Self(), called_class, true, true);
+    ObjPtr<mirror::Class> called_class = called->GetDeclaringClass();
+    if (NeedsClinitCheckBeforeCall(called) && !called_class->IsVisiblyInitialized()) {
+      // Ensure that the called method's class is initialized.
+      StackHandleScope<1> hs(soa.Self());
+      HandleWrapperObjPtr<mirror::Class> h_called_class(hs.NewHandleWrapper(&called_class));
+      linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
+    }
     bool force_interpreter = self->IsForceInterpreter() && !called->IsNative();
     if (called_class->IsInitialized() || called_class->IsInitializing()) {
       if (UNLIKELY(force_interpreter ||
@@ -2379,15 +2382,18 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   // We can set the entrypoint of a native method to generic JNI even when the
   // class hasn't been initialized, so we need to do the initialization check
   // before invoking the native code.
-  if (called->NeedsInitializationCheck()) {
-    // Ensure static method's class is initialized.
-    StackHandleScope<1> hs(self);
-    Handle<mirror::Class> h_class(hs.NewHandle(called->GetDeclaringClass()));
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
-      DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
-      self->PopHandleScope();
-      // A negative value denotes an error.
-      return GetTwoWordFailureValue();
+  if (NeedsClinitCheckBeforeCall(called)) {
+    ObjPtr<mirror::Class> declaring_class = called->GetDeclaringClass();
+    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+      // Ensure static method's class is initialized.
+      StackHandleScope<1> hs(self);
+      Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
+      if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+        DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
+        self->PopHandleScope();
+        // A negative value denotes an error.
+        return GetTwoWordFailureValue();
+      }
     }
   }
 
@@ -2721,6 +2727,10 @@ extern "C" TwoWordReturn artInvokeInterfaceTrampoline(ArtMethod* interface_metho
   // We arrive here if we have found an implementation, and it is not in the ImtConflictTable.
   // We create a new table with the new pair { interface_method, method }.
   DCHECK(conflict_method->IsRuntimeMethod());
+
+  // Classes in the boot image should never need to update conflict methods in
+  // their IMT.
+  CHECK(!Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(cls.Get()));
   ArtMethod* new_conflict_method = Runtime::Current()->GetClassLinker()->AddMethodToConflictTable(
       cls.Get(),
       conflict_method,
