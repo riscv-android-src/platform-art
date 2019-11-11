@@ -112,6 +112,7 @@
 #include "non_debuggable_classes.h"
 #include "obj_ptr.h"
 #include "object_lock.h"
+#include "reflective_value_visitor.h"
 #include "runtime.h"
 #include "runtime_globals.h"
 #include "stack.h"
@@ -376,7 +377,7 @@ jvmtiError Redefiner::GetClassRedefinitionError(jclass klass, /*out*/ std::strin
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(obj->AsClass()));
-  return Redefiner::GetClassRedefinitionError(h_klass, error_msg);
+  return Redefiner::GetClassRedefinitionError<kType>(h_klass, error_msg);
 }
 
 template <RedefinitionType kType>
@@ -574,9 +575,10 @@ Redefiner::ClassRedefinition::~ClassRedefinition() {
   }
 }
 
-jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
-                                      jint class_count,
-                                      const jvmtiClassDefinition* definitions) {
+template<RedefinitionType kType>
+jvmtiError Redefiner::RedefineClassesGeneric(jvmtiEnv* jenv,
+                                             jint class_count,
+                                             const jvmtiClassDefinition* definitions) {
   art::Runtime* runtime = art::Runtime::Current();
   art::Thread* self = art::Thread::Current();
   ArtJvmTiEnv* env = ArtJvmTiEnv::AsArtJvmTiEnv(jenv);
@@ -597,7 +599,8 @@ jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
   std::vector<ArtClassDefinition> def_vector;
   def_vector.reserve(class_count);
   for (jint i = 0; i < class_count; i++) {
-    jvmtiError res = Redefiner::GetClassRedefinitionError(definitions[i].klass, &error_msg);
+    jvmtiError res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(
+        definitions[i].klass, &error_msg);
     if (res != OK) {
       JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE " << error_msg;
       return res;
@@ -611,13 +614,33 @@ jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
     def_vector.push_back(std::move(def));
   }
   // Call all the transformation events.
-  Transformer::RetransformClassesDirect(self, &def_vector);
-  jvmtiError res = RedefineClassesDirect(
-      env, runtime, self, def_vector, RedefinitionType::kNormal, &error_msg);
+  Transformer::RetransformClassesDirect<kType>(self, &def_vector);
+  if (kType == RedefinitionType::kStructural) {
+    Transformer::RetransformClassesDirect<RedefinitionType::kNormal>(self, &def_vector);
+  }
+  jvmtiError res = RedefineClassesDirect(env, runtime, self, def_vector, kType, &error_msg);
   if (res != OK) {
     JVMTI_LOG(WARNING, env) << "FAILURE TO REDEFINE " << error_msg;
   }
   return res;
+}
+
+jvmtiError Redefiner::StructurallyRedefineClasses(jvmtiEnv* jenv,
+                                                  jint class_count,
+                                                  const jvmtiClassDefinition* definitions) {
+  ArtJvmTiEnv* art_env = ArtJvmTiEnv::AsArtJvmTiEnv(jenv);
+  if (art_env == nullptr) {
+    return ERR(INVALID_ENVIRONMENT);
+  } else if (art_env->capabilities.can_redefine_classes != 1) {
+    return ERR(MUST_POSSESS_CAPABILITY);
+  }
+  return RedefineClassesGeneric<RedefinitionType::kStructural>(jenv, class_count, definitions);
+}
+
+jvmtiError Redefiner::RedefineClasses(jvmtiEnv* jenv,
+                                      jint class_count,
+                                      const jvmtiClassDefinition* definitions) {
+  return RedefineClassesGeneric<RedefinitionType::kNormal>(jenv, class_count, definitions);
 }
 
 jvmtiError Redefiner::StructurallyRedefineClassDirect(jvmtiEnv* env,
@@ -663,6 +686,11 @@ jvmtiError Redefiner::RedefineClassesDirect(ArtJvmTiEnv* env,
     // We don't actually need to do anything. Just return OK.
     return OK;
   }
+  // We need to fiddle with the verification class flags. To do this we need to make sure there are
+  // no concurrent redefinitions of the same class at the same time. For simplicity and because
+  // this is not expected to be a common occurrence we will just wrap the whole thing in a TOP-level
+  // lock.
+
   // Stop JIT for the duration of this redefine since the JIT might concurrently compile a method we
   // are going to redefine.
   // TODO We should prevent user-code suspensions to make sure this isn't held for too long.
@@ -1149,13 +1177,10 @@ bool Redefiner::ClassRedefinition::CheckRedefinable() {
 
   art::Handle<art::mirror::Class> h_klass(hs.NewHandle(GetMirrorClass()));
   jvmtiError res;
-  switch (driver_->type_) {
-  case RedefinitionType::kNormal:
-    res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(h_klass, &err);
-    break;
-  case RedefinitionType::kStructural:
+  if (driver_->type_ == RedefinitionType::kStructural && this->IsStructuralRedefinition()) {
     res = Redefiner::GetClassRedefinitionError<RedefinitionType::kStructural>(h_klass, &err);
-    break;
+  } else {
+    res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(h_klass, &err);
   }
   if (res != OK) {
     RecordFailure(res, err);
@@ -1166,7 +1191,7 @@ bool Redefiner::ClassRedefinition::CheckRedefinable() {
 }
 
 bool Redefiner::ClassRedefinition::CheckRedefinitionIsValid() {
-  return CheckRedefinable() && CheckClass() && CheckFields() && CheckMethods();
+  return CheckClass() && CheckFields() && CheckMethods() && CheckRedefinable();
 }
 
 class RedefinitionDataIter;
@@ -1616,6 +1641,11 @@ bool Redefiner::ClassRedefinition::FinishRemainingAllocations(
     }
 
     cur_data->SetNewClassObject(nc.Get());
+    // We really want to be able to resolve to the new class-object using this dex-cache for
+    // verification work. Since we haven't put it in the class-table yet we wll just manually add it
+    // to the dex-cache.
+    // TODO: We should maybe do this in a better spot.
+    cur_data->GetNewDexCache()->SetResolvedType(nc->GetDexTypeIndex(), nc.Get());
   }
   return true;
 }
@@ -1863,31 +1893,33 @@ jvmtiError Redefiner::Run() {
   }
   UnregisterAllBreakpoints();
 
-  // Disable GC and wait for it to be done if we are a moving GC.  This is fine since we are done
-  // allocating so no deadlocks.
-  ScopedDisableConcurrentAndMovingGc sdcamgc(runtime_->GetHeap(), self_);
+  {
+    // Disable GC and wait for it to be done if we are a moving GC.  This is fine since we are done
+    // allocating so no deadlocks.
+    ScopedDisableConcurrentAndMovingGc sdcamgc(runtime_->GetHeap(), self_);
 
-  // Do transition to final suspension
-  // TODO We might want to give this its own suspended state!
-  // TODO This isn't right. We need to change state without any chance of suspend ideally!
-  art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
-  art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend=*/true);
-  for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
-    art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
-    ClassRedefinition& redef = data.GetRedefinition();
-    if (data.GetSourceClassLoader() != nullptr) {
-      ClassLoaderHelper::UpdateJavaDexFile(data.GetJavaDexFile(), data.GetNewDexFileCookie());
+    // Do transition to final suspension
+    // TODO We might want to give this its own suspended state!
+    // TODO This isn't right. We need to change state without any chance of suspend ideally!
+    art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
+    art::ScopedSuspendAll ssa("Final installation of redefined Classes!", /*long_suspend=*/true);
+    for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
+      art::ScopedAssertNoThreadSuspension nts("Updating runtime objects for redefinition");
+      ClassRedefinition& redef = data.GetRedefinition();
+      if (data.GetSourceClassLoader() != nullptr) {
+        ClassLoaderHelper::UpdateJavaDexFile(data.GetJavaDexFile(), data.GetNewDexFileCookie());
+      }
+      redef.UpdateClass(data);
     }
-    redef.UpdateClass(data);
+    RestoreObsoleteMethodMapsIfUnneeded(holder);
+    // TODO We should check for if any of the redefined methods are intrinsic methods here and, if
+    // any are, force a full-world deoptimization before finishing redefinition. If we don't do this
+    // then methods that have been jitted prior to the current redefinition being applied might
+    // continue to use the old versions of the intrinsics!
+    // TODO Do the dex_file release at a more reasonable place. This works but it muddles who really
+    // owns the DexFile and when ownership is transferred.
+    ReleaseAllDexFiles();
   }
-  RestoreObsoleteMethodMapsIfUnneeded(holder);
-  // TODO We should check for if any of the redefined methods are intrinsic methods here and, if any
-  // are, force a full-world deoptimization before finishing redefinition. If we don't do this then
-  // methods that have been jitted prior to the current redefinition being applied might continue
-  // to use the old versions of the intrinsics!
-  // TODO Do the dex_file release at a more reasonable place. This works but it muddles who really
-  // owns the DexFile and when ownership is transferred.
-  ReleaseAllDexFiles();
   // By now the class-linker knows about all the classes so we can safetly retry verification and
   // update method flags.
   ReverifyClasses(holder);
@@ -1895,7 +1927,6 @@ jvmtiError Redefiner::Run() {
 }
 
 void Redefiner::ReverifyClasses(RedefinitionDataHolder& holder) {
-  art::ScopedAssertNoThreadSuspension nts("Updating method flags");
   for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
     data.GetRedefinition().ReverifyClass(data);
   }
@@ -2062,25 +2093,84 @@ void Redefiner::ClassRedefinition::UpdateClassStructurally(const RedefinitionDat
   replacement->SetLockWord(orig->GetLockWord(false), false);
   orig->SetLockWord(art::LockWord::Default(), false);
   // Update live pointers in ART code.
+  auto could_change_resolution_of = [&](auto* field_or_method,
+                                        const auto& info) REQUIRES(art::Locks::mutator_lock_) {
+    constexpr bool is_method = std::is_same_v<art::ArtMethod*, decltype(field_or_method)>;
+    static_assert(is_method || std::is_same_v<art::ArtField*, decltype(field_or_method)>,
+                  "Input is not field or method!");
+    // Only dex-cache is used for resolution
+    if (LIKELY(info.GetType() != art::ReflectionSourceType::kSourceDexCacheResolvedField &&
+               info.GetType() != art::ReflectionSourceType::kSourceDexCacheResolvedMethod)) {
+      return false;
+    }
+    if constexpr (is_method) {
+      // Only direct methods are used without further indirection through a vtable/IFTable.
+      // Constructors cannot be shadowed.
+      if (LIKELY(!field_or_method->IsDirect() || field_or_method->IsConstructor())) {
+        return false;
+      }
+    } else {
+      // Only non-private fields can be shadowed in a manner that's visible.
+      if (LIKELY(field_or_method->IsPrivate())) {
+        return false;
+      }
+    }
+    // We can only shadow things from our superclasses
+    if (LIKELY(!field_or_method->GetDeclaringClass()->IsAssignableFrom(orig))) {
+      return false;
+    }
+    if constexpr (is_method) {
+      auto direct_methods = replacement->GetDirectMethods(art::kRuntimePointerSize);
+      return std::find_if(direct_methods.begin(),
+                          direct_methods.end(),
+                          [&](art::ArtMethod& m) REQUIRES(art::Locks::mutator_lock_) {
+                            return UNLIKELY(m.HasSameNameAndSignature(field_or_method));
+                          }) != direct_methods.end();
+    } else {
+      auto pred = [&](art::ArtField& f) REQUIRES(art::Locks::mutator_lock_) {
+        return std::string_view(f.GetName()) == std::string_view(field_or_method->GetName()) &&
+               std::string_view(f.GetTypeDescriptor()) ==
+                   std::string_view(field_or_method->GetTypeDescriptor());
+      };
+      if (field_or_method->IsStatic()) {
+        auto sfields = replacement->GetSFields();
+        return std::find_if(sfields.begin(), sfields.end(), pred) != sfields.end();
+      } else {
+        auto ifields = replacement->GetIFields();
+        return std::find_if(ifields.begin(), ifields.end(), pred) != ifields.end();
+      }
+    }
+  };
   // TODO Performing 2 stack-walks back to back isn't the greatest. We might want to try to combine
   // it with the one ReplaceReferences does. Doing so would be rather complicated though.
   driver_->runtime_->VisitReflectiveTargets(
       [&](art::ArtField* f, const auto& info) REQUIRES(art::Locks::mutator_lock_) {
+        DCHECK(f != nullptr) << info;
         auto it = field_map.find(f);
-        if (it == field_map.end()) {
-          return f;
+        if (it != field_map.end()) {
+          VLOG(plugin) << "Updating " << info << " object for (field) "
+                       << it->second->PrettyField();
+          return it->second;
+        } else if (UNLIKELY(could_change_resolution_of(f, info))) {
+          // Resolution might change. Just clear the resolved value.
+          VLOG(plugin) << "Clearing resolution " << info << " for (field) " << f->PrettyField();
+          return static_cast<art::ArtField*>(nullptr);
         }
-        VLOG(plugin) << "Updating " << info << " object for (field) " << it->second->PrettyField();
-        return it->second;
+        return f;
       },
       [&](art::ArtMethod* m, const auto& info) REQUIRES(art::Locks::mutator_lock_) {
+        DCHECK(m != nullptr) << info;
         auto it = method_map.find(m);
-        if (it == method_map.end()) {
-          return m;
+        if (it != method_map.end()) {
+          VLOG(plugin) << "Updating " << info << " object for (method) "
+                      << it->second->PrettyMethod();
+          return it->second;
+        } else if (UNLIKELY(could_change_resolution_of(m, info))) {
+          // Resolution might change. Just clear the resolved value.
+          VLOG(plugin) << "Clearing resolution " << info << " for (method) " << m->PrettyMethod();
+          return static_cast<art::ArtMethod*>(nullptr);
         }
-        VLOG(plugin) << "Updating " << info << " object for (method) "
-                     << it->second->PrettyMethod();
-        return it->second;
+        return m;
       });
 
   // Force every frame of every thread to deoptimize (any frame might have eg offsets compiled in).
@@ -2208,6 +2298,25 @@ void Redefiner::ClassRedefinition::UpdateClass(const RedefinitionDataIter& holde
   } else {
     UpdateClassInPlace(holder);
   }
+  UpdateClassCommon(holder);
+}
+
+void Redefiner::ClassRedefinition::UpdateClassCommon(const RedefinitionDataIter &cur_data) {
+  // NB This is after we've already replaced all old-refs with new-refs in the structural case.
+  art::ObjPtr<art::mirror::Class> klass(cur_data.GetMirrorClass());
+  DCHECK(!IsStructuralRedefinition() || klass == cur_data.GetNewClassObject());
+  if (!needs_reverify_) {
+    return;
+  }
+  // Force the most restrictive interpreter environment. We don't know what the final verification
+  // will allow. We will clear these after retrying verification once we drop the mutator-lock.
+  klass->VisitMethods([](art::ArtMethod* m) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+    if (!m->IsNative() && m->IsInvokable() && !m->IsObsolete()) {
+      m->ClearSkipAccessChecks();
+      m->SetDontCompile();
+      m->SetMustCountLocks();
+    }
+  }, art::kRuntimePointerSize);
 }
 
 // Restores the old obsolete methods maps if it turns out they weren't needed (ie there were no new
