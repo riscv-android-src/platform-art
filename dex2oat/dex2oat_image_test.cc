@@ -50,7 +50,7 @@
 namespace art {
 
 // A suitable address for loading the core images.
-constexpr uint32_t kBaseAddress = 0x60000000;
+constexpr uint32_t kBaseAddress = ART_BASE_ADDRESS;
 
 struct ImageSizes {
   size_t art_size = 0;
