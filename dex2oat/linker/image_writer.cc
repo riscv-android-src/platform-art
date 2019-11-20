@@ -1158,8 +1158,8 @@ bool ImageWriter::KeepClass(ObjPtr<mirror::Class> klass) {
   if (!compiler_options_.IsImageClass(klass->GetDescriptor(&temp))) {
     return false;
   }
-  if (compiler_options_.IsAppImage() || compiler_options_.IsBootImageExtension()) {
-    // For app images and boot image extensions, we need to prune classes that
+  if (compiler_options_.IsAppImage()) {
+    // For app images, we need to prune classes that
     // are defined by the boot class path we're compiling against but not in
     // the boot image spaces since these may have already been loaded at
     // run time when this image is loaded. Keep classes in the boot image
@@ -1872,7 +1872,7 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
         class_def_index = enum_cast<uint32_t>(component_type->GetPrimitiveType());
       } else {
         auto it = std::find(dex_files_.begin(), dex_files_.end(), &component_type->GetDexFile());
-        DCHECK(it != dex_files_.end());
+        DCHECK(it != dex_files_.end()) << klass->PrettyDescriptor();
         dex_file_index = std::distance(dex_files_.begin(), it) + 1u;  // 0 is for primitive types.
         class_def_index = component_type->GetDexClassDefIndex();
       }
@@ -2180,6 +2180,16 @@ void ImageWriter::LayoutHelper::VerifyImageBinSlotsAssigned() {
           ArtField* field = jni::DecodeArtField(WellKnownClasses::dalvik_system_DexFile_cookie);
           CHECK(field->GetObject(ref) == nullptr);
           return;
+        }
+        if (obj->IsString()) {
+          // Ignore interned strings. These may come from reflection interning method names.
+          // TODO: Make dex file strings weak interns and GC them before writing the image.
+          Runtime* runtime = Runtime::Current();
+          ObjPtr<mirror::String> interned =
+              runtime->GetInternTable()->LookupStrong(Thread::Current(), obj->AsString());
+          if (interned == obj) {
+            return;
+          }
         }
         LOG(FATAL) << "Image object without assigned bin slot: "
             << mirror::Object::PrettyTypeOf(obj) << " " << obj;
@@ -2653,6 +2663,22 @@ void ImageWriter::CreateHeader(size_t oat_index) {
     }
   }
 
+  // Compute boot image checksums for the primary component, leave as 0 otherwise.
+  uint32_t boot_image_components = 0u;
+  uint32_t boot_image_checksums = 0u;
+  if (oat_index == 0u) {
+    const std::vector<gc::space::ImageSpace*>& image_spaces =
+        Runtime::Current()->GetHeap()->GetBootImageSpaces();
+    boot_image_components = dchecked_integral_cast<uint32_t>(image_spaces.size());
+    DCHECK_EQ(boot_image_components == 0u, compiler_options_.IsBootImage());
+    for (uint32_t i = 0; i != boot_image_components; ) {
+      const ImageHeader& header = image_spaces[i]->GetImageHeader();
+      boot_image_checksums ^= header.GetImageChecksum();
+      DCHECK_LE(header.GetComponentCount(), boot_image_components - i);
+      i += header.GetComponentCount();
+    }
+  }
+
   // Create the image sections.
   auto section_info_pair = image_info.CreateImageSections();
   const size_t image_end = section_info_pair.first;
@@ -2695,6 +2721,8 @@ void ImageWriter::CreateHeader(size_t oat_index) {
       PointerToLowMemUInt32(oat_file_end),
       boot_image_begin_,
       boot_image_size_,
+      boot_image_components,
+      boot_image_checksums,
       static_cast<uint32_t>(target_ptr_size_));
 }
 

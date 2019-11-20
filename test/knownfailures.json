@@ -1145,7 +1145,12 @@
                   "1990-structural-bad-verify",
                   "1991-hello-structural-retransform",
                   "1992-retransform-no-such-field",
-                  "1993-fallback-non-structural"
+                  "1993-fallback-non-structural",
+                  "1994-final-virtual-structural",
+                  "1995-final-virtual-structural-multithread",
+                  "1996-final-override-virtual-structural",
+                  "1997-structural-shadow-method",
+                  "1998-structural-shadow-field"
                 ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
@@ -1267,5 +1272,11 @@
         "env_vars": {"ART_READ_BARRIER_TYPE": "TABLELOOKUP"},
         "bug": "b/140507091",
         "description": ["Test containing Checker assertions expecting Baker read barriers."]
+    },
+    {
+        "tests": ["689-zygote-jit-deopt"],
+        "variant": "gcstress",
+        "bug": "b/137887811",
+        "description": ["Occasional timeouts."]
     }
 ]

@@ -449,6 +449,11 @@ while true; do
     fi
 done
 
+# HACK: Force the use of `signal_dumper` on host.
+if [[ "$HOST" = "y" ]]; then
+  TIME_OUT="timeout"
+fi
+
 # If you change this, update the timeout in testrunner.py as well.
 if [ -z "$TIME_OUT_VALUE" ] ; then
   # 10 minutes is the default.
@@ -953,6 +958,13 @@ if [ "$HOST" = "n" ]; then
   TMP_DIR_OPTION="-Djava.io.tmpdir=/data/local/tmp"
 fi
 
+# The build servers have an ancient version of bash so we cannot use @Q.
+if [ "$USE_GDBSERVER" == "y" ]; then
+  printf -v QUOTED_DALVIKVM_BOOT_OPT "%q" "$DALVIKVM_BOOT_OPT"
+else
+  QUOTED_DALVIKVM_BOOT_OPT="$DALVIKVM_BOOT_OPT"
+fi
+
 # We set DumpNativeStackOnSigQuit to false to avoid stressing libunwind.
 # b/27185632
 # b/24664297
@@ -967,7 +979,7 @@ dalvikvm_cmdline="$INVOKE_WITH $GDB $ANDROID_ART_BIN_DIR/$DALVIKVM \
                   $JNI_OPTS \
                   $INT_OPTS \
                   $DEBUGGER_OPTS \
-                  $DALVIKVM_BOOT_OPT \
+                  ${QUOTED_DALVIKVM_BOOT_OPT} \
                   $TMP_DIR_OPTION \
                   -XX:DumpNativeStackOnSigQuit:false \
                   -cp $DEX_LOCATION/$TEST_NAME.jar$SECONDARY_DEX $MAIN $ARGS"
