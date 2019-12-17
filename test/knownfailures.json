@@ -447,7 +447,8 @@
             "1976-hello-structural-static-methods",
             "1985-structural-redefine-stack-scope",
             "1986-structural-redefine-multi-thread-stack-scope",
-            "1987-structural-redefine-recursive-stack-scope"
+            "1987-structural-redefine-recursive-stack-scope",
+            "2000-virtual-list-structural"
         ],
         "description": [
             "Tests for/using bytecodes introduced after DEX version 037 that are unsupported by",
@@ -1118,6 +1119,7 @@
                   "691-hiddenapi-proxy",
                   "692-vdex-inmem-loader",
                   "693-vdex-inmem-loader-evict",
+                  "723-string-init-range",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1150,7 +1152,11 @@
                   "1995-final-virtual-structural-multithread",
                   "1996-final-override-virtual-structural",
                   "1997-structural-shadow-method",
-                  "1998-structural-shadow-field"
+                  "1998-structural-shadow-field",
+                  "1999-virtual-structural",
+                  "2000-virtual-list-structural",
+                  "2001-virtual-structural-multithread",
+                  "2002-virtual-structural-initializing"
                 ],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
@@ -1278,5 +1284,11 @@
         "variant": "gcstress",
         "bug": "b/137887811",
         "description": ["Occasional timeouts."]
+    },
+    {
+        "tests": ["909-attach-agent", "126-miranda-multidex"],
+        "zipapex": true,
+        "bug": "b/135507613",
+        "description": ["These tests run dalvikvm multiple times, this can messup the zipapex runner"]
     }
 ]

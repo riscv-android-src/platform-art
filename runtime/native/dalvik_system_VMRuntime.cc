@@ -275,6 +275,22 @@ static void VMRuntime_setTargetSdkVersionNative(JNIEnv*, jobject, jint target_sd
 #endif
 }
 
+static void VMRuntime_setDisabledCompatChangesNative(JNIEnv* env, jobject,
+    jlongArray disabled_compat_changes) {
+  if (disabled_compat_changes == nullptr) {
+    return;
+  }
+  std::set<uint64_t> disabled_compat_changes_vec;
+  int length = env->GetArrayLength(disabled_compat_changes);
+  jlong* elements = env->GetLongArrayElements(disabled_compat_changes, /*isCopy*/nullptr);
+  for (int i = 0; i < length; i++) {
+    disabled_compat_changes_vec.insert(static_cast<uint64_t>(elements[i]));
+  }
+  Runtime::Current()->SetDisabledCompatChanges(disabled_compat_changes_vec);
+
+  // TODO(145743810): pipe into libc as well.
+}
+
 static inline size_t clamp_to_size_t(jlong n) {
   if (sizeof(jlong) > sizeof(size_t)
       && UNLIKELY(n > static_cast<jlong>(std::numeric_limits<size_t>::max()))) {
@@ -733,6 +749,34 @@ static void VMRuntime_bootCompleted(JNIEnv* env ATTRIBUTE_UNUSED,
   }
 }
 
+class ClearJitCountersVisitor : public ClassVisitor {
+ public:
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
+    // Avoid some types of classes that don't need their methods visited.
+    if (klass->IsProxyClass() ||
+        klass->IsArrayClass() ||
+        klass->IsPrimitive() ||
+        !klass->IsResolved() ||
+        klass->IsErroneousResolved()) {
+      return true;
+    }
+    for (ArtMethod& m : klass->GetMethods(kRuntimePointerSize)) {
+      if (!m.IsAbstract()) {
+        if (m.GetCounter() != 0) {
+          m.SetCounter(0);
+        }
+      }
+    }
+    return true;
+  }
+};
+
+static void VMRuntime_resetJitCounters(JNIEnv* env, jclass klass ATTRIBUTE_UNUSED) {
+  ScopedObjectAccess soa(env);
+  ClearJitCountersVisitor visitor;
+  Runtime::Current()->GetClassLinker()->VisitClasses(&visitor);
+}
+
 static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
@@ -753,6 +797,7 @@ static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, newUnpaddedArray, "(Ljava/lang/Class;I)Ljava/lang/Object;"),
   NATIVE_METHOD(VMRuntime, properties, "()[Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, setTargetSdkVersionNative, "(I)V"),
+  NATIVE_METHOD(VMRuntime, setDisabledCompatChangesNative, "([J)V"),
   NATIVE_METHOD(VMRuntime, registerNativeAllocation, "(J)V"),
   NATIVE_METHOD(VMRuntime, registerNativeFree, "(J)V"),
   NATIVE_METHOD(VMRuntime, getNotifyNativeInterval, "()I"),
@@ -783,6 +828,7 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setProcessPackageName, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setProcessDataDirectory, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, bootCompleted, "()V"),
+  NATIVE_METHOD(VMRuntime, resetJitCounters, "()V"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

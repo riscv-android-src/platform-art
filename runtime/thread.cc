@@ -89,6 +89,7 @@
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
 #include "nativehelper/scoped_utf_chars.h"
+#include "nterp_helpers.h"
 #include "nth_caller_visitor.h"
 #include "oat_quick_method_header.h"
 #include "obj_ptr-inl.h"
@@ -585,6 +586,14 @@ void Thread::InitAfterFork() {
   InitTid();
 }
 
+void Thread::DeleteJPeer(JNIEnv* env) {
+  // Make sure nothing can observe both opeer and jpeer set at the same time.
+  jobject old_jpeer = tlsPtr_.jpeer;
+  CHECK(old_jpeer != nullptr);
+  tlsPtr_.jpeer = nullptr;
+  env->DeleteGlobalRef(old_jpeer);
+}
+
 void* Thread::CreateCallback(void* arg) {
   Thread* self = reinterpret_cast<Thread*>(arg);
   Runtime* runtime = Runtime::Current();
@@ -614,8 +623,8 @@ void* Thread::CreateCallback(void* arg) {
     // Copy peer into self, deleting global reference when done.
     CHECK(self->tlsPtr_.jpeer != nullptr);
     self->tlsPtr_.opeer = soa.Decode<mirror::Object>(self->tlsPtr_.jpeer).Ptr();
-    self->GetJniEnv()->DeleteGlobalRef(self->tlsPtr_.jpeer);
-    self->tlsPtr_.jpeer = nullptr;
+    // Make sure nothing can observe both opeer and jpeer set at the same time.
+    self->DeleteJPeer(self->GetJniEnv());
     self->SetThreadName(self->GetThreadName()->ToModifiedUtf8().c_str());
 
     ArtField* priorityField = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_priority);
@@ -892,9 +901,9 @@ void Thread::CreateNativeThread(JNIEnv* env, jobject java_peer, size_t stack_siz
     MutexLock mu(self, *Locks::runtime_shutdown_lock_);
     runtime->EndThreadBirth();
   }
-  // Manually delete the global reference since Thread::Init will not have been run.
-  env->DeleteGlobalRef(child_thread->tlsPtr_.jpeer);
-  child_thread->tlsPtr_.jpeer = nullptr;
+  // Manually delete the global reference since Thread::Init will not have been run. Make sure
+  // nothing can observe both opeer and jpeer set at the same time.
+  child_thread->DeleteJPeer(env);
   delete child_thread;
   child_thread = nullptr;
   // TODO: remove from thread group?
@@ -2440,18 +2449,14 @@ void Thread::Destroy() {
     ScopedObjectAccess soa(self);
     Runtime::Current()->GetHeap()->RevokeThreadLocalBuffers(this);
   }
+  // Mark-stack revocation must be performed at the very end. No
+  // checkpoint/flip-function or read-barrier should be called after this.
+  if (kUseReadBarrier) {
+    Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->RevokeThreadLocalMarkStack(this);
+  }
 }
 
 Thread::~Thread() {
-  if (kUseReadBarrier) {
-    // It's a cheap operation so can be done in the destructor (instead of
-    // Destroy()).
-    // Doing it without mutator_lock mutual exclusion is also necessary as there
-    // is a checkpoint in ConcurrentCopying which scans the threads' stacks,
-    // thereby assigning a thread-local mark-stack to self, breaking some
-    // assumptions about how the GC works (see b/140119552).
-    Runtime::Current()->GetHeap()->ConcurrentCopyingCollector()->RevokeThreadLocalMarkStack(this);
-  }
   CHECK(tlsPtr_.class_loader_override == nullptr);
   CHECK(tlsPtr_.jpeer == nullptr);
   CHECK(tlsPtr_.opeer == nullptr);
@@ -3709,6 +3714,8 @@ class ReferenceMapVisitor : public StackVisitor {
     ShadowFrame* shadow_frame = GetCurrentShadowFrame();
     if (shadow_frame != nullptr) {
       VisitShadowFrame(shadow_frame);
+    } else if (GetCurrentOatQuickMethodHeader()->IsNterpMethodHeader()) {
+      VisitNterpFrame();
     } else {
       VisitQuickFrame();
     }
@@ -3773,6 +3780,32 @@ class ReferenceMapVisitor : public StackVisitor {
       visitor_(&new_ref, /* vreg= */ JavaFrameRootInfo::kMethodDeclaringClass, this);
       if (new_ref != klass) {
         method->CASDeclaringClass(klass.Ptr(), new_ref->AsClass());
+      }
+    }
+  }
+
+  void VisitNterpFrame() REQUIRES_SHARED(Locks::mutator_lock_) {
+    ArtMethod** cur_quick_frame = GetCurrentQuickFrame();
+    StackReference<mirror::Object>* vreg_ref_base =
+        reinterpret_cast<StackReference<mirror::Object>*>(NterpGetReferenceArray(cur_quick_frame));
+    StackReference<mirror::Object>* vreg_int_base =
+        reinterpret_cast<StackReference<mirror::Object>*>(NterpGetRegistersArray(cur_quick_frame));
+    CodeItemDataAccessor accessor((*cur_quick_frame)->DexInstructionData());
+    const uint16_t num_regs = accessor.RegistersSize();
+    // An nterp frame has two arrays: a dex register array and a reference array
+    // that shadows the dex register array but only containing references
+    // (non-reference dex registers have nulls). See nterp_helpers.cc.
+    for (size_t reg = 0; reg < num_regs; ++reg) {
+      StackReference<mirror::Object>* ref_addr = vreg_ref_base + reg;
+      mirror::Object* ref = ref_addr->AsMirrorPtr();
+      if (ref != nullptr) {
+        mirror::Object* new_ref = ref;
+        visitor_(&new_ref, reg, this);
+        if (new_ref != ref) {
+          ref_addr->Assign(new_ref);
+          StackReference<mirror::Object>* int_addr = vreg_int_base + reg;
+          int_addr->Assign(new_ref);
+        }
       }
     }
   }
@@ -4040,6 +4073,41 @@ void Thread::VisitRoots(RootVisitor* visitor) {
   mapper.template WalkStack<StackVisitor::CountTransitions::kNo>(false);
   for (instrumentation::InstrumentationStackFrame& frame : *GetInstrumentationStack()) {
     visitor->VisitRootIfNonNull(&frame.this_object_, RootInfo(kRootVMInternal, thread_id));
+  }
+}
+
+void Thread::SweepInterpreterCache(IsMarkedVisitor* visitor) {
+  for (InterpreterCache::Entry& entry : GetInterpreterCache()->GetArray()) {
+    const Instruction* inst = reinterpret_cast<const Instruction*>(entry.first);
+    if (inst != nullptr) {
+      if (inst->Opcode() == Instruction::NEW_INSTANCE ||
+          inst->Opcode() == Instruction::CHECK_CAST ||
+          inst->Opcode() == Instruction::INSTANCE_OF ||
+          inst->Opcode() == Instruction::NEW_ARRAY ||
+          inst->Opcode() == Instruction::CONST_CLASS) {
+        mirror::Class* cls = reinterpret_cast<mirror::Class*>(entry.second);
+        if (cls == nullptr || cls == Runtime::GetWeakClassSentinel()) {
+          // Entry got deleted in a previous sweep.
+          continue;
+        }
+        Runtime::ProcessWeakClass(
+            reinterpret_cast<GcRoot<mirror::Class>*>(&entry.second),
+            visitor,
+            Runtime::GetWeakClassSentinel());
+      } else if (inst->Opcode() == Instruction::CONST_STRING ||
+                 inst->Opcode() == Instruction::CONST_STRING_JUMBO) {
+        mirror::Object* object = reinterpret_cast<mirror::Object*>(entry.second);
+        mirror::Object* new_object = visitor->IsMarked(object);
+        // We know the string is marked because it's a strongly-interned string that
+        // is always alive (see b/117621117 for trying to make those strings weak).
+        // The IsMarked implementation of the CMS collector returns
+        // null for newly allocated objects, but we know those haven't moved. Therefore,
+        // only update the entry if we get a different non-null string.
+        if (new_object != nullptr && new_object != object) {
+          entry.second = reinterpret_cast<size_t>(new_object);
+        }
+      }
+    }
   }
 }
 

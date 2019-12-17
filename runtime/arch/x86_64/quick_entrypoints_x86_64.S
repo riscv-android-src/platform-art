@@ -26,127 +26,8 @@ MACRO0(ASSERT_USE_READ_BARRIER)
 #endif
 END_MACRO
 
-MACRO0(SETUP_FP_CALLEE_SAVE_FRAME)
-    // Create space for ART FP callee-saved registers
-    subq MACRO_LITERAL(4 * 8), %rsp
-    CFI_ADJUST_CFA_OFFSET(4 * 8)
-    movq %xmm12, 0(%rsp)
-    movq %xmm13, 8(%rsp)
-    movq %xmm14, 16(%rsp)
-    movq %xmm15, 24(%rsp)
-END_MACRO
-
-MACRO0(RESTORE_FP_CALLEE_SAVE_FRAME)
-    // Restore ART FP callee-saved registers
-    movq 0(%rsp), %xmm12
-    movq 8(%rsp), %xmm13
-    movq 16(%rsp), %xmm14
-    movq 24(%rsp), %xmm15
-    addq MACRO_LITERAL(4 * 8), %rsp
-    CFI_ADJUST_CFA_OFFSET(- 4 * 8)
-END_MACRO
-
 // For x86, the CFA is esp+4, the address above the pushed return address on the stack.
 
-    /*
-     * Macro that sets up the callee save frame to conform with
-     * Runtime::CreateCalleeSaveMethod(kSaveAllCalleeSaves)
-     */
-MACRO0(SETUP_SAVE_ALL_CALLEE_SAVES_FRAME)
-#if defined(__APPLE__)
-    int3
-    int3
-#else
-    // R10 := Runtime::Current()
-    movq _ZN3art7Runtime9instance_E@GOTPCREL(%rip), %r10
-    movq (%r10), %r10
-    // Save callee save registers to agree with core spills bitmap.
-    PUSH r15  // Callee save.
-    PUSH r14  // Callee save.
-    PUSH r13  // Callee save.
-    PUSH r12  // Callee save.
-    PUSH rbp  // Callee save.
-    PUSH rbx  // Callee save.
-    // Create space for FPR args, plus space for ArtMethod*.
-    subq MACRO_LITERAL(4 * 8 + 8), %rsp
-    CFI_ADJUST_CFA_OFFSET(4 * 8 + 8)
-    // Save FPRs.
-    movq %xmm12, 8(%rsp)
-    movq %xmm13, 16(%rsp)
-    movq %xmm14, 24(%rsp)
-    movq %xmm15, 32(%rsp)
-    // R10 := ArtMethod* for save all callee save frame method.
-    movq RUNTIME_SAVE_ALL_CALLEE_SAVES_METHOD_OFFSET(%r10), %r10
-    // Store ArtMethod* to bottom of stack.
-    movq %r10, 0(%rsp)
-    // Store rsp as the top quick frame.
-    movq %rsp, %gs:THREAD_TOP_QUICK_FRAME_OFFSET
-
-    // Ugly compile-time check, but we only have the preprocessor.
-    // Last +8: implicit return address pushed on stack when caller made call.
-#if (FRAME_SIZE_SAVE_ALL_CALLEE_SAVES != 6 * 8 + 4 * 8 + 8 + 8)
-#error "FRAME_SIZE_SAVE_ALL_CALLEE_SAVES(X86_64) size not as expected."
-#endif
-#endif  // __APPLE__
-END_MACRO
-
-    /*
-     * Macro that sets up the callee save frame to conform with
-     * Runtime::CreateCalleeSaveMethod(kSaveRefsOnly)
-     */
-MACRO0(SETUP_SAVE_REFS_ONLY_FRAME)
-#if defined(__APPLE__)
-    int3
-    int3
-#else
-    // R10 := Runtime::Current()
-    movq _ZN3art7Runtime9instance_E@GOTPCREL(%rip), %r10
-    movq (%r10), %r10
-    // Save callee and GPR args, mixed together to agree with core spills bitmap.
-    PUSH r15  // Callee save.
-    PUSH r14  // Callee save.
-    PUSH r13  // Callee save.
-    PUSH r12  // Callee save.
-    PUSH rbp  // Callee save.
-    PUSH rbx  // Callee save.
-    // Create space for FPR args, plus space for ArtMethod*.
-    subq LITERAL(8 + 4 * 8), %rsp
-    CFI_ADJUST_CFA_OFFSET(8 + 4 * 8)
-    // Save FPRs.
-    movq %xmm12, 8(%rsp)
-    movq %xmm13, 16(%rsp)
-    movq %xmm14, 24(%rsp)
-    movq %xmm15, 32(%rsp)
-    // R10 := ArtMethod* for refs only callee save frame method.
-    movq RUNTIME_SAVE_REFS_ONLY_METHOD_OFFSET(%r10), %r10
-    // Store ArtMethod* to bottom of stack.
-    movq %r10, 0(%rsp)
-    // Store rsp as the stop quick frame.
-    movq %rsp, %gs:THREAD_TOP_QUICK_FRAME_OFFSET
-
-    // Ugly compile-time check, but we only have the preprocessor.
-    // Last +8: implicit return address pushed on stack when caller made call.
-#if (FRAME_SIZE_SAVE_REFS_ONLY != 6 * 8 + 4 * 8 + 8 + 8)
-#error "FRAME_SIZE_SAVE_REFS_ONLY(X86_64) size not as expected."
-#endif
-#endif  // __APPLE__
-END_MACRO
-
-MACRO0(RESTORE_SAVE_REFS_ONLY_FRAME)
-    movq 8(%rsp), %xmm12
-    movq 16(%rsp), %xmm13
-    movq 24(%rsp), %xmm14
-    movq 32(%rsp), %xmm15
-    addq LITERAL(8 + 4*8), %rsp
-    CFI_ADJUST_CFA_OFFSET(-8 - 4*8)
-    // TODO: optimize by not restoring callee-saves restored by the ABI
-    POP rbx
-    POP rbp
-    POP r12
-    POP r13
-    POP r14
-    POP r15
-END_MACRO
 
     /*
      * Macro that sets up the callee save frame to conform with
@@ -406,26 +287,6 @@ MACRO0(RESTORE_SAVE_EVERYTHING_FRAME_KEEP_RAX)
     CFI_ADJUST_CFA_OFFSET(-(16 + 16 * 8 + 8))
 
     RESTORE_SAVE_EVERYTHING_FRAME_GPRS_EXCEPT_RAX
-END_MACRO
-
-    /*
-     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_ when the runtime method frame is ready.
-     */
-MACRO0(DELIVER_PENDING_EXCEPTION_FRAME_READY)
-    // (Thread*) setup
-    movq %gs:THREAD_SELF_OFFSET, %rdi
-    call SYMBOL(artDeliverPendingExceptionFromCode)  // artDeliverPendingExceptionFromCode(Thread*)
-    UNREACHABLE
-END_MACRO
-
-    /*
-     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_.
-     */
-MACRO0(DELIVER_PENDING_EXCEPTION)
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME        // save callee saves for throw
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
 END_MACRO
 
 MACRO2(NO_ARG_RUNTIME_EXCEPTION, c_name, cxx_name)
@@ -988,15 +849,6 @@ END_MACRO
 MACRO0(RETURN_IF_EAX_ZERO)
     testl %eax, %eax               // eax == 0 ?
     jnz  1f                        // if eax != 0 goto 1
-    ret                            // return
-1:                                 // deliver exception on current thread
-    DELIVER_PENDING_EXCEPTION
-END_MACRO
-
-MACRO0(RETURN_OR_DELIVER_PENDING_EXCEPTION)
-    movq %gs:THREAD_EXCEPTION_OFFSET, %rcx // get exception field
-    testq %rcx, %rcx               // rcx == 0 ?
-    jnz 1f                         // if rcx != 0 goto 1
     ret                            // return
 1:                                 // deliver exception on current thread
     DELIVER_PENDING_EXCEPTION
@@ -1886,14 +1738,10 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     movq %rbp, %rsi
     call SYMBOL(artQuickGenericJniTrampoline)  // (Thread*, sp)
 
-    // The C call will have registered the complete save-frame on success.
+    // The C call will have registered the complete save-frame.
     // The result of the call is:
-    // %rax: pointer to native code, 0 on error.
+    // %rax: pointer to native code.
     // %rdx: pointer to the bottom of the used area of the alloca, can restore stack till there.
-
-    // Check for error = 0.
-    test %rax, %rax
-    jz .Lexception_in_native
 
     // Release part of the alloca.
     movq %rdx, %rsp
@@ -2405,17 +2253,7 @@ DEFINE_FUNCTION art_quick_osr_stub
     POP r8
     POP rcx
     POP rbp
-    cmpb LITERAL(68), (%r8)        // Test if result type char == 'D'.
-    je .Losr_return_double_quick
-    cmpb LITERAL(70), (%r8)        // Test if result type char == 'F'.
-    je .Losr_return_float_quick
-    movq %rax, (%rcx)              // Store the result assuming its a long, int or Object*
-    ret
-.Losr_return_double_quick:
-    movsd %xmm0, (%rcx)            // Store the double floating point result.
-    ret
-.Losr_return_float_quick:
-    movss %xmm0, (%rcx)            // Store the floating point result.
+    movq %rax, (%rcx)              // Store the result.
     ret
 .Losr_entry:
     CFI_RESTORE_STATE_AND_DEF_CFA(rsp, 80)
@@ -2467,3 +2305,61 @@ DEFINE_FUNCTION ExecuteSwitchImplAsm
     POP rbx                  // Restore RBX
     ret
 END_FUNCTION ExecuteSwitchImplAsm
+
+// On entry: edi is the class, r11 is the inline cache. r10 and rax are available.
+DEFINE_FUNCTION art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+.Lentry1:
+    movl INLINE_CACHE_CLASSES_OFFSET(%r11), %eax
+    cmpl %edi, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry2
+    lock cmpxchg %edi, INLINE_CACHE_CLASSES_OFFSET(%r11)
+    jz .Ldone
+    jmp .Lentry1
+.Lentry2:
+    movl (INLINE_CACHE_CLASSES_OFFSET+4)(%r11), %eax
+    cmpl %edi, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry3
+    lock cmpxchg %edi, (INLINE_CACHE_CLASSES_OFFSET+4)(%r11)
+    jz .Ldone
+    jmp .Lentry2
+.Lentry3:
+    movl (INLINE_CACHE_CLASSES_OFFSET+8)(%r11), %eax
+    cmpl %edi, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry4
+    lock cmpxchg %edi, (INLINE_CACHE_CLASSES_OFFSET+8)(%r11)
+    jz .Ldone
+    jmp .Lentry3
+.Lentry4:
+    movl (INLINE_CACHE_CLASSES_OFFSET+12)(%r11), %eax
+    cmpl %edi, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry5
+    lock cmpxchg %edi, (INLINE_CACHE_CLASSES_OFFSET+12)(%r11)
+    jz .Ldone
+    jmp .Lentry4
+.Lentry5:
+    // Unconditionally store, the cache is megamorphic.
+    movl %edi, (INLINE_CACHE_CLASSES_OFFSET+16)(%r11)
+.Ldone:
+    ret
+END_FUNCTION art_quick_update_inline_cache
+
+// On entry, method is at the bottom of the stack.
+DEFINE_FUNCTION art_quick_compile_optimized
+    SETUP_SAVE_EVERYTHING_FRAME
+    movq FRAME_SIZE_SAVE_EVERYTHING(%rsp), %rdi // pass ArtMethod
+    movq %gs:THREAD_SELF_OFFSET, %rsi           // pass Thread::Current()
+    call SYMBOL(artCompileOptimized)            // (ArtMethod*, Thread*)
+    RESTORE_SAVE_EVERYTHING_FRAME               // restore frame up to return address
+    ret
+END_FUNCTION art_quick_compile_optimized

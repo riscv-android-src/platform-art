@@ -851,7 +851,8 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
       dead_reference_safe,
       compiler_options.GetDebuggable(),
       /* osr= */ osr,
-      /* is_shared_jit_code= */ is_shared_jit_code);
+      /* is_shared_jit_code= */ is_shared_jit_code,
+      /* baseline= */ baseline);
 
   if (method != nullptr) {
     graph->SetArtMethod(method);
@@ -1174,7 +1175,8 @@ static ScopedArenaVector<uint8_t> CreateJniStackMap(ScopedArenaAllocator* alloca
       jni_compiled_method.GetFrameSize(),
       jni_compiled_method.GetCoreSpillMask(),
       jni_compiled_method.GetFpSpillMask(),
-      /* num_dex_registers= */ 0);
+      /* num_dex_registers= */ 0,
+      /* baseline= */ false);
   stack_map_stream->EndMethod();
   return stack_map_stream->Encode();
 }
@@ -1375,7 +1377,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                    &code_allocator,
                    dex_compilation_unit,
                    method,
-                   baseline,
+                   baseline || GetCompilerOptions().IsBaseline(),
                    osr,
                    /* is_shared_jit_code= */ code_cache->IsSharedRegion(*region),
                    &handles));

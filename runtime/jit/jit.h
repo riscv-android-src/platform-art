@@ -25,6 +25,7 @@
 #include "base/runtime_debug.h"
 #include "base/timing_logger.h"
 #include "handle.h"
+#include "offsets.h"
 #include "jit/debugger_interface.h"
 #include "jit/profile_saver_options.h"
 #include "obj_ptr.h"
@@ -114,6 +115,14 @@ class JitOptions {
     return use_jit_compilation_;
   }
 
+  bool UseTieredJitCompilation() const {
+    return use_tiered_jit_compilation_;
+  }
+
+  bool CanCompileBaseline() const {
+    return use_tiered_jit_compilation_ || use_baseline_compiler_;
+  }
+
   void SetUseJitCompilation(bool b) {
     use_jit_compilation_ = b;
   }
@@ -131,12 +140,22 @@ class JitOptions {
     compile_threshold_ = 0;
   }
 
+  void SetUseBaselineCompiler() {
+    use_baseline_compiler_ = true;
+  }
+
+  bool UseBaselineCompiler() const {
+    return use_baseline_compiler_;
+  }
+
  private:
   // We add the sample in batches of size kJitSamplesBatchSize.
   // This method rounds the threshold so that it is multiple of the batch size.
   static uint32_t RoundUpThreshold(uint32_t threshold);
 
   bool use_jit_compilation_;
+  bool use_tiered_jit_compilation_;
+  bool use_baseline_compiler_;
   size_t code_cache_initial_capacity_;
   size_t code_cache_max_capacity_;
   uint32_t compile_threshold_;
@@ -150,6 +169,8 @@ class JitOptions {
 
   JitOptions()
       : use_jit_compilation_(false),
+        use_tiered_jit_compilation_(false),
+        use_baseline_compiler_(false),
         code_cache_initial_capacity_(0),
         code_cache_max_capacity_(0),
         compile_threshold_(0),
@@ -179,6 +200,30 @@ class JitCompilerInterface {
                                                  ArrayRef<const void*> removed_symbols,
                                                  bool compress,
                                                  /*out*/ size_t* num_symbols) = 0;
+};
+
+// Data structure holding information to perform an OSR.
+struct OsrData {
+  // The native PC to jump to.
+  const uint8_t* native_pc;
+
+  // The frame size of the compiled code to jump to.
+  size_t frame_size;
+
+  // The dynamically allocated memory of size `frame_size` to copy to stack.
+  void* memory[0];
+
+  static constexpr MemberOffset NativePcOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(OsrData, native_pc));
+  }
+
+  static constexpr MemberOffset FrameSizeOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(OsrData, frame_size));
+  }
+
+  static constexpr MemberOffset MemoryOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(OsrData, memory));
+  }
 };
 
 class Jit {
@@ -304,6 +349,11 @@ class Jit {
   // Return whether the runtime should use a priority thread weight when sampling.
   static bool ShouldUsePriorityThreadWeight(Thread* self);
 
+  // Return the information required to do an OSR jump. Return null if the OSR
+  // cannot be done.
+  OsrData* PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // If an OSR compiled version is available for `method`,
   // and `dex_pc + dex_pc_offset` is an entry point of that compiled
   // version, this method will jump to the compiled code, let it run,
@@ -382,6 +432,8 @@ class Jit {
   // Notify to other processes that the zygote is done profile compiling boot
   // class path methods.
   void NotifyZygoteCompilationDone();
+
+  void EnqueueOptimizedCompilation(ArtMethod* method, Thread* self);
 
  private:
   Jit(JitCodeCache* code_cache, JitOptions* options);

@@ -954,15 +954,19 @@ void ConcurrentCopying::RemoveThreadMarkStackMapping(Thread* thread,
 }
 
 void ConcurrentCopying::AssertEmptyThreadMarkStackMap() {
-  if (!thread_mark_stack_map_.empty()) {
-    LOG(FATAL_WITHOUT_ABORT) << "thread_mark_stack_map not empty. size:"
-                             << thread_mark_stack_map_.size()
-                             << " Mappings:";
+  std::ostringstream oss;
+  auto capture_mappings = [this, &oss] () REQUIRES(mark_stack_lock_) {
     for (const auto & iter : thread_mark_stack_map_) {
-      LOG(FATAL_WITHOUT_ABORT) << "thread:" << iter.first << " mark-stack:" << iter.second;
+      oss << "thread:" << iter.first << " mark-stack:" << iter.second << "\n";
     }
-    LOG(FATAL) << "pooled_mark_stacks size:" << pooled_mark_stacks_.size();
-  }
+    return oss.str();
+  };
+  CHECK(thread_mark_stack_map_.empty()) << "thread_mark_stack_map not empty. size:"
+                                        << thread_mark_stack_map_.size()
+                                        << "Mappings:\n"
+                                        << capture_mappings()
+                                        << "pooled_mark_stacks size:"
+                                        << pooled_mark_stacks_.size();
 }
 
 void ConcurrentCopying::AssertNoThreadMarkStackMapping(Thread* thread) {
@@ -991,12 +995,14 @@ class ConcurrentCopying::RevokeThreadLocalMarkStackCheckpoint : public Closure {
     CHECK(thread == self || thread->IsSuspended() || thread->GetState() == kWaitingPerformingGc)
         << thread->GetState() << " thread " << thread << " self " << self;
     // Revoke thread local mark stacks.
-    accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
-    if (tl_mark_stack != nullptr) {
+    {
       MutexLock mu(self, concurrent_copying_->mark_stack_lock_);
-      concurrent_copying_->revoked_mark_stacks_.push_back(tl_mark_stack);
-      thread->SetThreadLocalMarkStack(nullptr);
-      concurrent_copying_->RemoveThreadMarkStackMapping(thread, tl_mark_stack);
+      accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
+      if (tl_mark_stack != nullptr) {
+        concurrent_copying_->revoked_mark_stacks_.push_back(tl_mark_stack);
+        thread->SetThreadLocalMarkStack(nullptr);
+        concurrent_copying_->RemoveThreadMarkStackMapping(thread, tl_mark_stack);
+      }
     }
     // Disable weak ref access.
     if (disable_weak_ref_access_) {
@@ -1282,7 +1288,7 @@ class ConcurrentCopying::ImmuneSpaceCaptureRefsVisitor {
   }
 
   static void Callback(mirror::Object* obj, void* arg) REQUIRES_SHARED(Locks::mutator_lock_) {
-    reinterpret_cast<ImmuneSpaceScanObjVisitor*>(arg)->operator()(obj);
+    reinterpret_cast<ImmuneSpaceCaptureRefsVisitor*>(arg)->operator()(obj);
   }
 
  private:
@@ -2045,12 +2051,12 @@ void ConcurrentCopying::RevokeThreadLocalMarkStacks(bool disable_weak_ref_access
 }
 
 void ConcurrentCopying::RevokeThreadLocalMarkStack(Thread* thread) {
+  Thread* self = Thread::Current();
+  CHECK_EQ(self, thread);
+  MutexLock mu(self, mark_stack_lock_);
   accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
   if (tl_mark_stack != nullptr) {
-    // With 2-phase CC change, we cannot assert that is_marking_ will always be true
-    // as we perform thread stack scan even before enabling the read-barrier.
-    CHECK(is_marking_ || (use_generational_cc_ && !young_gen_));
-    MutexLock mu(Thread::Current(), mark_stack_lock_);
+    CHECK(is_marking_);
     revoked_mark_stacks_.push_back(tl_mark_stack);
     RemoveThreadMarkStackMapping(thread, tl_mark_stack);
     thread->SetThreadLocalMarkStack(nullptr);

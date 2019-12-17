@@ -1031,29 +1031,8 @@ ENTRY art_quick_osr_stub
     RESTORE_TWO_REGS xFP, xLR, 96
     RESTORE_TWO_REGS_DECREASE_FRAME x3, x4, SAVE_SIZE
 
-    // Store result (w0/x0/s0/d0) appropriately, depending on resultType.
-    ldrb w10, [x4]
-
-    // Check the return type and store the correct register into the jvalue in memory.
-
-    // Don't set anything for a void type.
-    cmp w10, #'V'
-    beq .Losr_exit
-    // Is it a double?
-    cmp w10, #'D'
-    beq .Losr_return_double
-    // Is it a float?
-    cmp w10, #'F'
-    beq .Losr_return_float
-    // Just store x0. Doesn't matter if it is 64 or 32 bits.
+    // The compiler put the result in x0. Doesn't matter if it is 64 or 32 bits.
     str x0, [x3]
-.Losr_exit:
-    ret
-.Losr_return_double:
-    str d0, [x3]
-    ret
-.Losr_return_float:
-    str s0, [x3]
     ret
 
 .Losr_entry:
@@ -2150,13 +2129,10 @@ ENTRY art_quick_generic_jni_trampoline
     mov x1, xFP
     bl artQuickGenericJniTrampoline  // (Thread*, sp)
 
-    // The C call will have registered the complete save-frame on success.
+    // The C call will have registered the complete save-frame.
     // The result of the call is:
-    // x0: pointer to native code, 0 on error.
+    // x0: pointer to native code.
     // x1: pointer to the bottom of the used area of the alloca, can restore stack till there.
-
-    // Check for error = 0.
-    cbz x0, .Lexception_in_native
 
     // Release part of the alloca.
     mov sp, x1
@@ -2874,3 +2850,71 @@ ENTRY ExecuteSwitchImplAsm
     RESTORE_TWO_REGS_DECREASE_FRAME x19, xLR, 16
     ret
 END ExecuteSwitchImplAsm
+
+// x0 contains the class, x8 contains the inline cache. x9-x15 can be used.
+ENTRY art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+.Lentry1:
+    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp w9, w0
+    beq .Ldone
+    cbnz w9, .Lentry2
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET
+    ldxr w9, [x10]
+    cbnz w9, .Lentry1
+    stxr  w9, w0, [x10]
+    cbz   w9, .Ldone
+    b .Lentry1
+.Lentry2:
+    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp w9, w0
+    beq .Ldone
+    cbnz w9, .Lentry3
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+4
+    ldxr w9, [x10]
+    cbnz w9, .Lentry2
+    stxr  w9, w0, [x10]
+    cbz   w9, .Ldone
+    b .Lentry2
+.Lentry3:
+    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp w9, w0
+    beq .Ldone
+    cbnz w9, .Lentry4
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+8
+    ldxr w9, [x10]
+    cbnz w9, .Lentry3
+    stxr  w9, w0, [x10]
+    cbz   w9, .Ldone
+    b .Lentry3
+.Lentry4:
+    ldr w9, [x8, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp w9, w0
+    beq .Ldone
+    cbnz w9, .Lentry5
+    add x10, x8, #INLINE_CACHE_CLASSES_OFFSET+12
+    ldxr w9, [x10]
+    cbnz w9, .Lentry4
+    stxr  w9, w0, [x10]
+    cbz   w9, .Ldone
+    b .Lentry4
+.Lentry5:
+    // Unconditionally store, the inline cache is megamorphic.
+    str  w0, [x8, #INLINE_CACHE_CLASSES_OFFSET+16]
+.Ldone:
+    ret
+END art_quick_update_inline_cache
+
+// On entry, method is at the bottom of the stack.
+ENTRY art_quick_compile_optimized
+    SETUP_SAVE_EVERYTHING_FRAME
+    ldr x0, [sp, #FRAME_SIZE_SAVE_EVERYTHING] // pass ArtMethod
+    mov x1, xSELF                             // pass Thread::Current
+    bl     artCompileOptimized                // (ArtMethod*, Thread*)
+    RESTORE_SAVE_EVERYTHING_FRAME
+    // We don't need to restore the marking register here, as
+    // artCompileOptimized doesn't allow thread suspension.
+    ret
+END art_quick_compile_optimized

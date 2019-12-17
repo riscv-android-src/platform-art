@@ -178,12 +178,12 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
   for (size_t i = 0u, num_spaces = image_spaces.size(); i != num_spaces; ) {
     const ImageHeader& image_header = image_spaces[i]->GetImageHeader();
     uint32_t reservation_size = image_header.GetImageReservationSize();
-    uint32_t component_count = image_header.GetComponentCount();
+    uint32_t image_count = image_header.GetImageSpaceCount();
 
-    CHECK_NE(component_count, 0u);
-    CHECK_LE(component_count, num_spaces - i);
+    CHECK_NE(image_count, 0u);
+    CHECK_LE(image_count, num_spaces - i);
     CHECK_NE(reservation_size, 0u);
-    for (size_t j = 1u; j != image_header.GetComponentCount(); ++j) {
+    for (size_t j = 1u; j != image_count; ++j) {
       CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetComponentCount(), 0u);
       CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetImageReservationSize(), 0u);
     }
@@ -193,7 +193,7 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
     // Check contiguous layout of images and oat files.
     const uint8_t* current_heap = image_spaces[i]->Begin();
     const uint8_t* current_oat = image_spaces[i]->GetImageHeader().GetOatFileBegin();
-    for (size_t j = 0u; j != image_header.GetComponentCount(); ++j) {
+    for (size_t j = 0u; j != image_count; ++j) {
       const ImageHeader& current_header = image_spaces[i + j]->GetImageHeader();
       CHECK_EQ(current_heap, image_spaces[i + j]->Begin());
       CHECK_EQ(current_oat, current_header.GetOatFileBegin());
@@ -207,7 +207,7 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
     CHECK_EQ(reservation_size, static_cast<size_t>(current_oat - image_spaces[i]->Begin()));
 
     boot_image_size += reservation_size;
-    i += component_count;
+    i += image_count;
   }
 }
 
@@ -1724,8 +1724,7 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
                                              size_t* bytes_allocated,
                                              size_t* usable_size,
                                              size_t* bytes_tl_bulk_allocated,
-                                             ObjPtr<mirror::Class>* klass,
-                                             /*out*/const char** old_no_thread_suspend_cause) {
+                                             ObjPtr<mirror::Class>* klass) {
   bool was_default_allocator = allocator == GetCurrentAllocator();
   // Make sure there is no pending exception since we may need to throw an OOME.
   self->AssertNoPendingException();
@@ -1734,24 +1733,17 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   StackHandleScope<1> hs(self);
   HandleWrapperObjPtr<mirror::Class> h_klass(hs.NewHandleWrapper(klass));
 
-  auto release_no_suspend = [&]() RELEASE(Roles::uninterruptible_) {
-    self->EndAssertNoThreadSuspension(*old_no_thread_suspend_cause);
-  };
-  auto send_object_pre_alloc = [&]() ACQUIRE(Roles::uninterruptible_)
-                                     REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (UNLIKELY(instrumented)) {
-    AllocationListener* l = nullptr;
-    l = alloc_listener_.load(std::memory_order_seq_cst);
-    if (UNLIKELY(l != nullptr) && UNLIKELY(l->HasPreAlloc())) {
-      l->PreObjectAllocated(self, h_klass, &alloc_size);
+  auto send_object_pre_alloc = [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
+    if (UNLIKELY(instrumented)) {
+      AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
+      if (UNLIKELY(l != nullptr) && UNLIKELY(l->HasPreAlloc())) {
+        l->PreObjectAllocated(self, h_klass, &alloc_size);
+      }
     }
-  }
-  *old_no_thread_suspend_cause =
-      self->StartAssertNoThreadSuspension("Called PreObjectAllocated, no suspend until alloc");
-};
+  };
 #define PERFORM_SUSPENDING_OPERATION(op)                                          \
   [&]() REQUIRES(Roles::uninterruptible_) REQUIRES_SHARED(Locks::mutator_lock_) { \
-    release_no_suspend();                                                         \
+    ScopedAllowThreadSuspension ats;                                              \
     auto res = (op);                                                              \
     send_object_pre_alloc();                                                      \
     return res;                                                                   \
@@ -1759,7 +1751,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
 
   // The allocation failed. If the GC is running, block until it completes, and then retry the
   // allocation.
-  collector::GcType last_gc = WaitForGcToComplete(kGcCauseForAlloc, self);
+  collector::GcType last_gc =
+      PERFORM_SUSPENDING_OPERATION(WaitForGcToComplete(kGcCauseForAlloc, self));
   // If we were the default allocator but the allocator changed while we were suspended,
   // abort the allocation.
   // We just waited, call the pre-alloc again.
@@ -1896,10 +1889,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
 #undef PERFORM_SUSPENDING_OPERATION
   // If the allocation hasn't succeeded by this point, throw an OOM error.
   if (ptr == nullptr) {
-    release_no_suspend();
+    ScopedAllowThreadSuspension ats;
     ThrowOutOfMemoryError(self, alloc_size, allocator);
-    *old_no_thread_suspend_cause =
-        self->StartAssertNoThreadSuspension("Failed allocation fallback");
   }
   return ptr;
 }
@@ -2515,10 +2506,16 @@ void Heap::TraceHeapSize(size_t heap_size) {
   ATraceIntegerValue("Heap size (KB)", heap_size / KB);
 }
 
+#if defined(__GLIBC__)
+# define IF_GLIBC(x) x
+#else
+# define IF_GLIBC(x)
+#endif
+
 size_t Heap::GetNativeBytes() {
   size_t malloc_bytes;
 #if defined(__BIONIC__) || defined(__GLIBC__)
-  size_t mmapped_bytes;
+  IF_GLIBC(size_t mmapped_bytes;)
   struct mallinfo mi = mallinfo();
   // In spite of the documentation, the jemalloc version of this call seems to do what we want,
   // and it is thread-safe.
@@ -2526,17 +2523,24 @@ size_t Heap::GetNativeBytes() {
     // Shouldn't happen, but glibc declares uordblks as int.
     // Avoiding sign extension gets us correct behavior for another 2 GB.
     malloc_bytes = (unsigned int)mi.uordblks;
-    mmapped_bytes = (unsigned int)mi.hblkhd;
+    IF_GLIBC(mmapped_bytes = (unsigned int)mi.hblkhd;)
   } else {
     malloc_bytes = mi.uordblks;
-    mmapped_bytes = mi.hblkhd;
+    IF_GLIBC(mmapped_bytes = mi.hblkhd;)
   }
-  // From the spec, we clearly have mmapped_bytes <= malloc_bytes. Reality is sometimes
-  // dramatically different. (b/119580449) If so, fudge it.
+  // From the spec, it appeared mmapped_bytes <= malloc_bytes. Reality was sometimes
+  // dramatically different. (b/119580449 was an early bug.) If so, we try to fudge it.
+  // However, malloc implementations seem to interpret hblkhd differently, namely as
+  // mapped blocks backing the entire heap (e.g. jemalloc) vs. large objects directly
+  // allocated via mmap (e.g. glibc). Thus we now only do this for glibc, where it
+  // previously helped, and which appears to use a reading of the spec compatible
+  // with our adjustment.
+#if defined(__GLIBC__)
   if (mmapped_bytes > malloc_bytes) {
     malloc_bytes = mmapped_bytes;
   }
-#else
+#endif  // GLIBC
+#else  // Neither Bionic nor Glibc
   // We should hit this case only in contexts in which GC triggering is not critical. Effectively
   // disable GC triggering based on malloc().
   malloc_bytes = 1000;
@@ -3924,6 +3928,8 @@ void Heap::NotifyNativeAllocations(JNIEnv* env) {
 // This should only be done for large allocations of non-malloc memory, which we wouldn't
 // otherwise see.
 void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
+  // Cautiously check for a wrapped negative bytes argument.
+  DCHECK(sizeof(size_t) < 8 || bytes < (std::numeric_limits<size_t>::max() / 2));
   native_bytes_registered_.fetch_add(bytes, std::memory_order_relaxed);
   uint32_t objects_notified =
       native_objects_notified_.fetch_add(1, std::memory_order_relaxed);

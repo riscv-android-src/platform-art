@@ -677,6 +677,19 @@ class Runtime {
     return target_sdk_version_;
   }
 
+  void SetDisabledCompatChanges(const std::set<uint64_t>& disabled_changes) {
+    disabled_compat_changes_ = disabled_changes;
+  }
+
+  std::set<uint64_t> GetDisabledCompatChanges() const {
+    return disabled_compat_changes_;
+  }
+
+  bool isChangeEnabled(uint64_t change_id) const {
+    // TODO(145743810): add an up call to java to log to statsd
+    return disabled_compat_changes_.count(change_id) == 0;
+  }
+
   uint32_t GetZygoteMaxFailedBoots() const {
     return zygote_max_failed_boots_;
   }
@@ -774,6 +787,20 @@ class Runtime {
   // For testing purpose only.
   // TODO: Remove this when this is no longer needed (b/116087961).
   GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
+
+
+  // Use a sentinel for marking entries in a table that have been cleared.
+  // This helps diagnosing in case code tries to wrongly access such
+  // entries.
+  static mirror::Class* GetWeakClassSentinel() {
+    return reinterpret_cast<mirror::Class*>(0xebadbeef);
+  }
+
+  // Helper for the GC to process a weak class in a table.
+  static void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
+                               IsMarkedVisitor* visitor,
+                               mirror::Class* update)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
@@ -1153,6 +1180,9 @@ class Runtime {
   // Specifies target SDK version to allow workarounds for certain API levels.
   uint32_t target_sdk_version_;
 
+  // A set of disabled compat changes for the running app, all other changes are enabled.
+  std::set<uint64_t> disabled_compat_changes_;
+
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
   bool implicit_so_checks_;         // StackOverflow checks are implicit.
@@ -1268,6 +1298,10 @@ class Runtime {
   // True if jmethodID and jfieldID are opaque Indices. When false (the default) these are simply
   // pointers. This is set by -Xopaque-jni-ids:{true,false}.
   JniIdType jni_ids_indirection_;
+
+  // Set to false in cases where we want to directly control when jni-id
+  // indirection is changed. This is intended only for testing JNI id swapping.
+  bool automatically_set_jni_ids_indirection_;
 
   // Saved environment.
   class EnvSnapshot {

@@ -16,7 +16,7 @@
 
 #include "code_generator_x86_64.h"
 
-#include "art_method.h"
+#include "art_method-inl.h"
 #include "class_table.h"
 #include "code_generator_utils.h"
 #include "compiled_method.h"
@@ -26,11 +26,13 @@
 #include "heap_poisoning.h"
 #include "intrinsics.h"
 #include "intrinsics_x86_64.h"
+#include "jit/profiling_info.h"
 #include "linker/linker_patch.h"
 #include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
 #include "mirror/object_reference.h"
+#include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils/assembler.h"
 #include "utils/stack_checks.h"
@@ -1068,6 +1070,9 @@ void CodeGeneratorX86_64::GenerateVirtualCall(
   // intact/accessible until the end of the marking phase (the
   // concurrent copying collector may not in the future).
   __ MaybeUnpoisonHeapReference(temp);
+
+  MaybeGenerateInlineCacheCheck(invoke, temp);
+
   // temp = temp->GetMethodAt(method_offset);
   __ movq(temp, Address(temp, method_offset));
   // call temp->GetEntryPoint();
@@ -1341,6 +1346,55 @@ static dwarf::Reg DWARFReg(FloatRegister reg) {
   return dwarf::Reg::X86_64Fp(static_cast<int>(reg));
 }
 
+void CodeGeneratorX86_64::MaybeIncrementHotness(bool is_frame_entry) {
+  if (GetCompilerOptions().CountHotnessInCompiledCode()) {
+    NearLabel overflow;
+    Register method = kMethodRegisterArgument;
+    if (!is_frame_entry) {
+      CHECK(RequiresCurrentMethod());
+      method = TMP;
+      __ movq(CpuRegister(method), Address(CpuRegister(RSP), kCurrentMethodStackOffset));
+    }
+    __ cmpw(Address(CpuRegister(method), ArtMethod::HotnessCountOffset().Int32Value()),
+            Immediate(ArtMethod::MaxCounter()));
+    __ j(kEqual, &overflow);
+    __ addw(Address(CpuRegister(method), ArtMethod::HotnessCountOffset().Int32Value()),
+            Immediate(1));
+    __ Bind(&overflow);
+  }
+
+  if (GetGraph()->IsCompilingBaseline() && !Runtime::Current()->IsAotCompiler()) {
+    ScopedObjectAccess soa(Thread::Current());
+    ProfilingInfo* info = GetGraph()->GetArtMethod()->GetProfilingInfo(kRuntimePointerSize);
+    if (info != nullptr) {
+      uint64_t address = reinterpret_cast64<uint64_t>(info);
+      NearLabel done;
+      __ movq(CpuRegister(TMP), Immediate(address));
+      __ addw(Address(CpuRegister(TMP), ProfilingInfo::BaselineHotnessCountOffset().Int32Value()),
+              Immediate(1));
+      __ j(kCarryClear, &done);
+      if (HasEmptyFrame()) {
+        CHECK(is_frame_entry);
+        // Frame alignment, and the stub expects the method on the stack.
+        __ pushq(CpuRegister(RDI));
+        __ cfi().AdjustCFAOffset(kX86_64WordSize);
+        __ cfi().RelOffset(DWARFReg(RDI), 0);
+      } else if (!RequiresCurrentMethod()) {
+        CHECK(is_frame_entry);
+        __ movq(Address(CpuRegister(RSP), kCurrentMethodStackOffset), CpuRegister(RDI));
+      }
+      GenerateInvokeRuntime(
+          GetThreadOffset<kX86_64PointerSize>(kQuickCompileOptimized).Int32Value());
+      if (HasEmptyFrame()) {
+        __ popq(CpuRegister(RDI));
+        __ cfi().AdjustCFAOffset(-static_cast<int>(kX86_64WordSize));
+        __ cfi().Restore(DWARFReg(RDI));
+      }
+      __ Bind(&done);
+    }
+  }
+}
+
 void CodeGeneratorX86_64::GenerateFrameEntry() {
   __ cfi().SetCurrentCFAOffset(kX86_64WordSize);  // return address
   __ Bind(&frame_entry_label_);
@@ -1348,17 +1402,6 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
       && !FrameNeedsStackCheck(GetFrameSize(), InstructionSet::kX86_64);
   DCHECK(GetCompilerOptions().GetImplicitStackOverflowChecks());
 
-  if (GetCompilerOptions().CountHotnessInCompiledCode()) {
-    NearLabel overflow;
-    __ cmpw(Address(CpuRegister(kMethodRegisterArgument),
-                    ArtMethod::HotnessCountOffset().Int32Value()),
-            Immediate(ArtMethod::MaxCounter()));
-    __ j(kEqual, &overflow);
-    __ addw(Address(CpuRegister(kMethodRegisterArgument),
-                    ArtMethod::HotnessCountOffset().Int32Value()),
-            Immediate(1));
-    __ Bind(&overflow);
-  }
 
   if (!skip_overflow_check) {
     size_t reserved_bytes = GetStackOverflowReservedBytes(InstructionSet::kX86_64);
@@ -1366,45 +1409,47 @@ void CodeGeneratorX86_64::GenerateFrameEntry() {
     RecordPcInfo(nullptr, 0);
   }
 
-  if (HasEmptyFrame()) {
-    return;
-  }
+  if (!HasEmptyFrame()) {
+    for (int i = arraysize(kCoreCalleeSaves) - 1; i >= 0; --i) {
+      Register reg = kCoreCalleeSaves[i];
+      if (allocated_registers_.ContainsCoreRegister(reg)) {
+        __ pushq(CpuRegister(reg));
+        __ cfi().AdjustCFAOffset(kX86_64WordSize);
+        __ cfi().RelOffset(DWARFReg(reg), 0);
+      }
+    }
 
-  for (int i = arraysize(kCoreCalleeSaves) - 1; i >= 0; --i) {
-    Register reg = kCoreCalleeSaves[i];
-    if (allocated_registers_.ContainsCoreRegister(reg)) {
-      __ pushq(CpuRegister(reg));
-      __ cfi().AdjustCFAOffset(kX86_64WordSize);
-      __ cfi().RelOffset(DWARFReg(reg), 0);
+    int adjust = GetFrameSize() - GetCoreSpillSize();
+    __ subq(CpuRegister(RSP), Immediate(adjust));
+    __ cfi().AdjustCFAOffset(adjust);
+    uint32_t xmm_spill_location = GetFpuSpillStart();
+    size_t xmm_spill_slot_size = GetCalleePreservedFPWidth();
+
+    for (int i = arraysize(kFpuCalleeSaves) - 1; i >= 0; --i) {
+      if (allocated_registers_.ContainsFloatingPointRegister(kFpuCalleeSaves[i])) {
+        int offset = xmm_spill_location + (xmm_spill_slot_size * i);
+        __ movsd(Address(CpuRegister(RSP), offset), XmmRegister(kFpuCalleeSaves[i]));
+        __ cfi().RelOffset(DWARFReg(kFpuCalleeSaves[i]), offset);
+      }
+    }
+
+    // Save the current method if we need it. Note that we do not
+    // do this in HCurrentMethod, as the instruction might have been removed
+    // in the SSA graph.
+    if (RequiresCurrentMethod()) {
+      CHECK(!HasEmptyFrame());
+      __ movq(Address(CpuRegister(RSP), kCurrentMethodStackOffset),
+              CpuRegister(kMethodRegisterArgument));
+    }
+
+    if (GetGraph()->HasShouldDeoptimizeFlag()) {
+      CHECK(!HasEmptyFrame());
+      // Initialize should_deoptimize flag to 0.
+      __ movl(Address(CpuRegister(RSP), GetStackOffsetOfShouldDeoptimizeFlag()), Immediate(0));
     }
   }
 
-  int adjust = GetFrameSize() - GetCoreSpillSize();
-  __ subq(CpuRegister(RSP), Immediate(adjust));
-  __ cfi().AdjustCFAOffset(adjust);
-  uint32_t xmm_spill_location = GetFpuSpillStart();
-  size_t xmm_spill_slot_size = GetCalleePreservedFPWidth();
-
-  for (int i = arraysize(kFpuCalleeSaves) - 1; i >= 0; --i) {
-    if (allocated_registers_.ContainsFloatingPointRegister(kFpuCalleeSaves[i])) {
-      int offset = xmm_spill_location + (xmm_spill_slot_size * i);
-      __ movsd(Address(CpuRegister(RSP), offset), XmmRegister(kFpuCalleeSaves[i]));
-      __ cfi().RelOffset(DWARFReg(kFpuCalleeSaves[i]), offset);
-    }
-  }
-
-  // Save the current method if we need it. Note that we do not
-  // do this in HCurrentMethod, as the instruction might have been removed
-  // in the SSA graph.
-  if (RequiresCurrentMethod()) {
-    __ movq(Address(CpuRegister(RSP), kCurrentMethodStackOffset),
-            CpuRegister(kMethodRegisterArgument));
-  }
-
-  if (GetGraph()->HasShouldDeoptimizeFlag()) {
-    // Initialize should_deoptimize flag to 0.
-    __ movl(Address(CpuRegister(RSP), GetStackOffsetOfShouldDeoptimizeFlag()), Immediate(0));
-  }
+  MaybeIncrementHotness(/* is_frame_entry= */ true);
 }
 
 void CodeGeneratorX86_64::GenerateFrameExit() {
@@ -1551,16 +1596,7 @@ void InstructionCodeGeneratorX86_64::HandleGoto(HInstruction* got, HBasicBlock* 
 
   HLoopInformation* info = block->GetLoopInformation();
   if (info != nullptr && info->IsBackEdge(*block) && info->HasSuspendCheck()) {
-    if (codegen_->GetCompilerOptions().CountHotnessInCompiledCode()) {
-      __ movq(CpuRegister(TMP), Address(CpuRegister(RSP), 0));
-      NearLabel overflow;
-      __ cmpw(Address(CpuRegister(TMP), ArtMethod::HotnessCountOffset().Int32Value()),
-              Immediate(ArtMethod::MaxCounter()));
-      __ j(kEqual, &overflow);
-      __ addw(Address(CpuRegister(TMP), ArtMethod::HotnessCountOffset().Int32Value()),
-              Immediate(1));
-      __ Bind(&overflow);
-    }
+    codegen_->MaybeIncrementHotness(/* is_frame_entry= */ false);
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
     return;
   }
@@ -2330,28 +2366,41 @@ void LocationsBuilderX86_64::VisitReturn(HReturn* ret) {
 }
 
 void InstructionCodeGeneratorX86_64::VisitReturn(HReturn* ret) {
-  if (kIsDebugBuild) {
-    switch (ret->InputAt(0)->GetType()) {
-      case DataType::Type::kReference:
-      case DataType::Type::kBool:
-      case DataType::Type::kUint8:
-      case DataType::Type::kInt8:
-      case DataType::Type::kUint16:
-      case DataType::Type::kInt16:
-      case DataType::Type::kInt32:
-      case DataType::Type::kInt64:
-        DCHECK_EQ(ret->GetLocations()->InAt(0).AsRegister<CpuRegister>().AsRegister(), RAX);
-        break;
+  switch (ret->InputAt(0)->GetType()) {
+    case DataType::Type::kReference:
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8:
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16:
+    case DataType::Type::kInt32:
+    case DataType::Type::kInt64:
+      DCHECK_EQ(ret->GetLocations()->InAt(0).AsRegister<CpuRegister>().AsRegister(), RAX);
+      break;
 
-      case DataType::Type::kFloat32:
-      case DataType::Type::kFloat64:
-        DCHECK_EQ(ret->GetLocations()->InAt(0).AsFpuRegister<XmmRegister>().AsFloatRegister(),
-                  XMM0);
-        break;
-
-      default:
-        LOG(FATAL) << "Unexpected return type " << ret->InputAt(0)->GetType();
+    case DataType::Type::kFloat32: {
+      DCHECK_EQ(ret->GetLocations()->InAt(0).AsFpuRegister<XmmRegister>().AsFloatRegister(),
+                XMM0);
+      // To simplify callers of an OSR method, we put the return value in both
+      // floating point and core register.
+      if (GetGraph()->IsCompilingOsr()) {
+        __ movd(CpuRegister(RAX), XmmRegister(XMM0), /* is64bit= */ false);
+      }
+      break;
     }
+    case DataType::Type::kFloat64: {
+      DCHECK_EQ(ret->GetLocations()->InAt(0).AsFpuRegister<XmmRegister>().AsFloatRegister(),
+                XMM0);
+      // To simplify callers of an OSR method, we put the return value in both
+      // floating point and core register.
+      if (GetGraph()->IsCompilingOsr()) {
+        __ movd(CpuRegister(RAX), XmmRegister(XMM0), /* is64bit= */ true);
+      }
+      break;
+    }
+
+    default:
+      LOG(FATAL) << "Unexpected return type " << ret->InputAt(0)->GetType();
   }
   codegen_->GenerateFrameExit();
 }
@@ -2520,6 +2569,31 @@ void LocationsBuilderX86_64::VisitInvokeInterface(HInvokeInterface* invoke) {
   invoke->GetLocations()->AddTemp(Location::RegisterLocation(RAX));
 }
 
+void CodeGeneratorX86_64::MaybeGenerateInlineCacheCheck(HInstruction* instruction,
+                                                        CpuRegister klass) {
+  DCHECK_EQ(RDI, klass.AsRegister());
+  // We know the destination of an intrinsic, so no need to record inline
+  // caches.
+  if (!instruction->GetLocations()->Intrinsified() &&
+      GetGraph()->IsCompilingBaseline() &&
+      !Runtime::Current()->IsAotCompiler()) {
+    ScopedObjectAccess soa(Thread::Current());
+    ProfilingInfo* info = GetGraph()->GetArtMethod()->GetProfilingInfo(kRuntimePointerSize);
+    if (info != nullptr) {
+      InlineCache* cache = info->GetInlineCache(instruction->GetDexPc());
+      uint64_t address = reinterpret_cast64<uint64_t>(cache);
+      NearLabel done;
+      __ movq(CpuRegister(TMP), Immediate(address));
+      // Fast path for a monomorphic cache.
+      __ cmpl(Address(CpuRegister(TMP), InlineCache::ClassesOffset().Int32Value()), klass);
+      __ j(kEqual, &done);
+      GenerateInvokeRuntime(
+          GetThreadOffset<kX86_64PointerSize>(kQuickUpdateInlineCache).Int32Value());
+      __ Bind(&done);
+    }
+  }
+}
+
 void InstructionCodeGeneratorX86_64::VisitInvokeInterface(HInvokeInterface* invoke) {
   // TODO: b/18116999, our IMTs can miss an IncompatibleClassChangeError.
   LocationSummary* locations = invoke->GetLocations();
@@ -2527,11 +2601,6 @@ void InstructionCodeGeneratorX86_64::VisitInvokeInterface(HInvokeInterface* invo
   CpuRegister hidden_reg = locations->GetTemp(1).AsRegister<CpuRegister>();
   Location receiver = locations->InAt(0);
   size_t class_offset = mirror::Object::ClassOffset().SizeValue();
-
-  // Set the hidden argument. This is safe to do this here, as RAX
-  // won't be modified thereafter, before the `call` instruction.
-  DCHECK_EQ(RAX, hidden_reg.AsRegister());
-  codegen_->Load64BitValue(hidden_reg, invoke->GetDexMethodIndex());
 
   if (receiver.IsStackSlot()) {
     __ movl(temp, Address(CpuRegister(RSP), receiver.GetStackIndex()));
@@ -2550,6 +2619,15 @@ void InstructionCodeGeneratorX86_64::VisitInvokeInterface(HInvokeInterface* invo
   // intact/accessible until the end of the marking phase (the
   // concurrent copying collector may not in the future).
   __ MaybeUnpoisonHeapReference(temp);
+
+  codegen_->MaybeGenerateInlineCacheCheck(invoke, temp);
+
+  // Set the hidden argument. This is safe to do this here, as RAX
+  // won't be modified thereafter, before the `call` instruction.
+  // We also di it after MaybeGenerateInlineCache that may use RAX.
+  DCHECK_EQ(RAX, hidden_reg.AsRegister());
+  codegen_->Load64BitValue(hidden_reg, invoke->GetDexMethodIndex());
+
   // temp = temp->GetAddressOfIMT()
   __ movq(temp,
       Address(temp, mirror::Class::ImtPtrOffset(kX86_64PointerSize).Uint32Value()));

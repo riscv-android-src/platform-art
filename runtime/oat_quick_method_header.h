@@ -18,6 +18,7 @@
 #define ART_RUNTIME_OAT_QUICK_METHOD_HEADER_H_
 
 #include "arch/instruction_set.h"
+#include "base/locks.h"
 #include "base/macros.h"
 #include "base/utils.h"
 #include "quick/quick_method_frame_info.h"
@@ -36,6 +37,10 @@ class PACKED(4) OatQuickMethodHeader {
       : vmap_table_offset_(vmap_table_offset),
         code_size_(code_size) {
   }
+
+  static OatQuickMethodHeader* NterpMethodHeader;
+
+  bool IsNterpMethodHeader() const;
 
   static OatQuickMethodHeader* FromCodePointer(const void* code_ptr) {
     uintptr_t code = reinterpret_cast<uintptr_t>(code_ptr);
@@ -83,7 +88,7 @@ class PACKED(4) OatQuickMethodHeader {
     // ART compiled method are prefixed with header, but we can also easily
     // accidentally use a function pointer to one of the stubs/trampolines.
     // We prefix those with 0xFF in the aseembly so that we can do DCHECKs.
-    CHECK_NE(code_size_, 0xFFFFFFFF) << code_;
+    CHECK_NE(code_size_, 0xFFFFFFFF) << code_size_;
     return code_size_ & kCodeSizeMask;
   }
 
@@ -148,7 +153,10 @@ class PACKED(4) OatQuickMethodHeader {
                             bool is_for_catch_handler,
                             bool abort_on_failure = true) const;
 
-  uint32_t ToDexPc(ArtMethod* method, const uintptr_t pc, bool abort_on_failure = true) const;
+  uint32_t ToDexPc(ArtMethod** frame,
+                   const uintptr_t pc,
+                   bool abort_on_failure = true) const
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetHasShouldDeoptimizeFlag() {
     DCHECK_EQ(code_size_ & kShouldDeoptimizeMask, 0u);

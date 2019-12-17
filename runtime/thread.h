@@ -89,6 +89,7 @@ struct DebugInvokeReq;
 class DeoptimizationContextRecord;
 class DexFile;
 class FrameIdToShadowFrame;
+class IsMarkedVisitor;
 class JavaVMExt;
 class JNIEnvExt;
 class Monitor;
@@ -263,6 +264,17 @@ class Thread {
         (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
   }
 
+  void DecrDefineClassCount() {
+    tls32_.define_class_counter--;
+  }
+
+  void IncrDefineClassCount() {
+    tls32_.define_class_counter++;
+  }
+  uint32_t GetDefineClassCount() const {
+    return tls32_.define_class_counter;
+  }
+
   // If delta > 0 and (this != self or suspend_barrier is not null), this function may temporarily
   // release thread_suspend_count_lock_ internally.
   ALWAYS_INLINE
@@ -353,6 +365,21 @@ class Thread {
       tlsPtr_.last_no_thread_suspension_cause = old_cause;
     }
     Roles::uninterruptible_.Release();  // No-op.
+  }
+
+  // End region where no thread suspension is expected. Returns the current open region in case we
+  // want to reopen it. Used for ScopedAllowThreadSuspension. Not supported if no_thread_suspension
+  // is larger than one.
+  const char* EndAssertNoThreadSuspension() RELEASE(Roles::uninterruptible_) WARN_UNUSED {
+    const char* ret = nullptr;
+    if (kIsDebugBuild) {
+      CHECK_EQ(tls32_.no_thread_suspension, 1u);
+      tls32_.no_thread_suspension--;
+      ret = tlsPtr_.last_no_thread_suspension_cause;
+      tlsPtr_.last_no_thread_suspension_cause = nullptr;
+    }
+    Roles::uninterruptible_.Release();  // No-op.
+    return ret;
   }
 
   void AssertThreadSuspensionIsAllowable(bool check_locks = true) const;
@@ -703,8 +730,15 @@ class Thread {
   }
 
  public:
-  static uint32_t QuickEntryPointOffsetWithSize(size_t quick_entrypoint_offset,
-                                                PointerSize pointer_size) {
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> QuickEntryPointOffset(
+      size_t quick_entrypoint_offset) {
+    return ThreadOffsetFromTlsPtr<pointer_size>(
+        OFFSETOF_MEMBER(tls_ptr_sized_values, quick_entrypoints) + quick_entrypoint_offset);
+  }
+
+  static constexpr uint32_t QuickEntryPointOffsetWithSize(size_t quick_entrypoint_offset,
+                                                          PointerSize pointer_size) {
     if (pointer_size == PointerSize::k32) {
       return QuickEntryPointOffset<PointerSize::k32>(quick_entrypoint_offset).
           Uint32Value();
@@ -715,12 +749,6 @@ class Thread {
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> QuickEntryPointOffset(size_t quick_entrypoint_offset) {
-    return ThreadOffsetFromTlsPtr<pointer_size>(
-        OFFSETOF_MEMBER(tls_ptr_sized_values, quick_entrypoints) + quick_entrypoint_offset);
-  }
-
-  template<PointerSize pointer_size>
   static ThreadOffset<pointer_size> JniEntryPointOffset(size_t jni_entrypoint_offset) {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, jni_entrypoints) + jni_entrypoint_offset);
@@ -728,7 +756,7 @@ class Thread {
 
   // Return the entry point offset integer value for ReadBarrierMarkRegX, where X is `reg`.
   template <PointerSize pointer_size>
-  static int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
+  static constexpr int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
     // The entry point list defines 30 ReadBarrierMarkRegX entry points.
     DCHECK_LT(reg, 30u);
     // The ReadBarrierMarkRegX entry points are ordered by increasing
@@ -1333,6 +1361,10 @@ class Thread {
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
   void Destroy();
 
+  // Deletes and clears the tlsPtr_.jpeer field. Done in a way so that both it and opeer cannot be
+  // observed to be set at the same time by instrumentation.
+  void DeleteJPeer(JNIEnv* env);
+
   void NotifyInTheadList()
       REQUIRES_SHARED(Locks::thread_list_lock_);
 
@@ -1454,6 +1486,8 @@ class Thread {
   template <bool kPrecise>
   void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  void SweepInterpreterCache(IsMarkedVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
+
   static bool IsAotCompiler();
 
   void ReleaseLongJumpContextInternal();
@@ -1535,7 +1569,8 @@ class Thread {
           user_code_suspend_count(0),
           force_interpreter_count(0),
           use_mterp(0),
-          make_visibly_initialized_counter(0) {}
+          make_visibly_initialized_counter(0),
+          define_class_counter(0) {}
 
     union StateAndFlags state_and_flags;
     static_assert(sizeof(union StateAndFlags) == sizeof(int32_t),
@@ -1633,6 +1668,10 @@ class Thread {
     // initialized but not visibly initialized for a long time even if no more classes are
     // being initialized anymore.
     uint32_t make_visibly_initialized_counter;
+
+    // Counter for how many nested define-classes are ongoing in this thread. Used to allow waiting
+    // for threads to be done with class-definition work.
+    uint32_t define_class_counter;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1909,6 +1948,30 @@ class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
   const bool enabled_;
   const char* old_cause_;
 };
+
+class ScopedAllowThreadSuspension {
+ public:
+  ALWAYS_INLINE ScopedAllowThreadSuspension() RELEASE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      self_ = Thread::Current();
+      old_cause_ = self_->EndAssertNoThreadSuspension();
+    } else {
+      Roles::uninterruptible_.Release();  // No-op.
+    }
+  }
+  ALWAYS_INLINE ~ScopedAllowThreadSuspension() ACQUIRE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      CHECK(self_->StartAssertNoThreadSuspension(old_cause_) == nullptr);
+    } else {
+      Roles::uninterruptible_.Acquire();  // No-op.
+    }
+  }
+
+ private:
+  Thread* self_;
+  const char* old_cause_;
+};
+
 
 class ScopedStackedShadowFramePusher {
  public:
