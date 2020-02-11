@@ -41,6 +41,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
+#include "oat.h"
 #include "oat_file-inl.h"
 #include "oat_writer.h"
 #include "profile/profile_compilation_info.h"
@@ -197,13 +198,10 @@ class OatTest : public CommonCompilerDriverTest {
     MultiOatRelativePatcher patcher(compiler_options_->GetInstructionSet(),
                                     compiler_options_->GetInstructionSetFeatures(),
                                     compiler_driver_->GetCompiledMethodStorage());
-    if (!oat_writer.StartRoData(compiler_driver_.get(),
-                                /*image_writer=*/ nullptr,
-                                dex_files,
-                                oat_rodata,
-                                &key_value_store)) {
+    if (!oat_writer.StartRoData(dex_files, oat_rodata, &key_value_store)) {
       return false;
     }
+    oat_writer.Initialize(compiler_driver_.get(), /*image_writer=*/ nullptr, dex_files);
     oat_writer.PrepareLayout(&patcher);
     elf_writer->PrepareDynamicSection(oat_writer.GetOatHeader().GetExecutableOffset(),
                                       oat_writer.GetCodeSize(),
@@ -416,8 +414,6 @@ TEST_F(OatTest, WriteRead) {
                                                   tmp_oat.GetFilename(),
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ true,
-                                                  /*abs_dex_location=*/ nullptr,
-                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file.get() != nullptr) << error_msg;
   const OatHeader& oat_header = oat_file->GetOatHeader();
@@ -473,7 +469,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(56U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(167 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(169 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 
@@ -535,8 +531,6 @@ TEST_F(OatTest, EmptyTextSection) {
                                                   tmp_oat.GetFilename(),
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ false,
-                                                  /*abs_dex_location=*/ nullptr,
-                                                  /*reservation=*/ nullptr,
                                                   &error_msg));
   ASSERT_TRUE(oat_file != nullptr);
   EXPECT_LT(static_cast<size_t>(oat_file->Size()),
@@ -612,8 +606,6 @@ void OatTest::TestDexFileInput(bool verify, bool low_4gb, bool use_profile) {
                                                          tmp_oat.GetFilename(),
                                                          /*executable=*/ false,
                                                          low_4gb,
-                                                         /*abs_dex_location=*/ nullptr,
-                                                         /*reservation=*/ nullptr,
                                                          &error_msg));
   ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
   if (low_4gb) {
@@ -742,8 +734,6 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
                                                              tmp_oat.GetFilename(),
                                                              /*executable=*/ false,
                                                              /*low_4gb=*/ false,
-                                                             /*abs_dex_location=*/ nullptr,
-                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());
@@ -792,8 +782,6 @@ void OatTest::TestZipFileInput(bool verify, CopyOption copy) {
                                                              tmp_oat.GetFilename(),
                                                              /*executable=*/ false,
                                                              /*low_4gb=*/ false,
-                                                             /*abs_dex_location=*/ nullptr,
-                                                             /*reservation=*/ nullptr,
                                                              &error_msg));
       ASSERT_TRUE(opened_oat_file != nullptr) << error_msg;
       ASSERT_EQ(2u, opened_oat_file->GetOatDexFiles().size());

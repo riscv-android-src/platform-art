@@ -39,7 +39,6 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array.h"
 #include "mirror/string.h"
-#include "oat.h"
 #include "obj_ptr-inl.h"
 #include "quick/quick_method_frame_info.h"
 #include "read_barrier-inl.h"
@@ -428,16 +427,6 @@ inline uint32_t ArtMethod::GetImtIndex() {
 inline void ArtMethod::CalculateAndSetImtIndex() {
   DCHECK(IsAbstract()) << PrettyMethod();
   imt_index_ = ~ImTable::GetImtIndex(this);
-}
-
-template <ReadBarrierOption kReadBarrierOption>
-bool ArtMethod::NeedsInitializationCheck() {
-  // The class needs to be visibly initialized before we can use entrypoints to
-  // compiled code for static methods. See b/18161648 . The class initializer is
-  // special as it is invoked during initialization and does not need the check.
-  return IsStatic() &&
-      !IsConstructor() &&
-      !GetDeclaringClass<kReadBarrierOption>()->IsVisiblyInitialized();
 }
 
 }  // namespace art

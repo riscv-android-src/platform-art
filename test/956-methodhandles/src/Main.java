@@ -27,6 +27,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
+import java.util.AbstractList;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -91,6 +92,11 @@ public class Main {
     }
     public MethodHandles.Lookup getLookup() {
       return MethodHandles.lookup();
+    }
+  }
+
+  public static class I {
+    public static void someVoidMethod() {
     }
   }
 
@@ -634,6 +640,30 @@ public class Main {
       fail();
     } catch (WrongMethodTypeException expected) {
     }
+
+    // Zero / null introduction
+    MethodHandle voidMH = MethodHandles.lookup().findStatic(I.class, "someVoidMethod",
+                                                            MethodType.methodType(void.class));
+    {
+      MethodHandle booleanMH = voidMH.asType(MethodType.methodType(boolean.class));
+      assertEquals(boolean.class, booleanMH.type().returnType());
+      assertEquals(false, booleanMH.invoke());
+    }
+    {
+      MethodHandle intMH = voidMH.asType(MethodType.methodType(int.class));
+      assertEquals(int.class, intMH.type().returnType());
+      assertEquals(0, intMH.invoke());
+    }
+    {
+      MethodHandle longMH = voidMH.asType(MethodType.methodType(long.class));
+      assertEquals(long.class, longMH.type().returnType());
+      assertEquals(0L, longMH.invoke());
+    }
+    {
+      MethodHandle objMH = voidMH.asType(MethodType.methodType(Object.class));
+      assertEquals(Object.class, objMH.type().returnType());
+      assertEquals(null, objMH.invoke());
+    }
   }
 
   public static void assertTrue(boolean value) {
@@ -755,6 +785,14 @@ public class Main {
             Object[].class, MethodType.methodType(void.class));
         fail("Unexpected success for array class type for findConstructor");
     } catch (NoSuchMethodException e) {}
+
+    // Child class constructor (b/143343351)
+    {
+        MethodHandle handle = MethodHandles.lookup().findConstructor(
+            ArrayList.class, MethodType.methodType(void.class));
+        AbstractList list = (AbstractList) handle.asType(MethodType.methodType(AbstractList.class))
+                .invokeExact();
+    }
   }
 
   public static void testStringConstructors() throws Throwable {
@@ -874,6 +912,16 @@ public class Main {
       fail("Unexpected string constructor result: '" + s + "'");
     }
 
+    // Child class constructor (b/143343351)
+    {
+        MethodHandle handle = MethodHandles.lookup().findConstructor(
+            String.class, MethodType.methodType(void.class));
+        CharSequence o = (CharSequence) handle.asType(MethodType.methodType(CharSequence.class))
+                .invokeExact();
+        if (!o.equals("")) {
+            fail("Unexpected child class constructor result: '" + o + "'");
+        }
+    }
     System.out.println("String constructors done.");
   }
 

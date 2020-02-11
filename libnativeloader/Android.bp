@@ -2,10 +2,7 @@
 // ========================================================
 cc_defaults {
     name: "libnativeloader-defaults",
-    cflags: [
-        "-Werror",
-        "-Wall",
-    ],
+    defaults: ["art_defaults"],
     cppflags: [
         "-fvisibility=hidden",
     ],
@@ -17,17 +14,20 @@ cc_library {
     name: "libnativeloader",
     defaults: ["libnativeloader-defaults"],
     visibility: [
-        "//art:__subpackages__",
-        // TODO(b/133140750): Clean this up.
         "//frameworks/base/cmds/app_process",
+        // TODO(b/133140750): Clean this up.
         "//frameworks/base/native/webview/loader",
+    ],
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
     ],
     host_supported: true,
     srcs: [
         "native_loader.cpp",
     ],
+    header_libs: ["libnativehelper_header_only"],
     shared_libs: [
-        "libnativehelper",
         "liblog",
         "libnativebridge",
         "libbase",
@@ -41,6 +41,9 @@ cc_library {
             ],
             shared_libs: [
                 "libdl_android",
+            ],
+            whole_static_libs: [
+                "PlatformProperties",
             ],
         },
     },
@@ -71,7 +74,8 @@ cc_library {
 cc_library_headers {
     name: "libnativeloader-headers",
     visibility: [
-        "//art/libnativeloader/test",
+        "//art:__subpackages__",
+        // TODO(b/133140750): Clean this up.
         "//frameworks/av/media/libstagefright",
         "//frameworks/native/libs/graphicsenv",
         "//frameworks/native/vulkan/libvulkan",
@@ -93,11 +97,12 @@ cc_test {
     static_libs: [
         "libbase",
         "liblog",
-        "libnativehelper",
         "libgmock",
+        "PlatformProperties",
     ],
     header_libs: [
         "libnativebridge-headers",
+        "libnativehelper_header_only",
         "libnativeloader-headers",
     ],
     // native_loader_test.cpp mocks libdl APIs so system_shared_libs

@@ -76,7 +76,7 @@ const char* const VixlJniHelpersResults[] = {
   "  f0:	f1bc 0f00 	cmp.w	ip, #0\n",
   "  f4:	bf18      	it	ne\n",
   "  f6:	f20d 4c01 	addwne	ip, sp, #1025	; 0x401\n",
-  "  fa:	f8d9 c09c 	ldr.w	ip, [r9, #156]	; 0x9c\n",
+  "  fa:	f8d9 c0a4 	ldr.w	ip, [r9, #164]	; 0xa4\n",
   "  fe:	f1bc 0f00 	cmp.w	ip, #0\n",
   " 102:	d171      	bne.n	1e8 <VixlJniHelpers+0x1e8>\n",
   " 104:	f8cd c7ff 	str.w	ip, [sp, #2047]	; 0x7ff\n",

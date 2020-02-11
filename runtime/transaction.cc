@@ -18,6 +18,7 @@
 
 #include <android-base/logging.h>
 
+#include "aot_class_linker.h"
 #include "base/mutex-inl.h"
 #include "base/stl_util.h"
 #include "gc/accounting/card_table-inl.h"
@@ -42,9 +43,9 @@ Transaction::Transaction(bool strict, mirror::Class* root)
     : log_lock_("transaction log lock", kTransactionLogLock),
       aborted_(false),
       rolling_back_(false),
-      heap_(strict ? nullptr : Runtime::Current()->GetHeap()),
+      heap_(Runtime::Current()->GetHeap()),
+      strict_(strict),
       root_(root) {
-  DCHECK_EQ(strict, IsStrict());
   DCHECK(Runtime::Current()->IsAotCompiler());
 }
 
@@ -116,20 +117,43 @@ const std::string& Transaction::GetAbortMessage() {
   return abort_message_;
 }
 
-bool Transaction::WriteConstraint(Thread* self, ObjPtr<mirror::Object> obj, ArtField* field) {
+bool Transaction::WriteConstraint(Thread* self, ObjPtr<mirror::Object> obj) {
+  DCHECK(obj != nullptr);
+  MutexLock mu(self, log_lock_);
+
+  // Prevent changes in boot image spaces for app or boot image extension.
+  // For boot image there are no boot image spaces and this condition evaluates to false.
+  if (heap_->ObjectIsInBootImageSpace(obj)) {
+    return true;
+  }
+
+  // For apps, also prevent writing to other classes.
+  return IsStrict() &&
+         obj->IsClass() &&  // no constraint updating instances or arrays
+         obj != root_;  // modifying other classes' static field, fail
+}
+
+bool Transaction::WriteValueConstraint(Thread* self, ObjPtr<mirror::Object> value) {
+  if (value == nullptr) {
+    return false;  // We can always store null values.
+  }
+  gc::Heap* heap = Runtime::Current()->GetHeap();
   MutexLock mu(self, log_lock_);
   if (IsStrict()) {
-    return field->IsStatic() &&  // no constraint instance updating
-           obj != root_;  // modifying other classes' static field, fail
+    // TODO: Should we restrict writes the same way as for boot image extension?
+    return false;
+  } else if (heap->GetBootImageSpaces().empty()) {
+    return false;  // No constraints for boot image.
   } else {
-    // For boot image extension, prevent changes in boot image.
-    // For boot image there are no boot image spaces and this returns false.
-    return heap_->ObjectIsInBootImageSpace(obj);
+    // Boot image extension.
+    ObjPtr<mirror::Class> klass = value->IsClass() ? value->AsClass() : value->GetClass();
+    return !AotClassLinker::CanReferenceInBootImageExtension(klass, heap);
   }
 }
 
-bool Transaction::ReadConstraint(Thread* self, ObjPtr<mirror::Object> obj, ArtField* field) {
-  DCHECK(field->IsStatic());
+bool Transaction::ReadConstraint(Thread* self, ObjPtr<mirror::Object> obj) {
+  // Read constraints are checked only for static field reads as there are
+  // no constraints on reading instance fields and array elements.
   DCHECK(obj->IsClass());
   MutexLock mu(self, log_lock_);
   if (IsStrict()) {

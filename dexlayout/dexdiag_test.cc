@@ -25,7 +25,7 @@
 
 namespace art {
 
-static const char* kDexDiagContains = "--contains=core.vdex";
+static const char* kDexDiagContains = "--contains=boot.vdex";
 static const char* kDexDiagContainsFails = "--contains=anything_other_than_core.vdex";
 static const char* kDexDiagHelp = "--help";
 static const char* kDexDiagVerbose = "--verbose";
@@ -68,8 +68,6 @@ class DexDiagTest : public CommonArtTest {
                                                oat_location.c_str(),
                                                /*executable=*/ false,
                                                /*low_4gb=*/ false,
-                                               /*abs_dex_location=*/ nullptr,
-                                               /*reservation=*/ nullptr,
                                                &error_msg));
     EXPECT_TRUE(oat != nullptr) << error_msg;
     return oat;

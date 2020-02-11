@@ -1933,7 +1933,7 @@ DEFINE_FUNCTION art_quick_generic_jni_trampoline
     // eax: pointer to native code, 0 on error.
     // edx: pointer to the bottom of the used area of the alloca, can restore stack till there.
 
-    // Check for error = 0.
+    // Check for error (locking can throw for synchronized native method).
     test %eax, %eax
     jz .Lexception_in_native
 
@@ -2429,19 +2429,8 @@ DEFINE_FUNCTION art_quick_osr_stub
     POP ebx
     POP ebp
     mov 16(%esp), %ecx            // Get JValue result
-    mov %eax, (%ecx)              // Store the result assuming it is a long, int or Object*
-    mov %edx, 4(%ecx)             // Store the other half of the result
-    mov 20(%esp), %edx            // Get the shorty
-    cmpb LITERAL(68), (%edx)      // Test if result type char == 'D'
-    je .Losr_return_double_quick
-    cmpb LITERAL(70), (%edx)      // Test if result type char == 'F'
-    je .Losr_return_float_quick
-    ret
-.Losr_return_double_quick:
-    movsd %xmm0, (%ecx)           // Store the floating point result
-    ret
-.Losr_return_float_quick:
-    movss %xmm0, (%ecx)           // Store the floating point result
+    mov %eax, (%ecx)              // Store the result.
+    mov %edx, 4(%ecx)             // Store the other half of the result.
     ret
 .Losr_entry:
     CFI_RESTORE_STATE_AND_DEF_CFA(ebp, SAVE_SIZE)  // CFA = ebp + SAVE_SIZE
@@ -2519,5 +2508,79 @@ DEFINE_FUNCTION ExecuteSwitchImplAsm
     ret
 END_FUNCTION ExecuteSwitchImplAsm
 
+// On entry: eax is the class, ebp is the inline cache.
+DEFINE_FUNCTION art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+    // Don't update the cache if we are marking.
+    cmpl LITERAL(0), %fs:THREAD_IS_GC_MARKING_OFFSET
+    jnz .Lret
+    PUSH ecx
+    movl %eax, %ecx // eax will be used for cmpxchg
+.Lentry1:
+    movl INLINE_CACHE_CLASSES_OFFSET(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry2
+    lock cmpxchg %ecx, INLINE_CACHE_CLASSES_OFFSET(%ebp)
+    jz .Ldone
+    jmp .Lentry1
+.Lentry2:
+    movl (INLINE_CACHE_CLASSES_OFFSET+4)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry3
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+4)(%ebp)
+    jz .Ldone
+    jmp .Lentry2
+.Lentry3:
+    movl (INLINE_CACHE_CLASSES_OFFSET+8)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry4
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+8)(%ebp)
+    jz .Ldone
+    jmp .Lentry3
+.Lentry4:
+    movl (INLINE_CACHE_CLASSES_OFFSET+12)(%ebp), %eax
+    cmpl %ecx, %eax
+    je .Ldone
+    cmpl LITERAL(0), %eax
+    jne .Lentry5
+    lock cmpxchg %ecx, (INLINE_CACHE_CLASSES_OFFSET+12)(%ebp)
+    jz .Ldone
+    jmp .Lentry4
+.Lentry5:
+    // Unconditionally store, the cache is megamorphic.
+    movl %ecx, (INLINE_CACHE_CLASSES_OFFSET+16)(%ebp)
+.Ldone:
+    // Restore registers
+    movl %ecx, %eax
+    POP ecx
+.Lret:
+    ret
+END_FUNCTION art_quick_update_inline_cache
+
     // TODO: implement these!
 UNIMPLEMENTED art_quick_memcmp16
+
+// On entry, the method is at the bottom of the stack.
+DEFINE_FUNCTION art_quick_compile_optimized
+    SETUP_SAVE_EVERYTHING_FRAME ebx, ebx
+    mov FRAME_SIZE_SAVE_EVERYTHING(%esp), %eax // Fetch ArtMethod
+    sub LITERAL(8), %esp   		       // Alignment padding
+    CFI_ADJUST_CFA_OFFSET(8)
+    pushl %fs:THREAD_SELF_OFFSET               // pass Thread::Current()
+    CFI_ADJUST_CFA_OFFSET(4)
+    pushl %eax
+    CFI_ADJUST_CFA_OFFSET(4)
+    call SYMBOL(artCompileOptimized)           // (ArtMethod*, Thread*)
+    addl LITERAL(16), %esp                     // Pop arguments.
+    CFI_ADJUST_CFA_OFFSET(-16)
+    RESTORE_SAVE_EVERYTHING_FRAME
+    ret
+END_FUNCTION art_quick_compile_optimized

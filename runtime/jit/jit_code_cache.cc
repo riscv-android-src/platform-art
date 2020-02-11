@@ -37,6 +37,7 @@
 #include "debugger_interface.h"
 #include "dex/dex_file_loader.h"
 #include "dex/method_reference.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/accounting/bitmap-inl.h"
 #include "gc/allocator/dlmalloc.h"
@@ -126,9 +127,29 @@ class JitCodeCache::JniStubData {
     for (ArtMethod* m : GetMethods()) {
       // Because `m` might be in the process of being deleted:
       // - Call the dedicated method instead of the more generic UpdateMethodsCode
-      // - Check the class status without a read barrier.
-      // TODO: Use ReadBarrier::IsMarked() if not null to check the class status.
-      if (!m->NeedsInitializationCheck<kWithoutReadBarrier>()) {
+      // - Check the class status without a full read barrier; use ReadBarrier::IsMarked().
+      bool can_set_entrypoint = true;
+      if (NeedsClinitCheckBeforeCall(m)) {
+        // To avoid resurrecting an unreachable object, we must not use a full read
+        // barrier but we do not want to miss updating an entrypoint under common
+        // circumstances, i.e. during a GC the class becomes visibly initialized,
+        // the method becomes hot, we compile the thunk and want to update the
+        // entrypoint while the method's declaring class field still points to the
+        // from-space class object with the old status. Therefore we read the
+        // declaring class without a read barrier and check if it's already marked.
+        // If yes, we check the status of the to-space class object as intended.
+        // Otherwise, there is no to-space object and the from-space class object
+        // contains the most recent value of the status field; even if this races
+        // with another thread doing a read barrier and updating the status, that's
+        // no different from a race with a thread that just updates the status.
+        // Such race can happen only for the zygote method pre-compilation, as we
+        // otherwise compile only thunks for methods of visibly initialized classes.
+        ObjPtr<mirror::Class> klass = m->GetDeclaringClass<kWithoutReadBarrier>();
+        ObjPtr<mirror::Class> marked = ReadBarrier::IsMarked(klass.Ptr());
+        ObjPtr<mirror::Class> checked_klass = (marked != nullptr) ? marked : klass;
+        can_set_entrypoint = checked_klass->IsVisiblyInitialized();
+      }
+      if (can_set_entrypoint) {
         instrum->UpdateNativeMethodsCodeToJitCode(m, entrypoint);
       }
     }
@@ -319,7 +340,7 @@ const void* JitCodeCache::FindCompiledCodeForInstrumentation(ArtMethod* method) 
 }
 
 const void* JitCodeCache::GetSavedEntryPointOfPreCompiledMethod(ArtMethod* method) {
-  if (Runtime::Current()->IsUsingApexBootImageLocation() && method->IsPreCompiled()) {
+  if (method->IsPreCompiled()) {
     const void* code_ptr = nullptr;
     if (method->GetDeclaringClass()->GetClassLoader() == nullptr) {
       code_ptr = zygote_map_.GetCodeFor(method);
@@ -389,39 +410,6 @@ static const uint8_t* GetRootTable(const void* code_ptr, uint32_t* number_of_roo
   return data - ComputeRootTableSize(roots);
 }
 
-// Use a sentinel for marking entries in the JIT table that have been cleared.
-// This helps diagnosing in case the compiled code tries to wrongly access such
-// entries.
-static mirror::Class* const weak_sentinel =
-    reinterpret_cast<mirror::Class*>(Context::kBadGprBase + 0xff);
-
-// Helper for the GC to process a weak class in a JIT root table.
-static inline void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
-                                    IsMarkedVisitor* visitor,
-                                    mirror::Class* update)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  // This does not need a read barrier because this is called by GC.
-  mirror::Class* cls = root_ptr->Read<kWithoutReadBarrier>();
-  if (cls != nullptr && cls != weak_sentinel) {
-    DCHECK((cls->IsClass<kDefaultVerifyFlags>()));
-    // Look at the classloader of the class to know if it has been unloaded.
-    // This does not need a read barrier because this is called by GC.
-    ObjPtr<mirror::Object> class_loader =
-        cls->GetClassLoader<kDefaultVerifyFlags, kWithoutReadBarrier>();
-    if (class_loader == nullptr || visitor->IsMarked(class_loader.Ptr()) != nullptr) {
-      // The class loader is live, update the entry if the class has moved.
-      mirror::Class* new_cls = down_cast<mirror::Class*>(visitor->IsMarked(cls));
-      // Note that new_object can be null for CMS and newly allocated objects.
-      if (new_cls != nullptr && new_cls != cls) {
-        *root_ptr = GcRoot<mirror::Class>(new_cls);
-      }
-    } else {
-      // The class loader is not live, clear the entry.
-      *root_ptr = GcRoot<mirror::Class>(update);
-    }
-  }
-}
-
 void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
   MutexLock mu(Thread::Current(), *Locks::jit_lock_);
   for (const auto& entry : method_code_map_) {
@@ -434,7 +422,7 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
     for (uint32_t i = 0; i < number_of_roots; ++i) {
       // This does not need a read barrier because this is called by GC.
       mirror::Object* object = roots[i].Read<kWithoutReadBarrier>();
-      if (object == nullptr || object == weak_sentinel) {
+      if (object == nullptr || object == Runtime::GetWeakClassSentinel()) {
         // entry got deleted in a previous sweep.
       } else if (object->IsString<kDefaultVerifyFlags>()) {
         mirror::Object* new_object = visitor->IsMarked(object);
@@ -449,8 +437,10 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
           roots[i] = GcRoot<mirror::Object>(new_object);
         }
       } else {
-        ProcessWeakClass(
-            reinterpret_cast<GcRoot<mirror::Class>*>(&roots[i]), visitor, weak_sentinel);
+        Runtime::ProcessWeakClass(
+            reinterpret_cast<GcRoot<mirror::Class>*>(&roots[i]),
+            visitor,
+            Runtime::GetWeakClassSentinel());
       }
     }
   }
@@ -459,7 +449,7 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
     for (size_t i = 0; i < info->number_of_inline_caches_; ++i) {
       InlineCache* cache = &info->cache_[i];
       for (size_t j = 0; j < InlineCache::kIndividualCacheSize; ++j) {
-        ProcessWeakClass(&cache->classes_[j], visitor, nullptr);
+        Runtime::ProcessWeakClass(&cache->classes_[j], visitor, nullptr);
       }
     }
   }
@@ -730,9 +720,9 @@ bool JitCodeCache::Commit(Thread* self,
       if (osr) {
         number_of_osr_compilations_++;
         osr_code_map_.Put(method, code_ptr);
-      } else if (method->NeedsInitializationCheck()) {
+      } else if (NeedsClinitCheckBeforeCall(method) &&
+                 !method->GetDeclaringClass()->IsVisiblyInitialized()) {
         // This situation currently only occurs in the jit-zygote mode.
-        DCHECK(Runtime::Current()->IsUsingApexBootImageLocation());
         DCHECK(!garbage_collect_code_);
         DCHECK(method->IsPreCompiled());
         // The shared region can easily be queried. For the private region, we
@@ -744,6 +734,11 @@ bool JitCodeCache::Commit(Thread* self,
         Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(
             method, method_header->GetEntryPoint());
       }
+    }
+    if (collection_in_progress_) {
+      // We need to update the live bitmap if there is a GC to ensure it sees this new
+      // code.
+      GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
     }
     VLOG(jit)
         << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
@@ -1006,13 +1001,12 @@ class MarkCodeClosure final : public Closure {
       // The stack walking code queries the side instrumentation stack if it
       // sees an instrumentation exit pc, so the JIT code of methods in that stack
       // must have been seen. We sanity check this below.
-      for (const instrumentation::InstrumentationStackFrame& frame
-              : *thread->GetInstrumentationStack()) {
+      for (const auto& it : *thread->GetInstrumentationStack()) {
         // The 'method_' in InstrumentationStackFrame is the one that has return_pc_ in
         // its stack frame, it is not the method owning return_pc_. We just pass null to
         // LookupMethodHeader: the method is only checked against in debug builds.
         OatQuickMethodHeader* method_header =
-            code_cache_->LookupMethodHeader(frame.return_pc_, /* method= */ nullptr);
+            code_cache_->LookupMethodHeader(it.second.return_pc_, /* method= */ nullptr);
         if (method_header != nullptr) {
           const void* code = method_header->GetCode();
           CHECK(bitmap_->Test(FromCodeToAllocation(code)));
@@ -1123,18 +1117,24 @@ void JitCodeCache::GarbageCollectCache(Thread* self) {
 
       // Start polling the liveness of compiled code to prepare for the next full collection.
       if (next_collection_will_be_full) {
-        // Save the entry point of methods we have compiled, and update the entry
-        // point of those methods to the interpreter. If the method is invoked, the
-        // interpreter will update its entry point to the compiled code and call it.
-        for (ProfilingInfo* info : profiling_infos_) {
-          const void* entry_point = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
-          if (!IsInZygoteDataSpace(info) && ContainsPc(entry_point)) {
-            info->SetSavedEntryPoint(entry_point);
-            // Don't call Instrumentation::UpdateMethodsCode(), as it can check the declaring
-            // class of the method. We may be concurrently running a GC which makes accessing
-            // the class unsafe. We know it is OK to bypass the instrumentation as we've just
-            // checked that the current entry point is JIT compiled code.
-            info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+        if (Runtime::Current()->GetJITOptions()->CanCompileBaseline()) {
+          for (ProfilingInfo* info : profiling_infos_) {
+            info->SetBaselineHotnessCount(0);
+          }
+        } else {
+          // Save the entry point of methods we have compiled, and update the entry
+          // point of those methods to the interpreter. If the method is invoked, the
+          // interpreter will update its entry point to the compiled code and call it.
+          for (ProfilingInfo* info : profiling_infos_) {
+            const void* entry_point = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
+            if (!IsInZygoteDataSpace(info) && ContainsPc(entry_point)) {
+              info->SetSavedEntryPoint(entry_point);
+              // Don't call Instrumentation::UpdateMethodsCode(), as it can check the declaring
+              // class of the method. We may be concurrently running a GC which makes accessing
+              // the class unsafe. We know it is OK to bypass the instrumentation as we've just
+              // checked that the current entry point is JIT compiled code.
+              info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+            }
           }
         }
 
@@ -1223,28 +1223,50 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
   ScopedTrace trace(__FUNCTION__);
   {
     MutexLock mu(self, *Locks::jit_lock_);
-    if (collect_profiling_info) {
-      // Clear the profiling info of methods that do not have compiled code as entrypoint.
-      // Also remove the saved entry point from the ProfilingInfo objects.
-      for (ProfilingInfo* info : profiling_infos_) {
-        const void* ptr = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
-        if (!ContainsPc(ptr) && !info->IsInUseByCompiler() && !IsInZygoteDataSpace(info)) {
-          info->GetMethod()->SetProfilingInfo(nullptr);
-        }
 
-        if (info->GetSavedEntryPoint() != nullptr) {
-          info->SetSavedEntryPoint(nullptr);
-          // We are going to move this method back to interpreter. Clear the counter now to
-          // give it a chance to be hot again.
-          ClearMethodCounter(info->GetMethod(), /*was_warm=*/ true);
+    if (Runtime::Current()->GetJITOptions()->CanCompileBaseline()) {
+      // Update to interpreter the methods that have baseline entrypoints and whose baseline
+      // hotness count is zero.
+      // Note that these methods may be in thread stack or concurrently revived
+      // between. That's OK, as the thread executing it will mark it.
+      for (ProfilingInfo* info : profiling_infos_) {
+        if (info->GetBaselineHotnessCount() == 0) {
+          const void* entry_point = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
+          if (ContainsPc(entry_point)) {
+            OatQuickMethodHeader* method_header =
+                OatQuickMethodHeader::FromEntryPoint(entry_point);
+            if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr())) {
+              info->GetMethod()->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+            }
+          }
         }
       }
-    } else if (kIsDebugBuild) {
-      // Sanity check that the profiling infos do not have a dangling entry point.
-      for (ProfilingInfo* info : profiling_infos_) {
-        DCHECK(!Runtime::Current()->IsZygote());
-        const void* entry_point = info->GetSavedEntryPoint();
-        DCHECK(entry_point == nullptr || IsInZygoteExecSpace(entry_point));
+      // TODO: collect profiling info
+      // TODO: collect optimized code?
+    } else {
+      if (collect_profiling_info) {
+        // Clear the profiling info of methods that do not have compiled code as entrypoint.
+        // Also remove the saved entry point from the ProfilingInfo objects.
+        for (ProfilingInfo* info : profiling_infos_) {
+          const void* ptr = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
+          if (!ContainsPc(ptr) && !info->IsInUseByCompiler() && !IsInZygoteDataSpace(info)) {
+            info->GetMethod()->SetProfilingInfo(nullptr);
+          }
+
+          if (info->GetSavedEntryPoint() != nullptr) {
+            info->SetSavedEntryPoint(nullptr);
+            // We are going to move this method back to interpreter. Clear the counter now to
+            // give it a chance to be hot again.
+            ClearMethodCounter(info->GetMethod(), /*was_warm=*/ true);
+          }
+        }
+      } else if (kIsDebugBuild) {
+        // Sanity check that the profiling infos do not have a dangling entry point.
+        for (ProfilingInfo* info : profiling_infos_) {
+          DCHECK(!Runtime::Current()->IsZygote());
+          const void* entry_point = info->GetSavedEntryPoint();
+          DCHECK(entry_point == nullptr || IsInZygoteExecSpace(entry_point));
+        }
       }
     }
 
@@ -1554,34 +1576,53 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
                                        Thread* self,
                                        bool osr,
                                        bool prejit,
+                                       bool baseline,
                                        JitMemoryRegion* region) {
-  if (!osr && ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
-    return false;
-  }
-
-  if (method->NeedsInitializationCheck() && !prejit) {
-    // Unless we're pre-jitting, we currently don't save the JIT compiled code if we cannot
-    // update the entrypoint due to needing an initialization check.
-    if (method->GetDeclaringClass()->IsInitialized()) {
-      // Request visible initialization but do not block to allow compiling other methods.
-      // Hopefully, this will complete by the time the method becomes hot again.
-      Runtime::Current()->GetClassLinker()->MakeInitializedClassesVisiblyInitialized(
-          self, /*wait=*/ false);
+  const void* existing_entry_point = method->GetEntryPointFromQuickCompiledCode();
+  if (!osr && ContainsPc(existing_entry_point)) {
+    OatQuickMethodHeader* method_header =
+        OatQuickMethodHeader::FromEntryPoint(existing_entry_point);
+    if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr()) == baseline) {
+      VLOG(jit) << "Not compiling "
+                << method->PrettyMethod()
+                << " because it has already been compiled"
+                << " baseline=" << std::boolalpha << baseline;
+      return false;
     }
-    VLOG(jit) << "Not compiling "
-              << method->PrettyMethod()
-              << " because it has the resolution stub";
-    // Give it a new chance to be hot.
-    ClearMethodCounter(method, /*was_warm=*/ false);
-    return false;
   }
 
-  MutexLock mu(self, *Locks::jit_lock_);
-  if (osr && (osr_code_map_.find(method) != osr_code_map_.end())) {
-    return false;
+  if (NeedsClinitCheckBeforeCall(method) && !prejit) {
+    // We do not need a synchronization barrier for checking the visibly initialized status
+    // or checking the initialized status just for requesting visible initialization.
+    ClassStatus status = method->GetDeclaringClass()
+        ->GetStatus<kDefaultVerifyFlags, /*kWithSynchronizationBarrier=*/ false>();
+    if (status != ClassStatus::kVisiblyInitialized) {
+      // Unless we're pre-jitting, we currently don't save the JIT compiled code if we cannot
+      // update the entrypoint due to needing an initialization check.
+      if (status == ClassStatus::kInitialized) {
+        // Request visible initialization but do not block to allow compiling other methods.
+        // Hopefully, this will complete by the time the method becomes hot again.
+        Runtime::Current()->GetClassLinker()->MakeInitializedClassesVisiblyInitialized(
+            self, /*wait=*/ false);
+      }
+      VLOG(jit) << "Not compiling "
+                << method->PrettyMethod()
+                << " because it has the resolution stub";
+      // Give it a new chance to be hot.
+      ClearMethodCounter(method, /*was_warm=*/ false);
+      return false;
+    }
+  }
+
+  if (osr) {
+    MutexLock mu(self, *Locks::jit_lock_);
+    if (osr_code_map_.find(method) != osr_code_map_.end()) {
+      return false;
+    }
   }
 
   if (UNLIKELY(method->IsNative())) {
+    MutexLock mu(self, *Locks::jit_lock_);
     JniStubKey key(method);
     auto it = jni_stubs_map_.find(key);
     bool new_compilation = false;
@@ -1610,6 +1651,12 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     return new_compilation;
   } else {
     ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
+    if (CanAllocateProfilingInfo() && baseline && info == nullptr) {
+      // We can retry allocation here as we're the JIT thread.
+      if (ProfilingInfo::Create(self, method, /* retry_allocation= */ true)) {
+        info = method->GetProfilingInfo(kRuntimePointerSize);
+      }
+    }
     if (info == nullptr) {
       // When prejitting, we don't allocate a profiling info.
       if (!prejit && !IsSharedRegion(*region)) {
@@ -1620,6 +1667,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
         return false;
       }
     } else {
+      MutexLock mu(self, *Locks::jit_lock_);
       if (info->IsMethodBeingCompiled(osr)) {
         return false;
       }
@@ -1810,15 +1858,18 @@ void ZygoteMap::Initialize(uint32_t number_of_methods) {
   // Allocate for 40-80% capacity. This will offer OK lookup times, and termination
   // cases.
   size_t capacity = RoundUpToPowerOfTwo(number_of_methods * 100 / 80);
-  const Entry* data =
-      reinterpret_cast<const Entry*>(region_->AllocateData(capacity * sizeof(Entry)));
-  if (data != nullptr) {
-    region_->FillData(data, capacity, Entry { nullptr, nullptr });
-    map_ = ArrayRef(data, capacity);
+  const uint8_t* memory = region_->AllocateData(
+      capacity * sizeof(Entry) + sizeof(ZygoteCompilationState));
+  if (memory == nullptr) {
+    LOG(WARNING) << "Could not allocate data for the zygote map";
+    return;
   }
-  done_ = reinterpret_cast<const bool*>(region_->AllocateData(sizeof(bool)));
-  CHECK(done_ != nullptr) << "Could not allocate a single boolean in the JIT region";
-  region_->WriteData(done_, false);
+  const Entry* data = reinterpret_cast<const Entry*>(memory);
+  region_->FillData(data, capacity, Entry { nullptr, nullptr });
+  map_ = ArrayRef(data, capacity);
+  compilation_state_ = reinterpret_cast<const ZygoteCompilationState*>(
+      memory + capacity * sizeof(Entry));
+  region_->WriteData(compilation_state_, ZygoteCompilationState::kInProgress);
 }
 
 const void* ZygoteMap::GetCodeFor(ArtMethod* method, uintptr_t pc) const {

@@ -48,6 +48,7 @@
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/var_handle.h"
+#include "oat.h"
 #include "oat_file.h"
 #include "oat_quick_method_header.h"
 #include "quick_exception_handler.h"
@@ -353,16 +354,20 @@ class QuickArgumentVisitor {
         return stack_map.GetDexPc();
       }
     } else {
-      return current_code->ToDexPc(*caller_sp, outer_pc);
+      return current_code->ToDexPc(caller_sp, outer_pc);
     }
+  }
+
+  static uint8_t* GetCallingPcAddr(ArtMethod** sp) REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK((*sp)->IsCalleeSaveMethod());
+    uint8_t* return_adress_spill =
+        reinterpret_cast<uint8_t*>(sp) + kQuickCalleeSaveFrame_RefAndArgs_ReturnPcOffset;
+    return return_adress_spill;
   }
 
   // For the given quick ref and args quick frame, return the caller's PC.
   static uintptr_t GetCallingPc(ArtMethod** sp) REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK((*sp)->IsCalleeSaveMethod());
-    uint8_t* return_adress_spill =
-        reinterpret_cast<uint8_t*>(sp) + kQuickCalleeSaveFrame_RefAndArgs_ReturnPcOffset;
-    return *reinterpret_cast<uintptr_t*>(return_adress_spill);
+    return *reinterpret_cast<uintptr_t*>(GetCallingPcAddr(sp));
   }
 
   QuickArgumentVisitor(ArtMethod** sp, bool is_static, const char* shorty,
@@ -774,7 +779,7 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
     self->PushShadowFrame(shadow_frame);
     self->EndAssertNoThreadSuspension(old_cause);
 
-    if (method->IsStatic()) {
+    if (NeedsClinitCheckBeforeCall(method)) {
       ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
       if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
         // Ensure static method's class is initialized.
@@ -1155,6 +1160,8 @@ extern "C" const void* artInstrumentationMethodEntryFromCode(ArtMethod* method,
   instrumentation->PushInstrumentationStackFrame(self,
                                                  is_static ? nullptr : this_object,
                                                  method,
+                                                 reinterpret_cast<uintptr_t>(
+                                                     QuickArgumentVisitor::GetCallingPcAddr(sp)),
                                                  QuickArgumentVisitor::GetCallingPc(sp),
                                                  interpreter_entry);
 
@@ -1180,9 +1187,9 @@ extern "C" TwoWordReturn artInstrumentationMethodExitFromCode(Thread* self,
   // Compute address of return PC and sanity check that it currently holds 0.
   constexpr size_t return_pc_offset =
       RuntimeCalleeSaveFrame::GetReturnPcOffset(CalleeSaveType::kSaveEverything);
-  uintptr_t* return_pc = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(sp) +
-                                                      return_pc_offset);
-  CHECK_EQ(*return_pc, 0U);
+  uintptr_t* return_pc_addr = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(sp) +
+                                                           return_pc_offset);
+  CHECK_EQ(*return_pc_addr, 0U);
 
   // Pop the frame filling in the return pc. The low half of the return value is 0 when
   // deoptimization shouldn't be performed with the high-half having the return address. When
@@ -1190,7 +1197,7 @@ extern "C" TwoWordReturn artInstrumentationMethodExitFromCode(Thread* self,
   // deoptimization entry point.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
   TwoWordReturn return_or_deoptimize_pc = instrumentation->PopInstrumentationStackFrame(
-      self, return_pc, gpr_result, fpr_result);
+      self, return_pc_addr, gpr_result, fpr_result);
   if (self->IsExceptionPending() || self->ObserveAsyncException()) {
     return GetTwoWordFailureValue();
   }
@@ -1456,28 +1463,20 @@ extern "C" const void* artQuickResolutionTrampoline(
                                << invoke_type << " " << orig_called->GetVtableIndex();
     }
 
-    // Ensure that the called method's class is initialized.
-    StackHandleScope<1> hs(soa.Self());
-    Handle<mirror::Class> called_class(hs.NewHandle(called->GetDeclaringClass()));
-    linker->EnsureInitialized(soa.Self(), called_class, true, true);
+    ObjPtr<mirror::Class> called_class = called->GetDeclaringClass();
+    if (NeedsClinitCheckBeforeCall(called) && !called_class->IsVisiblyInitialized()) {
+      // Ensure that the called method's class is initialized.
+      StackHandleScope<1> hs(soa.Self());
+      HandleWrapperObjPtr<mirror::Class> h_called_class(hs.NewHandleWrapper(&called_class));
+      linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
+    }
     bool force_interpreter = self->IsForceInterpreter() && !called->IsNative();
     if (called_class->IsInitialized() || called_class->IsInitializing()) {
-      if (UNLIKELY(force_interpreter ||
-                   Dbg::IsForcedInterpreterNeededForResolution(self, called))) {
+      if (UNLIKELY(force_interpreter)) {
         // If we are single-stepping or the called method is deoptimized (by a
         // breakpoint, for example), then we have to execute the called method
         // with the interpreter.
         code = GetQuickToInterpreterBridge();
-      } else if (UNLIKELY(Dbg::IsForcedInstrumentationNeededForResolution(self, caller))) {
-        // If the caller is deoptimized (by a breakpoint, for example), we have to
-        // continue its execution with interpreter when returning from the called
-        // method. Because we do not want to execute the called method with the
-        // interpreter, we wrap its execution into the instrumentation stubs.
-        // When the called method returns, it will execute the instrumentation
-        // exit hook that will determine the need of the interpreter with a call
-        // to Dbg::IsForcedInterpreterNeededForUpcall and deoptimize the stack if
-        // it is needed.
-        code = GetQuickInstrumentationEntryPoint();
       } else {
         code = called->GetEntryPointFromQuickCompiledCode();
         if (linker->IsQuickResolutionStub(code)) {
@@ -2296,37 +2295,6 @@ void BuildGenericJniFrameVisitor::FinalizeHandleScope(Thread* self) {
   }
 }
 
-extern "C" const void* artFindNativeMethod(Thread* self);
-
-static uint64_t artQuickGenericJniEndJNIRef(Thread* self,
-                                            uint32_t cookie,
-                                            bool fast_native ATTRIBUTE_UNUSED,
-                                            jobject l,
-                                            jobject lock) {
-  // TODO: add entrypoints for @FastNative returning objects.
-  if (lock != nullptr) {
-    return reinterpret_cast<uint64_t>(JniMethodEndWithReferenceSynchronized(l, cookie, lock, self));
-  } else {
-    return reinterpret_cast<uint64_t>(JniMethodEndWithReference(l, cookie, self));
-  }
-}
-
-static void artQuickGenericJniEndJNINonRef(Thread* self,
-                                           uint32_t cookie,
-                                           bool fast_native,
-                                           jobject lock) {
-  if (lock != nullptr) {
-    JniMethodEndSynchronized(cookie, lock, self);
-    // Ignore "fast_native" here because synchronized functions aren't very fast.
-  } else {
-    if (UNLIKELY(fast_native)) {
-      JniMethodFastEnd(cookie, self);
-    } else {
-      JniMethodEnd(cookie, self);
-    }
-  }
-}
-
 /*
  * Initializes an alloca region assumed to be directly below sp for a native call:
  * Create a HandleScope and call stack and fill a mini stack with values to be pushed to registers.
@@ -2379,15 +2347,18 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   // We can set the entrypoint of a native method to generic JNI even when the
   // class hasn't been initialized, so we need to do the initialization check
   // before invoking the native code.
-  if (called->NeedsInitializationCheck()) {
-    // Ensure static method's class is initialized.
-    StackHandleScope<1> hs(self);
-    Handle<mirror::Class> h_class(hs.NewHandle(called->GetDeclaringClass()));
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
-      DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
-      self->PopHandleScope();
-      // A negative value denotes an error.
-      return GetTwoWordFailureValue();
+  if (NeedsClinitCheckBeforeCall(called)) {
+    ObjPtr<mirror::Class> declaring_class = called->GetDeclaringClass();
+    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
+      // Ensure static method's class is initialized.
+      StackHandleScope<1> hs(self);
+      Handle<mirror::Class> h_class(hs.NewHandle(declaring_class));
+      if (!runtime->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+        DCHECK(Thread::Current()->IsExceptionPending()) << called->PrettyMethod();
+        self->PopHandleScope();
+        // A negative value denotes an error.
+        return GetTwoWordFailureValue();
+      }
     }
   }
 
@@ -2417,35 +2388,10 @@ extern "C" TwoWordReturn artQuickGenericJniTrampoline(Thread* self, ArtMethod** 
   }
 
   // Retrieve the stored native code.
+  // Note that it may point to the lookup stub or trampoline.
+  // FIXME: This is broken for @CriticalNative as the art_jni_dlsym_lookup_stub
+  // does not handle that case. Calls from compiled stubs are also broken.
   void const* nativeCode = called->GetEntryPointFromJni();
-
-  // There are two cases for the content of nativeCode:
-  // 1) Pointer to the native function.
-  // 2) Pointer to the trampoline for native code binding.
-  // In the second case, we need to execute the binding and continue with the actual native function
-  // pointer.
-  DCHECK(nativeCode != nullptr);
-  if (nativeCode == GetJniDlsymLookupStub()) {
-    nativeCode = artFindNativeMethod(self);
-
-    if (nativeCode == nullptr) {
-      DCHECK(self->IsExceptionPending());    // There should be an exception pending now.
-
-      // @CriticalNative calls do not need to call back into JniMethodEnd.
-      if (LIKELY(!critical_native)) {
-        // End JNI, as the assembly will move to deliver the exception.
-        jobject lock = called->IsSynchronized() ? visitor.GetFirstHandleScopeJObject() : nullptr;
-        if (shorty[0] == 'L') {
-          artQuickGenericJniEndJNIRef(self, cookie, fast_native, nullptr, lock);
-        } else {
-          artQuickGenericJniEndJNINonRef(self, cookie, fast_native, lock);
-        }
-      }
-
-      return GetTwoWordFailureValue();
-    }
-    // Note that the native code pointer will be automatically set by artFindNativeMethod().
-  }
 
 #if defined(__mips__) && !defined(__LP64__)
   // On MIPS32 if the first two arguments are floating-point, we need to know their types

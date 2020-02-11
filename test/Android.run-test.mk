@@ -21,7 +21,6 @@ include art/build/Android.common_test.mk
 TEST_ART_RUN_TEST_DEPENDENCIES := \
   $(HOST_OUT_EXECUTABLES)/dx \
   $(HOST_OUT_EXECUTABLES)/d8 \
-  $(HOST_OUT_EXECUTABLES)/d8-compat-dx \
   $(HOST_OUT_EXECUTABLES)/hiddenapi \
   $(HOST_OUT_EXECUTABLES)/jasmin \
   $(HOST_OUT_EXECUTABLES)/smali
@@ -104,10 +103,6 @@ host_prereq_rules := $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES)
 # Required for jasmin and smali.
 host_prereq_rules += $(TEST_ART_RUN_TEST_DEPENDENCIES)
 
-# Sync test files to the target, depends upon all things that must be pushed
-#to the target.
-target_prereq_rules += test-art-target-sync
-
 define core-image-dependencies
   image_suffix := $(3)
   ifeq ($(3),regalloc_gc)
@@ -145,7 +140,7 @@ $(foreach target, $(TARGET_TYPES), \
 
 test-art-host-run-test-dependencies : $(host_prereq_rules)
 .PHONY: test-art-host-run-test-dependencies
-test-art-target-run-test-dependencies : $(target_prereq_rules)
+test-art-target-run-test-dependencies :
 .PHONY: test-art-target-run-test-dependencies
 test-art-run-test-dependencies : test-art-host-run-test-dependencies test-art-target-run-test-dependencies
 .PHONY: test-art-run-test-dependencies
@@ -169,7 +164,6 @@ $(foreach target, $(TARGET_TYPES), $(eval \
 test-art-run-test : test-art-host-run-test test-art-target-run-test
 
 host_prereq_rules :=
-target_prereq_rules :=
 core-image-dependencies :=
 define-test-art-host-or-target-run-test-group :=
 TARGET_TYPES :=

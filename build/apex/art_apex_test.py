@@ -27,14 +27,35 @@ import zipfile
 
 logging.basicConfig(format='%(message)s')
 
+# Flavors of ART APEX package.
+FLAVOR_RELEASE = 'release'
+FLAVOR_DEBUG = 'debug'
+FLAVOR_TESTING = 'testing'
+FLAVOR_AUTO = 'auto'
+FLAVORS_ALL = [FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING, FLAVOR_AUTO]
+
+# Bitness options for APEX package
+BITNESS_32 = '32'
+BITNESS_64 = '64'
+BITNESS_MULTILIB = 'multilib'
+BITNESS_AUTO = 'auto'
+BITNESS_ALL = [BITNESS_32, BITNESS_64, BITNESS_MULTILIB, BITNESS_AUTO]
+
 # Architectures supported by APEX packages.
-archs = ["arm", "arm64", "x86", "x86_64"]
+ARCHS = ["arm", "arm64", "x86", "x86_64"]
+
 # Directory containing ART tests within an ART APEX (if the package includes
 # any). ART test executables are installed in `bin/art/<arch>`. Segregating
 # tests by architecture is useful on devices supporting more than one
 # architecture, as it permits testing all of them using a single ART APEX
 # package.
-art_test_dir = 'bin/art'
+ART_TEST_DIR = 'bin/art'
+
+
+# Test if a given variable is set to a string "true".
+def isEnvTrue(var):
+  return var in os.environ and os.environ[var] == 'true'
+
 
 class FSObject:
   def __init__(self, name, is_dir, is_exec, is_symlink, size):
@@ -252,6 +273,14 @@ class Checker:
       return False, '%s is a directory'
     return True, ''
 
+  def is_dir(self, path):
+    fs_object = self._provider.get(path)
+    if fs_object is None:
+      return False, 'Could not find %s'
+    if not fs_object.is_dir:
+      return False, '%s is not a directory'
+    return True, ''
+
   def check_file(self, path):
     ok, msg = self.is_file(path)
     if not ok:
@@ -279,27 +308,30 @@ class Checker:
       self.fail('%s is not a symlink', path)
     self._expected_file_globs.add(path)
 
-  def check_art_test_executable(self, filename):
-    # This is a simplistic implementation, as we declare victory as soon as the
-    # test binary is found for one of the supported (not built) architectures.
-    # Ideally we would propagate the built architectures from the build system
-    # to this script and require test binaries for all of them to be present.
-    # Note that this behavior is not specific to this method: there are other
-    # places in this script where we rely on this simplified strategy.
+  def arch_dirs_for_path(self, path):
+    # Look for target-specific subdirectories for the given directory path.
+    # This is needed because the list of build targets is not propagated
+    # to this script.
     #
-    # TODO: Implement the suggestion above (here and in other places in this
-    # script).
-    test_found = False
-    for arch in archs:
-      test_path = '%s/%s/%s' % (art_test_dir, arch, filename)
-      test_is_file, _ = self.is_file(test_path)
-      if test_is_file:
-        test_found = True
-        self._expected_file_globs.add(test_path)
-        if not self._provider.get(test_path).is_exec:
-          self.fail('%s is not executable', test_path)
-    if not test_found:
+    # TODO(b/123602136): Pass build target information to this script and fix
+    # all places where this function in used (or similar workarounds).
+    dirs = []
+    for arch in ARCHS:
+      dir = '%s/%s' % (path, arch)
+      found, _ = self.is_dir(dir)
+      if found:
+        dirs.append(dir)
+    return dirs
+
+  def check_art_test_executable(self, filename):
+    dirs = self.arch_dirs_for_path(ART_TEST_DIR)
+    if not dirs:
       self.fail('ART test binary missing: %s', filename)
+    for dir in dirs:
+      test_path = '%s/%s' % (dir, filename)
+      self._expected_file_globs.add(test_path)
+      if not self._provider.get(test_path).is_exec:
+        self.fail('%s is not executable', test_path)
 
   def check_single_library(self, filename):
     lib_path = 'lib/%s' % filename
@@ -313,6 +345,14 @@ class Checker:
     if not lib_is_file and not lib64_is_file:
       self.fail('Library missing: %s', filename)
 
+  def check_dexpreopt(self, basename):
+    dirs = self.arch_dirs_for_path('javalib')
+    if not dirs:
+      self.fail('Could not find javalib directory for any arch.')
+    for dir in dirs:
+      for ext in ['art', 'oat', 'vdex']:
+        self.check_file('%s/%s.%s' % (dir, basename, ext))
+
   def check_java_library(self, basename):
     return self.check_file('javalib/%s.jar' % basename)
 
@@ -320,8 +360,8 @@ class Checker:
     self._expected_file_globs.add(path_glob)
 
   def check_optional_art_test_executable(self, filename):
-    for arch in archs:
-      self.ignore_path('%s/%s/%s' % (art_test_dir, arch, filename))
+    for arch in ARCHS:
+      self.ignore_path('%s/%s/%s' % (ART_TEST_DIR, arch, filename))
 
   def check_no_superfluous_files(self, dir_path):
     paths = []
@@ -436,8 +476,8 @@ class ReleaseChecker:
     return 'Release Checker'
 
   def run(self):
-    # Check the APEX manifest.
-    self._checker.check_file('apex_manifest.json')
+    # Check the Protocol Buffers APEX manifest.
+    self._checker.check_file('apex_manifest.pb')
 
     # Check binaries for ART.
     self._checker.check_executable('dex2oat')
@@ -474,6 +514,9 @@ class ReleaseChecker:
     self._checker.check_java_library('core-libart')
     self._checker.check_java_library('core-oj')
     self._checker.check_java_library('okhttp')
+    if isEnvTrue('EMMA_INSTRUMENT_FRAMEWORK'):
+      # In coverage builds jacoco is added to the list of ART apex jars.
+      self._checker.check_java_library('jacocoagent')
 
     # Check internal native libraries for Managed Core Library.
     self._checker.check_native_library('libjavacore')
@@ -507,6 +550,16 @@ class ReleaseChecker:
     self._checker.check_optional_native_library('libclang_rt.hwasan*')
     self._checker.check_optional_native_library('libclang_rt.ubsan*')
 
+    # Check dexpreopt files for libcore bootclasspath jars.
+    self._checker.check_dexpreopt('boot')
+    self._checker.check_dexpreopt('boot-apache-xml')
+    self._checker.check_dexpreopt('boot-bouncycastle')
+    self._checker.check_dexpreopt('boot-core-icu4j')
+    self._checker.check_dexpreopt('boot-core-libart')
+    self._checker.check_dexpreopt('boot-okhttp')
+    if isEnvTrue('EMMA_INSTRUMENT_FRAMEWORK'):
+      # In coverage builds the ART boot image includes jacoco.
+      self._checker.check_dexpreopt('boot-jacocoagent')
 
 class ReleaseTargetChecker:
   def __init__(self, checker):
@@ -516,12 +569,10 @@ class ReleaseTargetChecker:
     return 'Release (Target) Checker'
 
   def run(self):
-    # Check the APEX package scripts.
-    self._checker.check_executable('art_postinstall_hook')
-    self._checker.check_executable('art_preinstall_hook')
-    self._checker.check_executable('art_preinstall_hook_boot')
-    self._checker.check_executable('art_preinstall_hook_system_server')
-    self._checker.check_executable('art_prepostinstall_utils')
+    # We don't check for the presence of the JSON APEX manifest (file
+    # `apex_manifest.json`, only present in target APEXes), as it is only
+    # included for compatibility reasons with Android Q and will likely be
+    # removed in Android R.
 
     # Check binaries for ART.
     self._checker.check_executable('oatdump')
@@ -677,6 +728,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('linker_patch_test')
     self._checker.check_art_test_executable('live_interval_test')
     self._checker.check_art_test_executable('load_store_analysis_test')
+    self._checker.check_art_test_executable('load_store_elimination_test')
     self._checker.check_art_test_executable('loop_optimization_test')
     self._checker.check_art_test_executable('nodes_test')
     self._checker.check_art_test_executable('nodes_vector_test')
@@ -852,7 +904,6 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('instrumentation_test')
     self._checker.check_art_test_executable('intern_table_test')
     self._checker.check_art_test_executable('java_vm_ext_test')
-    self._checker.check_art_test_executable('jdwp_options_test')
     self._checker.check_art_test_executable('jit_memory_region_test')
     self._checker.check_art_test_executable('jni_internal_test')
     self._checker.check_art_test_executable('large_object_space_test')
@@ -940,8 +991,8 @@ class NoSuperfluousArtTestsChecker:
     return 'No superfluous ART tests checker'
 
   def run(self):
-    for arch in archs:
-      self._checker.check_no_superfluous_files('%s/%s' % (art_test_dir, arch))
+    for arch in ARCHS:
+      self._checker.check_no_superfluous_files('%s/%s' % (ART_TEST_DIR, arch))
 
 
 class List:
@@ -1030,38 +1081,11 @@ def art_apex_test_main(test_args):
   if test_args.host and test_args.flattened:
     logging.error("Both of --host and --flattened set")
     return 1
-  if test_args.tree and test_args.debug:
-    logging.error("Both of --tree and --debug set")
-    return 1
-  if test_args.tree and test_args.testing:
-    logging.error("Both of --tree and --testing set")
-    return 1
-  if test_args.list and test_args.debug:
-    logging.error("Both of --list and --debug set")
-    return 1
-  if test_args.list and test_args.testing:
-    logging.error("Both of --list and --testing set")
-    return 1
   if test_args.list and test_args.tree:
     logging.error("Both of --list and --tree set")
     return 1
   if test_args.size and not (test_args.list or test_args.tree):
     logging.error("--size set but neither --list nor --tree set")
-    return 1
-  if test_args.host and test_args.flavor:
-    logging.error("Both of --host and --flavor set")
-    return 1
-  if test_args.host and test_args.testing:
-    logging.error("Both of --host and --testing set")
-    return 1
-  if test_args.debug and test_args.testing:
-    logging.error("Both of --debug and --testing set")
-    return 1
-  if test_args.flavor and test_args.debug:
-    logging.error("Both of --flavor and --debug set")
-    return 1
-  if test_args.flavor and test_args.testing:
-    logging.error("Both of --flavor and --testing set")
     return 1
   if not test_args.flattened and not test_args.tmpdir:
     logging.error("Need a tmpdir.")
@@ -1069,8 +1093,27 @@ def art_apex_test_main(test_args):
   if not test_args.flattened and not test_args.host and not test_args.debugfs:
     logging.error("Need debugfs.")
     return 1
-  if test_args.bitness not in ['32', '64', 'multilib', 'auto']:
-    logging.error('--bitness needs to be one of 32|64|multilib|auto')
+
+  if test_args.host:
+    # Host APEX.
+    if test_args.flavor not in [FLAVOR_DEBUG, FLAVOR_AUTO]:
+      logging.error("Using option --host with non-Debug APEX")
+      return 1
+    # Host APEX is always a debug flavor (for now).
+    test_args.flavor = FLAVOR_DEBUG
+  else:
+    # Device APEX.
+    if test_args.flavor == FLAVOR_AUTO:
+      logging.warning('--flavor=auto, trying to autodetect. This may be incorrect!')
+      for flavor in [ FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING ]:
+        flavor_pattern = '*.%s*' % flavor
+        if fnmatch.fnmatch(test_args.apex, flavor_pattern):
+          test_args.flavor = flavor
+          break
+      if test_args.flavor == FLAVOR_AUTO:
+        logging.error('  Could not detect APEX flavor, neither \'%s\', \'%s\' nor \'%s\' in \'%s\'',
+                    FLAVOR_RELEASE, FLAVOR_DEBUG, FLAVOR_TESTING, test_args.apex)
+        return 1
 
   try:
     if test_args.host:
@@ -1091,55 +1134,31 @@ def art_apex_test_main(test_args):
     List(apex_provider, test_args.size).print_list()
     return 0
 
-  # Handle legacy flavor flags.
-  if test_args.debug:
-    logging.warning('Using deprecated option --debug')
-    test_args.flavor='debug'
-  if test_args.testing:
-    logging.warning('Using deprecated option --testing')
-    test_args.flavor='testing'
-  if test_args.flavor == 'auto':
-    logging.warning('--flavor=auto, trying to autodetect. This may be incorrect!')
-    if fnmatch.fnmatch(test_args.apex, '*.release*'):
-      logging.warning('  Detected Release APEX')
-      test_args.flavor='release'
-    elif fnmatch.fnmatch(test_args.apex, '*.debug*'):
-      logging.warning('  Detected Debug APEX')
-      test_args.flavor='debug'
-    elif fnmatch.fnmatch(test_args.apex, '*.testing*'):
-      logging.warning('  Detected Testing APEX')
-      test_args.flavor='testing'
-    else:
-      logging.error('  Could not detect APEX flavor, neither \'release\', \'debug\' nor ' +
-                    '\'testing\' in \'%s\'',
-          test_args.apex)
-      return 1
-
   checkers = []
-  if test_args.bitness == 'auto':
+  if test_args.bitness == BITNESS_AUTO:
     logging.warning('--bitness=auto, trying to autodetect. This may be incorrect!')
     has_32 = apex_provider.get('lib') is not None
     has_64 = apex_provider.get('lib64') is not None
     if has_32 and has_64:
       logging.warning('  Detected multilib')
-      test_args.bitness = 'multilib'
+      test_args.bitness = BITNESS_MULTILIB
     elif has_32:
       logging.warning('  Detected 32-only')
-      test_args.bitness = '32'
+      test_args.bitness = BITNESS_32
     elif has_64:
       logging.warning('  Detected 64-only')
-      test_args.bitness = '64'
+      test_args.bitness = BITNESS_64
     else:
       logging.error('  Could not detect bitness, neither lib nor lib64 contained.')
       List(apex_provider).print_list()
       return 1
 
-  if test_args.bitness == '32':
+  if test_args.bitness == BITNESS_32:
     base_checker = Arch32Checker(apex_provider)
-  elif test_args.bitness == '64':
+  elif test_args.bitness == BITNESS_64:
     base_checker = Arch64Checker(apex_provider)
   else:
-    assert test_args.bitness == 'multilib'
+    assert test_args.bitness == BITNESS_MULTILIB
     base_checker = MultilibChecker(apex_provider)
 
   checkers.append(ReleaseChecker(base_checker))
@@ -1147,11 +1166,11 @@ def art_apex_test_main(test_args):
     checkers.append(ReleaseHostChecker(base_checker))
   else:
     checkers.append(ReleaseTargetChecker(base_checker))
-  if test_args.flavor == 'debug' or test_args.flavor == 'testing':
+  if test_args.flavor == FLAVOR_DEBUG or test_args.flavor == FLAVOR_TESTING:
     checkers.append(DebugChecker(base_checker))
     if not test_args.host:
       checkers.append(DebugTargetChecker(base_checker))
-  if test_args.flavor == 'testing':
+  if test_args.flavor == FLAVOR_TESTING:
     checkers.append(TestingTargetChecker(base_checker))
 
   # These checkers must be last.
@@ -1191,7 +1210,7 @@ def art_apex_test_default(test_parser):
   test_args.tmpdir = '.'
   test_args.tree = False
   test_args.list = False
-  test_args.bitness = 'auto'
+  test_args.bitness = BITNESS_AUTO
   failed = False
 
   if not os.path.exists(test_args.debugfs):
@@ -1202,9 +1221,9 @@ def art_apex_test_default(test_parser):
   # TODO: Add host support.
   # TODO: Add support for flattened APEX packages.
   configs = [
-    {'name': 'com.android.art.release', 'flavor': 'release', 'host': False},
-    {'name': 'com.android.art.debug',   'flavor': 'debug',   'host': False},
-    {'name': 'com.android.art.testing', 'flavor': 'testing', 'host': False},
+    {'name': 'com.android.art.release', 'flavor': FLAVOR_RELEASE, 'host': False},
+    {'name': 'com.android.art.debug',   'flavor': FLAVOR_DEBUG,   'host': False},
+    {'name': 'com.android.art.testing', 'flavor': FLAVOR_TESTING, 'host': False},
   ]
 
   for config in configs:
@@ -1232,12 +1251,8 @@ if __name__ == "__main__":
 
   parser.add_argument('--flattened', help='Check as flattened (target) APEX', action='store_true')
 
-  parser.add_argument('--flavor', help='Check as FLAVOR APEX, release|debug|testing|auto',
-                      default='auto')
-  # Deprecated flavor flags.
-  # TODO: Stop supporting those flags eventually.
-  parser.add_argument('--debug', help='Check as debug APEX', action='store_true')
-  parser.add_argument('--testing', help='Check as testing APEX', action='store_true')
+  parser.add_argument('--flavor', help='Check as FLAVOR APEX', choices=FLAVORS_ALL,
+                      default=FLAVOR_AUTO)
 
   parser.add_argument('--list', help='List all files', action='store_true')
   parser.add_argument('--tree', help='Print directory tree', action='store_true')
@@ -1246,7 +1261,8 @@ if __name__ == "__main__":
   parser.add_argument('--tmpdir', help='Directory for temp files')
   parser.add_argument('--debugfs', help='Path to debugfs')
 
-  parser.add_argument('--bitness', help='Bitness to check, 32|64|multilib|auto', default='auto')
+  parser.add_argument('--bitness', help='Bitness to check', choices=BITNESS_ALL,
+                      default=BITNESS_AUTO)
 
   if len(sys.argv) == 1:
     art_apex_test_default(parser)

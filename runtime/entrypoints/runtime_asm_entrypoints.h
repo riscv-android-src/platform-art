@@ -19,7 +19,12 @@
 
 #include "deoptimization_kind.h"
 
+#include "jni.h"
+
 namespace art {
+
+class ArtMethod;
+class Thread;
 
 #ifndef BUILDING_LIBART
 #error "File and symbols only for use within libart."
@@ -88,6 +93,7 @@ static inline const void* GetQuickInstrumentationExitPc() {
 }
 
 extern "C" void* art_quick_string_builder_append(uint32_t format);
+extern "C" void art_quick_compile_optimized(ArtMethod*, Thread*);
 
 }  // namespace art
 

@@ -1740,6 +1740,11 @@ TEST_F(AssemblerX86_64Test, Pmaddwd) {
   DriverStr(RepeatFF(&x86_64::X86_64Assembler::pmaddwd, "pmaddwd %{reg2}, %{reg1}"), "pmadwd");
 }
 
+TEST_F(AssemblerX86_64AVXTest, VPmaddwd) {
+  DriverStr(RepeatFFF(&x86_64::X86_64Assembler::vpmaddwd,
+                      "vpmaddwd %{reg3}, %{reg2}, %{reg1}"), "vpmaddwd");
+}
+
 TEST_F(AssemblerX86_64Test, Phaddw) {
   DriverStr(RepeatFF(&x86_64::X86_64Assembler::phaddw, "phaddw %{reg2}, %{reg1}"), "phaddw");
 }
@@ -2405,7 +2410,7 @@ std::string increaseframe_test_fn(
 
   // Construct assembly text counterpart.
   std::ostringstream str;
-  str << "addq $0, %rsp\n";
+  // Increase by 0 is a NO-OP and ignored by the assembler.
   str << "addq $-" << kStackAlignment << ", %rsp\n";
   str << "addq $-" << 10 * kStackAlignment << ", %rsp\n";
 
@@ -2425,7 +2430,7 @@ std::string decreaseframe_test_fn(
 
   // Construct assembly text counterpart.
   std::ostringstream str;
-  str << "addq $0, %rsp\n";
+  // Decrease by 0 is a NO-OP and ignored by the assembler.
   str << "addq $" << kStackAlignment << ", %rsp\n";
   str << "addq $" << 10 * kStackAlignment << ", %rsp\n";
 

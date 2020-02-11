@@ -85,17 +85,16 @@ class BaseMutex;
 class ClassLinker;
 class Closure;
 class Context;
-struct DebugInvokeReq;
 class DeoptimizationContextRecord;
 class DexFile;
 class FrameIdToShadowFrame;
+class IsMarkedVisitor;
 class JavaVMExt;
 class JNIEnvExt;
 class Monitor;
 class RootVisitor;
 class ScopedObjectAccessAlreadyRunnable;
 class ShadowFrame;
-class SingleStepControl;
 class StackedShadowFrameRecord;
 enum class SuspendReason : char;
 class Thread;
@@ -263,6 +262,17 @@ class Thread {
         (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
   }
 
+  void DecrDefineClassCount() {
+    tls32_.define_class_counter--;
+  }
+
+  void IncrDefineClassCount() {
+    tls32_.define_class_counter++;
+  }
+  uint32_t GetDefineClassCount() const {
+    return tls32_.define_class_counter;
+  }
+
   // If delta > 0 and (this != self or suspend_barrier is not null), this function may temporarily
   // release thread_suspend_count_lock_ internally.
   ALWAYS_INLINE
@@ -353,6 +363,21 @@ class Thread {
       tlsPtr_.last_no_thread_suspension_cause = old_cause;
     }
     Roles::uninterruptible_.Release();  // No-op.
+  }
+
+  // End region where no thread suspension is expected. Returns the current open region in case we
+  // want to reopen it. Used for ScopedAllowThreadSuspension. Not supported if no_thread_suspension
+  // is larger than one.
+  const char* EndAssertNoThreadSuspension() RELEASE(Roles::uninterruptible_) WARN_UNUSED {
+    const char* ret = nullptr;
+    if (kIsDebugBuild) {
+      CHECK_EQ(tls32_.no_thread_suspension, 1u);
+      tls32_.no_thread_suspension--;
+      ret = tlsPtr_.last_no_thread_suspension_cause;
+      tlsPtr_.last_no_thread_suspension_cause = nullptr;
+    }
+    Roles::uninterruptible_.Release();  // No-op.
+    return ret;
   }
 
   void AssertThreadSuspensionIsAllowable(bool check_locks = true) const;
@@ -703,8 +728,15 @@ class Thread {
   }
 
  public:
-  static uint32_t QuickEntryPointOffsetWithSize(size_t quick_entrypoint_offset,
-                                                PointerSize pointer_size) {
+  template<PointerSize pointer_size>
+  static constexpr ThreadOffset<pointer_size> QuickEntryPointOffset(
+      size_t quick_entrypoint_offset) {
+    return ThreadOffsetFromTlsPtr<pointer_size>(
+        OFFSETOF_MEMBER(tls_ptr_sized_values, quick_entrypoints) + quick_entrypoint_offset);
+  }
+
+  static constexpr uint32_t QuickEntryPointOffsetWithSize(size_t quick_entrypoint_offset,
+                                                          PointerSize pointer_size) {
     if (pointer_size == PointerSize::k32) {
       return QuickEntryPointOffset<PointerSize::k32>(quick_entrypoint_offset).
           Uint32Value();
@@ -715,12 +747,6 @@ class Thread {
   }
 
   template<PointerSize pointer_size>
-  static ThreadOffset<pointer_size> QuickEntryPointOffset(size_t quick_entrypoint_offset) {
-    return ThreadOffsetFromTlsPtr<pointer_size>(
-        OFFSETOF_MEMBER(tls_ptr_sized_values, quick_entrypoints) + quick_entrypoint_offset);
-  }
-
-  template<PointerSize pointer_size>
   static ThreadOffset<pointer_size> JniEntryPointOffset(size_t jni_entrypoint_offset) {
     return ThreadOffsetFromTlsPtr<pointer_size>(
         OFFSETOF_MEMBER(tls_ptr_sized_values, jni_entrypoints) + jni_entrypoint_offset);
@@ -728,7 +754,7 @@ class Thread {
 
   // Return the entry point offset integer value for ReadBarrierMarkRegX, where X is `reg`.
   template <PointerSize pointer_size>
-  static int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
+  static constexpr int32_t ReadBarrierMarkEntryPointsOffset(size_t reg) {
     // The entry point list defines 30 ReadBarrierMarkRegX entry points.
     DCHECK_LT(reg, 30u);
     // The ReadBarrierMarkRegX entry points are ordered by increasing
@@ -913,14 +939,6 @@ class Thread {
     return handle_scope;
   }
 
-  DebugInvokeReq* GetInvokeReq() const {
-    return tlsPtr_.debug_invoke_req;
-  }
-
-  SingleStepControl* GetSingleStepControl() const {
-    return tlsPtr_.single_step_control;
-  }
-
   // Indicates whether this thread is ready to invoke a method for debugging. This
   // is only true if the thread has been suspended by a debug event.
   bool IsReadyForDebugInvoke() const {
@@ -996,25 +1014,6 @@ class Thread {
   // Returns true if the thread is allowed to load java classes.
   bool CanLoadClasses() const;
 
-  // Activates single step control for debugging. The thread takes the
-  // ownership of the given SingleStepControl*. It is deleted by a call
-  // to DeactivateSingleStepControl or upon thread destruction.
-  void ActivateSingleStepControl(SingleStepControl* ssc);
-
-  // Deactivates single step control for debugging.
-  void DeactivateSingleStepControl();
-
-  // Sets debug invoke request for debugging. When the thread is resumed,
-  // it executes the method described by this request then sends the reply
-  // before suspending itself. The thread takes the ownership of the given
-  // DebugInvokeReq*. It is deleted by a call to ClearDebugInvokeReq.
-  void SetDebugInvokeReq(DebugInvokeReq* req);
-
-  // Clears debug invoke request for debugging. When the thread completes
-  // method invocation, it deletes its debug invoke request and suspends
-  // itself.
-  void ClearDebugInvokeReq();
-
   // Returns the fake exception used to activate deoptimization.
   static mirror::Throwable* GetDeoptimizationException() {
     // Note that the mirror::Throwable must be aligned to kObjectAlignment or else it cannot be
@@ -1065,7 +1064,19 @@ class Thread {
   void RemoveDebuggerShadowFrameMapping(size_t frame_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  std::deque<instrumentation::InstrumentationStackFrame>* GetInstrumentationStack() {
+  // While getting this map requires shared the mutator lock, manipulating it
+  // should actually follow these rules:
+  // (1) The owner of this map (the thread) can change it with its mutator lock.
+  // (2) Other threads can read this map when the owner is suspended and they
+  //     hold the mutator lock.
+  // (3) Other threads can change this map when owning the mutator lock exclusively.
+  //
+  // The reason why (3) needs the mutator lock exclusively (and not just having
+  // the owner suspended) is that we don't want other threads to concurrently read the map.
+  //
+  // TODO: Add a class abstraction to express these rules.
+  std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* GetInstrumentationStack()
+      REQUIRES_SHARED(Locks::mutator_lock_) {
     return tlsPtr_.instrumentation_stack;
   }
 
@@ -1154,13 +1165,16 @@ class Thread {
   mirror::Object* AllocTlab(size_t bytes);
   void SetTlab(uint8_t* start, uint8_t* end, uint8_t* limit);
   bool HasTlab() const;
+  void ResetTlab();
   uint8_t* GetTlabStart() {
     return tlsPtr_.thread_local_start;
   }
   uint8_t* GetTlabPos() {
     return tlsPtr_.thread_local_pos;
   }
-
+  uint8_t* GetTlabEnd() {
+    return tlsPtr_.thread_local_end;
+  }
   // Remove the suspend trigger for this thread by making the suspend_trigger_ TLS value
   // equal to a valid pointer.
   // TODO: does this need to atomic?  I don't think so.
@@ -1333,6 +1347,10 @@ class Thread {
   ~Thread() REQUIRES(!Locks::mutator_lock_, !Locks::thread_suspend_count_lock_);
   void Destroy();
 
+  // Deletes and clears the tlsPtr_.jpeer field. Done in a way so that both it and opeer cannot be
+  // observed to be set at the same time by instrumentation.
+  void DeleteJPeer(JNIEnv* env);
+
   void NotifyInTheadList()
       REQUIRES_SHARED(Locks::thread_list_lock_);
 
@@ -1354,8 +1372,7 @@ class Thread {
                        jint thread_priority)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit, ~Thread and
-  // Dbg::ManageDeoptimization.
+  // Avoid use, callers should use SetState. Used only by SignalCatcher::HandleSigQuit and, ~Thread
   ThreadState SetStateUnsafe(ThreadState new_state) {
     ThreadState old_state = GetState();
     if (old_state == kRunnable && new_state != kRunnable) {
@@ -1454,6 +1471,8 @@ class Thread {
   template <bool kPrecise>
   void VisitRoots(RootVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  void SweepInterpreterCache(IsMarkedVisitor* visitor) REQUIRES_SHARED(Locks::mutator_lock_);
+
   static bool IsAotCompiler();
 
   void ReleaseLongJumpContextInternal();
@@ -1535,7 +1554,8 @@ class Thread {
           user_code_suspend_count(0),
           force_interpreter_count(0),
           use_mterp(0),
-          make_visibly_initialized_counter(0) {}
+          make_visibly_initialized_counter(0),
+          define_class_counter(0) {}
 
     union StateAndFlags state_and_flags;
     static_assert(sizeof(union StateAndFlags) == sizeof(int32_t),
@@ -1633,6 +1653,10 @@ class Thread {
     // initialized but not visibly initialized for a long time even if no more classes are
     // being initialized anymore.
     uint32_t make_visibly_initialized_counter;
+
+    // Counter for how many nested define-classes are ongoing in this thread. Used to allow waiting
+    // for threads to be done with class-definition work.
+    uint32_t define_class_counter;
   } tls32_;
 
   struct PACKED(8) tls_64bit_sized_values {
@@ -1651,7 +1675,7 @@ class Thread {
       self(nullptr), opeer(nullptr), jpeer(nullptr), stack_begin(nullptr), stack_size(0),
       deps_or_stack_trace_sample(), wait_next(nullptr), monitor_enter_object(nullptr),
       top_handle_scope(nullptr), class_loader_override(nullptr), long_jump_context(nullptr),
-      instrumentation_stack(nullptr), debug_invoke_req(nullptr), single_step_control(nullptr),
+      instrumentation_stack(nullptr),
       stacked_shadow_frame_record(nullptr), deoptimization_context_stack(nullptr),
       frame_id_to_shadow_frame(nullptr), name(nullptr), pthread_self(0),
       last_no_thread_suspension_cause(nullptr), checkpoint_function(nullptr),
@@ -1734,14 +1758,12 @@ class Thread {
     Context* long_jump_context;
 
     // Additional stack used by method instrumentation to store method and return pc values.
-    // Stored as a pointer since std::deque is not PACKED.
-    std::deque<instrumentation::InstrumentationStackFrame>* instrumentation_stack;
-
-    // JDWP invoke-during-breakpoint support.
-    DebugInvokeReq* debug_invoke_req;
-
-    // JDWP single-stepping support.
-    SingleStepControl* single_step_control;
+    // Stored as a pointer since std::map is not PACKED.
+    // !DO NOT CHANGE! to std::unordered_map: the users of this map require an
+    // ordered iteration on the keys (which are stack addresses).
+    // Also see Thread::GetInstrumentationStack for the requirements on
+    // manipulating and reading this map.
+    std::map<uintptr_t, instrumentation::InstrumentationStackFrame>* instrumentation_stack;
 
     // For gc purpose, a shadow frame record stack that keeps track of:
     // 1) shadow frames under construction.
@@ -1864,7 +1886,6 @@ class Thread {
   // the caller is allowed to access all fields and methods in the Core Platform API.
   uint32_t core_platform_api_cookie_ = 0;
 
-  friend class Dbg;  // For SetStateUnsafe.
   friend class gc::collector::SemiSpace;  // For getting stack traces.
   friend class Runtime;  // For CreatePeer.
   friend class QuickExceptionHandler;  // For dumping the stack.
@@ -1909,6 +1930,30 @@ class SCOPED_CAPABILITY ScopedAssertNoThreadSuspension {
   const bool enabled_;
   const char* old_cause_;
 };
+
+class ScopedAllowThreadSuspension {
+ public:
+  ALWAYS_INLINE ScopedAllowThreadSuspension() RELEASE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      self_ = Thread::Current();
+      old_cause_ = self_->EndAssertNoThreadSuspension();
+    } else {
+      Roles::uninterruptible_.Release();  // No-op.
+    }
+  }
+  ALWAYS_INLINE ~ScopedAllowThreadSuspension() ACQUIRE(Roles::uninterruptible_) {
+    if (kIsDebugBuild) {
+      CHECK(self_->StartAssertNoThreadSuspension(old_cause_) == nullptr);
+    } else {
+      Roles::uninterruptible_.Acquire();  // No-op.
+    }
+  }
+
+ private:
+  Thread* self_;
+  const char* old_cause_;
+};
+
 
 class ScopedStackedShadowFramePusher {
  public:

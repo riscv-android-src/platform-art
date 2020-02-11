@@ -603,8 +603,17 @@ def run_test(command, test, test_variant, test_name):
         proc_name = "dalvikvm" + test_name[-2:]
         pidof = subprocess.run(["adb", "shell", "pidof", proc_name], stdout=subprocess.PIPE)
         for pid in pidof.stdout.decode("ascii").split():
-          print_text("Backtrace of %s at %s\n" % (pid, time.monotonic()))
-          subprocess.run(["adb", "shell", "debuggerd", pid])
+          if i >= 4:
+            print_text("Backtrace of %s at %s\n" % (pid, time.monotonic()))
+            subprocess.run(["adb", "shell", "debuggerd", pid])
+            time.sleep(10)
+          task_dir = "/proc/%s/task" % pid
+          tids = subprocess.run(["adb", "shell", "ls", task_dir], stdout=subprocess.PIPE)
+          for tid in tids.stdout.decode("ascii").split():
+            for status in ["stat", "status"]:
+              filename = "%s/%s/%s" % (task_dir, tid, status)
+              print_text("Content of %s\n" % (filename))
+              subprocess.run(["adb", "shell", "cat", filename])
         time.sleep(60)
 
     # The python documentation states that it is necessary to actually kill the process.
@@ -700,6 +709,7 @@ def verify_knownfailure_entry(entry):
       'variant' : (str,),
       'devices': (list, str),
       'env_vars' : (dict,),
+      'zipapex' : (bool,),
   }
   for field in entry:
     field_type = type(entry[field])
@@ -759,6 +769,17 @@ def get_disabled_test_info(device_name):
           disabled_test_info[test] = disabled_test_info[test].union(variants)
         else:
           disabled_test_info[test] = variants
+
+    zipapex_disable = failure.get("zipapex", False)
+    if zipapex_disable and zipapex_loc is not None:
+      for test in tests:
+        if test not in RUN_TEST_SET:
+          raise ValueError('%s is not a valid run-test' % (test))
+        if test in disabled_test_info:
+          disabled_test_info[test] = disabled_test_info[test].union(variants)
+        else:
+          disabled_test_info[test] = variants
+
   return disabled_test_info
 
 def gather_disabled_test_info():

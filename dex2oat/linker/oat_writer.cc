@@ -61,6 +61,7 @@
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
 #include "mirror/object-inl.h"
+#include "oat.h"
 #include "oat_quick_method_header.h"
 #include "profile/profile_compilation_info.h"
 #include "quicken_info.h"
@@ -415,7 +416,7 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     size_quickening_info_alignment_(0),
     size_interpreter_to_interpreter_bridge_(0),
     size_interpreter_to_compiled_code_bridge_(0),
-    size_jni_dlsym_lookup_(0),
+    size_jni_dlsym_lookup_trampoline_(0),
     size_quick_generic_jni_trampoline_(0),
     size_quick_imt_conflict_trampoline_(0),
     size_quick_resolution_trampoline_(0),
@@ -685,16 +686,10 @@ bool OatWriter::WriteAndOpenDexFiles(
   return true;
 }
 
-// Initialize the writer with the given parameters.
-bool OatWriter::StartRoData(const CompilerDriver* compiler_driver,
-                            ImageWriter* image_writer,
-                            const std::vector<const DexFile*>& dex_files,
+bool OatWriter::StartRoData(const std::vector<const DexFile*>& dex_files,
                             OutputStream* oat_rodata,
                             SafeMap<std::string, std::string>* key_value_store) {
   CHECK(write_state_ == WriteState::kStartRoData);
-  compiler_driver_ = compiler_driver;
-  image_writer_ = image_writer;
-  dex_files_ = &dex_files;
 
   // Record the ELF rodata section offset, i.e. the beginning of the OAT data.
   if (!RecordOatDataOffset(oat_rodata)) {
@@ -720,8 +715,19 @@ bool OatWriter::StartRoData(const CompilerDriver* compiler_driver,
     return false;
   }
 
-  write_state_ = WriteState::kPrepareLayout;
+  write_state_ = WriteState::kInitialize;
   return true;
+}
+
+// Initialize the writer with the given parameters.
+void OatWriter::Initialize(const CompilerDriver* compiler_driver,
+                           ImageWriter* image_writer,
+                           const std::vector<const DexFile*>& dex_files) {
+  CHECK(write_state_ == WriteState::kInitialize);
+  compiler_driver_ = compiler_driver;
+  image_writer_ = image_writer;
+  dex_files_ = &dex_files;
+  write_state_ = WriteState::kPrepareLayout;
 }
 
 void OatWriter::PrepareLayout(MultiOatRelativePatcher* relative_patcher) {
@@ -1606,7 +1612,7 @@ class OatWriter::InitImageMethodVisitor : public OatDexMethodVisitor {
 
   // Assign a pointer to quick code for copied methods
   // not handled in the method StartClass
-  void Postprocess() {
+  void Postprocess() REQUIRES_SHARED(Locks::mutator_lock_) {
     for (std::pair<ArtMethod*, ArtMethod*>& p : methods_to_process_) {
       ArtMethod* method = p.first;
       ArtMethod* origin = p.second;
@@ -2201,7 +2207,7 @@ size_t OatWriter::InitOatCode(size_t offset) {
       }                                                                     \
       offset += (field)->size();
 
-    DO_TRAMPOLINE(jni_dlsym_lookup_, JniDlsymLookup);
+    DO_TRAMPOLINE(jni_dlsym_lookup_trampoline_, JniDlsymLookupTrampoline);
     DO_TRAMPOLINE(quick_generic_jni_trampoline_, QuickGenericJniTrampoline);
     DO_TRAMPOLINE(quick_imt_conflict_trampoline_, QuickImtConflictTrampoline);
     DO_TRAMPOLINE(quick_resolution_trampoline_, QuickResolutionTrampoline);
@@ -2209,7 +2215,7 @@ size_t OatWriter::InitOatCode(size_t offset) {
 
     #undef DO_TRAMPOLINE
   } else {
-    oat_header_->SetJniDlsymLookupOffset(0);
+    oat_header_->SetJniDlsymLookupTrampolineOffset(0);
     oat_header_->SetQuickGenericJniTrampolineOffset(0);
     oat_header_->SetQuickImtConflictTrampolineOffset(0);
     oat_header_->SetQuickResolutionTrampolineOffset(0);
@@ -2266,6 +2272,7 @@ size_t OatWriter::InitOatCodeDexFiles(size_t offset) {
   }
 
   if (HasImage()) {
+    ScopedObjectAccess soa(Thread::Current());
     ScopedAssertNoThreadSuspension sants("Init image method visitor", Thread::Current());
     InitImageMethodVisitor image_visitor(this, offset, dex_files_);
     success = VisitDexMethods(&image_visitor);
@@ -2747,7 +2754,7 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
     DO_STAT(size_quickening_info_alignment_);
     DO_STAT(size_interpreter_to_interpreter_bridge_);
     DO_STAT(size_interpreter_to_compiled_code_bridge_);
-    DO_STAT(size_jni_dlsym_lookup_);
+    DO_STAT(size_jni_dlsym_lookup_trampoline_);
     DO_STAT(size_quick_generic_jni_trampoline_);
     DO_STAT(size_quick_imt_conflict_trampoline_);
     DO_STAT(size_quick_resolution_trampoline_);
@@ -3078,7 +3085,7 @@ size_t OatWriter::WriteCode(OutputStream* out, size_t file_offset, size_t relati
         DCHECK_OFFSET(); \
       } while (false)
 
-    DO_TRAMPOLINE(jni_dlsym_lookup_);
+    DO_TRAMPOLINE(jni_dlsym_lookup_trampoline_);
     DO_TRAMPOLINE(quick_generic_jni_trampoline_);
     DO_TRAMPOLINE(quick_imt_conflict_trampoline_);
     DO_TRAMPOLINE(quick_resolution_trampoline_);
@@ -3801,6 +3808,8 @@ bool OatWriter::WriteTypeLookupTables(OutputStream* oat_rodata,
 
     // Create the lookup table. When `nullptr` is given as the storage buffer,
     // TypeLookupTable allocates its own and OatDexFile takes ownership.
+    // TODO: Create the table in an mmap()ed region of the output file to reduce dirty memory.
+    // (We used to do that when dex files were still copied into the oat file.)
     const DexFile& dex_file = *opened_dex_files[i];
     {
       TypeLookupTable type_lookup_table = TypeLookupTable::Create(dex_file);
@@ -3853,9 +3862,8 @@ bool OatWriter::WriteTypeLookupTables(OutputStream* oat_rodata,
   return true;
 }
 
-bool OatWriter::WriteDexLayoutSections(
-    OutputStream* oat_rodata,
-    const std::vector<const DexFile*>& opened_dex_files) {
+bool OatWriter::WriteDexLayoutSections(OutputStream* oat_rodata,
+                                       const std::vector<const DexFile*>& opened_dex_files) {
   TimingLogger::ScopedTiming split(__FUNCTION__, timings_);
 
   if (!kWriteDexLayoutInfo) {

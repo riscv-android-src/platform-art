@@ -25,7 +25,9 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <thread>
+#include <time.h>
 
 #include "gc/heap-visit-objects-inl.h"
 #include "gc/heap.h"
@@ -37,6 +39,7 @@
 #include "perfetto/trace/profiling/heap_graph.pbzero.h"
 #include "perfetto/trace/profiling/profile_common.pbzero.h"
 #include "perfetto/config/profiling/java_hprof_config.pbzero.h"
+#include "perfetto/protozero/packed_repeated_fields.h"
 #include "perfetto/tracing.h"
 #include "runtime-inl.h"
 #include "runtime_callbacks.h"
@@ -217,8 +220,8 @@ void WaitForDataSource(art::Thread* self) {
 
 class Writer {
  public:
-  Writer(pid_t parent_pid, JavaHprofDataSource::TraceContext* ctx)
-      : parent_pid_(parent_pid), ctx_(ctx) {}
+  Writer(pid_t parent_pid, JavaHprofDataSource::TraceContext* ctx, uint64_t timestamp)
+      : parent_pid_(parent_pid), ctx_(ctx), timestamp_(timestamp) {}
 
   perfetto::protos::pbzero::HeapGraph* GetHeapGraph() {
     if (!heap_graph_ || ++objects_written_ % kObjectsPerPacket == 0) {
@@ -228,6 +231,7 @@ class Writer {
       Finalize();
 
       trace_packet_ = ctx_->NewTracePacket();
+      trace_packet_->set_timestamp(timestamp_);
       heap_graph_ = trace_packet_->set_heap_graph();
       heap_graph_->set_pid(parent_pid_);
       heap_graph_->set_index(index_++);
@@ -247,6 +251,7 @@ class Writer {
  private:
   const pid_t parent_pid_;
   JavaHprofDataSource::TraceContext* const ctx_;
+  const uint64_t timestamp_;
 
   perfetto::DataSource<JavaHprofDataSource>::TraceContext::TracePacketHandle
       trace_packet_;
@@ -275,7 +280,7 @@ class ReferredObjectsFinder {
     }
     std::string field_name = "";
     if (field != nullptr) {
-      field_name = field->PrettyField(/*with_type=*/false);
+      field_name = field->PrettyField(/*with_type=*/true);
     }
     referred_objects_->emplace_back(std::move(field_name), ref);
   }
@@ -359,18 +364,45 @@ void DumpPerfetto(art::Thread* self) {
   art::ScopedSuspendAll ssa(__FUNCTION__, /* long_suspend=*/ true);
 
   pid_t pid = fork();
-  if (pid != 0) {
+  if (pid == -1) {
+    // Fork error.
+    PLOG(ERROR) << "fork";
     return;
   }
+  if (pid != 0) {
+    // Parent
+    int stat_loc;
+    for (;;) {
+      if (waitpid(pid, &stat_loc, 0) != -1 || errno != EINTR) {
+        break;
+      }
+    }
+    return;
+  }
+
+  // The following code is only executed by the child of the original process.
+  //
+  // Daemon creates a new process that is the grand-child of the original process, and exits.
+  if (daemon(0, 0) == -1) {
+    PLOG(FATAL) << "daemon";
+  }
+
+  // The following code is only executed by the grand-child of the original process.
 
   // Make sure that this is the first thing we do after forking, so if anything
   // below hangs, the fork will go away from the watchdog.
   ArmWatchdogOrDie();
 
+  struct timespec ts = {};
+  if (clock_gettime(CLOCK_BOOTTIME, &ts) != 0) {
+    LOG(FATAL) << "Failed to get boottime.";
+  }
+  uint64_t timestamp = ts.tv_sec * 1000000000LL + ts.tv_nsec;
+
   WaitForDataSource(self);
 
   JavaHprofDataSource::Trace(
-      [parent_pid](JavaHprofDataSource::TraceContext ctx)
+      [parent_pid, timestamp](JavaHprofDataSource::TraceContext ctx)
           NO_THREAD_SAFETY_ANALYSIS {
             {
               auto ds = ctx.GetDataSourceLocked();
@@ -380,7 +412,7 @@ void DumpPerfetto(art::Thread* self) {
               }
             }
             LOG(INFO) << "dumping heap for " << parent_pid;
-            Writer writer(parent_pid, &ctx);
+            Writer writer(parent_pid, &ctx, timestamp);
             // Make sure that intern ID 0 (default proto value for a uint64_t) always maps to ""
             // (default proto value for a string).
             std::map<std::string, uint64_t> interned_fields{{"", 0}};
@@ -389,6 +421,8 @@ void DumpPerfetto(art::Thread* self) {
             std::map<art::RootType, std::vector<art::mirror::Object*>> root_objects;
             RootFinder rcf(&root_objects);
             art::Runtime::Current()->VisitRoots(&rcf);
+            std::unique_ptr<protozero::PackedVarInt> object_ids(
+                new protozero::PackedVarInt);
             for (const auto& p : root_objects) {
               const art::RootType root_type = p.first;
               const std::vector<art::mirror::Object*>& children = p.second;
@@ -396,11 +430,19 @@ void DumpPerfetto(art::Thread* self) {
                 writer.GetHeapGraph()->add_roots();
               root_proto->set_root_type(ToProtoType(root_type));
               for (art::mirror::Object* obj : children)
-                root_proto->add_object_ids(reinterpret_cast<uintptr_t>(obj));
+                object_ids->Append(reinterpret_cast<uintptr_t>(obj));
+              root_proto->set_object_ids(*object_ids);
+              object_ids->Reset();
             }
 
+            std::unique_ptr<protozero::PackedVarInt> reference_field_ids(
+                new protozero::PackedVarInt);
+            std::unique_ptr<protozero::PackedVarInt> reference_object_ids(
+                new protozero::PackedVarInt);
+
             art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
-                [&writer, &interned_types, &interned_fields](
+                [&writer, &interned_types, &interned_fields,
+                &reference_field_ids, &reference_object_ids](
                     art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
                   perfetto::protos::pbzero::HeapGraphObject* object_proto =
                     writer.GetHeapGraph()->add_objects();
@@ -414,11 +456,13 @@ void DumpPerfetto(art::Thread* self) {
                   ReferredObjectsFinder objf(&referred_objects);
                   obj->VisitReferences(objf, art::VoidFunctor());
                   for (const auto& p : referred_objects) {
-                    object_proto->add_reference_field_id(
-                        FindOrAppend(&interned_fields, p.first));
-                    object_proto->add_reference_object_id(
-                        reinterpret_cast<uintptr_t>(p.second));
+                    reference_field_ids->Append(FindOrAppend(&interned_fields, p.first));
+                    reference_object_ids->Append(reinterpret_cast<uintptr_t>(p.second));
                   }
+                  object_proto->set_reference_field_id(*reference_field_ids);
+                  object_proto->set_reference_object_id(*reference_object_ids);
+                  reference_field_ids->Reset();
+                  reference_object_ids->Reset();
                 });
 
             for (const auto& p : interned_fields) {
@@ -478,12 +522,13 @@ extern "C" bool ArtPlugin_Initialize() {
     g_state = State::kWaitForListener;
   }
 
-  if (pipe(g_signal_pipe_fds) == -1) {
+  if (pipe2(g_signal_pipe_fds, O_CLOEXEC) == -1) {
     PLOG(ERROR) << "Failed to pipe";
     return false;
   }
 
   struct sigaction act = {};
+  act.sa_flags = SA_SIGINFO | SA_RESTART;
   act.sa_sigaction = [](int, siginfo_t*, void*) {
     if (write(g_signal_pipe_fds[1], kByte, sizeof(kByte)) == -1) {
       PLOG(ERROR) << "Failed to trigger heap dump";
@@ -502,17 +547,17 @@ extern "C" bool ArtPlugin_Initialize() {
   std::thread th([] {
     art::Runtime* runtime = art::Runtime::Current();
     if (!runtime) {
-      LOG(FATAL_WITHOUT_ABORT) << "no runtime in hprof_listener";
+      LOG(FATAL_WITHOUT_ABORT) << "no runtime in perfetto_hprof_listener";
       return;
     }
-    if (!runtime->AttachCurrentThread("hprof_listener", /*as_daemon=*/ true,
+    if (!runtime->AttachCurrentThread("perfetto_hprof_listener", /*as_daemon=*/ true,
                                       runtime->GetSystemThreadGroup(), /*create_peer=*/ false)) {
       LOG(ERROR) << "failed to attach thread.";
       return;
     }
     art::Thread* self = art::Thread::Current();
     if (!self) {
-      LOG(FATAL_WITHOUT_ABORT) << "no thread in hprof_listener";
+      LOG(FATAL_WITHOUT_ABORT) << "no thread in perfetto_hprof_listener";
       return;
     }
     {

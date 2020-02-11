@@ -21,40 +21,11 @@ cc_defaults {
     export_include_dirs: ["include"],
 }
 
-// libartpalette-system is the implementation of the abstraction layer. It is
-// only available as a shared library on Android.
-art_cc_library {
-    name: "libartpalette-system",
-    defaults: ["libartpalette_defaults"],
-    compile_multilib: "both",
-    target: {
-        android: {
-            srcs: ["system/palette_android.cc"],
-            header_libs: ["libbase_headers"],
-            shared_libs: [
-                "libbase",
-                "libcutils",
-                "liblog",
-                "libprocessgroup",
-                "libtombstoned_client",
-            ],
-        },
-        host: {
-            header_libs: ["libbase_headers"],
-            srcs: ["system/palette_fake.cc"],
-            shared_libs: ["libbase"],
-        },
-        darwin: {
-            enabled: false,
-        },
-        windows: {
-            enabled: false,
-        },
-    },
-    static: {
-        enabled: false,
-    },
-    version_script: "libartpalette.map.txt",
+cc_library_headers {
+    name: "libartpalette-headers",
+    export_include_dirs: ["include"],
+    host_supported: true,
+    visibility: ["//system/libartpalette"],
 }
 
 // libartpalette is the dynamic loader of the platform abstraction
@@ -63,11 +34,6 @@ art_cc_library {
 art_cc_library {
     name: "libartpalette",
     defaults: ["libartpalette_defaults"],
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//frameworks/base/startop/view_compiler",
-        "//system/extras/simpleperf",
-    ],
     required: ["libartpalette-system"], // libartpalette.so dlopen()'s libartpalette-system.
     header_libs: ["libbase_headers"],
     target: {
@@ -126,6 +92,15 @@ art_cc_library {
             ],
         },
     },
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+        // TODO(b/142944931): remove this
+        "com.android.runtime", // due to the transitive dependency from linker
+        // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
+        // from /system/core, etc.
+        "//apex_available:platform",
+    ],
 }
 
 art_cc_test {

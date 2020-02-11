@@ -70,11 +70,10 @@ class CompilerOptions final {
   static constexpr size_t kUnsetInlineMaxCodeUnits = -1;
 
   enum class ImageType : uint8_t {
-    kNone,                // JIT or AOT app compilation producing only an oat file but no image.
-    kBootImage,           // Creating boot image.
-    kBootImageExtension,  // Creating boot image extension.
-    kAppImage,            // Creating app image.
-    kApexBootImage,       // Creating the apex image for jit/zygote experiment b/119800099.
+    kNone,                    // JIT or AOT app compilation producing only an oat file but no image.
+    kBootImage,               // Creating boot image.
+    kBootImageExtension,      // Creating boot image extension.
+    kAppImage,                // Creating app image.
   };
 
   CompilerOptions();
@@ -194,11 +193,7 @@ class CompilerOptions final {
 
   // Are we compiling a boot image?
   bool IsBootImage() const {
-    return image_type_ == ImageType::kBootImage || image_type_ == ImageType::kApexBootImage;
-  }
-
-  bool IsApexBootImage() const {
-    return image_type_ == ImageType::kApexBootImage;
+    return image_type_ == ImageType::kBootImage;
   }
 
   // Are we compiling a boot image extension?

@@ -42,6 +42,7 @@
 #include "driver/compiler_options.h"
 #include "elf/elf_utils.h"
 #include "elf_file.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc/accounting/heap_bitmap.h"
 #include "gc/accounting/space_bitmap-inl.h"
@@ -400,21 +401,21 @@ class ImageWriter::ImageFileGuard {
 
 bool ImageWriter::Write(int image_fd,
                         const std::vector<std::string>& image_filenames,
-                        const std::vector<std::string>& oat_filenames) {
+                        size_t component_count) {
   // If image_fd or oat_fd are not kInvalidFd then we may have empty strings in image_filenames or
   // oat_filenames.
   CHECK(!image_filenames.empty());
   if (image_fd != kInvalidFd) {
     CHECK_EQ(image_filenames.size(), 1u);
   }
-  CHECK(!oat_filenames.empty());
-  CHECK_EQ(image_filenames.size(), oat_filenames.size());
+  DCHECK(!oat_filenames_.empty());
+  CHECK_EQ(image_filenames.size(), oat_filenames_.size());
 
   Thread* const self = Thread::Current();
   {
     ScopedObjectAccess soa(self);
-    for (size_t i = 0; i < oat_filenames.size(); ++i) {
-      CreateHeader(i);
+    for (size_t i = 0; i < oat_filenames_.size(); ++i) {
+      CreateHeader(i, component_count);
       CopyAndFixupNativeData(i);
     }
   }
@@ -443,15 +444,12 @@ bool ImageWriter::Write(int image_fd,
     ImageInfo& image_info = GetImageInfo(i);
     ImageFileGuard image_file;
     if (image_fd != kInvalidFd) {
-      if (image_filename.empty()) {
-        image_file.reset(new File(image_fd, unix_file::kCheckSafeUsage));
-        // Empty the file in case it already exists.
-        if (image_file != nullptr) {
-          TEMP_FAILURE_RETRY(image_file->SetLength(0));
-          TEMP_FAILURE_RETRY(image_file->Flush());
-        }
-      } else {
-        LOG(ERROR) << "image fd " << image_fd << " name " << image_filename;
+      // Ignore image_filename, it is supplied only for better diagnostic.
+      image_file.reset(new File(image_fd, unix_file::kCheckSafeUsage));
+      // Empty the file in case it already exists.
+      if (image_file != nullptr) {
+        TEMP_FAILURE_RETRY(image_file->SetLength(0));
+        TEMP_FAILURE_RETRY(image_file->Flush());
       }
     } else {
       image_file.reset(OS::CreateEmptyFile(image_filename.c_str()));
@@ -462,9 +460,10 @@ bool ImageWriter::Write(int image_fd,
       return false;
     }
 
-    if (!compiler_options_.IsAppImage() && fchmod(image_file->Fd(), 0644) != 0) {
+    // Make file world readable if we have created it, i.e. when not passed as file descriptor.
+    if (image_fd == -1 && !compiler_options_.IsAppImage() && fchmod(image_file->Fd(), 0644) != 0) {
       PLOG(ERROR) << "Failed to make image file world readable: " << image_filename;
-      return EXIT_FAILURE;
+      return false;
     }
 
     // Image data size excludes the bitmap and the header.
@@ -1157,8 +1156,8 @@ bool ImageWriter::KeepClass(ObjPtr<mirror::Class> klass) {
   if (!compiler_options_.IsImageClass(klass->GetDescriptor(&temp))) {
     return false;
   }
-  if (compiler_options_.IsAppImage() || compiler_options_.IsBootImageExtension()) {
-    // For app images and boot image extensions, we need to prune classes that
+  if (compiler_options_.IsAppImage()) {
+    // For app images, we need to prune classes that
     // are defined by the boot class path we're compiling against but not in
     // the boot image spaces since these may have already been loaded at
     // run time when this image is loaded. Keep classes in the boot image
@@ -1871,7 +1870,7 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
         class_def_index = enum_cast<uint32_t>(component_type->GetPrimitiveType());
       } else {
         auto it = std::find(dex_files_.begin(), dex_files_.end(), &component_type->GetDexFile());
-        DCHECK(it != dex_files_.end());
+        DCHECK(it != dex_files_.end()) << klass->PrettyDescriptor();
         dex_file_index = std::distance(dex_files_.begin(), it) + 1u;  // 0 is for primitive types.
         class_def_index = component_type->GetDexClassDefIndex();
       }
@@ -2154,6 +2153,7 @@ void ImageWriter::LayoutHelper::VerifyImageBinSlotsAssigned() {
     }
   }
 
+  std::vector<mirror::Object*> missed_objects;
   auto ensure_bin_slots_assigned = [&](mirror::Object* obj)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (!image_writer_->IsInBootImage(obj)) {
@@ -2180,12 +2180,34 @@ void ImageWriter::LayoutHelper::VerifyImageBinSlotsAssigned() {
           CHECK(field->GetObject(ref) == nullptr);
           return;
         }
-        LOG(FATAL) << "Image object without assigned bin slot: "
-            << mirror::Object::PrettyTypeOf(obj) << " " << obj;
+        if (obj->IsString()) {
+          // Ignore interned strings. These may come from reflection interning method names.
+          // TODO: Make dex file strings weak interns and GC them before writing the image.
+          Runtime* runtime = Runtime::Current();
+          ObjPtr<mirror::String> interned =
+              runtime->GetInternTable()->LookupStrong(Thread::Current(), obj->AsString());
+          if (interned == obj) {
+            return;
+          }
+        }
+        missed_objects.push_back(obj);
       }
     }
   };
   Runtime::Current()->GetHeap()->VisitObjects(ensure_bin_slots_assigned);
+  if (!missed_objects.empty()) {
+    const gc::Verification* v = Runtime::Current()->GetHeap()->GetVerification();
+    size_t num_missed_objects = missed_objects.size();
+    size_t num_paths = std::min<size_t>(num_missed_objects, 5u);  // Do not flood the output.
+    ArrayRef<mirror::Object*> missed_objects_head =
+        ArrayRef<mirror::Object*>(missed_objects).SubArray(/*pos=*/ 0u, /*length=*/ num_paths);
+    for (mirror::Object* obj : missed_objects_head) {
+      LOG(ERROR) << "Image object without assigned bin slot: "
+          << mirror::Object::PrettyTypeOf(obj) << " " << obj
+          << " " << v->FirstPathFromRootSet(obj);
+    }
+    LOG(FATAL) << "Found " << num_missed_objects << " objects without assigned bin slots.";
+  }
 }
 
 void ImageWriter::LayoutHelper::FinalizeBinSlotOffsets() {
@@ -2629,7 +2651,7 @@ std::pair<size_t, std::vector<ImageSection>> ImageWriter::ImageInfo::CreateImage
   return make_pair(metadata_section.End(), std::move(sections));
 }
 
-void ImageWriter::CreateHeader(size_t oat_index) {
+void ImageWriter::CreateHeader(size_t oat_index, size_t component_count) {
   ImageInfo& image_info = GetImageInfo(oat_index);
   const uint8_t* oat_file_begin = image_info.oat_file_begin_;
   const uint8_t* oat_file_end = oat_file_begin + image_info.oat_loaded_size_;
@@ -2637,18 +2659,39 @@ void ImageWriter::CreateHeader(size_t oat_index) {
 
   uint32_t image_reservation_size = image_info.image_size_;
   DCHECK_ALIGNED(image_reservation_size, kPageSize);
-  uint32_t component_count = 1u;
-  if (!compiler_options_.IsAppImage()) {
+  uint32_t current_component_count = 1u;
+  if (compiler_options_.IsAppImage()) {
+    DCHECK_EQ(oat_index, 0u);
+    DCHECK_EQ(component_count, current_component_count);
+  } else {
+    DCHECK(image_infos_.size() == 1u || image_infos_.size() == component_count)
+        << image_infos_.size() << " " << component_count;
     if (oat_index == 0u) {
       const ImageInfo& last_info = image_infos_.back();
       const uint8_t* end = last_info.oat_file_begin_ + last_info.oat_loaded_size_;
       DCHECK_ALIGNED(image_info.image_begin_, kPageSize);
       image_reservation_size =
           dchecked_integral_cast<uint32_t>(RoundUp(end - image_info.image_begin_, kPageSize));
-      component_count = image_infos_.size();
+      current_component_count = component_count;
     } else {
       image_reservation_size = 0u;
-      component_count = 0u;
+      current_component_count = 0u;
+    }
+  }
+
+  // Compute boot image checksums for the primary component, leave as 0 otherwise.
+  uint32_t boot_image_components = 0u;
+  uint32_t boot_image_checksums = 0u;
+  if (oat_index == 0u) {
+    const std::vector<gc::space::ImageSpace*>& image_spaces =
+        Runtime::Current()->GetHeap()->GetBootImageSpaces();
+    DCHECK_EQ(image_spaces.empty(), compiler_options_.IsBootImage());
+    for (size_t i = 0u, size = image_spaces.size(); i != size; ) {
+      const ImageHeader& header = image_spaces[i]->GetImageHeader();
+      boot_image_components += header.GetComponentCount();
+      boot_image_checksums ^= header.GetImageChecksum();
+      DCHECK_LE(header.GetImageSpaceCount(), size - i);
+      i += header.GetImageSpaceCount();
     }
   }
 
@@ -2682,7 +2725,7 @@ void ImageWriter::CreateHeader(size_t oat_index) {
   // image.
   new (image_info.image_.Begin()) ImageHeader(
       image_reservation_size,
-      component_count,
+      current_component_count,
       PointerToLowMemUInt32(image_info.image_begin_),
       image_end,
       sections.data(),
@@ -2694,6 +2737,8 @@ void ImageWriter::CreateHeader(size_t oat_index) {
       PointerToLowMemUInt32(oat_file_end),
       boot_image_begin_,
       boot_image_size_,
+      boot_image_components,
+      boot_image_checksums,
       static_cast<uint32_t>(target_ptr_size_));
 }
 
@@ -3326,8 +3371,8 @@ const uint8_t* ImageWriter::GetOatAddress(StubType type) const {
       // TODO: We could maybe clean this up if we stored them in an array in the oat header.
       case StubType::kQuickGenericJNITrampoline:
         return static_cast<const uint8_t*>(header.GetQuickGenericJniTrampoline());
-      case StubType::kJNIDlsymLookup:
-        return static_cast<const uint8_t*>(header.GetJniDlsymLookup());
+      case StubType::kJNIDlsymLookupTrampoline:
+        return static_cast<const uint8_t*>(header.GetJniDlsymLookupTrampoline());
       case StubType::kQuickIMTConflictTrampoline:
         return static_cast<const uint8_t*>(header.GetQuickImtConflictTrampoline());
       case StubType::kQuickResolutionTrampoline:
@@ -3368,12 +3413,14 @@ const uint8_t* ImageWriter::GetQuickCode(ArtMethod* method, const ImageInfo& ima
 
   if (quick_code == nullptr) {
     // If we don't have code, use generic jni / interpreter bridge.
+    // Both perform class initialization check if needed.
     quick_code = method->IsNative()
         ? GetOatAddress(StubType::kQuickGenericJNITrampoline)
         : GetOatAddress(StubType::kQuickToInterpreterBridge);
-  } else if (method->NeedsInitializationCheck()) {
-    // If we do have code and the method needs an initialization check, go through
-    // the resolution stub.
+  } else if (NeedsClinitCheckBeforeCall(method) &&
+             !method->GetDeclaringClass()->IsVisiblyInitialized()) {
+    // If we do have code but the method needs a class initialization check before calling
+    // that code, install the resolution stub that will perform the check.
     quick_code = GetOatAddress(StubType::kQuickResolutionTrampoline);
   }
   return quick_code;
@@ -3440,7 +3487,7 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
         // The native method's pointer is set to a stub to lookup via dlsym.
         // Note this is not the code_ pointer, that is handled above.
         copy->SetEntryPointFromJniPtrSize(
-            GetOatAddress(StubType::kJNIDlsymLookup), target_ptr_size_);
+            GetOatAddress(StubType::kJNIDlsymLookupTrampoline), target_ptr_size_);
       } else {
         CHECK(copy->GetDataPtrSize(target_ptr_size_) == nullptr);
       }
@@ -3575,8 +3622,8 @@ void ImageWriter::UpdateOatFileHeader(size_t oat_index, const OatHeader& oat_hea
 
   if (oat_index == GetDefaultOatIndex()) {
     // Primary oat file, read the trampolines.
-    cur_image_info.SetStubOffset(StubType::kJNIDlsymLookup,
-                                 oat_header.GetJniDlsymLookupOffset());
+    cur_image_info.SetStubOffset(StubType::kJNIDlsymLookupTrampoline,
+                                 oat_header.GetJniDlsymLookupTrampolineOffset());
     cur_image_info.SetStubOffset(StubType::kQuickGenericJNITrampoline,
                                  oat_header.GetQuickGenericJniTrampolineOffset());
     cur_image_info.SetStubOffset(StubType::kQuickIMTConflictTrampoline,

@@ -28,6 +28,7 @@ cc_defaults {
 
     shared_libs: [
         "libbase",
+        "libadbconnection_client",
     ],
     target: {
         host: {
@@ -53,19 +54,10 @@ art_cc_library {
         "libart",
         "libartbase",
     ],
-}
-
-cc_library {
-    name: "libadbconnection_server",
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//system/core/adb",
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
     ],
-    srcs: ["adbconnection_server.cc"],
-    export_include_dirs: ["include"],
-    shared_libs: ["libbase"],
-    host_supported: true,
-    recovery_available: true,
 }
 
 art_cc_library {
@@ -77,5 +69,8 @@ art_cc_library {
     shared_libs: [
         "libartd",
         "libartbased",
+    ],
+    apex_available: [
+        "com.android.art.debug",
     ],
 }

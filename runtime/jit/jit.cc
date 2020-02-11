@@ -31,6 +31,7 @@
 #include "debugger.h"
 #include "dex/type_lookup_table.h"
 #include "gc/space/image_space.h"
+#include "entrypoints/entrypoint_utils-inl.h"
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "image-inl.h"
 #include "interpreter/interpreter.h"
@@ -88,6 +89,8 @@ JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
   jit_options->use_jit_compilation_ = options.GetOrDefault(RuntimeArgumentMap::UseJitCompilation);
+  jit_options->use_tiered_jit_compilation_ =
+      options.GetOrDefault(RuntimeArgumentMap::UseTieredJitCompilation);
 
   jit_options->code_cache_initial_capacity_ =
       options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheInitialCapacity);
@@ -214,7 +217,10 @@ Jit::Jit(JitCodeCache* code_cache, JitOptions* options)
       boot_completed_lock_("Jit::boot_completed_lock_"),
       cumulative_timings_("JIT timings"),
       memory_use_("Memory used for compilation", 16),
-      lock_("JIT memory use lock") {}
+      lock_("JIT memory use lock"),
+      zygote_mapping_methods_(),
+      fd_methods_(-1),
+      fd_methods_size_(0) {}
 
 Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
   if (jit_load_ == nullptr) {
@@ -242,6 +248,15 @@ Jit* Jit::Create(JitCodeCache* code_cache, JitOptions* options) {
       << ", max_capacity=" << PrettySize(options->GetCodeCacheMaxCapacity())
       << ", compile_threshold=" << options->GetCompileThreshold()
       << ", profile_saver_options=" << options->GetProfileSaverOptions();
+
+  // We want to know whether the compiler is compiling baseline, as this
+  // affects how we GC ProfilingInfos.
+  for (const std::string& option : Runtime::Current()->GetCompilerOptions()) {
+    if (option == "--baseline") {
+      options->SetUseBaselineCompiler();
+      break;
+    }
+  }
 
   // Notify native debugger about the classes already loaded before the creation of the jit.
   jit->DumpTypeInfoForLoadedTypes(Runtime::Current()->GetClassLinker());
@@ -287,6 +302,15 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr
     return false;
   }
 
+  if (!method->IsCompilable()) {
+    DCHECK(method->GetDeclaringClass()->IsObsoleteObject() ||
+           method->IsProxyMethod()) << method->PrettyMethod();
+    VLOG(jit) << "JIT not compiling " << method->PrettyMethod() << " due to method being made "
+              << "obsolete while waiting for JIT task to run. This probably happened due to "
+              << "concurrent structural class redefinition.";
+    return false;
+  }
+
   // Don't compile the method if we are supposed to be deoptimized.
   instrumentation::Instrumentation* instrumentation = Runtime::Current()->GetInstrumentation();
   if (instrumentation->AreAllMethodsDeoptimized() || instrumentation->IsDeoptimized(method)) {
@@ -305,13 +329,14 @@ bool Jit::CompileMethod(ArtMethod* method, Thread* self, bool baseline, bool osr
   // If we get a request to compile a proxy method, we pass the actual Java method
   // of that proxy method, as the compiler does not expect a proxy method.
   ArtMethod* method_to_compile = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
-  if (!code_cache_->NotifyCompilationOf(method_to_compile, self, osr, prejit, region)) {
+  if (!code_cache_->NotifyCompilationOf(method_to_compile, self, osr, prejit, baseline, region)) {
     return false;
   }
 
   VLOG(jit) << "Compiling method "
             << ArtMethod::PrettyMethod(method_to_compile)
-            << " osr=" << std::boolalpha << osr;
+            << " osr=" << std::boolalpha << osr
+            << " baseline=" << std::boolalpha << baseline;
   bool success = jit_compiler_->CompileMethod(self, region, method_to_compile, baseline, osr);
   code_cache_->DoneCompiling(method_to_compile, self, osr);
   if (!success) {
@@ -434,36 +459,15 @@ extern "C" void art_quick_osr_stub(void** stack,
                                    const char* shorty,
                                    Thread* self);
 
-bool Jit::MaybeDoOnStackReplacement(Thread* thread,
-                                    ArtMethod* method,
-                                    uint32_t dex_pc,
-                                    int32_t dex_pc_offset,
-                                    JValue* result) {
+OsrData* Jit::PrepareForOsr(ArtMethod* method, uint32_t dex_pc, uint32_t* vregs) {
   if (!kEnableOnStackReplacement) {
-    return false;
+    return nullptr;
   }
-
-  Jit* jit = Runtime::Current()->GetJit();
-  if (jit == nullptr) {
-    return false;
-  }
-
-  if (UNLIKELY(__builtin_frame_address(0) < thread->GetStackEnd())) {
-    // Don't attempt to do an OSR if we are close to the stack limit. Since
-    // the interpreter frames are still on stack, OSR has the potential
-    // to stack overflow even for a simple loop.
-    // b/27094810.
-    return false;
-  }
-
-  // Get the actual Java method if this method is from a proxy class. The compiler
-  // and the JIT code cache do not expect methods from proxy classes.
-  method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
 
   // Cheap check if the method has been compiled already. That's an indicator that we should
   // osr into it.
-  if (!jit->GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
-    return false;
+  if (!GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
+    return nullptr;
   }
 
   // Fetch some data before looking up for an OSR method. We don't want thread
@@ -471,36 +475,25 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
   // method while we are being suspended.
   CodeItemDataAccessor accessor(method->DexInstructionData());
   const size_t number_of_vregs = accessor.RegistersSize();
-  const char* shorty = method->GetShorty();
   std::string method_name(VLOG_IS_ON(jit) ? method->PrettyMethod() : "");
-  void** memory = nullptr;
-  size_t frame_size = 0;
-  ShadowFrame* shadow_frame = nullptr;
-  const uint8_t* native_pc = nullptr;
+  OsrData* osr_data = nullptr;
 
   {
     ScopedAssertNoThreadSuspension sts("Holding OSR method");
-    const OatQuickMethodHeader* osr_method = jit->GetCodeCache()->LookupOsrMethodHeader(method);
+    const OatQuickMethodHeader* osr_method = GetCodeCache()->LookupOsrMethodHeader(method);
     if (osr_method == nullptr) {
       // No osr method yet, just return to the interpreter.
-      return false;
+      return nullptr;
     }
 
     CodeInfo code_info(osr_method);
 
     // Find stack map starting at the target dex_pc.
-    StackMap stack_map = code_info.GetOsrStackMapForDexPc(dex_pc + dex_pc_offset);
+    StackMap stack_map = code_info.GetOsrStackMapForDexPc(dex_pc);
     if (!stack_map.IsValid()) {
       // There is no OSR stack map for this dex pc offset. Just return to the interpreter in the
       // hope that the next branch has one.
-      return false;
-    }
-
-    // Before allowing the jump, make sure no code is actively inspecting the method to avoid
-    // jumping from interpreter to OSR while e.g. single stepping. Note that we could selectively
-    // disable OSR when single stepping, but that's currently hard to know at this point.
-    if (Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method)) {
-      return false;
+      return nullptr;
     }
 
     // We found a stack map, now fill the frame with dex register values from the interpreter's
@@ -508,20 +501,22 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
     DexRegisterMap vreg_map = code_info.GetDexRegisterMapOf(stack_map);
     DCHECK_EQ(vreg_map.size(), number_of_vregs);
 
-    frame_size = osr_method->GetFrameSizeInBytes();
+    size_t frame_size = osr_method->GetFrameSizeInBytes();
 
     // Allocate memory to put shadow frame values. The osr stub will copy that memory to
     // stack.
     // Note that we could pass the shadow frame to the stub, and let it copy the values there,
     // but that is engineering complexity not worth the effort for something like OSR.
-    memory = reinterpret_cast<void**>(malloc(frame_size));
-    CHECK(memory != nullptr);
-    memset(memory, 0, frame_size);
+    osr_data = reinterpret_cast<OsrData*>(malloc(sizeof(OsrData) + frame_size));
+    if (osr_data == nullptr) {
+      return nullptr;
+    }
+    memset(osr_data, 0, sizeof(OsrData) + frame_size);
+    osr_data->frame_size = frame_size;
 
     // Art ABI: ArtMethod is at the bottom of the stack.
-    memory[0] = method;
+    osr_data->memory[0] = method;
 
-    shadow_frame = thread->PopShadowFrame();
     if (vreg_map.empty()) {
       // If we don't have a dex register map, then there are no live dex registers at
       // this dex pc.
@@ -540,30 +535,71 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
 
         DCHECK_EQ(location, DexRegisterLocation::Kind::kInStack);
 
-        int32_t vreg_value = shadow_frame->GetVReg(vreg);
+        int32_t vreg_value = vregs[vreg];
         int32_t slot_offset = vreg_map[vreg].GetStackOffsetInBytes();
         DCHECK_LT(slot_offset, static_cast<int32_t>(frame_size));
         DCHECK_GT(slot_offset, 0);
-        (reinterpret_cast<int32_t*>(memory))[slot_offset / sizeof(int32_t)] = vreg_value;
+        (reinterpret_cast<int32_t*>(osr_data->memory))[slot_offset / sizeof(int32_t)] = vreg_value;
       }
     }
 
-    native_pc = stack_map.GetNativePcOffset(kRuntimeISA) +
+    osr_data->native_pc = stack_map.GetNativePcOffset(kRuntimeISA) +
         osr_method->GetEntryPoint();
     VLOG(jit) << "Jumping to "
               << method_name
               << "@"
-              << std::hex << reinterpret_cast<uintptr_t>(native_pc);
+              << std::hex << reinterpret_cast<uintptr_t>(osr_data->native_pc);
+  }
+  return osr_data;
+}
+
+bool Jit::MaybeDoOnStackReplacement(Thread* thread,
+                                    ArtMethod* method,
+                                    uint32_t dex_pc,
+                                    int32_t dex_pc_offset,
+                                    JValue* result) {
+  Jit* jit = Runtime::Current()->GetJit();
+  if (jit == nullptr) {
+    return false;
+  }
+
+  if (UNLIKELY(__builtin_frame_address(0) < thread->GetStackEnd())) {
+    // Don't attempt to do an OSR if we are close to the stack limit. Since
+    // the interpreter frames are still on stack, OSR has the potential
+    // to stack overflow even for a simple loop.
+    // b/27094810.
+    return false;
+  }
+
+  // Get the actual Java method if this method is from a proxy class. The compiler
+  // and the JIT code cache do not expect methods from proxy classes.
+  method = method->GetInterfaceMethodIfProxy(kRuntimePointerSize);
+
+  // Before allowing the jump, make sure no code is actively inspecting the method to avoid
+  // jumping from interpreter to OSR while e.g. single stepping. Note that we could selectively
+  // disable OSR when single stepping, but that's currently hard to know at this point.
+  if (Runtime::Current()->GetRuntimeCallbacks()->IsMethodBeingInspected(method)) {
+    return false;
+  }
+
+  ShadowFrame* shadow_frame = thread->GetManagedStack()->GetTopShadowFrame();
+  OsrData* osr_data = jit->PrepareForOsr(method,
+                                         dex_pc + dex_pc_offset,
+                                         shadow_frame->GetVRegArgs(0));
+
+  if (osr_data == nullptr) {
+    return false;
   }
 
   {
+    thread->PopShadowFrame();
     ManagedStack fragment;
     thread->PushManagedStackFragment(&fragment);
-    (*art_quick_osr_stub)(memory,
-                          frame_size,
-                          native_pc,
+    (*art_quick_osr_stub)(osr_data->memory,
+                          osr_data->frame_size,
+                          osr_data->native_pc,
                           result,
-                          shorty,
+                          method->GetShorty(),
                           thread);
 
     if (UNLIKELY(thread->GetException() == Thread::GetDeoptimizationException())) {
@@ -571,9 +607,9 @@ bool Jit::MaybeDoOnStackReplacement(Thread* thread,
     }
     thread->PopManagedStackFragment(fragment);
   }
-  free(memory);
+  free(osr_data);
   thread->PushShadowFrame(shadow_frame);
-  VLOG(jit) << "Done running OSR code for " << method_name;
+  VLOG(jit) << "Done running OSR code for " << method->PrettyMethod();
   return true;
 }
 
@@ -586,6 +622,135 @@ void Jit::AddMemoryUsage(ArtMethod* method, size_t bytes) {
   }
   MutexLock mu(Thread::Current(), lock_);
   memory_use_.AddValue(bytes);
+}
+
+void Jit::NotifyZygoteCompilationDone() {
+  if (fd_methods_ == -1) {
+    return;
+  }
+
+  size_t offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      memcpy(zygote_mapping_methods_.Begin() + offset, page_start, capacity);
+      offset += capacity;
+    }
+  }
+
+  // Do an msync to ensure we are not affected by writes still being in caches.
+  if (msync(zygote_mapping_methods_.Begin(), fd_methods_size_, MS_SYNC) != 0) {
+    PLOG(WARNING) << "Failed to sync boot image methods memory";
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  // We don't need the shared mapping anymore, and we need to drop it in case
+  // the file hasn't been sealed writable.
+  zygote_mapping_methods_ = MemMap::Invalid();
+
+  // Seal writes now. Zygote and children will map the memory private in order
+  // to write to it.
+  if (fcntl(fd_methods_, F_ADD_SEALS, F_SEAL_SEAL | F_SEAL_WRITE) == -1) {
+    PLOG(WARNING) << "Failed to seal boot image methods file descriptor";
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  std::string error_str;
+  MemMap child_mapping_methods = MemMap::MapFile(
+      fd_methods_size_,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE,
+      fd_methods_,
+      /* start= */ 0,
+      /* low_4gb= */ false,
+      "boot-image-methods",
+      &error_str);
+
+  if (!child_mapping_methods.IsValid()) {
+    LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
+    code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedFailure);
+    return;
+  }
+
+  // Ensure the contents are the same as before: there was a window between
+  // the memcpy and the sealing where other processes could have changed the
+  // contents.
+  // Note this would not be needed if we could have used F_SEAL_FUTURE_WRITE,
+  // see b/143833776.
+  offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      if (memcmp(child_mapping_methods.Begin() + offset, page_start, capacity) != 0) {
+        LOG(WARNING) << "Contents differ in boot image methods data";
+        code_cache_->GetZygoteMap()->SetCompilationState(
+            ZygoteCompilationState::kNotifiedFailure);
+        return;
+      }
+      offset += capacity;
+    }
+  }
+
+  // Future spawned processes don't need the fd anymore.
+  fd_methods_.reset();
+
+  // In order to have the zygote and children share the memory, we also remap
+  // the memory into the zygote process.
+  offset = 0;
+  for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+    const ImageHeader& header = space->GetImageHeader();
+    const ImageSection& section = header.GetMethodsSection();
+    // Because mremap works at page boundaries, we can only handle methods
+    // within a page range. For methods that falls above or below the range,
+    // the child processes will copy their contents to their private mapping
+    // in `child_mapping_methods`. See `MapBootImageMethods`.
+    uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
+    uint8_t* page_end =
+        AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
+    if (page_end > page_start) {
+      uint64_t capacity = page_end - page_start;
+      if (mremap(child_mapping_methods.Begin() + offset,
+                 capacity,
+                 capacity,
+                 MREMAP_FIXED | MREMAP_MAYMOVE,
+                 page_start) == MAP_FAILED) {
+        // Failing to remap is safe as the process will just use the old
+        // contents.
+        PLOG(WARNING) << "Failed mremap of boot image methods of " << space->GetImageFilename();
+      }
+      offset += capacity;
+    }
+  }
+
+  LOG(INFO) << "Successfully notified child processes on sharing boot image methods";
+
+  // Mark that compilation of boot classpath is done, and memory can now be
+  // shared. Other processes will pick up this information.
+  code_cache_->GetZygoteMap()->SetCompilationState(ZygoteCompilationState::kNotifiedOk);
+
+  // The private mapping created for this process has been mremaped. We can
+  // reset it.
+  child_mapping_methods.Reset();
 }
 
 class JitCompileTask final : public Task {
@@ -690,38 +855,9 @@ class JitDoneCompilingProfileTask final : public SelfDeletingTask {
     }
 
     if (Runtime::Current()->IsZygote()) {
-      // Copy the boot image methods data to the mappings we created to share
-      // with the children.
-      Jit* jit = Runtime::Current()->GetJit();
-      size_t offset = 0;
-      for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
-        const ImageHeader& header = space->GetImageHeader();
-        const ImageSection& section = header.GetMethodsSection();
-        // Because mremap works at page boundaries, we can only handle methods
-        // within a page range. For methods that falls above or below the range,
-        // the child processes will copy their contents to their private mapping
-        // in `child_mapping_methods_`. See `MapBootImageMethods`.
-        uint8_t* page_start = AlignUp(header.GetImageBegin() + section.Offset(), kPageSize);
-        uint8_t* page_end =
-            AlignDown(header.GetImageBegin() + section.Offset() + section.Size(), kPageSize);
-        if (page_end > page_start) {
-          uint64_t capacity = page_end - page_start;
-          memcpy(jit->GetZygoteMappingMethods().Begin() + offset, page_start, capacity);
-          // So the memory is shared, also map the memory into the zygote
-          // process.
-          if (mremap(jit->GetChildMappingMethods().Begin() + offset,
-                     capacity,
-                     capacity,
-                     MREMAP_FIXED | MREMAP_MAYMOVE,
-                     page_start) == MAP_FAILED) {
-            PLOG(WARNING) << "Failed mremap of boot image methods of " << space->GetImageFilename();
-          }
-          offset += capacity;
-        }
-      }
-      // Mark that compilation of boot classpath is done. Other processes will
-      // pick up this boolean.
-      jit->GetCodeCache()->GetZygoteMap()->SetCompilationDone();
+      // Record that we are done compiling the profile.
+      Runtime::Current()->GetJit()->GetCodeCache()->GetZygoteMap()->SetCompilationState(
+          ZygoteCompilationState::kDone);
     }
   }
 
@@ -737,29 +873,29 @@ class ZygoteTask final : public Task {
 
   void Run(Thread* self) override {
     Runtime* runtime = Runtime::Current();
-    std::string profile_file;
-    for (const std::string& option : runtime->GetImageCompilerOptions()) {
-      if (android::base::StartsWith(option, "--profile-file=")) {
-        profile_file = option.substr(strlen("--profile-file="));
-        break;
-      }
-    }
-
-    const std::vector<const DexFile*>& boot_class_path =
-        runtime->GetClassLinker()->GetBootClassPath();
-    ScopedNullHandle<mirror::ClassLoader> null_handle;
-    std::string boot_profile = GetBootProfileFile(profile_file);
-    // We add to the queue for zygote so that we can fork processes in-between
-    // compilations.
     uint32_t added_to_queue = 0;
-    if (Runtime::Current()->IsPrimaryZygote()) {
-      // We avoid doing compilation at boot for the secondary zygote, as apps
-      // forked from it are not critical for boot.
-      added_to_queue += runtime->GetJit()->CompileMethodsFromBootProfile(
-          self, boot_class_path, boot_profile, null_handle, /* add_to_queue= */ true);
+    for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
+      const std::string& profile_file = space->GetProfileFile();
+      if (profile_file.empty()) {
+        continue;
+      }
+      LOG(INFO) << "JIT Zygote looking at profile " << profile_file;
+
+      const std::vector<const DexFile*>& boot_class_path =
+          runtime->GetClassLinker()->GetBootClassPath();
+      ScopedNullHandle<mirror::ClassLoader> null_handle;
+      // We add to the queue for zygote so that we can fork processes in-between
+      // compilations.
+      if (Runtime::Current()->IsPrimaryZygote()) {
+        std::string boot_profile = GetBootProfileFile(profile_file);
+        // We avoid doing compilation at boot for the secondary zygote, as apps
+        // forked from it are not critical for boot.
+        added_to_queue += runtime->GetJit()->CompileMethodsFromBootProfile(
+            self, boot_class_path, boot_profile, null_handle, /* add_to_queue= */ true);
+      }
+      added_to_queue += runtime->GetJit()->CompileMethodsFromProfile(
+          self, boot_class_path, profile_file, null_handle, /* add_to_queue= */ true);
     }
-    added_to_queue += runtime->GetJit()->CompileMethodsFromProfile(
-        self, boot_class_path, profile_file, null_handle, /* add_to_queue= */ true);
 
     JitCodeCache* code_cache = runtime->GetJit()->GetCodeCache();
     code_cache->GetZygoteMap()->Initialize(added_to_queue);
@@ -841,7 +977,30 @@ static void CopyIfDifferent(void* s1, const void* s2, size_t n) {
 }
 
 void Jit::MapBootImageMethods() {
-  if (!GetChildMappingMethods().IsValid()) {
+  CHECK_NE(fd_methods_.get(), -1);
+  if (!code_cache_->GetZygoteMap()->CanMapBootImageMethods()) {
+    LOG(WARNING) << "Not mapping boot image methods due to error from zygote";
+    // We don't need the fd anymore.
+    fd_methods_.reset();
+    return;
+  }
+
+  std::string error_str;
+  MemMap child_mapping_methods = MemMap::MapFile(
+      fd_methods_size_,
+      PROT_READ | PROT_WRITE,
+      MAP_PRIVATE,
+      fd_methods_,
+      /* start= */ 0,
+      /* low_4gb= */ false,
+      "boot-image-methods",
+      &error_str);
+
+  // We don't need the fd anymore.
+  fd_methods_.reset();
+
+  if (!child_mapping_methods.IsValid()) {
+    LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
     return;
   }
   size_t offset = 0;
@@ -893,11 +1052,13 @@ void Jit::MapBootImageMethods() {
 
 
       uint8_t* pointer = reinterpret_cast<uint8_t*>(&method);
-      if (pointer >= page_start && pointer < page_end) {
+      // Note: We could refactor this to only check if the ArtMethod entrypoint is inside the
+      // page region. This would remove the need for the edge case handling below.
+      if (pointer >= page_start && pointer + sizeof(ArtMethod) < page_end) {
         // For all the methods in the mapping, put the entrypoint to the
         // resolution stub.
         ArtMethod* new_method = reinterpret_cast<ArtMethod*>(
-            GetChildMappingMethods().Begin() + offset + (pointer - page_start));
+            child_mapping_methods.Begin() + offset + (pointer - page_start));
         const void* code = new_method->GetEntryPointFromQuickCompiledCode();
         if (!class_linker->IsQuickGenericJniStub(code) &&
             !class_linker->IsQuickToInterpreterBridge(code) &&
@@ -917,7 +1078,7 @@ void Jit::MapBootImageMethods() {
         //                            |/////////| -> copy -> |/////////|
         //                            |         |            |         |
         //
-        CopyIfDifferent(GetChildMappingMethods().Begin() + offset,
+        CopyIfDifferent(child_mapping_methods.Begin() + offset,
                         page_start,
                         pointer + sizeof(ArtMethod) - page_start);
       } else if (pointer < page_end && (pointer + sizeof(ArtMethod)) > page_end) {
@@ -932,14 +1093,14 @@ void Jit::MapBootImageMethods() {
         //         section end   -->  -----------
         //
         size_t bytes_to_copy = (page_end - pointer);
-        CopyIfDifferent(GetChildMappingMethods().Begin() + offset + capacity - bytes_to_copy,
+        CopyIfDifferent(child_mapping_methods.Begin() + offset + capacity - bytes_to_copy,
                         page_end - bytes_to_copy,
                         bytes_to_copy);
       }
     }, space->Begin(), kRuntimePointerSize);
 
     // Map the memory in the boot image range.
-    if (mremap(GetChildMappingMethods().Begin() + offset,
+    if (mremap(child_mapping_methods.Begin() + offset,
                capacity,
                capacity,
                MREMAP_FIXED | MREMAP_MAYMOVE,
@@ -948,6 +1109,11 @@ void Jit::MapBootImageMethods() {
     }
     offset += capacity;
   }
+
+  // The private mapping created for this process has been mremaped. We can
+  // reset it.
+  child_mapping_methods.Reset();
+  LOG(INFO) << "Successfully mapped boot image methods";
 }
 
 void Jit::CreateThreadPool() {
@@ -962,7 +1128,7 @@ void Jit::CreateThreadPool() {
   Start();
 
   Runtime* runtime = Runtime::Current();
-  if (runtime->IsZygote() && runtime->IsUsingApexBootImageLocation() && UseJitCompilation()) {
+  if (runtime->IsZygote() && runtime->IsRunningJitZygote() && UseJitCompilation()) {
     // If we're not using the default boot image location, request a JIT task to
     // compile all methods in the boot image profile.
     thread_pool_->AddTask(Thread::Current(), new ZygoteTask());
@@ -989,7 +1155,7 @@ void Jit::CreateThreadPool() {
       // Start with '/boot' and end with '.art' to match the pattern recognized
       // by android_os_Debug.cpp for boot images.
       const char* name = "/boot-image-methods.art";
-      unique_fd mem_fd = unique_fd(art::memfd_create(name, /* flags= */ 0));
+      unique_fd mem_fd = unique_fd(art::memfd_create(name, /* flags= */ MFD_ALLOW_SEALING));
       if (mem_fd.get() == -1) {
         PLOG(WARNING) << "Could not create boot image methods file descriptor";
         return;
@@ -999,6 +1165,9 @@ void Jit::CreateThreadPool() {
         return;
       }
       std::string error_str;
+
+      // Create the shared mapping eagerly, as this prevents other processes
+      // from adding the writable seal.
       zygote_mapping_methods_ = MemMap::MapFile(
         total_capacity,
         PROT_READ | PROT_WRITE,
@@ -1019,21 +1188,17 @@ void Jit::CreateThreadPool() {
         return;
       }
 
-      child_mapping_methods_ = MemMap::MapFile(
-        total_capacity,
-        PROT_READ | PROT_WRITE,
-        MAP_PRIVATE,
-        mem_fd,
-        /* start= */ 0,
-        /* low_4gb= */ true,
-        "boot-image-methods",
-        &error_str);
-
-      if (!child_mapping_methods_.IsValid()) {
-        LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
+      // We should use the F_SEAL_FUTURE_WRITE flag, but this has unexpected
+      // behavior on private mappings after fork (the mapping becomes shared between
+      // parent and children), see b/143833776.
+      // We will seal the write once we are done writing to the shared mapping.
+      if (fcntl(mem_fd, F_ADD_SEALS, F_SEAL_SHRINK | F_SEAL_GROW) == -1) {
+        PLOG(WARNING) << "Failed to seal boot image methods file descriptor";
         zygote_mapping_methods_ = MemMap();
         return;
       }
+      fd_methods_ = unique_fd(mem_fd.release());
+      fd_methods_size_ = total_capacity;
     }
   }
 }
@@ -1044,7 +1209,7 @@ void Jit::RegisterDexFiles(const std::vector<std::unique_ptr<const DexFile>>& de
     return;
   }
   Runtime* runtime = Runtime::Current();
-  if (runtime->IsSystemServer() && runtime->IsUsingApexBootImageLocation() && UseJitCompilation()) {
+  if (runtime->IsSystemServer() && runtime->IsRunningJitZygote() && UseJitCompilation()) {
     thread_pool_->AddTask(Thread::Current(), new JitProfileTask(dex_files, class_loader));
   }
 }
@@ -1249,7 +1414,8 @@ bool Jit::MaybeCompileMethod(Thread* self,
     return false;
   }
   if (UNLIKELY(method->IsPreCompiled()) && !with_backedges /* don't check for OSR */) {
-    if (!method->NeedsInitializationCheck()) {
+    if (!NeedsClinitCheckBeforeCall(method) ||
+        method->GetDeclaringClass()->IsVisiblyInitialized()) {
       const void* entry_point = code_cache_->GetSavedEntryPointOfPreCompiledMethod(method);
       if (entry_point != nullptr) {
         Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(method, entry_point);
@@ -1275,7 +1441,8 @@ bool Jit::MaybeCompileMethod(Thread* self,
     // Note: Native method have no "warm" state or profiling info.
     if (!method->IsNative() &&
         (method->GetProfilingInfo(kRuntimePointerSize) == nullptr) &&
-        code_cache_->CanAllocateProfilingInfo()) {
+        code_cache_->CanAllocateProfilingInfo() &&
+        !options_->UseTieredJitCompilation()) {
       bool success = ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
       if (success) {
         VLOG(jit) << "Start profiling " << method->PrettyMethod();
@@ -1298,7 +1465,7 @@ bool Jit::MaybeCompileMethod(Thread* self,
   if (UseJitCompilation()) {
     if (old_count == 0 &&
         method->IsNative() &&
-        Runtime::Current()->IsUsingApexBootImageLocation()) {
+        Runtime::Current()->IsRunningJitZygote()) {
       // jitzygote: Compile JNI stub on first use to avoid the expensive generic stub.
       CompileMethod(method, self, /* baseline= */ false, /* osr= */ false, /* prejit= */ false);
       return true;
@@ -1306,7 +1473,11 @@ bool Jit::MaybeCompileMethod(Thread* self,
     if (old_count < HotMethodThreshold() && new_count >= HotMethodThreshold()) {
       if (!code_cache_->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
         DCHECK(thread_pool_ != nullptr);
-        thread_pool_->AddTask(self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+        JitCompileTask::TaskKind kind =
+            (options_->UseTieredJitCompilation() || options_->UseBaselineCompiler())
+                ? JitCompileTask::TaskKind::kCompileBaseline
+                : JitCompileTask::TaskKind::kCompile;
+        thread_pool_->AddTask(self, new JitCompileTask(method, kind));
       }
     }
     if (old_count < OSRMethodThreshold() && new_count >= OSRMethodThreshold()) {
@@ -1322,6 +1493,19 @@ bool Jit::MaybeCompileMethod(Thread* self,
     }
   }
   return true;
+}
+
+void Jit::EnqueueOptimizedCompilation(ArtMethod* method, Thread* self) {
+  if (thread_pool_ == nullptr) {
+    return;
+  }
+  // We arrive here after a baseline compiled code has reached its baseline
+  // hotness threshold. If tiered compilation is enabled, enqueue a compilation
+  // task that will compile optimize the method.
+  if (options_->UseTieredJitCompilation()) {
+    thread_pool_->AddTask(
+        self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
+  }
 }
 
 class ScopedSetRuntimeThread {
@@ -1423,8 +1607,27 @@ static void* RunPollingThread(void* arg) {
   Jit* jit = reinterpret_cast<Jit*>(arg);
   do {
     sleep(10);
-  } while (!jit->GetCodeCache()->GetZygoteMap()->IsCompilationDone());
-  jit->MapBootImageMethods();
+  } while (!jit->GetCodeCache()->GetZygoteMap()->IsCompilationNotified());
+
+  // We will suspend other threads: we can only do that if we're attached to the
+  // runtime.
+  Runtime* runtime = Runtime::Current();
+  bool thread_attached = runtime->AttachCurrentThread(
+      "BootImagePollingThread",
+      /* as_daemon= */ true,
+      /* thread_group= */ nullptr,
+      /* create_peer= */ false);
+  CHECK(thread_attached);
+
+  {
+    // Prevent other threads from running while we are remapping the boot image
+    // ArtMethod's. Native threads might still be running, but they cannot
+    // change the contents of ArtMethod's.
+    ScopedSuspendAll ssa(__FUNCTION__);
+    runtime->GetJit()->MapBootImageMethods();
+  }
+
+  Runtime::Current()->DetachCurrentThread();
   return nullptr;
 }
 
@@ -1435,8 +1638,9 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
     tasks_after_boot_.clear();
   }
 
-  if (Runtime::Current()->IsUsingApexBootImageLocation() &&
-      !GetCodeCache()->GetZygoteMap()->IsCompilationDone()) {
+  Runtime* const runtime = Runtime::Current();
+  // For child zygote, we instead query IsCompilationNotified() post zygote fork.
+  if (!is_zygote && runtime->IsRunningJitZygote() && fd_methods_ != -1) {
     // Create a thread that will poll the status of zygote compilation, and map
     // the private mapping of boot image methods.
     zygote_mapping_methods_.ResetInForkedProcess();
@@ -1451,7 +1655,7 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
         "Methods maps thread");
   }
 
-  if (is_zygote || Runtime::Current()->IsSafeMode()) {
+  if (is_zygote || runtime->IsSafeMode()) {
     // Delete the thread pool, we are not going to JIT.
     thread_pool_.reset(nullptr);
     return;
@@ -1464,7 +1668,7 @@ void Jit::PostForkChildAction(bool is_system_server, bool is_zygote) {
   code_cache_->SetGarbageCollectCode(!jit_compiler_->GenerateDebugInfo() &&
       !Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled());
 
-  if (is_system_server && Runtime::Current()->IsUsingApexBootImageLocation()) {
+  if (is_system_server && Runtime::Current()->IsRunningJitZygote()) {
     // Disable garbage collection: we don't want it to delete methods we're compiling
     // through boot and system server profiles.
     // TODO(ngeoffray): Fix this so we still collect deoptimized and unused code.
@@ -1487,7 +1691,22 @@ void Jit::PreZygoteFork() {
 
 void Jit::PostZygoteFork() {
   if (thread_pool_ == nullptr) {
+    // If this is a child zygote, check if we need to remap the boot image
+    // methods.
+    if (fd_methods_ != -1 && code_cache_->GetZygoteMap()->IsCompilationNotified()) {
+      ScopedSuspendAll ssa(__FUNCTION__);
+      MapBootImageMethods();
+    }
     return;
+  }
+  if (Runtime::Current()->IsZygote() &&
+      code_cache_->GetZygoteMap()->IsCompilationDoneButNotNotified()) {
+    // Copy the boot image methods data to the mappings we created to share
+    // with the children. We do this here as we are the only thread running and
+    // we don't risk other threads concurrently updating the ArtMethod's.
+    CHECK_EQ(GetTaskCount(), 1);
+    NotifyZygoteCompilationDone();
+    CHECK(code_cache_->GetZygoteMap()->IsCompilationNotified());
   }
   thread_pool_->CreateThreads();
 }
@@ -1531,6 +1750,27 @@ bool Jit::CanAssumeInitialized(ObjPtr<mirror::Class> cls, bool is_for_shared_reg
     }
     uint16_t class_def_index = cls->GetDexClassDefIndex();
     return oat_dex_file->GetOatClass(class_def_index).GetStatus() >= ClassStatus::kInitialized;
+  }
+}
+
+void Jit::EnqueueCompilationFromNterp(ArtMethod* method, Thread* self) {
+  if (thread_pool_ == nullptr) {
+    return;
+  }
+  if (GetCodeCache()->ContainsPc(method->GetEntryPointFromQuickCompiledCode())) {
+    // If we already have compiled code for it, nterp may be stuck in a loop.
+    // Compile OSR.
+    thread_pool_->AddTask(
+        self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompileOsr));
+    return;
+  }
+  if (GetCodeCache()->CanAllocateProfilingInfo()) {
+    ProfilingInfo::Create(self, method, /* retry_allocation= */ false);
+    thread_pool_->AddTask(
+        self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompileBaseline));
+  } else {
+    thread_pool_->AddTask(
+        self, new JitCompileTask(method, JitCompileTask::TaskKind::kCompile));
   }
 }
 

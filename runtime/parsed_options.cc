@@ -113,7 +113,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XjdwpProvider:_")
           .WithType<JdwpProvider>()
           .IntoKey(M::JdwpProvider)
-      .Define({"-Xrunjdwp:_", "-agentlib:jdwp=_", "-XjdwpOptions:_"})
+      .Define("-XjdwpOptions:_")
           .WithType<std::string>()
           .IntoKey(M::JdwpOptions)
       // TODO Re-enable -agentlib: once I have a good way to transform the values.
@@ -201,6 +201,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::UseJitCompilation)
+      .Define("-Xusetieredjit:_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::UseTieredJitCompilation)
       .Define("-Xjitinitialsize:_")
           .WithType<MemoryKiB>()
           .IntoKey(M::JITCodeCacheInitialCapacity)
@@ -377,6 +381,10 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
                          {"indices", JniIdType::kIndices},
                          {"default", JniIdType::kDefault}})
           .IntoKey(M::OpaqueJniIds)
+      .Define("-Xauto-promote-opaque-jni-ids:_")
+          .WithType<bool>()
+          .WithValueMap({{"true", true}, {"false", false}})
+          .IntoKey(M::AutoPromoteOpaqueJniIds)
       .Define("-XX:VerifierMissingKThrowFatal=_")
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
@@ -705,7 +713,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
                        "    'third-party-jni', 'threads', 'verifier', 'verifier-debug')\n");
   UsageMessage(stream, "  -showversion\n");
   UsageMessage(stream, "  -help\n");
-  UsageMessage(stream, "  -agentlib:jdwp=options\n");
   // TODO add back in once -agentlib actually does something.
   // UsageMessage(stream, "  -agentlib:library=options (Experimental feature, "
   //                      "requires -Xexperimental:agent, some features might not be supported)\n");
@@ -714,7 +721,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "\n");
 
   UsageMessage(stream, "The following extended options are supported:\n");
-  UsageMessage(stream, "  -Xrunjdwp:<options>\n");
   UsageMessage(stream, "  -Xbootclasspath:bootclasspath\n");
   UsageMessage(stream, "  -Xcheck:tag  (e.g. 'jni')\n");
   UsageMessage(stream, "  -XmsN (min heap, must be multiple of 1K, >= 1MB)\n");

@@ -17,6 +17,7 @@
 #include "heap.h"
 
 #include <limits>
+#include "android-base/thread_annotations.h"
 #if defined(__BIONIC__) || defined(__GLIBC__)
 #include <malloc.h>  // For mallinfo()
 #endif
@@ -146,10 +147,6 @@ static const char* kRegionSpaceName = "main space (region space)";
 // If true, we log all GCs in the both the foreground and background. Used for debugging.
 static constexpr bool kLogAllGCs = false;
 
-// How much we grow the TLAB if we can do it.
-static constexpr size_t kPartialTlabSize = 16 * KB;
-static constexpr bool kUsePartialTlabs = true;
-
 // Use Max heap for 2 seconds, this is smaller than the usual 5s window since we don't want to leave
 // allocate with relaxed ergonomics for that long.
 static constexpr size_t kPostForkMaxHeapDurationMS = 2000;
@@ -177,12 +174,12 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
   for (size_t i = 0u, num_spaces = image_spaces.size(); i != num_spaces; ) {
     const ImageHeader& image_header = image_spaces[i]->GetImageHeader();
     uint32_t reservation_size = image_header.GetImageReservationSize();
-    uint32_t component_count = image_header.GetComponentCount();
+    uint32_t image_count = image_header.GetImageSpaceCount();
 
-    CHECK_NE(component_count, 0u);
-    CHECK_LE(component_count, num_spaces - i);
+    CHECK_NE(image_count, 0u);
+    CHECK_LE(image_count, num_spaces - i);
     CHECK_NE(reservation_size, 0u);
-    for (size_t j = 1u; j != image_header.GetComponentCount(); ++j) {
+    for (size_t j = 1u; j != image_count; ++j) {
       CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetComponentCount(), 0u);
       CHECK_EQ(image_spaces[i + j]->GetImageHeader().GetImageReservationSize(), 0u);
     }
@@ -192,7 +189,7 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
     // Check contiguous layout of images and oat files.
     const uint8_t* current_heap = image_spaces[i]->Begin();
     const uint8_t* current_oat = image_spaces[i]->GetImageHeader().GetOatFileBegin();
-    for (size_t j = 0u; j != image_header.GetComponentCount(); ++j) {
+    for (size_t j = 0u; j != image_count; ++j) {
       const ImageHeader& current_header = image_spaces[i + j]->GetImageHeader();
       CHECK_EQ(current_heap, image_spaces[i + j]->Begin());
       CHECK_EQ(current_oat, current_header.GetOatFileBegin());
@@ -206,7 +203,7 @@ static void VerifyBootImagesContiguity(const std::vector<gc::space::ImageSpace*>
     CHECK_EQ(reservation_size, static_cast<size_t>(current_oat - image_spaces[i]->Begin()));
 
     boot_image_size += reservation_size;
-    i += component_count;
+    i += image_count;
   }
 }
 
@@ -281,6 +278,10 @@ Heap::Heap(size_t initial_size,
       capacity_(capacity),
       growth_limit_(growth_limit),
       target_footprint_(initial_size),
+      // Using kPostMonitorLock as a lock at kDefaultMutexLevel is acquired after
+      // this one.
+      process_state_update_lock_("process state update lock", kPostMonitorLock),
+      min_foreground_target_footprint_(0),
       concurrent_start_bytes_(std::numeric_limits<size_t>::max()),
       total_bytes_freed_ever_(0),
       total_objects_freed_ever_(0),
@@ -975,12 +976,24 @@ void Heap::ThreadFlipEnd(Thread* self) {
   thread_flip_cond_->Broadcast(self);
 }
 
+void Heap::GrowHeapOnJankPerceptibleSwitch() {
+  MutexLock mu(Thread::Current(), process_state_update_lock_);
+  size_t orig_target_footprint = target_footprint_.load(std::memory_order_relaxed);
+  if (orig_target_footprint < min_foreground_target_footprint_) {
+    target_footprint_.compare_exchange_strong(orig_target_footprint,
+                                              min_foreground_target_footprint_,
+                                              std::memory_order_relaxed);
+  }
+  min_foreground_target_footprint_ = 0;
+}
+
 void Heap::UpdateProcessState(ProcessState old_process_state, ProcessState new_process_state) {
   if (old_process_state != new_process_state) {
     const bool jank_perceptible = new_process_state == kProcessStateJankPerceptible;
     if (jank_perceptible) {
       // Transition back to foreground right away to prevent jank.
       RequestCollectorTransition(foreground_collector_type_, 0);
+      GrowHeapOnJankPerceptibleSwitch();
     } else {
       // Don't delay for debug builds since we may want to stress test the GC.
       // If background_collector_type_ is kCollectorTypeHomogeneousSpaceCompact then we have
@@ -1205,8 +1218,8 @@ void Heap::ResetGcPerformanceInfo() {
   post_gc_last_process_cpu_time_ns_ = process_cpu_start_time_ns_;
   post_gc_weighted_allocated_bytes_ = 0u;
 
-  total_bytes_freed_ever_ = 0;
-  total_objects_freed_ever_ = 0;
+  total_bytes_freed_ever_.store(0);
+  total_objects_freed_ever_.store(0);
   total_wait_time_ = 0;
   blocking_gc_count_ = 0;
   blocking_gc_time_ = 0;
@@ -1728,11 +1741,31 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // Make sure there is no pending exception since we may need to throw an OOME.
   self->AssertNoPendingException();
   DCHECK(klass != nullptr);
+
   StackHandleScope<1> hs(self);
-  HandleWrapperObjPtr<mirror::Class> h(hs.NewHandleWrapper(klass));
+  HandleWrapperObjPtr<mirror::Class> h_klass(hs.NewHandleWrapper(klass));
+
+  auto send_object_pre_alloc =
+      [&]() REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_) {
+        if (UNLIKELY(instrumented)) {
+          AllocationListener* l = alloc_listener_.load(std::memory_order_seq_cst);
+          if (UNLIKELY(l != nullptr) && UNLIKELY(l->HasPreAlloc())) {
+            l->PreObjectAllocated(self, h_klass, &alloc_size);
+          }
+        }
+      };
+#define PERFORM_SUSPENDING_OPERATION(op)                                          \
+  [&]() REQUIRES(Roles::uninterruptible_) REQUIRES_SHARED(Locks::mutator_lock_) { \
+    ScopedAllowThreadSuspension ats;                                              \
+    auto res = (op);                                                              \
+    send_object_pre_alloc();                                                      \
+    return res;                                                                   \
+  }()
+
   // The allocation failed. If the GC is running, block until it completes, and then retry the
   // allocation.
-  collector::GcType last_gc = WaitForGcToComplete(kGcCauseForAlloc, self);
+  collector::GcType last_gc =
+      PERFORM_SUSPENDING_OPERATION(WaitForGcToComplete(kGcCauseForAlloc, self));
   // If we were the default allocator but the allocator changed while we were suspended,
   // abort the allocation.
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
@@ -1749,8 +1782,9 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   }
 
   collector::GcType tried_type = next_gc_type_;
-  const bool gc_ran =
-      CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone;
+  const bool gc_ran = PERFORM_SUSPENDING_OPERATION(
+      CollectGarbageInternal(tried_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
+
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
@@ -1769,8 +1803,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
       continue;
     }
     // Attempt to run the collector, if we succeed, re-try the allocation.
-    const bool plan_gc_ran =
-        CollectGarbageInternal(gc_type, kGcCauseForAlloc, false) != collector::kGcTypeNone;
+    const bool plan_gc_ran = PERFORM_SUSPENDING_OPERATION(
+        CollectGarbageInternal(gc_type, kGcCauseForAlloc, false) != collector::kGcTypeNone);
     if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
         (!instrumented && EntrypointsInstrumented())) {
       return nullptr;
@@ -1800,7 +1834,7 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
   // TODO: Run finalization, but this may cause more allocations to occur.
   // We don't need a WaitForGcToComplete here either.
   DCHECK(!gc_plan_.empty());
-  CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true);
+  PERFORM_SUSPENDING_OPERATION(CollectGarbageInternal(gc_plan_.back(), kGcCauseForAlloc, true));
   if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
       (!instrumented && EntrypointsInstrumented())) {
     return nullptr;
@@ -1817,7 +1851,8 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
             current_time - last_time_homogeneous_space_compaction_by_oom_ >
             min_interval_homogeneous_space_compaction_by_oom_) {
           last_time_homogeneous_space_compaction_by_oom_ = current_time;
-          HomogeneousSpaceCompactResult result = PerformHomogeneousSpaceCompact();
+          HomogeneousSpaceCompactResult result =
+              PERFORM_SUSPENDING_OPERATION(PerformHomogeneousSpaceCompact());
           // Thread suspension could have occurred.
           if ((was_default_allocator && allocator != GetCurrentAllocator()) ||
               (!instrumented && EntrypointsInstrumented())) {
@@ -1862,8 +1897,10 @@ mirror::Object* Heap::AllocateInternalWithGc(Thread* self,
       }
     }
   }
+#undef PERFORM_SUSPENDING_OPERATION
   // If the allocation hasn't succeeded by this point, throw an OOM error.
   if (ptr == nullptr) {
+    ScopedAllowThreadSuspension ats;
     ThrowOutOfMemoryError(self, alloc_size, allocator);
   }
   return ptr;
@@ -1903,7 +1940,21 @@ uint64_t Heap::GetObjectsAllocatedEver() const {
 }
 
 uint64_t Heap::GetBytesAllocatedEver() const {
-  return GetBytesFreedEver() + GetBytesAllocated();
+  // Force the returned value to be monotonically increasing, in the sense that if this is called
+  // at A and B, such that A happens-before B, then the call at B returns a value no smaller than
+  // that at A. This is not otherwise guaranteed, since num_bytes_allocated_ is decremented first,
+  // and total_bytes_freed_ever_ is incremented later.
+  static std::atomic<uint64_t> max_bytes_so_far(0);
+  uint64_t so_far = max_bytes_so_far.load(std::memory_order_relaxed);
+  uint64_t current_bytes = GetBytesFreedEver(std::memory_order_acquire);
+  current_bytes += GetBytesAllocated();
+  do {
+    if (current_bytes <= so_far) {
+      return so_far;
+    }
+  } while (!max_bytes_so_far.compare_exchange_weak(so_far /* updated */,
+                                                   current_bytes, std::memory_order_relaxed));
+  return current_bytes;
 }
 
 // Check whether the given object is an instance of the given class.
@@ -2239,6 +2290,25 @@ void Heap::UnBindBitmaps() {
   }
 }
 
+void Heap::IncrementFreedEver() {
+  // Counters are updated only by us, but may be read concurrently.
+  // The updates should become visible after the corresponding live object info.
+  total_objects_freed_ever_.store(total_objects_freed_ever_.load(std::memory_order_relaxed)
+                                  + GetCurrentGcIteration()->GetFreedObjects()
+                                  + GetCurrentGcIteration()->GetFreedLargeObjects(),
+                                  std::memory_order_release);
+  total_bytes_freed_ever_.store(total_bytes_freed_ever_.load(std::memory_order_relaxed)
+                                + GetCurrentGcIteration()->GetFreedBytes()
+                                + GetCurrentGcIteration()->GetFreedLargeObjectBytes(),
+                                std::memory_order_release);
+}
+
+#pragma clang diagnostic push
+#if !ART_USE_FUTEXES
+// Frame gets too large, perhaps due to Bionic pthread_mutex_lock size. We don't care.
+#  pragma clang diagnostic ignored "-Wframe-larger-than="
+#endif
+// This has a large frame, but shouldn't be run anywhere near the stack limit.
 void Heap::PreZygoteFork() {
   if (!HasZygoteSpace()) {
     // We still want to GC in case there is some unreachable non moving objects that could cause a
@@ -2313,10 +2383,7 @@ void Heap::PreZygoteFork() {
     if (temp_space_ != nullptr) {
       CHECK(temp_space_->IsEmpty());
     }
-    total_objects_freed_ever_ += GetCurrentGcIteration()->GetFreedObjects() +
-        GetCurrentGcIteration()->GetFreedLargeObjects();
-    total_bytes_freed_ever_ += GetCurrentGcIteration()->GetFreedBytes() +
-        GetCurrentGcIteration()->GetFreedLargeObjectBytes();
+    IncrementFreedEver();
     // Update the end and write out image.
     non_moving_space_->SetEnd(target_space.End());
     non_moving_space_->SetLimit(target_space.Limit());
@@ -2402,6 +2469,7 @@ void Heap::PreZygoteFork() {
     AddRememberedSet(post_zygote_non_moving_space_rem_set);
   }
 }
+#pragma clang diagnostic pop
 
 void Heap::FlushAllocStack() {
   MarkAllocStackAsLive(allocation_stack_.get());
@@ -2456,10 +2524,16 @@ void Heap::TraceHeapSize(size_t heap_size) {
   ATraceIntegerValue("Heap size (KB)", heap_size / KB);
 }
 
+#if defined(__GLIBC__)
+# define IF_GLIBC(x) x
+#else
+# define IF_GLIBC(x)
+#endif
+
 size_t Heap::GetNativeBytes() {
   size_t malloc_bytes;
 #if defined(__BIONIC__) || defined(__GLIBC__)
-  size_t mmapped_bytes;
+  IF_GLIBC(size_t mmapped_bytes;)
   struct mallinfo mi = mallinfo();
   // In spite of the documentation, the jemalloc version of this call seems to do what we want,
   // and it is thread-safe.
@@ -2467,17 +2541,24 @@ size_t Heap::GetNativeBytes() {
     // Shouldn't happen, but glibc declares uordblks as int.
     // Avoiding sign extension gets us correct behavior for another 2 GB.
     malloc_bytes = (unsigned int)mi.uordblks;
-    mmapped_bytes = (unsigned int)mi.hblkhd;
+    IF_GLIBC(mmapped_bytes = (unsigned int)mi.hblkhd;)
   } else {
     malloc_bytes = mi.uordblks;
-    mmapped_bytes = mi.hblkhd;
+    IF_GLIBC(mmapped_bytes = mi.hblkhd;)
   }
-  // From the spec, we clearly have mmapped_bytes <= malloc_bytes. Reality is sometimes
-  // dramatically different. (b/119580449) If so, fudge it.
+  // From the spec, it appeared mmapped_bytes <= malloc_bytes. Reality was sometimes
+  // dramatically different. (b/119580449 was an early bug.) If so, we try to fudge it.
+  // However, malloc implementations seem to interpret hblkhd differently, namely as
+  // mapped blocks backing the entire heap (e.g. jemalloc) vs. large objects directly
+  // allocated via mmap (e.g. glibc). Thus we now only do this for glibc, where it
+  // previously helped, and which appears to use a reading of the spec compatible
+  // with our adjustment.
+#if defined(__GLIBC__)
   if (mmapped_bytes > malloc_bytes) {
     malloc_bytes = mmapped_bytes;
   }
-#else
+#endif  // GLIBC
+#else  // Neither Bionic nor Glibc
   // We should hit this case only in contexts in which GC triggering is not critical. Effectively
   // disable GC triggering based on malloc().
   malloc_bytes = 1000;
@@ -2588,10 +2669,7 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
       << "Could not find garbage collector with collector_type="
       << static_cast<size_t>(collector_type_) << " and gc_type=" << gc_type;
   collector->Run(gc_cause, clear_soft_references || runtime->IsZygote());
-  total_objects_freed_ever_ += GetCurrentGcIteration()->GetFreedObjects() +
-      GetCurrentGcIteration()->GetFreedLargeObjects();
-  total_bytes_freed_ever_ += GetCurrentGcIteration()->GetFreedBytes() +
-      GetCurrentGcIteration()->GetFreedLargeObjectBytes();
+  IncrementFreedEver();
   RequestTrim(self);
   // Collect cleared references.
   SelfDeletingTask* clear = reference_processor_->CollectClearedReferences(self);
@@ -3440,23 +3518,19 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
   const size_t bytes_allocated = GetBytesAllocated();
   // Trace the new heap size after the GC is finished.
   TraceHeapSize(bytes_allocated);
-  uint64_t target_size;
+  uint64_t target_size, grow_bytes;
   collector::GcType gc_type = collector_ran->GetGcType();
+  MutexLock mu(Thread::Current(), process_state_update_lock_);
   // Use the multiplier to grow more for foreground.
-  const double multiplier = HeapGrowthMultiplier();  // Use the multiplier to grow more for
-  // foreground.
-  const size_t adjusted_min_free = static_cast<size_t>(min_free_ * multiplier);
-  const size_t adjusted_max_free = static_cast<size_t>(max_free_ * multiplier);
+  const double multiplier = HeapGrowthMultiplier();
   if (gc_type != collector::kGcTypeSticky) {
     // Grow the heap for non sticky GC.
     uint64_t delta = bytes_allocated * (1.0 / GetTargetHeapUtilization() - 1.0);
     DCHECK_LE(delta, std::numeric_limits<size_t>::max()) << "bytes_allocated=" << bytes_allocated
         << " target_utilization_=" << target_utilization_;
-    target_size = bytes_allocated + delta * multiplier;
-    target_size = std::min(target_size,
-                           static_cast<uint64_t>(bytes_allocated + adjusted_max_free));
-    target_size = std::max(target_size,
-                           static_cast<uint64_t>(bytes_allocated + adjusted_min_free));
+    grow_bytes = std::min(delta, static_cast<uint64_t>(max_free_));
+    grow_bytes = std::max(grow_bytes, static_cast<uint64_t>(min_free_));
+    target_size = bytes_allocated + static_cast<uint64_t>(grow_bytes * multiplier);
     next_gc_type_ = collector::kGcTypeSticky;
   } else {
     collector::GcType non_sticky_gc_type = NonStickyGcType();
@@ -3486,15 +3560,28 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
       next_gc_type_ = non_sticky_gc_type;
     }
     // If we have freed enough memory, shrink the heap back down.
+    const size_t adjusted_max_free = static_cast<size_t>(max_free_ * multiplier);
     if (bytes_allocated + adjusted_max_free < target_footprint) {
       target_size = bytes_allocated + adjusted_max_free;
+      grow_bytes = max_free_;
     } else {
       target_size = std::max(bytes_allocated, target_footprint);
+      // The same whether jank perceptible or not; just avoid the adjustment.
+      grow_bytes = 0;
     }
   }
   CHECK_LE(target_size, std::numeric_limits<size_t>::max());
   if (!ignore_target_footprint_) {
     SetIdealFootprint(target_size);
+    // Store target size (computed with foreground heap growth multiplier) for updating
+    // target_footprint_ when process state switches to foreground.
+    // target_size = 0 ensures that target_footprint_ is not updated on
+    // process-state switch.
+    min_foreground_target_footprint_ =
+        (multiplier <= 1.0 && grow_bytes > 0)
+        ? bytes_allocated + static_cast<size_t>(grow_bytes * foreground_heap_growth_multiplier_)
+        : 0;
+
     if (IsGcConcurrent()) {
       const uint64_t freed_bytes = current_gc_iteration_.GetFreedBytes() +
           current_gc_iteration_.GetFreedLargeObjectBytes() +
@@ -3868,6 +3955,8 @@ void Heap::NotifyNativeAllocations(JNIEnv* env) {
 // This should only be done for large allocations of non-malloc memory, which we wouldn't
 // otherwise see.
 void Heap::RegisterNativeAllocation(JNIEnv* env, size_t bytes) {
+  // Cautiously check for a wrapped negative bytes argument.
+  DCHECK(sizeof(size_t) < 8 || bytes < (std::numeric_limits<size_t>::max() / 2));
   native_bytes_registered_.fetch_add(bytes, std::memory_order_relaxed);
   uint32_t objects_notified =
       native_objects_notified_.fetch_add(1, std::memory_order_relaxed);
@@ -4006,10 +4095,10 @@ void Heap::CheckGcStressMode(Thread* self, ObjPtr<mirror::Object>* obj) {
     bool new_backtrace = false;
     {
       static constexpr size_t kMaxFrames = 16u;
+      MutexLock mu(self, *backtrace_lock_);
       FixedSizeBacktrace<kMaxFrames> backtrace;
       backtrace.Collect(/* skip_count= */ 2);
       uint64_t hash = backtrace.Hash();
-      MutexLock mu(self, *backtrace_lock_);
       new_backtrace = seen_backtraces_.find(hash) == seen_backtraces_.end();
       if (new_backtrace) {
         seen_backtraces_.insert(hash);
@@ -4122,14 +4211,13 @@ mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
             ? std::max(alloc_size, kPartialTlabSize)
             : gc::space::RegionSpace::kRegionSize;
         // Try to allocate a tlab.
-        if (!region_space_->AllocNewTlab(self, new_tlab_size)) {
+        if (!region_space_->AllocNewTlab(self, new_tlab_size, bytes_tl_bulk_allocated)) {
           // Failed to allocate a tlab. Try non-tlab.
           return region_space_->AllocNonvirtual<false>(alloc_size,
                                                        bytes_allocated,
                                                        usable_size,
                                                        bytes_tl_bulk_allocated);
         }
-        *bytes_tl_bulk_allocated = new_tlab_size;
         // Fall-through to using the TLAB below.
       } else {
         // Check OOME for a non-tlab allocation.
@@ -4218,6 +4306,15 @@ void Heap::VisitReflectiveTargets(ReflectiveValueVisitor *visit) {
       down_cast<mirror::DexCache*>(ref)->VisitReflectiveTargets(visit);
     }
   });
+}
+
+bool Heap::AddHeapTask(gc::HeapTask* task) {
+  Thread* const self = Thread::Current();
+  if (!CanAddHeapTask(self)) {
+    return false;
+  }
+  GetTaskProcessor()->AddTask(self, task);
+  return true;
 }
 
 }  // namespace gc

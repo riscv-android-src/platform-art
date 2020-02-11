@@ -17,8 +17,10 @@
 #include <gtest/gtest.h>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "base/stl_util.h"
+#include "class_linker.h"
 #include "dexopt_test.h"
 #include "noop_compiler_callbacks.h"
 
@@ -49,10 +51,22 @@ TEST_F(DexoptTest, ValidateOatFile) {
                                              oat_location.c_str(),
                                              /*executable=*/ false,
                                              /*low_4gb=*/ false,
-                                             /*abs_dex_location=*/ nullptr,
-                                             /*reservation=*/ nullptr,
                                              &error_msg));
   ASSERT_TRUE(oat != nullptr) << error_msg;
+
+  {
+    // Test opening the oat file also with explicit dex filenames.
+    std::vector<std::string> dex_filenames{ dex1, multidex1, dex2 };
+    std::unique_ptr<OatFile> oat2(OatFile::Open(/*zip_fd=*/ -1,
+                                                oat_location.c_str(),
+                                                oat_location.c_str(),
+                                                /*executable=*/ false,
+                                                /*low_4gb=*/ false,
+                                                ArrayRef<const std::string>(dex_filenames),
+                                                /*reservation=*/ nullptr,
+                                                &error_msg));
+    ASSERT_TRUE(oat2 != nullptr) << error_msg;
+  }
 
   // Originally all the dex checksums should be up to date.
   EXPECT_TRUE(ImageSpace::ValidateOatFile(*oat, &error_msg)) << error_msg;
@@ -110,14 +124,67 @@ TEST_F(DexoptTest, ValidateOatFile) {
   EXPECT_FALSE(ImageSpace::ValidateOatFile(*oat, &error_msg));
 }
 
+TEST_F(DexoptTest, Checksums) {
+  Runtime* runtime = Runtime::Current();
+  ASSERT_TRUE(runtime != nullptr);
+  ASSERT_FALSE(runtime->GetHeap()->GetBootImageSpaces().empty());
+
+  std::vector<std::string> bcp = runtime->GetBootClassPath();
+  std::vector<std::string> bcp_locations = runtime->GetBootClassPathLocations();
+  std::vector<const DexFile*> dex_files = runtime->GetClassLinker()->GetBootClassPath();
+
+  std::string error_msg;
+  auto create_and_verify = [&]() {
+    std::string checksums = gc::space::ImageSpace::GetBootClassPathChecksums(
+        ArrayRef<gc::space::ImageSpace* const>(runtime->GetHeap()->GetBootImageSpaces()),
+        ArrayRef<const DexFile* const>(dex_files));
+    return gc::space::ImageSpace::VerifyBootClassPathChecksums(
+        checksums,
+        android::base::Join(bcp_locations, ':'),
+        runtime->GetImageLocation(),
+        ArrayRef<const std::string>(bcp_locations),
+        ArrayRef<const std::string>(bcp),
+        kRuntimeISA,
+        gc::space::ImageSpaceLoadingOrder::kSystemFirst,
+        &error_msg);
+  };
+
+  ASSERT_TRUE(create_and_verify()) << error_msg;
+
+  std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
+  for (const std::string& src : { GetDexSrc1(), GetDexSrc2() }) {
+    std::vector<std::unique_ptr<const DexFile>> new_dex_files;
+    const ArtDexFileLoader dex_file_loader;
+    ASSERT_TRUE(dex_file_loader.Open(src.c_str(),
+                                     src,
+                                     /*verify=*/ true,
+                                     /*verify_checksum=*/ false,
+                                     &error_msg,
+                                     &new_dex_files))
+        << error_msg;
+
+    bcp.push_back(src);
+    bcp_locations.push_back(src);
+    for (std::unique_ptr<const DexFile>& df : new_dex_files) {
+      dex_files.push_back(df.get());
+      opened_dex_files.push_back(std::move(df));
+    }
+
+    ASSERT_TRUE(create_and_verify()) << error_msg;
+  }
+}
+
 template <bool kImage, bool kRelocate, bool kImageDex2oat>
 class ImageSpaceLoadingTest : public CommonRuntimeTest {
  protected:
   void SetUpRuntimeOptions(RuntimeOptions* options) override {
-    if (kImage) {
-      options->emplace_back(android::base::StringPrintf("-Ximage:%s", GetCoreArtLocation().c_str()),
-                            nullptr);
+    std::string image_location = GetCoreArtLocation();
+    if (!kImage) {
+      missing_image_base_ = std::make_unique<ScratchFile>();
+      image_location = missing_image_base_->GetFilename() + ".art";
     }
+    options->emplace_back(android::base::StringPrintf("-Ximage:%s", image_location.c_str()),
+                          nullptr);
     options->emplace_back(kRelocate ? "-Xrelocate" : "-Xnorelocate", nullptr);
     options->emplace_back(kImageDex2oat ? "-Ximage-dex2oat" : "-Xnoimage-dex2oat", nullptr);
 
@@ -142,9 +209,11 @@ class ImageSpaceLoadingTest : public CommonRuntimeTest {
       CHECK_EQ(result, 0);
       old_dex2oat_bcp_.reset();
     }
+    missing_image_base_.reset();
   }
 
  private:
+  std::unique_ptr<ScratchFile> missing_image_base_;
   UniqueCPtr<const char[]> old_dex2oat_bcp_;
 };
 
@@ -186,13 +255,13 @@ class NoAccessAndroidDataTest : public ImageSpaceLoadingTest<false, true, true> 
   }
 
   void TearDown() override {
+    ImageSpaceLoadingTest<false, true, true>::TearDown();
     int result = unlink(bad_dalvik_cache_.c_str());
     CHECK_EQ(result, 0) << strerror(errno);
     result = rmdir(bad_android_data_.c_str());
     CHECK_EQ(result, 0) << strerror(errno);
     result = setenv("ANDROID_DATA", old_android_data_.c_str(), /* replace */ 1);
     CHECK_EQ(result, 0) << strerror(errno);
-    ImageSpaceLoadingTest<false, true, true>::TearDown();
   }
 
  private:

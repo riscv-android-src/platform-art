@@ -105,6 +105,10 @@ class MANAGED Class final : public Object {
   static void SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
+  // Used for structural redefinition to directly set the class-status while
+  // holding a strong mutator-lock.
+  void SetStatusLocked(ClassStatus new_status) REQUIRES(Locks::mutator_lock_);
+
   void SetStatusForPrimitiveOrArray(ClassStatus new_status) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static constexpr MemberOffset StatusOffset() {
@@ -190,6 +194,9 @@ class MANAGED Class final : public Object {
     ClassStatus status = GetStatus<kVerifyFlags, /*kWithSynchronizationBarrier=*/ false>();
     return status == ClassStatus::kVisiblyInitialized;
   }
+
+  // Returns true if this class is ever accessed through a C++ mirror.
+  bool IsMirrored() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE uint32_t GetAccessFlags() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -491,8 +498,21 @@ class MANAGED Class final : public Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Enum used to control whether we try to add a finalizer-reference for object alloc or not.
+  enum class AddFinalizer {
+    // Don't create a finalizer reference regardless of what the class-flags say.
+    kNoAddFinalizer,
+    // Use the class-flags to figure out if we should make a finalizer reference.
+    kUseClassTag,
+  };
+
   // Creates a raw object instance but does not invoke the default constructor.
-  template<bool kIsInstrumented = true, bool kCheckAddFinalizer = true>
+  // kCheckAddFinalizer controls whether we use a DCHECK to sanity check that we create a
+  // finalizer-reference if needed. This should only be disabled when doing structural class
+  // redefinition.
+  template <bool kIsInstrumented = true,
+            AddFinalizer kAddFinalizer = AddFinalizer::kUseClassTag,
+            bool kCheckAddFinalizer = true>
   ALWAYS_INLINE ObjPtr<Object> Alloc(Thread* self, gc::AllocatorType allocator_type)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
@@ -613,6 +633,11 @@ class MANAGED Class final : public Object {
   // that extends) another can be assigned to its parent, but not vice-versa. All Classes may assign
   // to themselves. Classes for primitive types may not assign to each other.
   ALWAYS_INLINE bool IsAssignableFrom(ObjPtr<Class> src) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Checks if 'klass' is a redefined version of this.
+  bool IsObsoleteVersionOf(ObjPtr<Class> klass) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  ObjPtr<Class> GetObsoleteClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
@@ -789,6 +814,11 @@ class MANAGED Class final : public Object {
     return MemberOffset(
         RoundUp(EmbeddedVTableLengthOffset().Uint32Value() + sizeof(uint32_t),
                 static_cast<size_t>(pointer_size)));
+  }
+
+  static constexpr MemberOffset EmbeddedVTableOffset(PointerSize pointer_size) {
+    return MemberOffset(
+        ImtPtrOffset(pointer_size).Uint32Value() + static_cast<size_t>(pointer_size));
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -1134,6 +1164,16 @@ class MANAGED Class final : public Object {
   static ObjPtr<mirror::Class> GetPrimitiveClass(ObjPtr<mirror::String> name)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Clear the kAccMustCountLocks flag on each method, for class redefinition.
+  void ClearMustCountLocksFlagOnAllMethods(PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  // Clear the kAccCompileDontBother flag on each method, for class redefinition.
+  void ClearDontCompileFlagOnAllMethods(PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Clear the kAccSkipAccessChecks flag on each method, for class redefinition.
+  void ClearSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
   // When class is verified, set the kAccSkipAccessChecks flag on each method.
   void SetSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1264,15 +1304,15 @@ class MANAGED Class final : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Get or create the various jni id arrays in a lock-less thread safe manner.
-  static ObjPtr<PointerArray> GetOrCreateMethodIds(Handle<Class> h_this)
+  static bool EnsureMethodIds(Handle<Class> h_this)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetMethodIds() REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<PointerArray> GetOrCreateStaticFieldIds(Handle<Class> h_this)
+  ObjPtr<Object> GetMethodIds() REQUIRES_SHARED(Locks::mutator_lock_);
+  static bool EnsureStaticFieldIds(Handle<Class> h_this)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetStaticFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<PointerArray> GetOrCreateInstanceFieldIds(Handle<Class> h_this)
+  ObjPtr<Object> GetStaticFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
+  static bool EnsureInstanceFieldIds(Handle<Class> h_this)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetInstanceFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Object> GetInstanceFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Calculate the index in the ifields_, methods_ or sfields_ arrays a method is located at. This
   // is to be used with the above Get{,OrCreate}...Ids functions.
@@ -1344,7 +1384,6 @@ class MANAGED Class final : public Object {
   // Check that the pointer size matches the one in the class linker.
   ALWAYS_INLINE static void CheckPointerSize(PointerSize pointer_size);
 
-  static MemberOffset EmbeddedVTableOffset(PointerSize pointer_size);
   template <bool kVisitNativeRoots,
             VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
             ReadBarrierOption kReadBarrierOption = kWithReadBarrier,

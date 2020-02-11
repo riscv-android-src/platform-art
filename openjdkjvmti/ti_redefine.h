@@ -41,6 +41,7 @@
 #include "art_jvmti.h"
 #include "base/array_ref.h"
 #include "base/globals.h"
+#include "dex/class_accessor.h"
 #include "dex/dex_file.h"
 #include "dex/dex_file_structs.h"
 #include "jni/jni_env_ext-inl.h"
@@ -51,6 +52,7 @@
 #include "obj_ptr.h"
 
 namespace art {
+class ClassAccessor;
 namespace dex {
 struct ClassDef;
 }  // namespace dex
@@ -87,6 +89,9 @@ class Redefiner {
   static jvmtiError RedefineClasses(jvmtiEnv* env,
                                     jint class_count,
                                     const jvmtiClassDefinition* definitions);
+  static jvmtiError StructurallyRedefineClasses(jvmtiEnv* env,
+                                                jint class_count,
+                                                const jvmtiClassDefinition* definitions);
 
   static jvmtiError IsModifiableClass(jvmtiEnv* env, jclass klass, jboolean* is_redefinable);
   static jvmtiError IsStructurallyModifiableClass(jvmtiEnv* env,
@@ -120,6 +125,17 @@ class Redefiner {
     // NO_THREAD_SAFETY_ANALYSIS so we can unlock the class in the destructor.
     ~ClassRedefinition() NO_THREAD_SAFETY_ANALYSIS;
 
+    // Move assignment so we can sort these in a vector.
+    ClassRedefinition& operator=(ClassRedefinition&& other) {
+      driver_ = other.driver_;
+      klass_ = other.klass_;
+      dex_file_ = std::move(other.dex_file_);
+      class_sig_ = std::move(other.class_sig_);
+      original_dex_file_ = other.original_dex_file_;
+      other.driver_ = nullptr;
+      return *this;
+    }
+
     // Move constructor so we can put these into a vector.
     ClassRedefinition(ClassRedefinition&& other)
         : driver_(other.driver_),
@@ -129,6 +145,10 @@ class Redefiner {
           original_dex_file_(other.original_dex_file_) {
       other.driver_ = nullptr;
     }
+
+    // No copy!
+    ClassRedefinition(ClassRedefinition&) = delete;
+    ClassRedefinition& operator=(ClassRedefinition&) = delete;
 
     art::ObjPtr<art::mirror::Class> GetMirrorClass() REQUIRES_SHARED(art::Locks::mutator_lock_);
     art::ObjPtr<art::mirror::ClassLoader> GetClassLoader()
@@ -149,7 +169,13 @@ class Redefiner {
       driver_->RecordFailure(e, class_sig_, err);
     }
 
-    bool FinishRemainingAllocations(/*out*/RedefinitionDataIter* cur_data)
+    bool FinishRemainingCommonAllocations(/*out*/RedefinitionDataIter* cur_data)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
+
+    bool FinishNewClassAllocations(RedefinitionDataHolder& holder,
+                                   /*out*/RedefinitionDataIter* cur_data)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
+    bool CollectAndCreateNewInstances(/*out*/RedefinitionDataIter* cur_data)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     bool AllocateAndRememberNewDexFileCookie(
@@ -161,10 +187,15 @@ class Redefiner {
     void FindAndAllocateObsoleteMethods(art::ObjPtr<art::mirror::Class> art_klass)
         REQUIRES(art::Locks::mutator_lock_);
 
+    art::ObjPtr<art::mirror::Class> AllocateNewClassObject(
+        art::Handle<art::mirror::Class> old_class,
+        art::Handle<art::mirror::Class> super_class,
+        art::Handle<art::mirror::DexCache> cache,
+        uint16_t dex_class_def_index) REQUIRES_SHARED(art::Locks::mutator_lock_);
     art::ObjPtr<art::mirror::Class> AllocateNewClassObject(art::Handle<art::mirror::DexCache> cache)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    uint32_t GetNewClassSize(bool with_embedded_tables, art::Handle<art::mirror::Class> old_class)
+    uint32_t GetNewClassSize(art::ClassAccessor& accessor)
         REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     // Checks that the dex file contains only the single expected class and that the top-level class
@@ -209,6 +240,12 @@ class Redefiner {
     void UpdateClass(const RedefinitionDataIter& cur_data)
         REQUIRES(art::Locks::mutator_lock_);
 
+    void UpdateClassCommon(const RedefinitionDataIter& cur_data)
+        REQUIRES(art::Locks::mutator_lock_);
+
+    void ReverifyClass(const RedefinitionDataIter& cur_data)
+        REQUIRES_SHARED(art::Locks::mutator_lock_);
+
     void CollectNewFieldAndMethodMappings(const RedefinitionDataIter& data,
                                           std::map<art::ArtMethod*, art::ArtMethod*>* method_map,
                                           std::map<art::ArtField*, art::ArtField*>* field_map)
@@ -219,14 +256,19 @@ class Redefiner {
 
     void ReleaseDexFile() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
-    void UnregisterBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
     // This should be done with all threads suspended.
     void UnregisterJvmtiBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
 
     void RecordNewMethodAdded();
     void RecordNewFieldAdded();
+    void RecordHasVirtualMembers() {
+      has_virtuals_ = true;
+    }
 
-   private:
+    bool HasVirtualMembers() const {
+      return has_virtuals_;
+    }
+
     bool IsStructuralRedefinition() const {
       DCHECK(!(added_fields_ || added_methods_) || driver_->IsStructuralRedefinition())
           << "added_fields_: " << added_fields_ << " added_methods_: " << added_methods_
@@ -234,6 +276,7 @@ class Redefiner {
       return driver_->IsStructuralRedefinition() && (added_fields_ || added_methods_);
     }
 
+   private:
     void UpdateClassStructurally(const RedefinitionDataIter& cur_data)
         REQUIRES(art::Locks::mutator_lock_);
 
@@ -248,6 +291,11 @@ class Redefiner {
 
     bool added_fields_ = false;
     bool added_methods_ = false;
+    bool has_virtuals_ = false;
+
+    // Does the class need to be reverified due to verification soft-fails possibly forcing
+    // interpreter or lock-counting?
+    bool needs_reverify_ = false;
   };
 
   ArtJvmTiEnv* env_;
@@ -277,6 +325,11 @@ class Redefiner {
       REQUIRES_SHARED(art::Locks::mutator_lock_);
 
   template<RedefinitionType kType = RedefinitionType::kNormal>
+  static jvmtiError RedefineClassesGeneric(jvmtiEnv* env,
+                                           jint class_count,
+                                           const jvmtiClassDefinition* definitions);
+
+  template<RedefinitionType kType = RedefinitionType::kNormal>
   static jvmtiError IsModifiableClassGeneric(jvmtiEnv* env, jclass klass, jboolean* is_redefinable);
 
   template<RedefinitionType kType = RedefinitionType::kNormal>
@@ -289,11 +342,18 @@ class Redefiner {
   bool CheckAllRedefinitionAreValid() REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool CheckAllClassesAreVerified(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
+  void MarkStructuralChanges(RedefinitionDataHolder& holder)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
   bool EnsureAllClassAllocationsFinished(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
-  bool FinishAllRemainingAllocations(RedefinitionDataHolder& holder)
+  bool FinishAllRemainingCommonAllocations(RedefinitionDataHolder& holder)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+  bool FinishAllNewClassAllocations(RedefinitionDataHolder& holder)
+      REQUIRES_SHARED(art::Locks::mutator_lock_);
+  bool CollectAndCreateNewInstances(RedefinitionDataHolder& holder)
       REQUIRES_SHARED(art::Locks::mutator_lock_);
   void ReleaseAllDexFiles() REQUIRES_SHARED(art::Locks::mutator_lock_);
+  void ReverifyClasses(RedefinitionDataHolder& holder) REQUIRES_SHARED(art::Locks::mutator_lock_);
   void UnregisterAllBreakpoints() REQUIRES_SHARED(art::Locks::mutator_lock_);
   // Restores the old obsolete methods maps if it turns out they weren't needed (ie there were no
   // new obsolete methods).

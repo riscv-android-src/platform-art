@@ -35,7 +35,6 @@
 #include "dex/type_reference.h"
 #include "linker/relative_patcher.h"  // For RelativePatcherTargetProvider.
 #include "mirror/class.h"
-#include "oat.h"
 
 namespace art {
 
@@ -44,6 +43,7 @@ class CompiledMethod;
 class CompilerDriver;
 class CompilerOptions;
 class DexContainer;
+class OatHeader;
 class OutputStream;
 class ProfileCompilationInfo;
 class TimingLogger;
@@ -177,13 +177,14 @@ class OatWriter {
                             CopyOption copy_dex_files,
                             /*out*/ std::vector<MemMap>* opened_dex_files_map,
                             /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files);
-  // Initialize the writer with the given parameters and start writing .rodata.
-  // Supporting data structures for dex files are written into the .rodata section of the oat file.
-  bool StartRoData(const CompilerDriver* compiler_driver,
-                   ImageWriter* image_writer,
-                   const std::vector<const DexFile*>& dex_files,
+  // Start writing .rodata, including supporting data structures for dex files.
+  bool StartRoData(const std::vector<const DexFile*>& dex_files,
                    OutputStream* oat_rodata,
                    SafeMap<std::string, std::string>* key_value_store);
+  // Initialize the writer with the given parameters.
+  void Initialize(const CompilerDriver* compiler_driver,
+                  ImageWriter* image_writer,
+                  const std::vector<const DexFile*>& dex_files);
   bool WriteQuickeningInfo(OutputStream* vdex_out);
   bool WriteVerifierDeps(OutputStream* vdex_out, verifier::VerifierDeps* verifier_deps);
   bool WriteChecksumsAndVdexHeader(OutputStream* vdex_out);
@@ -356,6 +357,7 @@ class OatWriter {
   enum class WriteState {
     kAddingDexFileSources,
     kStartRoData,
+    kInitialize,
     kPrepareLayout,
     kWriteRoData,
     kWriteText,
@@ -472,7 +474,7 @@ class OatWriter {
   dchecked_vector<OatDexFile> oat_dex_files_;
   dchecked_vector<OatClassHeader> oat_class_headers_;
   dchecked_vector<OatClass> oat_classes_;
-  std::unique_ptr<const std::vector<uint8_t>> jni_dlsym_lookup_;
+  std::unique_ptr<const std::vector<uint8_t>> jni_dlsym_lookup_trampoline_;
   std::unique_ptr<const std::vector<uint8_t>> quick_generic_jni_trampoline_;
   std::unique_ptr<const std::vector<uint8_t>> quick_imt_conflict_trampoline_;
   std::unique_ptr<const std::vector<uint8_t>> quick_resolution_trampoline_;
@@ -492,7 +494,7 @@ class OatWriter {
   uint32_t size_quickening_info_alignment_;
   uint32_t size_interpreter_to_interpreter_bridge_;
   uint32_t size_interpreter_to_compiled_code_bridge_;
-  uint32_t size_jni_dlsym_lookup_;
+  uint32_t size_jni_dlsym_lookup_trampoline_;
   uint32_t size_quick_generic_jni_trampoline_;
   uint32_t size_quick_imt_conflict_trampoline_;
   uint32_t size_quick_resolution_trampoline_;

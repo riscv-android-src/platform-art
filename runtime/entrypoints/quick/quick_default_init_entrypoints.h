@@ -124,6 +124,10 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
 
   // StringBuilder append
   qpoints->pStringBuilderAppend = art_quick_string_builder_append;
+
+  // Tiered JIT support
+  qpoints->pUpdateInlineCache = art_quick_update_inline_cache;
+  qpoints->pCompileOptimized = art_quick_compile_optimized;
 }
 
 }  // namespace art

@@ -632,17 +632,7 @@ ENTRY art_quick_osr_stub
     ldr    r10, [sp, #8]                   @ Restore JValue* result
     ldr    sp, [sp, #4]                    @ Restore saved stack pointer
     .cfi_def_cfa sp, SAVE_SIZE             @ CFA = sp + SAVE_SIZE
-    ldr    r4, [sp, #SAVE_SIZE]            @ load shorty
-    ldrb   r4, [r4, #0]                    @ load return type
-    cmp    r4, #68                         @ Test if result type char == 'D'.
-    beq    .Losr_fp_result
-    cmp    r4, #70                         @ Test if result type char == 'F'.
-    beq    .Losr_fp_result
     strd r0, [r10]                         @ Store r0/r1 into result pointer
-    b    .Losr_exit
-.Losr_fp_result:
-    vstr d0, [r10]                         @ Store s0-s1/d0 into result pointer
-.Losr_exit:
     vpop   {s16-s31}
     .cfi_adjust_cfa_offset -64
     pop    {r4, r5, r6, r7, r8, r9, r10, r11, pc}
@@ -1730,7 +1720,7 @@ ENTRY art_quick_generic_jni_trampoline
     // r0: pointer to native code, 0 on error.
     // r1: pointer to the bottom of the used area of the alloca, can restore stack till there.
 
-    // Check for error = 0.
+    // Check for error (locking can throw for synchronized native method).
     cbz r0, .Lexception_in_native
 
     // Release part of the alloca.
@@ -2742,3 +2732,84 @@ ENTRY ExecuteSwitchImplAsm
     blx r1                                        // Call the wrapped method.
     pop {r4, pc}
 END ExecuteSwitchImplAsm
+
+// r0 contains the class, r4 contains the inline cache. We can use ip as temporary.
+ENTRY art_quick_update_inline_cache
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
+    // Don't update the cache if we are marking.
+    cmp rMR, #0
+    bne .Ldone
+#endif
+.Lentry1:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry2
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, #0
+    bne .Lentry1
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry1
+.Lentry2:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry3
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, #0
+    bne .Lentry2
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+4]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry2
+.Lentry3:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry4
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, #0
+    bne .Lentry3
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+8]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry3
+.Lentry4:
+    ldr ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, r0
+    beq .Ldone
+    cmp ip, #0
+    bne .Lentry5
+    ldrex ip, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, #0
+    bne .Lentry4
+    strex  ip, r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+12]
+    cmp ip, #0
+    bne .Ldone
+    b .Lentry4
+.Lentry5:
+    // Unconditionally store, the inline cache is megamorphic.
+    str  r0, [r4, #INLINE_CACHE_CLASSES_OFFSET+16]
+.Ldone:
+    blx lr
+END art_quick_update_inline_cache
+
+// On entry, method is at the bottom of the stack.
+ENTRY art_quick_compile_optimized
+    SETUP_SAVE_EVERYTHING_FRAME r0
+    ldr r0, [sp, FRAME_SIZE_SAVE_EVERYTHING] @ pass ArtMethod
+    mov r1, rSELF                            @ pass Thread::Current
+    bl     artCompileOptimized               @ (ArtMethod*, Thread*)
+    RESTORE_SAVE_EVERYTHING_FRAME
+    // We don't need to restore the marking register here, as
+    // artCompileOptimized doesn't allow thread suspension.
+    blx lr
+END art_quick_compile_optimized

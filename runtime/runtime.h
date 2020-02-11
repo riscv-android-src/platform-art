@@ -30,6 +30,7 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
+#include "base/string_view_cpp20.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
@@ -86,6 +87,7 @@ class ArtMethod;
 enum class CalleeSaveType: uint32_t;
 class ClassLinker;
 class CompilerCallbacks;
+class Dex2oatImageTest;
 class DexFile;
 enum class InstructionSet;
 class InternTable;
@@ -210,10 +212,6 @@ class Runtime {
 
   const std::string& GetImageLocation() const {
     return image_location_;
-  }
-
-  bool IsUsingApexBootImageLocation() const {
-    return is_using_apex_boot_image_location_;
   }
 
   // Starts a runtime, which may cause threads to be started and code to run.
@@ -435,7 +433,7 @@ class Runtime {
     imt_conflict_method_ = nullptr;
   }
 
-  void FixupConflictTables();
+  void FixupConflictTables() REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtConflictMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
   void SetImtUnimplementedMethod(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -511,6 +509,7 @@ class Runtime {
   void InitNonZygoteOrPostFork(
       JNIEnv* env,
       bool is_system_server,
+      bool is_child_zygote,
       NativeBridgeAction action,
       const char* isa,
       bool profile_system_server = false);
@@ -601,6 +600,14 @@ class Runtime {
     return core_platform_api_policy_;
   }
 
+  void SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    test_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetTestApiEnforcementPolicy() const {
+    return test_api_policy_;
+  }
+
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
     hidden_api_exemptions_ = exemptions;
   }
@@ -667,6 +674,19 @@ class Runtime {
 
   uint32_t GetTargetSdkVersion() const {
     return target_sdk_version_;
+  }
+
+  void SetDisabledCompatChanges(const std::set<uint64_t>& disabled_changes) {
+    disabled_compat_changes_ = disabled_changes;
+  }
+
+  std::set<uint64_t> GetDisabledCompatChanges() const {
+    return disabled_compat_changes_;
+  }
+
+  bool isChangeEnabled(uint64_t change_id) const {
+    // TODO(145743810): add an up call to java to log to statsd
+    return disabled_compat_changes_.count(change_id) == 0;
   }
 
   uint32_t GetZygoteMaxFailedBoots() const {
@@ -766,6 +786,20 @@ class Runtime {
   // For testing purpose only.
   // TODO: Remove this when this is no longer needed (b/116087961).
   GcRoot<mirror::Object> GetSentinel() REQUIRES_SHARED(Locks::mutator_lock_);
+
+
+  // Use a sentinel for marking entries in a table that have been cleared.
+  // This helps diagnosing in case code tries to wrongly access such
+  // entries.
+  static mirror::Class* GetWeakClassSentinel() {
+    return reinterpret_cast<mirror::Class*>(0xebadbeef);
+  }
+
+  // Helper for the GC to process a weak class in a table.
+  static void ProcessWeakClass(GcRoot<mirror::Class>* root_ptr,
+                               IsMarkedVisitor* visitor,
+                               mirror::Class* update)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Create a normal LinearAlloc or low 4gb version if we are 64 bit AOT compiler.
   LinearAlloc* CreateLinearAlloc();
@@ -942,6 +976,14 @@ class Runtime {
     return verifier_missing_kthrow_fatal_;
   }
 
+  // Return true if we should load oat files as executable or not.
+  bool GetOatFilesExecutable() const;
+
+  bool IsRunningJitZygote() const {
+    // TODO: This should be better specified.
+    return EndsWith(image_location_, "boot-image.prof");
+  }
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1022,7 +1064,6 @@ class Runtime {
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
-  bool is_using_apex_boot_image_location_;
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
@@ -1142,6 +1183,9 @@ class Runtime {
   // Specifies target SDK version to allow workarounds for certain API levels.
   uint32_t target_sdk_version_;
 
+  // A set of disabled compat changes for the running app, all other changes are enabled.
+  std::set<uint64_t> disabled_compat_changes_;
+
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
   bool implicit_so_checks_;         // StackOverflow checks are implicit.
@@ -1215,6 +1259,9 @@ class Runtime {
   // Whether access checks on core platform API should be performed.
   hiddenapi::EnforcementPolicy core_platform_api_policy_;
 
+  // Whether access checks on test API should be performed.
+  hiddenapi::EnforcementPolicy test_api_policy_;
+
   // List of signature prefixes of methods that have been removed from the blacklist, and treated
   // as if whitelisted.
   std::vector<std::string> hidden_api_exemptions_;
@@ -1255,6 +1302,10 @@ class Runtime {
   // pointers. This is set by -Xopaque-jni-ids:{true,false}.
   JniIdType jni_ids_indirection_;
 
+  // Set to false in cases where we want to directly control when jni-id
+  // indirection is changed. This is intended only for testing JNI id swapping.
+  bool automatically_set_jni_ids_indirection_;
+
   // Saved environment.
   class EnvSnapshot {
    public:
@@ -1293,8 +1344,10 @@ class Runtime {
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
+  friend class Dex2oatImageTest;
   friend class ScopedThreadPoolUsage;
   friend class OatFileAssistantTest;
+  class NotifyStartupCompletedTask;
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };

@@ -245,13 +245,14 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
   const uint32_t vregC = (is_range) ? inst->VRegC_3rc() : inst->VRegC_35c();
   ArtMethod* sf_method = shadow_frame.GetMethod();
 
-  // Try to find the method in small thread-local cache first.
+  // Try to find the method in small thread-local cache first (only used when
+  // nterp is not used as mterp and nterp use the cache in an incompatible way).
   InterpreterCache* tls_cache = self->GetInterpreterCache();
   size_t tls_value;
   ArtMethod* resolved_method;
   if (is_quick) {
     resolved_method = nullptr;  // We don't know/care what the original method was.
-  } else if (LIKELY(tls_cache->Get(inst, &tls_value))) {
+  } else if (!IsNterpSupported() && LIKELY(tls_cache->Get(inst, &tls_value))) {
     resolved_method = reinterpret_cast<ArtMethod*>(tls_value);
   } else {
     ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
@@ -264,7 +265,9 @@ static ALWAYS_INLINE bool DoInvoke(Thread* self,
       result->SetJ(0);
       return false;
     }
-    tls_cache->Set(inst, reinterpret_cast<size_t>(resolved_method));
+    if (!IsNterpSupported()) {
+      tls_cache->Set(inst, reinterpret_cast<size_t>(resolved_method));
+    }
   }
 
   // Null pointer check and virtual method resolution.
@@ -517,7 +520,7 @@ ALWAYS_INLINE bool DoFieldGet(Thread* self, ShadowFrame& shadow_frame, const Ins
   if (is_static) {
     obj = f->GetDeclaringClass();
     if (transaction_active) {
-      if (Runtime::Current()->GetTransaction()->ReadConstraint(self, obj, f)) {
+      if (Runtime::Current()->GetTransaction()->ReadConstraint(self, obj)) {
         Runtime::Current()->AbortTransactionAndThrowAbortError(self, "Can't read static fields of "
             + obj->PrettyTypeOf() + " since it does not belong to clinit's class.");
         return false;
@@ -632,6 +635,34 @@ ALWAYS_INLINE bool DoIGetQuick(ShadowFrame& shadow_frame, const Instruction* ins
   return true;
 }
 
+static inline bool CheckWriteConstraint(Thread* self, ObjPtr<mirror::Object> obj)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  Runtime* runtime = Runtime::Current();
+  if (runtime->GetTransaction()->WriteConstraint(self, obj)) {
+    DCHECK(runtime->GetHeap()->ObjectIsInBootImageSpace(obj) || obj->IsClass());
+    const char* base_msg = runtime->GetHeap()->ObjectIsInBootImageSpace(obj)
+        ? "Can't set fields of boot image "
+        : "Can't set fields of ";
+    runtime->AbortTransactionAndThrowAbortError(self, base_msg + obj->PrettyTypeOf());
+    return false;
+  }
+  return true;
+}
+
+static inline bool CheckWriteValueConstraint(Thread* self, ObjPtr<mirror::Object> value)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  Runtime* runtime = Runtime::Current();
+  if (runtime->GetTransaction()->WriteValueConstraint(self, value)) {
+    DCHECK(value != nullptr);
+    std::string msg = value->IsClass()
+        ? "Can't store reference to class " + value->AsClass()->PrettyDescriptor()
+        : "Can't store reference to instance of " + value->GetClass()->PrettyDescriptor();
+    runtime->AbortTransactionAndThrowAbortError(self, msg);
+    return false;
+  }
+  return true;
+}
+
 // Handles iput-XXX and sput-XXX instructions.
 // Returns true on success, otherwise throws an exception and returns false.
 template<FindFieldType find_type, Primitive::Type field_type, bool do_access_check,
@@ -659,25 +690,19 @@ ALWAYS_INLINE bool DoFieldPut(Thread* self, const ShadowFrame& shadow_frame,
       return false;
     }
   }
-  if (transaction_active) {
-    Runtime* runtime = Runtime::Current();
-    if (runtime->GetTransaction()->WriteConstraint(self, obj, f)) {
-      if (is_static) {
-        runtime->AbortTransactionAndThrowAbortError(
-            self, "Can't set fields of " + obj->PrettyTypeOf());
-      } else {
-        // This can happen only when compiling a boot image extension.
-        DCHECK(!runtime->GetTransaction()->IsStrict());
-        DCHECK(runtime->GetHeap()->ObjectIsInBootImageSpace(obj));
-        runtime->AbortTransactionAndThrowAbortError(
-            self, "Can't set fields of boot image objects");
-      }
-      return false;
-    }
+  if (transaction_active && !CheckWriteConstraint(self, obj)) {
+    return false;
   }
 
   uint32_t vregA = is_static ? inst->VRegA_21c(inst_data) : inst->VRegA_22c(inst_data);
   JValue value = GetFieldValue<field_type>(shadow_frame, vregA);
+
+  if (transaction_active &&
+      field_type == Primitive::kPrimNot &&
+      !CheckWriteValueConstraint(self, value.GetL())) {
+    return false;
+  }
+
   return DoFieldPutCommon<field_type, do_assignability_check, transaction_active>(self,
                                                                                   shadow_frame,
                                                                                   obj,

@@ -75,6 +75,10 @@ class ArtField final {
     return (GetAccessFlags() & kAccFinal) != 0;
   }
 
+  bool IsPrivate() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return (GetAccessFlags() & kAccPrivate) != 0;
+  }
+
   uint32_t GetDexFieldIndex() {
     return field_dex_idx_;
   }
@@ -92,8 +96,12 @@ class ArtField final {
     return MemberOffset(offset_);
   }
 
-  static MemberOffset OffsetOffset() {
+  static constexpr MemberOffset OffsetOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtField, offset_));
+  }
+
+  static constexpr MemberOffset DeclaringClassOffset() {
+    return MemberOffset(OFFSETOF_MEMBER(ArtField, declaring_class_));
   }
 
   MemberOffset GetOffsetDuringLinking() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -224,6 +232,9 @@ class ArtField final {
       REQUIRES_SHARED(Locks::mutator_lock_);
   std::string PrettyField(bool with_type = true)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Returns true if a set-* instruction in the given method is allowable.
+  ALWAYS_INLINE inline bool CanBeChangedBy(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:
   bool IsProxyField() REQUIRES_SHARED(Locks::mutator_lock_);

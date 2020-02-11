@@ -32,8 +32,8 @@ class InstructionSetFeatures;
 class PACKED(4) OatHeader {
  public:
   static constexpr std::array<uint8_t, 4> kOatMagic { { 'o', 'a', 't', '\n' } };
-  // Last oat version changed reason: Optimize stack map decoding - interleave varints.
-  static constexpr std::array<uint8_t, 4> kOatVersion { { '1', '7', '3', '\0' } };
+  // Last oat version changed reason: pCompileOptimized entrypoint.
+  static constexpr std::array<uint8_t, 4> kOatVersion { { '1', '7', '8', '\0' } };
 
   static constexpr const char* kDex2OatCmdLineKey = "dex2oat-cmdline";
   static constexpr const char* kDebuggableKey = "debuggable";
@@ -69,9 +69,9 @@ class PACKED(4) OatHeader {
   uint32_t GetExecutableOffset() const;
   void SetExecutableOffset(uint32_t executable_offset);
 
-  const void* GetJniDlsymLookup() const;
-  uint32_t GetJniDlsymLookupOffset() const;
-  void SetJniDlsymLookupOffset(uint32_t offset);
+  const void* GetJniDlsymLookupTrampoline() const;
+  uint32_t GetJniDlsymLookupTrampolineOffset() const;
+  void SetJniDlsymLookupTrampolineOffset(uint32_t offset);
 
   const void* GetQuickGenericJniTrampoline() const;
   uint32_t GetQuickGenericJniTrampolineOffset() const;
@@ -122,7 +122,7 @@ class PACKED(4) OatHeader {
   uint32_t dex_file_count_;
   uint32_t oat_dex_files_offset_;
   uint32_t executable_offset_;
-  uint32_t jni_dlsym_lookup_offset_;
+  uint32_t jni_dlsym_lookup_trampoline_offset_;
   uint32_t quick_generic_jni_trampoline_offset_;
   uint32_t quick_imt_conflict_trampoline_offset_;
   uint32_t quick_resolution_trampoline_offset_;
@@ -132,31 +132,6 @@ class PACKED(4) OatHeader {
   uint8_t key_value_store_[0];  // note variable width data at end
 
   DISALLOW_COPY_AND_ASSIGN(OatHeader);
-};
-
-// OatMethodOffsets are currently 5x32-bits=160-bits long, so if we can
-// save even one OatMethodOffsets struct, the more complicated encoding
-// using a bitmap pays for itself since few classes will have 160
-// methods.
-enum OatClassType {
-  kOatClassAllCompiled = 0,   // OatClass is followed by an OatMethodOffsets for each method.
-  kOatClassSomeCompiled = 1,  // A bitmap of which OatMethodOffsets are present follows the OatClass.
-  kOatClassNoneCompiled = 2,  // All methods are interpreted so no OatMethodOffsets are necessary.
-  kOatClassMax = 3,
-};
-
-std::ostream& operator<<(std::ostream& os, const OatClassType& rhs);
-
-class PACKED(4) OatMethodOffsets {
- public:
-  explicit OatMethodOffsets(uint32_t code_offset = 0);
-
-  ~OatMethodOffsets();
-
-  OatMethodOffsets(const OatMethodOffsets&) = default;
-  OatMethodOffsets& operator=(const OatMethodOffsets&) = default;
-
-  uint32_t code_offset_;
 };
 
 }  // namespace art

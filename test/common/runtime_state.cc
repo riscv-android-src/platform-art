@@ -32,6 +32,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/class.h"
 #include "nativehelper/ScopedUtfChars.h"
+#include "oat.h"
 #include "oat_file.h"
 #include "oat_quick_method_header.h"
 #include "profile/profile_compilation_info.h"
@@ -67,6 +68,24 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_hasOatFile(JNIEnv* env, jclass c
   const DexFile& dex_file = klass->GetDexFile();
   const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
   return (oat_dex_file != nullptr) ? JNI_TRUE : JNI_FALSE;
+}
+
+extern "C" JNIEXPORT jobject JNICALL Java_Main_getCompilerFilter(JNIEnv* env,
+                                                                 jclass caller ATTRIBUTE_UNUSED,
+                                                                 jclass cls) {
+  ScopedObjectAccess soa(env);
+
+  ObjPtr<mirror::Class> klass = soa.Decode<mirror::Class>(cls);
+  const DexFile& dex_file = klass->GetDexFile();
+  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
+  if (oat_dex_file == nullptr) {
+    return nullptr;
+  }
+
+  std::string filter =
+      CompilerFilter::NameOfFilter(oat_dex_file->GetOatFile()->GetCompilerFilter());
+  return soa.AddLocalReference<jobject>(
+      mirror::String::AllocFromModifiedUtf8(soa.Self(), filter.c_str()));
 }
 
 // public static native boolean runtimeIsSoftFail();
@@ -160,7 +179,8 @@ extern "C" JNIEXPORT jboolean JNICALL Java_Main_isAotCompiled(JNIEnv* env,
   }
   const void* actual_code = method->GetEntryPointFromQuickCompiledCodePtrSize(kRuntimePointerSize);
   bool interpreter =
-      Runtime::Current()->GetClassLinker()->ShouldUseInterpreterEntrypoint(method, actual_code);
+      Runtime::Current()->GetClassLinker()->ShouldUseInterpreterEntrypoint(method, actual_code) ||
+      (actual_code == interpreter::GetNterpEntryPoint());
   return !interpreter;
 }
 
@@ -252,8 +272,6 @@ static void ForceJitCompiled(Thread* self, ArtMethod* method) REQUIRES(!Locks::m
   while (true) {
     if (native && code_cache->ContainsMethod(method)) {
       break;
-    } else if (code_cache->WillExecuteJitCode(method)) {
-      break;
     } else {
       // Sleep to yield to the compiler thread.
       usleep(1000);
@@ -262,8 +280,14 @@ static void ForceJitCompiled(Thread* self, ArtMethod* method) REQUIRES(!Locks::m
         // Make sure there is a profiling info, required by the compiler.
         ProfilingInfo::Create(self, method, /* retry_allocation */ true);
       }
-      // Will either ensure it's compiled or do the compilation itself.
+      // Will either ensure it's compiled or do the compilation itself. We do
+      // this before checking if we will execute JIT code to make sure the
+      // method is compiled 'optimized' and not baseline (tests expect optimized
+      // compilation).
       jit->CompileMethod(method, self, /*baseline=*/ false, /*osr=*/ false, /*prejit=*/ false);
+      if (code_cache->WillExecuteJitCode(method)) {
+        break;
+      }
     }
   }
 }
