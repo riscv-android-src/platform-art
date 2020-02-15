@@ -152,9 +152,12 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
   jobject LoadDexInPathClassLoader(const std::string& dex_name,
                                    jobject parent_loader,
                                    jobject shared_libraries = nullptr);
+  jobject LoadDexInPathClassLoader(const std::vector<std::string>& dex_names,
+                                   jobject parent_loader,
+                                   jobject shared_libraries = nullptr);
   jobject LoadDexInDelegateLastClassLoader(const std::string& dex_name, jobject parent_loader);
   jobject LoadDexInInMemoryDexClassLoader(const std::string& dex_name, jobject parent_loader);
-  jobject LoadDexInWellKnownClassLoader(const std::string& dex_name,
+  jobject LoadDexInWellKnownClassLoader(const std::vector<std::string>& dex_names,
                                         jclass loader_class,
                                         jobject parent_loader,
                                         jobject shared_libraries = nullptr);
@@ -254,18 +257,6 @@ class CheckJniAbortCatcher {
 #define TEST_DISABLED_FOR_ARM64() \
   if (kRuntimeISA == InstructionSet::kArm64) { \
     printf("WARNING: TEST DISABLED FOR ARM64\n"); \
-    return; \
-  }
-
-#define TEST_DISABLED_FOR_MIPS() \
-  if (kRuntimeISA == InstructionSet::kMips) { \
-    printf("WARNING: TEST DISABLED FOR MIPS\n"); \
-    return; \
-  }
-
-#define TEST_DISABLED_FOR_MIPS64() \
-  if (kRuntimeISA == InstructionSet::kMips64) { \
-    printf("WARNING: TEST DISABLED FOR MIPS64\n"); \
     return; \
   }
 

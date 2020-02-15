@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2020 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,23 +14,16 @@
  * limitations under the License.
  */
 
-#include "thread.h"
+#ifndef ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_
+#define ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_
 
-#include <android-base/logging.h>
-
-#include "asm_support_mips.h"
-#include "base/enums.h"
+#include <jni.h>
+#include <unistd.h>
 
 namespace art {
 
-void Thread::InitCpu() {
-  CHECK_EQ(THREAD_FLAGS_OFFSET, ThreadFlagsOffset<PointerSize::k32>().Int32Value());
-  CHECK_EQ(THREAD_CARD_TABLE_OFFSET, CardTableOffset<PointerSize::k32>().Int32Value());
-  CHECK_EQ(THREAD_EXCEPTION_OFFSET, ExceptionOffset<PointerSize::k32>().Int32Value());
-}
-
-void Thread::CleanupCpu() {
-  // Do nothing.
-}
+void register_dalvik_system_BaseDexClassLoader(JNIEnv* env);
 
 }  // namespace art
+
+#endif  // ART_RUNTIME_NATIVE_DALVIK_SYSTEM_BASEDEXCLASSLOADER_H_
