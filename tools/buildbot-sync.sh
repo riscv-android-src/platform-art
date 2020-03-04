@@ -25,6 +25,8 @@ if [ -t 1 ]; then
   nc='\033[0m'
 fi
 
+# Setup as root, as some actions performed here require it.
+adb root
 adb wait-for-device
 
 if [[ -z "$ANDROID_BUILD_TOP" ]]; then
@@ -65,68 +67,6 @@ adb push "$ANDROID_BUILD_TOP/art/tools/public.libraries.buildbot.txt" \
   "$ART_TEST_CHROOT/system/etc/public.libraries.txt"
 
 
-# Linker configuration.
-# ---------------------
-
-# Statically linked `linkerconfig` binary.
-linkerconfig_binary="/system/bin/linkerconfig"
-# Generated linker configuration file path (since Android R).
-ld_generated_config_file_path="/linkerconfig/ld.config.txt"
-# Location of the generated linker configuration file.
-ld_generated_config_file_location=$(dirname "$ld_generated_config_file_path")
-
-# Return the file name passed as argument with the VNDK version of the "host
-# system" inserted before the file name's extension, if applicable. This mimics
-# the logic used in Bionic linker's `Config::get_vndk_version_string`.
-insert_vndk_version_string() {
-  local file_path="$1"
-  local vndk_version=$(adb shell getprop "ro.vndk.version")
-  if [[ -n "$vndk_version" ]] && [[ "$vndk_version" != current ]]; then
-    # Insert the VNDK version after the last period (and add another period).
-    file_path=$(echo "$file_path" \
-      | sed -e "s/^\\(.*\\)\\.\\([^.]\\)/\\1.${vndk_version}.\\2/")
-  fi
-  echo "$file_path"
-}
-
-# Adjust the names of the following files (sync'd to the device with the
-# previous `adb push` command) depending on the VNDK version of the "host
-# system":
-#
-#   /system/etc/llndk.libraries.R.txt
-#   /system/etc/vndkcore.libraries.R.txt
-#   /system/etc/vndkprivate.libraries.R.txt
-#   /system/etc/vndksp.libraries.R.txt
-#
-# Note that `/system/etc/vndkcorevariant.libraries.txt` does not have a version
-# number.
-#
-# See `build/soong/cc/vndk.go` and `packages/modules/vndk/Android.bp` for more
-# information.
-vndk_libraries_txt_file_names="llndk.libraries.txt \
-  vndkcore.libraries.txt \
-  vndkprivate.libraries.txt \
-  vndksp.libraries.txt"
-for file_name in $vndk_libraries_txt_file_names; do
-  pattern="$(basename $file_name .txt)\*.txt"
-  adb shell find "$ART_TEST_CHROOT/system/etc" -maxdepth 1 -name "$pattern" | \
-    while read src_file_name; do
-      dst_file_name="$ART_TEST_CHROOT/system/etc/$(insert_vndk_version_string "$file_name")"
-      if [[ "$src_file_name" != "$dst_file_name" ]]; then
-        echo -e "${green}Renaming VNDK libraries file in chroot environment:" \
-          "\`$src_file_name\` -> \`$dst_file_name\`${nc}"
-        adb shell mv -f "$src_file_name" "$dst_file_name"
-      fi
-  done
-done
-
-echo -e "${green}Generating the linker configuration file on device:" \
-  "\`$ld_generated_config_file_path\`${nc}"
-# Generate the linker configuration file on device.
-adb shell chroot "$ART_TEST_CHROOT" \
-  "$linkerconfig_binary" --target "$ld_generated_config_file_location" || exit 1
-
-
 # APEX packages activation.
 # -------------------------
 
@@ -158,6 +98,26 @@ activate_apex com.android.i18n
 activate_apex com.android.runtime
 activate_apex com.android.tzdata
 activate_apex com.android.conscrypt
+
+
+# Linker configuration.
+# ---------------------
+
+# Statically linked `linkerconfig` binary.
+linkerconfig_binary="/system/bin/linkerconfig"
+# Generated linker configuration file path (since Android R).
+ld_generated_config_file_path="/linkerconfig/ld.config.txt"
+# Location of the generated linker configuration file.
+ld_generated_config_file_location=$(dirname "$ld_generated_config_file_path")
+
+# Generate linker configuration files on device.
+echo -e "${green}Generating linker configuration files on device in" \
+  "\`$ld_generated_config_file_path\`${nc}..."
+adb shell chroot "$ART_TEST_CHROOT" \
+  "$linkerconfig_binary" --target "$ld_generated_config_file_location" || exit 1
+ld_generated_config_files=$(adb shell find $ART_TEST_CHROOT/linkerconfig ! -type d | sed 's/^/  /')
+echo -e "${green}Generated linker configuration files on device:${nc}"
+echo -e "${green}$ld_generated_config_files${nc}"
 
 
 # `/data` "partition" synchronization.

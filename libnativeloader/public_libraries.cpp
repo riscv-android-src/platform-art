@@ -38,10 +38,11 @@
 
 namespace android::nativeloader {
 
-using namespace internal;
-using namespace ::std::string_literals;
 using android::base::ErrnoError;
 using android::base::Result;
+using internal::ConfigEntry;
+using internal::ParseConfig;
+using std::literals::string_literals::operator""s;
 
 namespace {
 
@@ -49,8 +50,8 @@ constexpr const char* kDefaultPublicLibrariesFile = "/etc/public.libraries.txt";
 constexpr const char* kExtendedPublicLibrariesFilePrefix = "public.libraries-";
 constexpr const char* kExtendedPublicLibrariesFileSuffix = ".txt";
 constexpr const char* kVendorPublicLibrariesFile = "/vendor/etc/public.libraries.txt";
-constexpr const char* kLlndkLibrariesFile = "/system/etc/llndk.libraries.txt";
-constexpr const char* kVndkLibrariesFile = "/system/etc/vndksp.libraries.txt";
+constexpr const char* kLlndkLibrariesFile = "/apex/com.android.vndk.v{}/etc/llndk.libraries.{}.txt";
+constexpr const char* kVndkLibrariesFile = "/apex/com.android.vndk.v{}/etc/vndksp.libraries.{}.txt";
 
 const std::vector<const std::string> kArtApexPublicLibraries = {
     "libicuuc.so",
@@ -62,6 +63,8 @@ constexpr const char* kArtApexLibPath = "/apex/com.android.art/" LIB;
 constexpr const char* kNeuralNetworksApexPublicLibrary = "libneuralnetworks.so";
 // STOPSHIP(b/146420818): Figure out how to use stub or non-specific lib name for libcronet.
 constexpr const char* kCronetApexPublicLibrary = "libcronet.80.0.3986.0.so";
+
+constexpr const char* kStatsdApexPublicLibrary = "libstats_jni.so";
 
 // TODO(b/130388701): do we need this?
 std::string root_dir() {
@@ -75,11 +78,13 @@ bool debuggable() {
 }
 
 std::string vndk_version_str(bool use_product_vndk) {
-  static std::string version = get_vndk_version(use_product_vndk);
-  if (version != "" && version != "current") {
-    return "." + version;
+  if (use_product_vndk) {
+    static std::string product_vndk_version = get_vndk_version(true);
+    return product_vndk_version;
+  } else {
+    static std::string vendor_vndk_version = get_vndk_version(false);
+    return vendor_vndk_version;
   }
-  return "";
 }
 
 // For debuggable platform builds use ANDROID_ADDITIONAL_PUBLIC_LIBRARIES environment
@@ -92,13 +97,15 @@ std::string additional_public_libraries() {
   return "";
 }
 
+// insert vndk version in every {} placeholder
 void InsertVndkVersionStr(std::string* file_name, bool use_product_vndk) {
   CHECK(file_name != nullptr);
-  size_t insert_pos = file_name->find_last_of(".");
-  if (insert_pos == std::string::npos) {
-    insert_pos = file_name->length();
+  auto version = vndk_version_str(use_product_vndk);
+  size_t pos = file_name->find("{}");
+  while (pos != std::string::npos) {
+    file_name->replace(pos, 2, version);
+    pos = file_name->find("{}", pos + version.size());
   }
-  file_name->insert(insert_pos, vndk_version_str(use_product_vndk));
 }
 
 const std::function<Result<bool>(const struct ConfigEntry&)> always_true =
@@ -218,7 +225,7 @@ static std::string InitDefaultPublicLibraries(bool for_preload) {
 }
 
 static std::string InitArtPublicLibraries() {
-  CHECK(sizeof(kArtApexPublicLibraries) > 0);
+  CHECK_GT((int)sizeof(kArtApexPublicLibraries), 0);
   std::string list = android::base::Join(kArtApexPublicLibraries, ":");
 
   std::string additional_libs = additional_public_libraries();
@@ -254,8 +261,8 @@ static std::string InitLlndkLibrariesVendor() {
   std::string config_file = kLlndkLibrariesFile;
   InsertVndkVersionStr(&config_file, false);
   auto sonames = ReadConfig(config_file, always_true);
-  if (!sonames) {
-    LOG_ALWAYS_FATAL("%s", sonames.error().message().c_str());
+  if (!sonames.ok()) {
+    LOG_ALWAYS_FATAL("%s: %s", config_file.c_str(), sonames.error().message().c_str());
     return "";
   }
   return android::base::Join(*sonames, ':');
@@ -266,17 +273,26 @@ static std::string InitLlndkLibrariesProduct() {
   InsertVndkVersionStr(&config_file, true);
   auto sonames = ReadConfig(config_file, always_true);
   if (!sonames.ok()) {
+    LOG_ALWAYS_FATAL("%s: %s", config_file.c_str(), sonames.error().message().c_str());
+    return "";
+  }
+  return android::base::Join(*sonames, ':');
+}
+
+static std::string InitVndkspLibrariesVendor() {
+  std::string config_file = kVndkLibrariesFile;
+  InsertVndkVersionStr(&config_file, false);
+  auto sonames = ReadConfig(config_file, always_true);
+  if (!sonames.ok()) {
     LOG_ALWAYS_FATAL("%s", sonames.error().message().c_str());
     return "";
   }
   return android::base::Join(*sonames, ':');
 }
 
-static std::string InitVndkspLibraries() {
-  // VNDK-SP is used only for vendor hals which are not available for the
-  // product partition.
+static std::string InitVndkspLibrariesProduct() {
   std::string config_file = kVndkLibrariesFile;
-  InsertVndkVersionStr(&config_file, false);
+  InsertVndkVersionStr(&config_file, true);
   auto sonames = ReadConfig(config_file, always_true);
   if (!sonames.ok()) {
     LOG_ALWAYS_FATAL("%s", sonames.error().message().c_str());
@@ -291,6 +307,10 @@ static std::string InitNeuralNetworksPublicLibraries() {
 
 static std::string InitCronetPublicLibraries() {
   return kCronetApexPublicLibrary;
+}
+
+static std::string InitStatsdPublicLibraries() {
+  return kStatsdApexPublicLibrary;
 }
 
 }  // namespace
@@ -330,6 +350,11 @@ const std::string& cronet_public_libraries() {
   return list;
 }
 
+const std::string& statsd_public_libraries() {
+  static std::string list = InitStatsdPublicLibraries();
+  return list;
+}
+
 const std::string& llndk_libraries_product() {
   static std::string list = InitLlndkLibrariesProduct();
   return list;
@@ -340,8 +365,13 @@ const std::string& llndk_libraries_vendor() {
   return list;
 }
 
-const std::string& vndksp_libraries() {
-  static std::string list = InitVndkspLibraries();
+const std::string& vndksp_libraries_product() {
+  static std::string list = InitVndkspLibrariesProduct();
+  return list;
+}
+
+const std::string& vndksp_libraries_vendor() {
+  static std::string list = InitVndkspLibrariesVendor();
   return list;
 }
 

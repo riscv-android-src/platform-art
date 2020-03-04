@@ -42,7 +42,6 @@
 #include "android-base/strings.h"
 
 #include "arch/instruction_set_features.h"
-#include "arch/mips/instruction_set_features_mips.h"
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
 #include "base/dumpable.h"
@@ -310,7 +309,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --android-root=out/host/linux-x86");
   UsageError("      Default: $ANDROID_ROOT");
   UsageError("");
-  UsageError("  --instruction-set=(arm|arm64|mips|mips64|x86|x86_64): compile for a particular");
+  UsageError("  --instruction-set=(arm|arm64|x86|x86_64): compile for a particular");
   UsageError("      instruction set.");
   UsageError("      Example: --instruction-set=x86");
   UsageError("      Default: arm");
@@ -1011,8 +1010,6 @@ class Dex2Oat final {
       case InstructionSet::kArm64:
       case InstructionSet::kX86:
       case InstructionSet::kX86_64:
-      case InstructionSet::kMips:
-      case InstructionSet::kMips64:
         compiler_options_->implicit_null_checks_ = true;
         compiler_options_->implicit_so_checks_ = true;
         break;
@@ -1611,7 +1608,8 @@ class Dex2Oat final {
         std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
         // No need to verify the dex file when we have a vdex file, which means it was already
         // verified.
-        const bool verify = (input_vdex_file_ == nullptr);
+        const bool verify =
+            (input_vdex_file_ == nullptr) && !compiler_options_->AssumeDexFilesAreVerified();
         if (!oat_writers_[i]->WriteAndOpenDexFiles(
             vdex_files_[i].get(),
             verify,
@@ -1656,8 +1654,10 @@ class Dex2Oat final {
       }
     }
 
-    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter())) {
-      // Only modes with compilation require verification results, do this here instead of when we
+    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter()) ||
+        IsImage()) {
+      // Only modes with compilation or image generation require verification results.
+      // Do this here instead of when we
       // create the compilation callbacks since the compilation mode may have been changed by the
       // very large app logic.
       // Avoiding setting the verification results saves RAM by not adding the dex files later in

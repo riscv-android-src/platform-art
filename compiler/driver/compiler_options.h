@@ -103,6 +103,10 @@ class CompilerOptions final {
     return CompilerFilter::IsVerificationEnabled(compiler_filter_);
   }
 
+  bool AssumeDexFilesAreVerified() const {
+    return compiler_filter_ == CompilerFilter::kAssumeVerified;
+  }
+
   bool AssumeClassesAreVerified() const {
     return compiler_filter_ == CompilerFilter::kAssumeVerified;
   }
@@ -189,6 +193,10 @@ class CompilerOptions final {
 
   bool GetImplicitSuspendChecks() const {
     return implicit_suspend_checks_;
+  }
+
+  bool IsGeneratingImage() const {
+    return IsBootImage() || IsBootImageExtension() || IsAppImage();
   }
 
   // Are we compiling a boot image?

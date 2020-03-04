@@ -42,9 +42,11 @@ namespace {
 // vendor and system namespaces.
 constexpr const char* kVendorNamespaceName = "sphal";
 constexpr const char* kVndkNamespaceName = "vndk";
-constexpr const char* kArtNamespaceName = "com.android.art";
-constexpr const char* kNeuralNetworksNamespaceName = "com.android.neuralnetworks";
-constexpr const char* kCronetNamespaceName = "com.android.cronet";
+constexpr const char* kVndkProductNamespaceName = "vndk_product";
+constexpr const char* kArtNamespaceName = "com_android_art";
+constexpr const char* kNeuralNetworksNamespaceName = "com_android_neuralnetworks";
+constexpr const char* kCronetNamespaceName = "com_android_cronet";
+constexpr const char* kStatsdNamespaceName = "com_android_os_statsd";
 
 // classloader-namespace is a linker namespace that is created for the loaded
 // app. To be specific, it is created for the app classloader. When
@@ -171,12 +173,12 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
 
   std::string system_exposed_libraries = default_public_libraries();
   std::string namespace_name = kClassloaderNamespaceName;
-  bool unbundled_vendor_or_product_app = false;
+  ApkOrigin unbundled_app_origin = APK_ORIGIN_DEFAULT;
   if ((apk_origin == APK_ORIGIN_VENDOR ||
        (apk_origin == APK_ORIGIN_PRODUCT &&
         is_product_vndk_version_defined())) &&
       !is_shared) {
-    unbundled_vendor_or_product_app = true;
+    unbundled_app_origin = apk_origin;
     // For vendor / product apks, give access to the vendor / product lib even though
     // they are treated as unbundled; the libs and apks are still bundled
     // together in the vendor / product partition.
@@ -245,12 +247,12 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   // ... and link to other namespaces to allow access to some public libraries
   bool is_bridged = app_ns->IsBridged();
 
-  auto platform_ns = NativeLoaderNamespace::GetSystemNamespace(is_bridged);
-  if (!platform_ns.ok()) {
-    return platform_ns.error();
+  auto system_ns = NativeLoaderNamespace::GetSystemNamespace(is_bridged);
+  if (!system_ns.ok()) {
+    return system_ns.error();
   }
 
-  auto linked = app_ns->Link(*platform_ns, system_exposed_libraries);
+  auto linked = app_ns->Link(*system_ns, system_exposed_libraries);
   if (!linked.ok()) {
     return linked.error();
   }
@@ -274,11 +276,22 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     }
   }
 
-  // Give access to VNDK-SP libraries from the 'vndk' namespace.
-  if (unbundled_vendor_or_product_app && !vndksp_libraries().empty()) {
+  // Give access to VNDK-SP libraries from the 'vndk' namespace for unbundled vendor apps.
+  if (unbundled_app_origin == APK_ORIGIN_VENDOR && !vndksp_libraries_vendor().empty()) {
     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkNamespaceName, is_bridged);
     if (vndk_ns.ok()) {
-      linked = app_ns->Link(*vndk_ns, vndksp_libraries());
+      linked = app_ns->Link(*vndk_ns, vndksp_libraries_vendor());
+      if (!linked.ok()) {
+        return linked.error();
+      }
+    }
+  }
+
+  // Give access to VNDK-SP libraries from the 'vndk_product' namespace for unbundled product apps.
+  if (unbundled_app_origin == APK_ORIGIN_PRODUCT && !vndksp_libraries_product().empty()) {
+    auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkProductNamespaceName, is_bridged);
+    if (vndk_ns.ok()) {
+      linked = app_ns->Link(*vndk_ns, vndksp_libraries_product());
       if (!linked.ok()) {
         return linked.error();
       }
@@ -295,10 +308,20 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     }
   }
 
+  // Give access to StatsdAPI libraries
+  auto statsd_ns =
+      NativeLoaderNamespace::GetExportedNamespace(kStatsdNamespaceName, is_bridged);
+  if (statsd_ns.ok()) {
+    linked = app_ns->Link(*statsd_ns, statsd_public_libraries());
+    if (!linked.ok()) {
+      return linked.error();
+    }
+  }
+
   if (!vendor_public_libraries().empty()) {
     auto vendor_ns = NativeLoaderNamespace::GetExportedNamespace(kVendorNamespaceName, is_bridged);
     // when vendor_ns is not configured, link to the system namespace
-    auto target_ns = vendor_ns.ok() ? vendor_ns : platform_ns;
+    auto target_ns = vendor_ns.ok() ? vendor_ns : system_ns;
     if (target_ns.ok()) {
       linked = app_ns->Link(*target_ns, vendor_public_libraries());
       if (!linked.ok()) {

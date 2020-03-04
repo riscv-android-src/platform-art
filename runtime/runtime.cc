@@ -45,8 +45,6 @@
 #include "arch/arm64/registers_arm64.h"
 #include "arch/context.h"
 #include "arch/instruction_set_features.h"
-#include "arch/mips/registers_mips.h"
-#include "arch/mips64/registers_mips64.h"
 #include "arch/x86/registers_x86.h"
 #include "arch/x86_64/registers_x86_64.h"
 #include "art_field-inl.h"
@@ -88,7 +86,6 @@
 #include "gc/task_processor.h"
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
-#include "hidden_api_jni.h"
 #include "image-inl.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
@@ -512,8 +509,6 @@ Runtime::~Runtime() {
   // instance. We rely on a small initialization order issue in Runtime::Start() that requires
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
-
-  hiddenapi::JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -893,6 +888,10 @@ bool Runtime::Start() {
   // because in checking the invocation types of intrinsic methods ArtMethod::GetInvokeType()
   // needs the SignaturePolymorphic annotation class which is initialized in WellKnownClasses::Init.
   InitializeIntrinsics();
+
+  // InitializeCorePlatformApiPrivateFields() needs to be called after well known class
+  // initializtion in InitNativeMethods().
+  art::hiddenapi::InitializeCorePlatformApiPrivateFields();
 
   // Initialize well known thread group values that may be accessed threads while attaching.
   InitThreadGroups(self);
@@ -1487,8 +1486,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     case InstructionSet::kX86:
     case InstructionSet::kArm64:
     case InstructionSet::kX86_64:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
       implicit_null_checks_ = true;
       // Historical note: Installing stack protection was not playing well with Valgrind.
       implicit_so_checks_ = true;
@@ -1912,10 +1909,6 @@ void Runtime::InitNativeMethods() {
 
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
-
-  // Having loaded native libraries for Managed Core library, enable field and
-  // method resolution checks via JNI from native code.
-  hiddenapi::JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
@@ -2374,8 +2367,6 @@ void Runtime::SetInstructionSet(InstructionSet instruction_set) {
       break;
     case InstructionSet::kArm:
     case InstructionSet::kArm64:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64:
       break;

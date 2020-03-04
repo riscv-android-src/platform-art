@@ -36,7 +36,6 @@
 #include "dex/utf.h"
 #include "fault_handler.h"
 #include "hidden_api.h"
-#include "hidden_api_jni.h"
 #include "gc/accounting/card_table-inl.h"
 #include "gc_root.h"
 #include "indirect_reference_table-inl.h"
@@ -88,17 +87,6 @@ static constexpr bool kWarnJniAbort = false;
 template<typename T>
 ALWAYS_INLINE static bool ShouldDenyAccessToMember(T* member, Thread* self)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  const bool native_caller_trusted =
-      hiddenapi::ScopedCorePlatformApiCheck::IsCurrentCallerApproved(self);
-  if (native_caller_trusted) {
-    // A trusted caller is in the same domain as the ART module so is assumed to always have
-    // access to the APIs that the module provides.
-    return false;
-  }
-
-  // Construct AccessContext from the first calling class on stack.
-  // If the calling class cannot be determined, e.g. unattached threads,
-  // we conservatively assume the caller is trusted.
   return hiddenapi::ShouldDenyAccessToMember(
       member,
       [&]() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -833,7 +821,6 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(name);
     CHECK_NON_NULL_ARGUMENT(sig);
     ScopedObjectAccess soa(env);
-    hiddenapi::ScopedCorePlatformApiCheck sc;
     return FindMethodID<kEnableIndexIds>(soa, java_class, name, sig, false);
   }
 
@@ -843,7 +830,6 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(name);
     CHECK_NON_NULL_ARGUMENT(sig);
     ScopedObjectAccess soa(env);
-    hiddenapi::ScopedCorePlatformApiCheck sc;
     return FindMethodID<kEnableIndexIds>(soa, java_class, name, sig, true);
   }
 
@@ -1376,7 +1362,6 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(name);
     CHECK_NON_NULL_ARGUMENT(sig);
     ScopedObjectAccess soa(env);
-    hiddenapi::ScopedCorePlatformApiCheck sc;
     return FindFieldID<kEnableIndexIds>(soa, java_class, name, sig, false);
   }
 
@@ -1386,7 +1371,6 @@ class JNI {
     CHECK_NON_NULL_ARGUMENT(name);
     CHECK_NON_NULL_ARGUMENT(sig);
     ScopedObjectAccess soa(env);
-    hiddenapi::ScopedCorePlatformApiCheck sc;
     return FindFieldID<kEnableIndexIds>(soa, java_class, name, sig, true);
   }
 
