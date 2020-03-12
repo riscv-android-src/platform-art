@@ -303,9 +303,24 @@
         "variant": "optimizing & ndebuggable | regalloc_gc & ndebuggable | speed-profile & ndebuggable | jit & ndebuggable | jit-on-first-use & ndebuggable"
     },
     {
+        "tests": ["596-app-images", "597-app-images-same-classloader"],
+        "description": "no image generated in configuration",
+        "variant": "no-image"
+    },
+    {
+        "tests": ["596-app-images", "597-app-images-same-classloader"],
+        "description": "not generated when using the access check configuration",
+        "variant": "interp-ac"
+    },
+    {
+        "tests": ["596-app-images", "597-app-images-same-classloader"],
+        "description": "jvmti does not interact well with images",
+        "variant": "field-stress | jvmti-stress | redefine-stress | step-stress | trace-stress"
+    },
+    {
         "tests": "596-app-images",
-        "description": "Code being tested has been disabled",
-        "bug": "b/70734839"
+        "description": "app images do not initialize classes when debuggable",
+        "variant": "debuggable"
     },
     {
         "tests": "055-enum-performance",
@@ -1333,6 +1348,13 @@
         "description": ["Occasional timeouts."]
     },
     {
+        "tests": ["2031-zygote-compiled-frame-deopt"],
+        "zipapex": true,
+        "bug": "b/144947842",
+        "description": ["This test requires strong knowledge about where the libdir is",
+                        "which the zipapex runner breaks."]
+    },
+    {
         "tests": ["909-attach-agent", "126-miranda-multidex"],
         "zipapex": true,
         "bug": "b/135507613",
@@ -1349,5 +1371,11 @@
         "variant": "gcstress & debuggable & debug & host",
         "bug": "b/149708943",
         "description": ["Timeouts."]
+    },
+    {
+        "tests": ["137-cfi"],
+        "variant": "target & jit",
+        "bug": "b/151137723",
+        "description": ["Fails on arm32"]
     }
 ]

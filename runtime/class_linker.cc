@@ -4025,6 +4025,8 @@ void ClassLinker::RegisterDexFileLocked(const DexFile& dex_file,
   // Make sure to hold the dex cache live in the class table. This case happens for the boot class
   // path dex caches without an image.
   data.class_table->InsertStrongRoot(dex_cache);
+  // Make sure that the dex cache holds the classloader live.
+  dex_cache->SetClassLoader(class_loader);
   if (class_loader != nullptr) {
     // Since we added a strong root to the class table, do the write barrier as required for
     // remembered sets and generational GCs.
@@ -5239,8 +5241,10 @@ bool ClassLinker::CanWeInitializeClass(ObjPtr<mirror::Class> klass, bool can_ini
   return can_init_parents && CanWeInitializeClass(super_class, can_init_statics, can_init_parents);
 }
 
-bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
-                                  bool can_init_statics, bool can_init_parents) {
+bool ClassLinker::InitializeClass(Thread* self,
+                                  Handle<mirror::Class> klass,
+                                  bool can_init_statics,
+                                  bool can_init_parents) {
   // see JLS 3rd edition, 12.4.2 "Detailed Initialization Procedure" for the locking protocol
 
   // Are we already initialized and therefore done?
@@ -5256,6 +5260,8 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
   }
 
   self->AllowThreadSuspension();
+  Runtime* const runtime = Runtime::Current();
+  const bool stats_enabled = runtime->HasStatsEnabled();
   uint64_t t0;
   {
     ObjectLock<mirror::Class> lock(self, klass);
@@ -5343,7 +5349,6 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     // is different at runtime than it was at compile time, the oat file is rejected. So if the
     // oat file is present, the classpaths must match, and the runtime time check can be skipped.
     bool has_oat_class = false;
-    const Runtime* runtime = Runtime::Current();
     const OatFile::OatClass oat_class = (runtime->IsStarted() && !runtime->IsAotCompiler())
         ? OatFile::FindOatClass(klass->GetDexFile(), klass->GetDexClassDefIndex(), &has_oat_class)
         : OatFile::OatClass::Invalid();
@@ -5362,7 +5367,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     klass->SetClinitThreadId(self->GetTid());
     mirror::Class::SetStatus(klass, ClassStatus::kInitializing, self);
 
-    t0 = NanoTime();
+    t0 = stats_enabled ? NanoTime() : 0u;
   }
 
   uint64_t t_sub = 0;
@@ -5375,9 +5380,9 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       CHECK(can_init_parents);
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> handle_scope_super(hs.NewHandle(super_class));
-      uint64_t super_t0 = NanoTime();
+      uint64_t super_t0 = stats_enabled ? NanoTime() : 0u;
       bool super_initialized = InitializeClass(self, handle_scope_super, can_init_statics, true);
-      uint64_t super_t1 = NanoTime();
+      uint64_t super_t1 = stats_enabled ? NanoTime() : 0u;
       if (!super_initialized) {
         // The super class was verified ahead of entering initializing, we should only be here if
         // the super class became erroneous due to initialization.
@@ -5416,12 +5421,13 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
         // We cannot just call initialize class directly because we need to ensure that ALL
         // interfaces with default methods are initialized. Non-default interface initialization
         // will not affect other non-default super-interfaces.
-        uint64_t inf_t0 = NanoTime();  // This is not very precise, misses all walking.
+        // This is not very precise, misses all walking.
+        uint64_t inf_t0 = stats_enabled ? NanoTime() : 0u;
         bool iface_initialized = InitializeDefaultInterfaceRecursive(self,
                                                                      handle_scope_iface,
                                                                      can_init_statics,
                                                                      can_init_parents);
-        uint64_t inf_t1 = NanoTime();
+        uint64_t inf_t1 = stats_enabled ? NanoTime() : 0u;
         if (!iface_initialized) {
           ObjectLock<mirror::Class> lock(self, klass);
           // Initialization failed because one of our interfaces with default methods is erroneous.
@@ -5500,7 +5506,7 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
     }
   }
   self->AllowThreadSuspension();
-  uint64_t t1 = NanoTime();
+  uint64_t t1 = stats_enabled ? NanoTime() : 0u;
 
   VisiblyInitializedCallback* callback = nullptr;
   bool success = true;
@@ -5517,16 +5523,18 @@ bool ClassLinker::InitializeClass(Thread* self, Handle<mirror::Class> klass,
       VLOG(compiler) << "Return from class initializer of "
                      << mirror::Class::PrettyDescriptor(klass.Get())
                      << " without exception while transaction was aborted: re-throw it now.";
-      Runtime::Current()->ThrowTransactionAbortError(self);
+      runtime->ThrowTransactionAbortError(self);
       mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
       success = false;
     } else {
-      RuntimeStats* global_stats = Runtime::Current()->GetStats();
-      RuntimeStats* thread_stats = self->GetStats();
-      ++global_stats->class_init_count;
-      ++thread_stats->class_init_count;
-      global_stats->class_init_time_ns += (t1 - t0 - t_sub);
-      thread_stats->class_init_time_ns += (t1 - t0 - t_sub);
+      if (stats_enabled) {
+        RuntimeStats* global_stats = runtime->GetStats();
+        RuntimeStats* thread_stats = self->GetStats();
+        ++global_stats->class_init_count;
+        ++thread_stats->class_init_count;
+        global_stats->class_init_time_ns += (t1 - t0 - t_sub);
+        thread_stats->class_init_time_ns += (t1 - t0 - t_sub);
+      }
       // Set the class as initialized except if failed to initialize static fields.
       callback = MarkClassInitialized(self, klass);
       if (VLOG_IS_ON(class_linker)) {

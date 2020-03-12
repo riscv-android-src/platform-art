@@ -15,30 +15,24 @@
 // The SDK for the art module apex.
 sdk {
     name: "art-module-sdk",
-    java_system_modules: [
-        "art-module-public-api-stubs-system-modules",
-        "art-module-intra-core-api-stubs-system-modules",
-        "art-module-platform-api-stubs-system-modules",
-        "core-platform-api-stubs-system-modules",
+    host_supported: true,
+    native_header_libs: [
+        "libnativehelper_header_only",
     ],
-    native_static_libs: [
-        "libartimagevalues",
-    ],
+    target: {
+        android: {
+            java_system_modules: [
+                "art-module-public-api-stubs-system-modules",
+                "art-module-intra-core-api-stubs-system-modules",
+                "art-module-platform-api-stubs-system-modules",
+                "core-platform-api-stubs-system-modules",
+            ],
+            native_static_libs: [
+                "libartimagevalues",
+            ],
+        },
+    },
 }
-
-/*
-
-Temporarily comment out art-module-host-exports
-
-The sdk/module_exports do not support building a single snapshot for
-multiple os types. Instead it builds a separate snapshot per os type
-which would conflict when unpacked. Attempting to fix that issue is
-complicated by the fact that there are presubmit builds which rely
-on that behavior for handling the art-module-host-exports.
-
-The quickest and safest way to deal with that is to temporarily
-comment out the broken module, fix the build issues and then
-uncomment it.
 
 // Exported host tools and libraries.
 module_exports {
@@ -65,7 +59,6 @@ module_exports {
         "dex2oatd",
     ],
 }
-*/
 
 // Exported tests and supporting libraries
 module_exports {
