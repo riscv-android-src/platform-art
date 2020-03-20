@@ -69,9 +69,6 @@
 //       2) Read the symfile and re-read the next pointer.
 //       3) Re-read both the current and next seqlock.
 //       4) Go to step 1 with using new entry and seqlock.
-//   * New entries are appended at the end which makes it
-//     possible to repack entries even when the reader
-//     is concurrently iterating over the linked list.
 //
 // 3) Asynchronously, using the global seqlock.
 //   * The seqlock is a monotonically increasing counter which is incremented
@@ -104,7 +101,14 @@ static Mutex g_dex_debug_lock("DEX native debug entries", kNativeDebugInterfaceL
 // Some writes are synchronized so libunwindstack can read the memory safely from another process.
 constexpr std::memory_order kNonRacingRelaxed = std::memory_order_relaxed;
 
+// Size of JIT code range covered by each packed JITCodeEntry.
+constexpr uint32_t kJitRepackGroupSize = 64 * KB;
+
+// Automatically call the repack method every 'n' new entries.
+constexpr uint32_t kJitRepackFrequency = 64;
+
 // Public binary interface between ART and native tools (gdb, libunwind, etc).
+// The fields below need to be exported and have special names as per the gdb api.
 extern "C" {
   enum JITAction {
     JIT_NOACTION = 0,
@@ -193,6 +197,18 @@ extern "C" {
   void (*__dex_debug_register_code_ptr)() = __dex_debug_register_code;
   JITDescriptor __dex_debug_descriptor GUARDED_BY(g_dex_debug_lock) {};
 }
+
+// The fields below are internal, but we keep them here anyway for consistency.
+// Their state is related to the static state above and it must be kept in sync.
+
+// Used only in debug builds to check that we are not adding duplicate entries.
+static std::unordered_set<const void*> g_dcheck_all_jit_functions GUARDED_BY(g_jit_debug_lock);
+
+// Methods that have been marked for deletion on the next repack pass.
+static std::vector<const void*> g_removed_jit_functions GUARDED_BY(g_jit_debug_lock);
+
+// Number of small (single symbol) ELF files. Used to trigger repacking.
+static uint32_t g_jit_num_unpacked_entries = 0;
 
 struct DexNativeInfo {
   static constexpr bool kCopySymfileData = false;  // Just reference DEX files.
@@ -314,9 +330,9 @@ static const JITCodeEntry* CreateJITCodeEntryInternal(
   uint64_t timestamp = GetNextTimestamp(descriptor);
 
   // We must insert entries at specific place.  See NativeDebugInfoPreFork().
-  const JITCodeEntry* next = nullptr;  // Append at the end of linked list.
-  if (!Runtime::Current()->IsZygote() && descriptor.zygote_head_entry_ != nullptr) {
-    next = &descriptor.application_tail_entry_;
+  const JITCodeEntry* next = descriptor.head_.load(kNonRacingRelaxed);  // Insert at the head.
+  if (descriptor.zygote_head_entry_ != nullptr && Runtime::Current()->IsZygote()) {
+    next = nullptr;  // Insert zygote entries at the tail.
   }
 
   // Pop entry from the free list.
@@ -423,9 +439,16 @@ void RemoveNativeDebugInfoForDex(Thread* self, const DexFile* dexfile) {
 // <------- owned by the application memory --------> <--- owned by zygote memory --->
 //         |----------------------|------------------|-------------|-----------------|
 // head -> | application_entries* | application_tail | zygote_head | zygote_entries* |
-//         |---------------------+|------------------|-------------|----------------+|
-//                               |                                                  |
-//     (new application entries)-/                             (new zygote entries)-/
+//         |+---------------------|------------------|-------------|----------------+|
+//          |                                                                       |
+//          \-(new application entries)                        (new zygote entries)-/
+//
+// Zygote entries are inserted at the end, which means that repacked zygote entries
+// will still be seen by single forward iteration of the linked list (avoiding race).
+//
+// Application entries are inserted at the start which introduces repacking race,
+// but that is ok, since it is easy to read new entries from head in further pass.
+// The benefit is that this makes it fast to read only the new entries.
 //
 void NativeDebugInfoPreFork() {
   CHECK(Runtime::Current()->IsZygote());
@@ -454,13 +477,6 @@ void NativeDebugInfoPostFork() {
   JITDescriptor& descriptor = JitNativeInfo::Descriptor();
   descriptor.free_entries_ = nullptr;  // Don't reuse zygote's entries.
 }
-
-// Size of JIT code range covered by each packed JITCodeEntry.
-static constexpr uint32_t kJitRepackGroupSize = 64 * KB;
-
-// Automatically call the repack method every 'n' new entries.
-static constexpr uint32_t kJitRepackFrequency = 64;
-static uint32_t g_jit_num_unpacked_entries = 0;
 
 // Split the JIT code cache into groups of fixed size and create single JITCodeEntry for each group.
 // The start address of method's code determines which group it belongs to.  The end is irrelevant.
@@ -545,11 +561,23 @@ static void RepackEntries(bool compress_entries, ArrayRef<const void*> removed)
   g_jit_num_unpacked_entries = 0;
 }
 
+void RepackNativeDebugInfoForJitLocked() REQUIRES(g_jit_debug_lock);
+
 void AddNativeDebugInfoForJit(const void* code_ptr,
                               const std::vector<uint8_t>& symfile,
                               bool allow_packing) {
   MutexLock mu(Thread::Current(), g_jit_debug_lock);
   DCHECK_NE(symfile.size(), 0u);
+  if (kIsDebugBuild && code_ptr != nullptr) {
+    DCHECK(g_dcheck_all_jit_functions.insert(code_ptr).second) << code_ptr << " already added";
+  }
+
+  // Remove all methods which have been marked for removal.  The JIT GC should
+  // force repack, so this should happen only rarely for various corner cases.
+  // Must be done before addition in case the added code_ptr is in the removed set.
+  if (!g_removed_jit_functions.empty()) {
+    RepackNativeDebugInfoForJitLocked();
+  }
 
   CreateJITCodeEntryInternal<JitNativeInfo>(ArrayRef<const uint8_t>(symfile),
                                             /*addr=*/ code_ptr,
@@ -571,16 +599,37 @@ void AddNativeDebugInfoForJit(const void* code_ptr,
   }
 }
 
-void RemoveNativeDebugInfoForJit(ArrayRef<const void*> removed) {
+void RemoveNativeDebugInfoForJit(const void* code_ptr) {
   MutexLock mu(Thread::Current(), g_jit_debug_lock);
-  RepackEntries(/*compress_entries=*/ true, removed);
+  g_dcheck_all_jit_functions.erase(code_ptr);
+
+  // Method removal is very expensive since we need to decompress and read ELF files.
+  // Collet methods to be removed and do the removal in bulk later.
+  g_removed_jit_functions.push_back(code_ptr);
+}
+
+void RepackNativeDebugInfoForJitLocked() {
+  // Remove entries which are inside packed and compressed ELF files.
+  std::vector<const void*>& removed = g_removed_jit_functions;
+  std::sort(removed.begin(), removed.end());
+  RepackEntries(/*compress_entries=*/ true, ArrayRef<const void*>(removed));
 
   // Remove entries which are not allowed to be packed (containing single method each).
-  for (const JITCodeEntry* it = __jit_debug_descriptor.head_; it != nullptr; it = it->next_) {
+  for (const JITCodeEntry* it = __jit_debug_descriptor.head_; it != nullptr;) {
+    const JITCodeEntry* next = it->next_;
     if (!it->allow_packing_ && std::binary_search(removed.begin(), removed.end(), it->addr_)) {
       DeleteJITCodeEntryInternal<JitNativeInfo>(/*entry=*/ it);
     }
+    it = next;
   }
+
+  removed.clear();
+  removed.shrink_to_fit();
+}
+
+void RepackNativeDebugInfoForJit() {
+  MutexLock mu(Thread::Current(), g_jit_debug_lock);
+  RepackNativeDebugInfoForJitLocked();
 }
 
 size_t GetJitMiniDebugInfoMemUsage() {

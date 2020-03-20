@@ -39,6 +39,11 @@ class ImageSpace : public MemMapSpace {
     return kSpaceTypeImageSpace;
   }
 
+  // The separator for boot image location components.
+  static constexpr char kComponentSeparator = ':';
+  // The separator for profile filename.
+  static constexpr char kProfileSeparator = '!';
+
   // Load boot image spaces for specified boot class path, image location, instruction set, etc.
   //
   // On successful return, the loaded spaces are added to boot_image_spaces (which must be
@@ -63,6 +68,15 @@ class ImageSpace : public MemMapSpace {
   //     <ext-path>/<ext-name>
   //     <ext-name>
   // and must be listed in the order of their corresponding BCP components.
+  // The specification may have a suffix with profile specification, one of
+  //     !<ext-path>/<ext-name>
+  //     !<ext-name>
+  // and this profile will be used to compile the extension when loading the
+  // boot image if the on-disk version is not acceptable (either not present
+  // or fails validation, presumably because it's out of date). The first
+  // extension specification that includes the profile specification also
+  // terminates the list of the boot image dependencies that each extension
+  // is compiled against.
   //
   // Search paths for remaining extensions can be specified after named
   // components as one of
@@ -94,6 +108,21 @@ class ImageSpace : public MemMapSpace {
   //           corresponding BCP component path and then in /system/framework.
   //     /apex/com.android.art/boot.art:*:boot-framework.jar
   //         - invalid, named components may not follow search paths.
+  //     boot.art:boot-framework.jar!/system/framework/framework.prof
+  //         - primary and one extension, use BCP component paths; if extension
+  //           is not found or broken compile it in memory using the specified
+  //           profile file from the exact path.
+  //     boot.art:boot-framework.jar:conscrypt.jar!conscrypt.prof
+  //         - primary and two extensions, use BCP component paths; only the
+  //           second extension has a profile file and can be compiled in memory
+  //           when it is not found or broken, using the specified profile file
+  //           in the BCP component path and it is compiled against the primary
+  //           and first extension and only if the first extension is OK.
+  //     boot.art:boot-framework.jar!framework.prof:conscrypt.jar!conscrypt.prof
+  //         - primary and two extensions, use BCP component paths; if any
+  //           extension is not found or broken compile it in memory using
+  //           the specified profile file in the BCP component path, each
+  //           extension is compiled only against the primary boot image.
   static bool LoadBootImage(
       const std::vector<std::string>& boot_class_path,
       const std::vector<std::string>& boot_class_path_locations,
@@ -113,13 +142,8 @@ class ImageSpace : public MemMapSpace {
                                                         std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Reads the image header from the specified image location for the
-  // instruction set image_isa. Returns null on failure, with
-  // reason in error_msg.
-  static std::unique_ptr<ImageHeader> ReadImageHeader(const char* image_location,
-                                                      InstructionSet image_isa,
-                                                      ImageSpaceLoadingOrder order,
-                                                      std::string* error_msg);
+  // Checks whether we have a primary boot image on the disk.
+  static bool IsBootClassPathOnDisk(InstructionSet image_isa);
 
   // Give access to the OatFile.
   const OatFile* GetOatFile() const;
@@ -145,6 +169,10 @@ class ImageSpace : public MemMapSpace {
   // For example: /system/framework/boot.art
   const std::string GetImageLocation() const {
     return image_location_;
+  }
+
+  const std::string GetProfileFile() const {
+    return profile_file_;
   }
 
   accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
@@ -265,6 +293,7 @@ class ImageSpace : public MemMapSpace {
 
   ImageSpace(const std::string& name,
              const char* image_location,
+             const char* profile_file,
              MemMap&& mem_map,
              accounting::ContinuousSpaceBitmap&& live_bitmap,
              uint8_t* end);
@@ -279,6 +308,7 @@ class ImageSpace : public MemMapSpace {
   const OatFile* oat_file_non_owned_;
 
   const std::string image_location_;
+  const std::string profile_file_;
 
   friend class Space;
 

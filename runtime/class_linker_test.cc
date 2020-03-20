@@ -672,6 +672,7 @@ struct ProxyOffsets : public CheckOffsets<mirror::Proxy> {
 
 struct DexCacheOffsets : public CheckOffsets<mirror::DexCache> {
   DexCacheOffsets() : CheckOffsets<mirror::DexCache>(false, "Ljava/lang/DexCache;") {
+    addOffset(OFFSETOF_MEMBER(mirror::DexCache, class_loader_), "classLoader");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, dex_file_), "dexFile");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, location_), "location");
     addOffset(OFFSETOF_MEMBER(mirror::DexCache, num_preresolved_strings_), "numPreResolvedStrings");
@@ -719,8 +720,8 @@ struct AccessibleObjectOffsets : public CheckOffsets<mirror::AccessibleObject> {
 struct FieldOffsets : public CheckOffsets<mirror::Field> {
   FieldOffsets() : CheckOffsets<mirror::Field>(false, "Ljava/lang/reflect/Field;") {
     addOffset(OFFSETOF_MEMBER(mirror::Field, access_flags_), "accessFlags");
+    addOffset(OFFSETOF_MEMBER(mirror::Field, art_field_index_), "artFieldIndex");
     addOffset(OFFSETOF_MEMBER(mirror::Field, declaring_class_), "declaringClass");
-    addOffset(OFFSETOF_MEMBER(mirror::Field, dex_field_index_), "dexFieldIndex");
     addOffset(OFFSETOF_MEMBER(mirror::Field, offset_), "offset");
     addOffset(OFFSETOF_MEMBER(mirror::Field, type_), "type");
   }

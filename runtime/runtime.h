@@ -30,6 +30,7 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
+#include "base/string_view_cpp20.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
@@ -86,6 +87,7 @@ class ArtMethod;
 enum class CalleeSaveType: uint32_t;
 class ClassLinker;
 class CompilerCallbacks;
+class Dex2oatImageTest;
 class DexFile;
 enum class InstructionSet;
 class InternTable;
@@ -210,10 +212,6 @@ class Runtime {
 
   const std::string& GetImageLocation() const {
     return image_location_;
-  }
-
-  bool IsUsingApexBootImageLocation() const {
-    return is_using_apex_boot_image_location_;
   }
 
   // Starts a runtime, which may cause threads to be started and code to run.
@@ -511,6 +509,7 @@ class Runtime {
   void InitNonZygoteOrPostFork(
       JNIEnv* env,
       bool is_system_server,
+      bool is_child_zygote,
       NativeBridgeAction action,
       const char* isa,
       bool profile_system_server = false);
@@ -1060,7 +1059,6 @@ class Runtime {
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
   std::string image_location_;
-  bool is_using_apex_boot_image_location_;
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
@@ -1341,6 +1339,7 @@ class Runtime {
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
+  friend class Dex2oatImageTest;
   friend class ScopedThreadPoolUsage;
   friend class OatFileAssistantTest;
   class NotifyStartupCompletedTask;

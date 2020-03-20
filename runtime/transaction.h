@@ -67,7 +67,7 @@ class Transaction final {
   // one class's clinit will not be allowed to read or modify another class's static fields, unless
   // the transaction is aborted.
   bool IsStrict() {
-    return heap_ == nullptr;
+    return strict_;
   }
 
   // Record object field changes.
@@ -140,11 +140,11 @@ class Transaction final {
       REQUIRES(!log_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool ReadConstraint(Thread* self, ObjPtr<mirror::Object> obj, ArtField* field)
+  bool ReadConstraint(Thread* self, ObjPtr<mirror::Object> obj)
       REQUIRES(!log_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool WriteConstraint(Thread* self, ObjPtr<mirror::Object> obj, ArtField* field)
+  bool WriteConstraint(Thread* self, ObjPtr<mirror::Object> obj)
       REQUIRES(!log_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -317,10 +317,32 @@ class Transaction final {
   bool aborted_ GUARDED_BY(log_lock_);
   bool rolling_back_;  // Single thread, no race.
   gc::Heap* const heap_;
+  const bool strict_;
   std::string abort_message_ GUARDED_BY(log_lock_);
   mirror::Class* root_ GUARDED_BY(log_lock_);
+  const char* assert_no_new_records_reason_ GUARDED_BY(log_lock_);
+
+  friend class ScopedAssertNoNewTransactionRecords;
 
   DISALLOW_COPY_AND_ASSIGN(Transaction);
+};
+
+class ScopedAssertNoNewTransactionRecords {
+ public:
+  explicit ScopedAssertNoNewTransactionRecords(const char* reason)
+    : transaction_(kIsDebugBuild ? InstallAssertion(reason) : nullptr) {}
+
+  ~ScopedAssertNoNewTransactionRecords() {
+    if (kIsDebugBuild && transaction_ != nullptr) {
+      RemoveAssertion(transaction_);
+    }
+  }
+
+ private:
+  static Transaction* InstallAssertion(const char* reason);
+  static void RemoveAssertion(Transaction* transaction);
+
+  Transaction* transaction_;
 };
 
 }  // namespace art

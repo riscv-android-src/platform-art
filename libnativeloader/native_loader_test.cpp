@@ -38,6 +38,7 @@ using ::testing::StrEq;
 using ::testing::_;
 using internal::ConfigEntry;
 using internal::ParseConfig;
+using internal::ParseJniConfig;
 
 #if defined(__LP64__)
 #define LIB_DIR "lib64"
@@ -92,13 +93,14 @@ class Platform {
 
 // These represents built-in namespaces created by the linker according to ld.config.txt
 static std::unordered_map<std::string, Platform::mock_namespace_handle> namespaces = {
-    {"platform", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("platform"))},
+    {"system", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("system"))},
     {"default", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("default"))},
-    {"art", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("art"))},
+    {"com_android_art", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("com_android_art"))},
     {"sphal", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("sphal"))},
     {"vndk", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("vndk"))},
-    {"neuralnetworks", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("neuralnetworks"))},
-    {"cronet", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("cronet"))},
+    {"vndk_product", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("vndk_product"))},
+    {"com_android_neuralnetworks", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("com_android_neuralnetworks"))},
+    {"com_android_os_statsd", TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE("com_android_os_statsd"))},
 };
 
 // The actual gmock object
@@ -348,21 +350,23 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
       ANDROID_NAMESPACE_TYPE_ISOLATED | ANDROID_NAMESPACE_TYPE_ALSO_USED_AS_ANONYMOUS;
   std::string expected_library_path = library_path;
   std::string expected_permitted_path = std::string("/data:/mnt/expand:") + permitted_path;
-  std::string expected_parent_namespace = "platform";
+  std::string expected_parent_namespace = "system";
   bool expected_link_with_platform_ns = true;
   bool expected_link_with_art_ns = true;
   bool expected_link_with_sphal_ns = !vendor_public_libraries().empty();
   bool expected_link_with_vndk_ns = false;
+  bool expected_link_with_vndk_product_ns = false;
   bool expected_link_with_default_ns = false;
   bool expected_link_with_neuralnetworks_ns = true;
-  bool expected_link_with_cronet_ns = true;
+  bool expected_link_with_statsd_ns = true;
   std::string expected_shared_libs_to_platform_ns = default_public_libraries();
   std::string expected_shared_libs_to_art_ns = art_public_libraries();
   std::string expected_shared_libs_to_sphal_ns = vendor_public_libraries();
-  std::string expected_shared_libs_to_vndk_ns = vndksp_libraries();
+  std::string expected_shared_libs_to_vndk_ns = vndksp_libraries_vendor();
+  std::string expected_shared_libs_to_vndk_product_ns = vndksp_libraries_product();
   std::string expected_shared_libs_to_default_ns = default_public_libraries();
   std::string expected_shared_libs_to_neuralnetworks_ns = neuralnetworks_public_libraries();
-  std::string expected_shared_libs_to_cronet_ns = cronet_public_libraries();
+  std::string expected_shared_libs_to_statsd_ns = statsd_public_libraries();
 
   void SetExpectations() {
     NativeLoaderTest::SetExpectations();
@@ -378,12 +382,12 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
                            StrEq(expected_permitted_path), NsEq(expected_parent_namespace.c_str())))
         .WillOnce(Return(TO_MOCK_NAMESPACE(TO_ANDROID_NAMESPACE(dex_path.c_str()))));
     if (expected_link_with_platform_ns) {
-      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("platform"),
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("system"),
                                               StrEq(expected_shared_libs_to_platform_ns)))
           .WillOnce(Return(true));
     }
     if (expected_link_with_art_ns) {
-      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("art"),
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("com_android_art"),
                                               StrEq(expected_shared_libs_to_art_ns)))
           .WillOnce(Return(true));
     }
@@ -397,19 +401,24 @@ class NativeLoaderTest_Create : public NativeLoaderTest {
                                               StrEq(expected_shared_libs_to_vndk_ns)))
           .WillOnce(Return(true));
     }
+    if (expected_link_with_vndk_product_ns) {
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("vndk_product"),
+                                              StrEq(expected_shared_libs_to_vndk_product_ns)))
+          .WillOnce(Return(true));
+    }
     if (expected_link_with_default_ns) {
       EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("default"),
                                               StrEq(expected_shared_libs_to_default_ns)))
           .WillOnce(Return(true));
     }
     if (expected_link_with_neuralnetworks_ns) {
-      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("neuralnetworks"),
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("com_android_neuralnetworks"),
                                               StrEq(expected_shared_libs_to_neuralnetworks_ns)))
           .WillOnce(Return(true));
     }
-    if (expected_link_with_cronet_ns) {
-      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("cronet"),
-                                              StrEq(expected_shared_libs_to_cronet_ns)))
+    if (expected_link_with_statsd_ns) {
+      EXPECT_CALL(*mock, mock_link_namespaces(Eq(IsBridged()), _, NsEq("com_android_os_statsd"),
+                                              StrEq(expected_shared_libs_to_statsd_ns)))
           .WillOnce(Return(true));
     }
   }
@@ -477,13 +486,13 @@ TEST_P(NativeLoaderTest_Create, UnbundledVendorApp) {
   expected_library_path = expected_library_path + ":/vendor/" LIB_DIR;
   expected_permitted_path = expected_permitted_path + ":/vendor/" LIB_DIR;
   expected_shared_libs_to_platform_ns =
-      expected_shared_libs_to_platform_ns + ":" + llndk_libraries();
+      expected_shared_libs_to_platform_ns + ":" + llndk_libraries_vendor();
   expected_link_with_vndk_ns = true;
   SetExpectations();
   RunTest();
 }
 
-TEST_P(NativeLoaderTest_Create, BundledProductApp_pre30) {
+TEST_P(NativeLoaderTest_Create, BundledProductApp) {
   dex_path = "/product/app/foo/foo.apk";
   is_shared = true;
 
@@ -493,36 +502,19 @@ TEST_P(NativeLoaderTest_Create, BundledProductApp_pre30) {
   RunTest();
 }
 
-TEST_P(NativeLoaderTest_Create, BundledProductApp_post30) {
-  dex_path = "/product/app/foo/foo.apk";
-  is_shared = true;
-  target_sdk_version = 30;
-
-  expected_namespace_name = "classloader-namespace-shared";
-  expected_namespace_flags |= ANDROID_NAMESPACE_TYPE_SHARED;
-  SetExpectations();
-  RunTest();
-}
-
-TEST_P(NativeLoaderTest_Create, UnbundledProductApp_pre30) {
+TEST_P(NativeLoaderTest_Create, UnbundledProductApp) {
   dex_path = "/product/app/foo/foo.apk";
   is_shared = false;
-  SetExpectations();
-  RunTest();
-}
 
-TEST_P(NativeLoaderTest_Create, UnbundledProductApp_post30) {
-  dex_path = "/product/app/foo/foo.apk";
-  is_shared = false;
-  target_sdk_version = 30;
-
-  expected_namespace_name = "vendor-classloader-namespace";
-  expected_library_path = expected_library_path + ":/product/" LIB_DIR ":/system/product/" LIB_DIR;
-  expected_permitted_path =
-      expected_permitted_path + ":/product/" LIB_DIR ":/system/product/" LIB_DIR;
-  expected_shared_libs_to_platform_ns =
-      expected_shared_libs_to_platform_ns + ":" + llndk_libraries();
-  expected_link_with_vndk_ns = true;
+  if (is_product_vndk_version_defined()) {
+    expected_namespace_name = "vendor-classloader-namespace";
+    expected_library_path = expected_library_path + ":/product/" LIB_DIR ":/system/product/" LIB_DIR;
+    expected_permitted_path =
+        expected_permitted_path + ":/product/" LIB_DIR ":/system/product/" LIB_DIR;
+    expected_shared_libs_to_platform_ns =
+        expected_shared_libs_to_platform_ns + ":" + llndk_libraries_product();
+    expected_link_with_vndk_product_ns = true;
+  }
   SetExpectations();
   RunTest();
 }
@@ -618,7 +610,7 @@ libD.so
 )";
   const std::vector<std::string> expected_result = {"libA.so", "libC.so", "libD.so"};
   Result<std::vector<std::string>> result = ParseConfig(file_content, always_true);
-  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_RESULT_OK(result);
   ASSERT_EQ(expected_result, *result);
 }
 
@@ -634,7 +626,7 @@ libC.so
   const std::vector<std::string> expected_result = {"libA.so", "libC.so"};
 #endif
   Result<std::vector<std::string>> result = ParseConfig(file_content, always_true);
-  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_RESULT_OK(result);
   ASSERT_EQ(expected_result, *result);
 }
 
@@ -649,7 +641,7 @@ libC.so
   Result<std::vector<std::string>> result =
       ParseConfig(file_content,
                   [](const struct ConfigEntry& entry) -> Result<bool> { return !entry.nopreload; });
-  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_RESULT_OK(result);
   ASSERT_EQ(expected_result, *result);
 }
 
@@ -670,17 +662,40 @@ libE.so nopreload
   Result<std::vector<std::string>> result =
       ParseConfig(file_content,
                   [](const struct ConfigEntry& entry) -> Result<bool> { return !entry.nopreload; });
-  ASSERT_TRUE(result) << result.error().message();
+  ASSERT_RESULT_OK(result);
   ASSERT_EQ(expected_result, *result);
 }
 
 TEST(NativeLoaderConfigParser, RejectMalformed) {
-  ASSERT_FALSE(ParseConfig("libA.so 32 64", always_true));
-  ASSERT_FALSE(ParseConfig("libA.so 32 32", always_true));
-  ASSERT_FALSE(ParseConfig("libA.so 32 nopreload 64", always_true));
-  ASSERT_FALSE(ParseConfig("32 libA.so nopreload", always_true));
-  ASSERT_FALSE(ParseConfig("nopreload libA.so 32", always_true));
-  ASSERT_FALSE(ParseConfig("libA.so nopreload # comment", always_true));
+  ASSERT_FALSE(ParseConfig("libA.so 32 64", always_true).ok());
+  ASSERT_FALSE(ParseConfig("libA.so 32 32", always_true).ok());
+  ASSERT_FALSE(ParseConfig("libA.so 32 nopreload 64", always_true).ok());
+  ASSERT_FALSE(ParseConfig("32 libA.so nopreload", always_true).ok());
+  ASSERT_FALSE(ParseConfig("nopreload libA.so 32", always_true).ok());
+  ASSERT_FALSE(ParseConfig("libA.so nopreload # comment", always_true).ok());
+}
+
+TEST(NativeLoaderJniConfigParser, BasicLoading) {
+  const char file_content[] = R"(
+# comment
+com_android_foo libfoo.so
+# Empty line is ignored
+
+com_android_bar libbar.so:libbar2.so
+)";
+
+  std::map<std::string, std::string> expected_result{
+    {"com_android_foo", "libfoo.so"},
+    {"com_android_bar", "libbar.so:libbar2.so"},
+  };
+
+  Result<std::map<std::string, std::string>> result = ParseJniConfig(file_content);
+  ASSERT_RESULT_OK(result);
+  ASSERT_EQ(expected_result, *result);
+}
+
+TEST(NativeLoaderJniConfigParser, RejectMalformed) {
+  ASSERT_FALSE(ParseJniConfig("com_android_foo").ok());
 }
 
 }  // namespace nativeloader

@@ -199,14 +199,15 @@ inline ObjPtr<mirror::Object> AllocObjectFromCodeResolved(ObjPtr<mirror::Class> 
       return nullptr;
     }
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    // Pass in false since the object cannot be finalizable.
+    // Pass in kNoAddFinalizer since the object cannot be finalizable.
     // CheckClassInitializedForObjectAlloc can cause thread suspension which means we may now be
     // instrumented.
-    return klass->Alloc</*kInstrumented=*/true, /*kCheckAddFinalizer=*/false>(
+    return klass->Alloc</*kInstrumented=*/true, mirror::Class::AddFinalizer::kNoAddFinalizer>(
         self, heap->GetCurrentAllocator());
   }
-  // Pass in false since the object cannot be finalizable.
-  return klass->Alloc<kInstrumented, /*kCheckAddFinalizer=*/false>(self, allocator_type);
+  // Pass in kNoAddFinalizer since the object cannot be finalizable.
+  return klass->Alloc<kInstrumented,
+                      mirror::Class::AddFinalizer::kNoAddFinalizer>(self, allocator_type);
 }
 
 // Given the context of a calling Method and an initialized class, create an instance.
@@ -216,8 +217,9 @@ inline ObjPtr<mirror::Object> AllocObjectFromCodeInitialized(ObjPtr<mirror::Clas
                                                              Thread* self,
                                                              gc::AllocatorType allocator_type) {
   DCHECK(klass != nullptr);
-  // Pass in false since the object cannot be finalizable.
-  return klass->Alloc<kInstrumented, /*kCheckAddFinalizer=*/false>(self, allocator_type);
+  // Pass in kNoAddFinalizer since the object cannot be finalizable.
+  return klass->Alloc<kInstrumented,
+                      mirror::Class::AddFinalizer::kNoAddFinalizer>(self, allocator_type);
 }
 
 
@@ -733,27 +735,6 @@ inline ObjPtr<mirror::Class> ResolveVerifyAndClinit(dex::TypeIndex type_idx,
   return h_class.Get();
 }
 
-inline void UnlockJniSynchronizedMethod(jobject locked, Thread* self) {
-  // Save any pending exception over monitor exit call.
-  ObjPtr<mirror::Throwable> saved_exception = nullptr;
-  if (UNLIKELY(self->IsExceptionPending())) {
-    saved_exception = self->GetException();
-    self->ClearException();
-  }
-  // Decode locked object and unlock, before popping local references.
-  self->DecodeJObject(locked)->MonitorExit(self);
-  if (UNLIKELY(self->IsExceptionPending())) {
-    LOG(FATAL) << "Synchronized JNI code returning with an exception:\n"
-        << saved_exception->Dump()
-        << "\nEncountered second exception during implicit MonitorExit:\n"
-        << self->GetException()->Dump();
-  }
-  // Restore pending exception.
-  if (saved_exception != nullptr) {
-    self->SetException(saved_exception);
-  }
-}
-
 template <typename INT_TYPE, typename FLOAT_TYPE>
 inline INT_TYPE art_float_to_integral(FLOAT_TYPE f) {
   const INT_TYPE kMaxInt = static_cast<INT_TYPE>(std::numeric_limits<INT_TYPE>::max());
@@ -776,6 +757,14 @@ inline bool NeedsClinitCheckBeforeCall(ArtMethod* method) {
   // compiled code for static methods. See b/18161648 . The class initializer is
   // special as it is invoked during initialization and does not need the check.
   return method->IsStatic() && !method->IsConstructor();
+}
+
+inline HandleScope* GetGenericJniHandleScope(ArtMethod** managed_sp,
+                                             size_t num_handle_scope_references) {
+  // The HandleScope is just below the cookie and padding to align as uintptr_t.
+  const size_t offset =
+      RoundUp(HandleScope::SizeOf(num_handle_scope_references) + kJniCookieSize, sizeof(uintptr_t));
+  return reinterpret_cast<HandleScope*>(reinterpret_cast<uint8_t*>(managed_sp) - offset);
 }
 
 }  // namespace art

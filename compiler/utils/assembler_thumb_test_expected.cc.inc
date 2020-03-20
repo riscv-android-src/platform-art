@@ -41,8 +41,8 @@ const char* const VixlJniHelpersResults[] = {
   "  7e:	f50d 5c80 	add.w	ip, sp, #4096	; 0x1000\n",
   "  82:	f8c9 c200 	str.w	ip, [r9, #512]	; 0x200\n",
   "  86:	f8c9 d200 	str.w	sp, [r9, #512]	; 0x200\n",
-  "  8a:	f8d0 c030 	ldr.w	ip, [r0, #48]	; 0x30\n",
-  "  8e:	47e0      	blx	ip\n",
+  "  8a:	f8d0 e030 	ldr.w	lr, [r0, #48]	; 0x30\n",
+  "  8e:	47f0      	blx	lr\n",
   "  90:	f8dd c02c 	ldr.w	ip, [sp, #44]	; 0x2c\n",
   "  94:	f8cd c030 	str.w	ip, [sp, #48]	; 0x30\n",
   "  98:	f8d9 c200 	ldr.w	ip, [r9, #512]	; 0x200\n",
@@ -51,7 +51,7 @@ const char* const VixlJniHelpersResults[] = {
   "  a4:	f8cd c030 	str.w	ip, [sp, #48]	; 0x30\n",
   "  a8:	4648      	mov	r0, r9\n",
   "  aa:	f8cd 9030 	str.w	r9, [sp, #48]	; 0x30\n",
-  "  ae:	4684      	mov	ip, r0\n",
+  "  ae:	4604      	mov	r4, r0\n",
   "  b0:	f1bc 0f00 	cmp.w	ip, #0\n",
   "  b4:	bf18      	it	ne\n",
   "  b6:	f10d 0c30 	addne.w	ip, sp, #48	; 0x30\n",
@@ -153,8 +153,8 @@ const char* const VixlJniHelpersResults[] = {
   " 21c:	f8d9 8034 	ldr.w	r8, [r9, #52]	; 0x34\n",
   " 220:	4770      	bx	lr\n",
   " 222:	4660      	mov	r0, ip\n",
-  " 224:	f8d9 c2ec 	ldr.w	ip, [r9, #748]	; 0x2ec\n",
-  " 228:	47e0      	blx	ip\n",
+  " 224:	f8d9 e2e8 	ldr.w	lr, [r9, #744]	; 0x2e8\n",
+  " 228:	47f0      	blx	lr\n",
   nullptr
 };
 

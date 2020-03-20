@@ -273,8 +273,12 @@ JitCodeCache::JitCodeCache()
 
 JitCodeCache::~JitCodeCache() {}
 
+bool JitCodeCache::PrivateRegionContainsPc(const void* ptr) const {
+  return private_region_.IsInExecSpace(ptr);
+}
+
 bool JitCodeCache::ContainsPc(const void* ptr) const {
-  return private_region_.IsInExecSpace(ptr) || shared_region_.IsInExecSpace(ptr);
+  return PrivateRegionContainsPc(ptr) || shared_region_.IsInExecSpace(ptr);
 }
 
 bool JitCodeCache::WillExecuteJitCode(ArtMethod* method) {
@@ -340,7 +344,7 @@ const void* JitCodeCache::FindCompiledCodeForInstrumentation(ArtMethod* method) 
 }
 
 const void* JitCodeCache::GetSavedEntryPointOfPreCompiledMethod(ArtMethod* method) {
-  if (Runtime::Current()->IsUsingApexBootImageLocation() && method->IsPreCompiled()) {
+  if (method->IsPreCompiled()) {
     const void* code_ptr = nullptr;
     if (method->GetDeclaringClass()->GetClassLoader() == nullptr) {
       code_ptr = zygote_map_.GetCodeFor(method);
@@ -371,6 +375,11 @@ bool JitCodeCache::WaitForPotentialCollectionToComplete(Thread* self) {
 static uintptr_t FromCodeToAllocation(const void* code) {
   size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
   return reinterpret_cast<uintptr_t>(code) - RoundUp(sizeof(OatQuickMethodHeader), alignment);
+}
+
+static const void* FromAllocationToCode(const uint8_t* alloc) {
+  size_t alignment = GetInstructionSetAlignment(kRuntimeISA);
+  return reinterpret_cast<const void*>(alloc + RoundUp(sizeof(OatQuickMethodHeader), alignment));
 }
 
 static uint32_t GetNumberOfRoots(const uint8_t* stack_map) {
@@ -455,22 +464,18 @@ void JitCodeCache::SweepRootTables(IsMarkedVisitor* visitor) {
   }
 }
 
-void JitCodeCache::FreeCodeAndData(const void* code_ptr, bool free_debug_info) {
+void JitCodeCache::FreeCodeAndData(const void* code_ptr) {
   if (IsInZygoteExecSpace(code_ptr)) {
     // No need to free, this is shared memory.
     return;
   }
   uintptr_t allocation = FromCodeToAllocation(code_ptr);
-  if (free_debug_info) {
-    // Remove compressed mini-debug info for the method.
-    // TODO: This is expensive, so we should always do it in the caller in bulk.
-    RemoveNativeDebugInfoForJit(ArrayRef<const void*>(&code_ptr, 1));
-  }
+  const uint8_t* data = nullptr;
   if (OatQuickMethodHeader::FromCodePointer(code_ptr)->IsOptimized()) {
-    private_region_.FreeData(GetRootTable(code_ptr));
+    data = GetRootTable(code_ptr);
   }  // else this is a JNI stub without any data.
 
-  private_region_.FreeCode(reinterpret_cast<uint8_t*>(allocation));
+  FreeLocked(&private_region_, reinterpret_cast<uint8_t*>(allocation), data);
 }
 
 void JitCodeCache::FreeAllMethodHeaders(
@@ -486,19 +491,13 @@ void JitCodeCache::FreeAllMethodHeaders(
         ->RemoveDependentsWithMethodHeaders(method_headers);
   }
 
-  // Remove compressed mini-debug info for the methods.
-  std::vector<const void*> removed_symbols;
-  removed_symbols.reserve(method_headers.size());
-  for (const OatQuickMethodHeader* method_header : method_headers) {
-    removed_symbols.push_back(method_header->GetCode());
-  }
-  std::sort(removed_symbols.begin(), removed_symbols.end());
-  RemoveNativeDebugInfoForJit(ArrayRef<const void*>(removed_symbols));
-
   ScopedCodeCacheWrite scc(private_region_);
   for (const OatQuickMethodHeader* method_header : method_headers) {
-    FreeCodeAndData(method_header->GetCode(), /*free_debug_info=*/ false);
+    FreeCodeAndData(method_header->GetCode());
   }
+
+  // We have potentially removed a lot of debug info. Do maintenance pass to save space.
+  RepackNativeDebugInfoForJit();
 }
 
 void JitCodeCache::RemoveMethodsIn(Thread* self, const LinearAlloc& alloc) {
@@ -723,7 +722,6 @@ bool JitCodeCache::Commit(Thread* self,
       } else if (NeedsClinitCheckBeforeCall(method) &&
                  !method->GetDeclaringClass()->IsVisiblyInitialized()) {
         // This situation currently only occurs in the jit-zygote mode.
-        DCHECK(Runtime::Current()->IsUsingApexBootImageLocation());
         DCHECK(!garbage_collect_code_);
         DCHECK(method->IsPreCompiled());
         // The shared region can easily be queried. For the private region, we
@@ -880,12 +878,29 @@ void JitCodeCache::MoveObsoleteMethod(ArtMethod* old_method, ArtMethod* new_meth
   }
 }
 
-void JitCodeCache::ClearEntryPointsInZygoteExecSpace() {
-  MutexLock mu(Thread::Current(), *Locks::jit_lock_);
-  for (const auto& it : method_code_map_) {
-    ArtMethod* method = it.second;
-    if (IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode())) {
-      method->SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
+void JitCodeCache::TransitionToDebuggable() {
+  // Check that none of our methods have an entrypoint in the zygote exec
+  // space (this should be taken care of by
+  // ClassLinker::UpdateEntryPointsClassVisitor.
+  {
+    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
+    if (kIsDebugBuild) {
+      for (const auto& it : method_code_map_) {
+        ArtMethod* method = it.second;
+        DCHECK(!method->IsPreCompiled());
+        DCHECK(!IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode()));
+      }
+    }
+    // Not strictly necessary, but this map is useless now.
+    saved_compiled_methods_map_.clear();
+  }
+  if (kIsDebugBuild) {
+    for (const auto& entry : zygote_map_) {
+      ArtMethod* method = entry.method;
+      if (method != nullptr) {
+        DCHECK(!method->IsPreCompiled());
+        DCHECK(!IsInZygoteExecSpace(method->GetEntryPointFromQuickCompiledCode()));
+      }
     }
   }
 }
@@ -964,7 +979,12 @@ void JitCodeCache::Free(Thread* self,
                         const uint8_t* data) {
   MutexLock mu(self, *Locks::jit_lock_);
   ScopedCodeCacheWrite ccw(*region);
+  FreeLocked(region, code, data);
+}
+
+void JitCodeCache::FreeLocked(JitMemoryRegion* region, const uint8_t* code, const uint8_t* data) {
   if (code != nullptr) {
+    RemoveNativeDebugInfoForJit(reinterpret_cast<const void*>(FromAllocationToCode(code)));
     region->FreeCode(code);
   }
   if (data != nullptr) {
@@ -1002,13 +1022,12 @@ class MarkCodeClosure final : public Closure {
       // The stack walking code queries the side instrumentation stack if it
       // sees an instrumentation exit pc, so the JIT code of methods in that stack
       // must have been seen. We sanity check this below.
-      for (const instrumentation::InstrumentationStackFrame& frame
-              : *thread->GetInstrumentationStack()) {
+      for (const auto& it : *thread->GetInstrumentationStack()) {
         // The 'method_' in InstrumentationStackFrame is the one that has return_pc_ in
         // its stack frame, it is not the method owning return_pc_. We just pass null to
         // LookupMethodHeader: the method is only checked against in debug builds.
         OatQuickMethodHeader* method_header =
-            code_cache_->LookupMethodHeader(frame.return_pc_, /* method= */ nullptr);
+            code_cache_->LookupMethodHeader(it.second.return_pc_, /* method= */ nullptr);
         if (method_header != nullptr) {
           const void* code = method_header->GetCode();
           CHECK(bitmap_->Test(FromCodeToAllocation(code)));

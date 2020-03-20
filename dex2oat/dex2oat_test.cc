@@ -458,9 +458,10 @@ TEST_F(Dex2oatSwapUseTest, CheckSwapUsage) {
   TEST_DISABLED_FOR_MEMORY_TOOL();
 
   // The `native_alloc_2_ >= native_alloc_1_` assertion below may not
-  // hold true on some x86 systems; disable this test while we
+  // hold true on some x86 or x86_64 systems; disable this test while we
   // investigate (b/29259363).
   TEST_DISABLED_FOR_X86();
+  TEST_DISABLED_FOR_X86_64();
 
   RunTest(/*use_fd=*/ false,
           /*expect_use=*/ false);
@@ -1635,7 +1636,7 @@ TEST_F(Dex2oatDedupeCode, DedupeTest) {
 }
 
 TEST_F(Dex2oatTest, UncompressedTest) {
-  std::unique_ptr<const DexFile> dex(OpenTestDexFile("MainUncompressed"));
+  std::unique_ptr<const DexFile> dex(OpenTestDexFile("MainUncompressedAligned"));
   std::string out_dir = GetScratchDir();
   const std::string base_oat_name = out_dir + "/base.oat";
   ASSERT_TRUE(GenerateOdexForTest(dex->GetLocation(),
@@ -2167,7 +2168,7 @@ TEST_F(Dex2oatTest, AppImageNoProfile) {
 }
 
 TEST_F(Dex2oatTest, ZipFd) {
-  std::string zip_location = GetTestDexFileName("MainUncompressed");
+  std::string zip_location = GetTestDexFileName("MainUncompressedAligned");
   std::unique_ptr<File> dex_file(OS::OpenFileForReading(zip_location.c_str()));
   std::vector<std::string> extra_args{
       StringPrintf("--zip-fd=%d", dex_file->Fd()),

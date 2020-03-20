@@ -39,9 +39,15 @@ class String;
 // C++ mirror of java.lang.reflect.Field.
 class MANAGED Field : public AccessibleObject {
  public:
-  ALWAYS_INLINE uint32_t GetDexFieldIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetField32(OFFSET_OF_OBJECT_MEMBER(Field, dex_field_index_));
+  ALWAYS_INLINE uint32_t GetArtFieldIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
+    return GetField32(OFFSET_OF_OBJECT_MEMBER(Field, art_field_index_));
   }
+  // Public for use by class redefinition code.
+  template<bool kTransactionActive>
+  void SetArtFieldIndex(uint32_t idx) REQUIRES_SHARED(Locks::mutator_lock_) {
+    SetField32<kTransactionActive>(OFFSET_OF_OBJECT_MEMBER(Field, art_field_index_), idx);
+  }
+
 
   ObjPtr<mirror::Class> GetDeclaringClass() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -69,10 +75,7 @@ class MANAGED Field : public AccessibleObject {
     return GetField32(OFFSET_OF_OBJECT_MEMBER(Field, offset_));
   }
 
-  // Slow, try to use only for PrettyField and such. Set use-dex-cache to false to not utilize the
-  // dex-cache when finding the art-field. This is useful for cases where the dex-cache might be
-  // temporarally invalid.
-  ArtField* GetArtField(bool use_dex_cache = true) REQUIRES_SHARED(Locks::mutator_lock_);
+  ArtField* GetArtField() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <PointerSize kPointerSize, bool kTransactionActive = false>
   static ObjPtr<mirror::Field> CreateFromArtField(Thread* self,
@@ -92,7 +95,7 @@ class MANAGED Field : public AccessibleObject {
   HeapReference<mirror::Class> declaring_class_;
   HeapReference<mirror::Class> type_;
   int32_t access_flags_;
-  int32_t dex_field_index_;
+  int32_t art_field_index_;
   int32_t offset_;
 
   template<bool kTransactionActive>
@@ -104,11 +107,6 @@ class MANAGED Field : public AccessibleObject {
   template<bool kTransactionActive>
   void SetAccessFlags(uint32_t flags) REQUIRES_SHARED(Locks::mutator_lock_) {
     SetField32<kTransactionActive>(OFFSET_OF_OBJECT_MEMBER(Field, access_flags_), flags);
-  }
-
-  template<bool kTransactionActive>
-  void SetDexFieldIndex(uint32_t idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetField32<kTransactionActive>(OFFSET_OF_OBJECT_MEMBER(Field, dex_field_index_), idx);
   }
 
   template<bool kTransactionActive>

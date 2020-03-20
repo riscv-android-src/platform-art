@@ -216,6 +216,10 @@ class MANAGED Class final : public Object {
   }
   void SetClassFlags(uint32_t new_flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Set access flags during linking, these cannot be rolled back by a Transaction.
+  void SetAccessFlagsDuringLinking(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Set access flags, recording the change if running inside a Transaction.
   void SetAccessFlags(uint32_t new_access_flags) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns true if the class is an enum.
@@ -258,7 +262,7 @@ class MANAGED Class final : public Object {
 
   ALWAYS_INLINE void SetFinalizable() REQUIRES_SHARED(Locks::mutator_lock_) {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    SetAccessFlags(flags | kAccClassIsFinalizable);
+    SetAccessFlagsDuringLinking(flags | kAccClassIsFinalizable);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -403,7 +407,8 @@ class MANAGED Class final : public Object {
     DCHECK_EQ(v32 & kPrimitiveTypeMask, v32) << "upper 16 bits aren't zero";
     // Store the component size shift in the upper 16 bits.
     v32 |= Primitive::ComponentSizeShift(new_type) << kPrimitiveTypeSizeShiftShift;
-    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
+    SetField32</*kTransactionActive=*/ false, /*kCheckTransaction=*/ false>(
+        OFFSET_OF_OBJECT_MEMBER(Class, primitive_type_), v32);
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -498,8 +503,21 @@ class MANAGED Class final : public Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Enum used to control whether we try to add a finalizer-reference for object alloc or not.
+  enum class AddFinalizer {
+    // Don't create a finalizer reference regardless of what the class-flags say.
+    kNoAddFinalizer,
+    // Use the class-flags to figure out if we should make a finalizer reference.
+    kUseClassTag,
+  };
+
   // Creates a raw object instance but does not invoke the default constructor.
-  template<bool kIsInstrumented = true, bool kCheckAddFinalizer = true>
+  // kCheckAddFinalizer controls whether we use a DCHECK to sanity check that we create a
+  // finalizer-reference if needed. This should only be disabled when doing structural class
+  // redefinition.
+  template <bool kIsInstrumented = true,
+            AddFinalizer kAddFinalizer = AddFinalizer::kUseClassTag,
+            bool kCheckAddFinalizer = true>
   ALWAYS_INLINE ObjPtr<Object> Alloc(Thread* self, gc::AllocatorType allocator_type)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
@@ -646,7 +664,6 @@ class MANAGED Class final : public Object {
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<ClassLoader> GetClassLoader() ALWAYS_INLINE REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template <bool kCheckTransaction = true>
   void SetClassLoader(ObjPtr<ClassLoader> new_cl) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static constexpr MemberOffset DexCacheOffset() {
@@ -1117,7 +1134,8 @@ class MANAGED Class final : public Object {
   }
 
   void SetDexClassDefIndex(uint16_t class_def_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
+    SetField32</*kTransactionActive=*/ false, /*kCheckTransaction=*/ false>(
+        OFFSET_OF_OBJECT_MEMBER(Class, dex_class_def_idx_), class_def_idx);
   }
 
   dex::TypeIndex GetDexTypeIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1126,7 +1144,8 @@ class MANAGED Class final : public Object {
   }
 
   void SetDexTypeIndex(dex::TypeIndex type_idx) REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetField32Transaction(OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
+    SetField32</*kTransactionActive=*/ false, /*kCheckTransaction=*/ false>(
+        OFFSET_OF_OBJECT_MEMBER(Class, dex_type_idx_), type_idx.index_);
   }
 
   dex::TypeIndex FindTypeIndexInOtherDexFile(const DexFile& dex_file)

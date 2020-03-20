@@ -173,6 +173,18 @@ art_cc_library {
         // TODO(b/133140750): Clean this up.
         "//packages/modules/NetworkStack/tests:__subpackages__",
     ],
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+        // due to the transitive dependency from linker:
+        // linker -> libdebuggerd_handler_fallback -> libdexfile_support_static -> libdexfile
+        // libartbase
+        // TODO(b/142944931): remove this
+        "com.android.runtime",
+        // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
+        // from /system/core, etc.
+        "//apex_available:platform",
+    ],
 
     shared_libs: [
         "libbase",
@@ -194,6 +206,9 @@ art_cc_library {
     defaults: [
         "art_debug_defaults",
         "libartbase_defaults",
+    ],
+    apex_available: [
+        "com.android.art.debug",
     ],
     shared_libs: [
         "libbase",
@@ -260,7 +275,6 @@ art_cc_test {
         "base/membarrier_test.cc",
         "base/memory_region_test.cc",
         "base/mem_map_test.cc",
-        "base/memory_type_table_test.cc",
         "base/safe_copy_test.cc",
         "base/scoped_flock_test.cc",
         "base/time_utils_test.cc",

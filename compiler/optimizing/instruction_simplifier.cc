@@ -276,17 +276,6 @@ bool InstructionSimplifierVisitor::TryCombineVecMultiplyAccumulate(HVecMul* mul)
         return false;
       }
       break;
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
-      if (!(type == DataType::Type::kUint8 ||
-            type == DataType::Type::kInt8 ||
-            type == DataType::Type::kUint16 ||
-            type == DataType::Type::kInt16 ||
-            type == DataType::Type::kInt32 ||
-            type == DataType::Type::kInt64)) {
-        return false;
-      }
-      break;
     default:
       return false;
   }
@@ -2489,6 +2478,10 @@ static bool TryReplaceStringBuilderAppend(HInvoke* invoke) {
     if (use.GetUser()->GetBlock() != block) {
       return false;
     }
+    // The append pattern uses the StringBuilder only as the first argument.
+    if (use.GetIndex() != 0u) {
+      return false;
+    }
   }
 
   // Collect args and check for unexpected uses.
@@ -2500,17 +2493,15 @@ static bool TryReplaceStringBuilderAppend(HInvoke* invoke) {
   uint32_t format = 0u;
   uint32_t num_args = 0u;
   HInstruction* args[StringBuilderAppend::kMaxArgs];  // Added in reverse order.
-  for (const HUseListNode<HInstruction*>& use : sb->GetUses()) {
-    // The append pattern uses the StringBuilder only as the first argument.
-    if (use.GetIndex() != 0u) {
-      return false;
+  for (HBackwardInstructionIterator iter(block->GetInstructions()); !iter.Done(); iter.Advance()) {
+    HInstruction* user = iter.Current();
+    // Instructions of interest apply to `sb`, skip those that do not involve `sb`.
+    if (user->InputCount() == 0u || user->InputAt(0u) != sb) {
+      continue;
     }
-    // We see the uses in reverse order because they are inserted at the front
-    // of the singly-linked list, so the StringBuilder.append() must come first.
-    HInstruction* user = use.GetUser();
+    // We visit the uses in reverse order, so the StringBuilder.toString() must come first.
     if (!seen_to_string) {
-      if (user->IsInvokeVirtual() &&
-          user->AsInvokeVirtual()->GetIntrinsic() == Intrinsics::kStringBuilderToString) {
+      if (user == invoke) {
         seen_to_string = true;
         continue;
       } else {
@@ -2628,6 +2619,8 @@ static bool TryReplaceStringBuilderAppend(HInvoke* invoke) {
     append->SetArgumentAt(i, args[num_args - 1u - i]);
   }
   block->InsertInstructionBefore(append, invoke);
+  DCHECK(!invoke->CanBeNull());
+  DCHECK(!append->CanBeNull());
   invoke->ReplaceWith(append);
   // Copy environment, except for the StringBuilder uses.
   for (HEnvironment* env = invoke->GetEnvironment(); env != nullptr; env = env->GetParent()) {

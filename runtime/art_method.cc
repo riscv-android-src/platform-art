@@ -332,8 +332,7 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
   // Invocation by the interpreter, explicitly forcing interpretation over JIT to prevent
   // cycling around the various JIT/Interpreter methods that handle method invocation.
   if (UNLIKELY(!runtime->IsStarted() ||
-               (self->IsForceInterpreter() && !IsNative() && !IsProxyMethod() && IsInvokable()) ||
-               Dbg::IsForcedInterpreterNeededForCalling(self, this))) {
+               (self->IsForceInterpreter() && !IsNative() && !IsProxyMethod() && IsInvokable()))) {
     if (IsStatic()) {
       art::interpreter::EnterInterpreterFromInvoke(
           self, this, nullptr, args, result, /*stay_in_interpreter=*/ true);
@@ -407,7 +406,8 @@ const void* ArtMethod::RegisterNative(const void* native_method) {
 void ArtMethod::UnregisterNative() {
   CHECK(IsNative()) << PrettyMethod();
   // restore stub to lookup native pointer via dlsym
-  SetEntryPointFromJni(GetJniDlsymLookupStub());
+  SetEntryPointFromJni(
+      IsCriticalNative() ? GetJniDlsymLookupCriticalStub() : GetJniDlsymLookupStub());
 }
 
 bool ArtMethod::IsOverridableByDefaultMethod() {

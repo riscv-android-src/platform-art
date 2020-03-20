@@ -15,9 +15,11 @@
  */
 
 #include <array>
+#include <iterator>
 
 #include "adbconnection.h"
 
+#include "adbconnection/client.h"
 #include "android-base/endian.h"
 #include "android-base/stringprintf.h"
 #include "base/file_utils.h"
@@ -25,6 +27,7 @@
 #include "base/macros.h"
 #include "base/mutex.h"
 #include "base/socket_peer_is_trusted.h"
+#include "debugger.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_env_ext.h"
 #include "mirror/throwable.h"
@@ -34,19 +37,23 @@
 #include "scoped_thread_state_change-inl.h"
 #include "well_known_classes.h"
 
-#include "jdwp/jdwp_priv.h"
-
 #include "fd_transport.h"
 
 #include "poll.h"
 
 #include <sys/ioctl.h>
 #include <sys/socket.h>
+#include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/eventfd.h>
 #include <jni.h>
 
 namespace adbconnection {
+
+static constexpr size_t kJdwpHeaderLen = 11U;
+/* DDM support */
+static constexpr uint8_t kJdwpDdmCmdSet = 199U;  // 0xc7, or 'G'+128
+static constexpr uint8_t kJdwpDdmCmd = 1U;
 
 // Messages sent from the transport
 using dt_fd_forward::kListenStartMessage;
@@ -66,7 +73,6 @@ static constexpr const char kJdwpHandshake[14] = {
 
 static constexpr int kEventfdLocked = 0;
 static constexpr int kEventfdUnlocked = 1;
-static constexpr int kControlSockSendTimeout = 10;
 
 static constexpr size_t kPacketHeaderLen = 11;
 static constexpr off_t kPacketSizeOff = 0;
@@ -77,7 +83,7 @@ static constexpr off_t kPacketCommandOff = 10;
 static constexpr uint8_t kDdmCommandSet = 199;
 static constexpr uint8_t kDdmChunkCommand = 1;
 
-static AdbConnectionState* gState;
+static std::optional<AdbConnectionState> gState;
 
 static bool IsDebuggingPossible() {
   return art::Dbg::IsJdwpAllowed();
@@ -85,7 +91,10 @@ static bool IsDebuggingPossible() {
 
 // Begin running the debugger.
 void AdbConnectionDebuggerController::StartDebugger() {
-  if (IsDebuggingPossible()) {
+  // The debugger thread is started for a debuggable or profileable-from-shell process.
+  // The pid will be send to adbd for adb's "track-jdwp" and "track-app" services.
+  // The thread will also set up the jdwp tunnel if the process is debuggable.
+  if (IsDebuggingPossible() || art::Runtime::Current()->IsProfileableFromShell()) {
     connection_->StartDebuggerThreads();
   } else {
     LOG(ERROR) << "Not starting debugger since process cannot load the jdwp agent.";
@@ -125,7 +134,7 @@ AdbConnectionState::AdbConnectionState(const std::string& agent_name)
     controller_(this),
     ddm_callback_(this),
     sleep_event_fd_(-1),
-    control_sock_(-1),
+    control_ctx_(nullptr, adbconnection_client_destroy),
     local_agent_control_sock_(-1),
     remote_agent_control_sock_(-1),
     adb_connection_socket_(-1),
@@ -139,14 +148,18 @@ AdbConnectionState::AdbConnectionState(const std::string& agent_name)
     notified_ddm_active_(false),
     next_ddm_id_(1),
     started_debugger_threads_(false) {
-  // Setup the addr.
-  control_addr_.controlAddrUn.sun_family = AF_UNIX;
-  control_addr_len_ = sizeof(control_addr_.controlAddrUn.sun_family) + sizeof(kJdwpControlName) - 1;
-  memcpy(control_addr_.controlAddrUn.sun_path, kJdwpControlName, sizeof(kJdwpControlName) - 1);
-
   // Add the startup callback.
   art::ScopedObjectAccess soa(art::Thread::Current());
   art::Runtime::Current()->GetRuntimeCallbacks()->AddDebuggerControlCallback(&controller_);
+}
+
+AdbConnectionState::~AdbConnectionState() {
+  // Remove the startup callback.
+  art::Thread* self = art::Thread::Current();
+  if (self != nullptr) {
+    art::ScopedObjectAccess soa(self);
+    art::Runtime::Current()->GetRuntimeCallbacks()->RemoveDebuggerControlCallback(&controller_);
+  }
 }
 
 static jobject CreateAdbConnectionThread(art::Thread* thr) {
@@ -173,7 +186,6 @@ struct CallbackData {
 
 static void* CallbackFunction(void* vdata) {
   std::unique_ptr<CallbackData> data(reinterpret_cast<CallbackData*>(vdata));
-  CHECK(data->this_ == gState);
   art::Thread* self = art::Thread::Attach(kAdbConnectionThreadName,
                                           true,
                                           data->thr_);
@@ -198,10 +210,6 @@ static void* CallbackFunction(void* vdata) {
   data->this_->RunPollLoop(self);
   int detach_result = art::Runtime::Current()->GetJavaVM()->DetachCurrentThread();
   CHECK_EQ(detach_result, 0);
-
-  // Get rid of the connection
-  gState = nullptr;
-  delete data->this_;
 
   return nullptr;
 }
@@ -333,7 +341,7 @@ void AdbConnectionState::SendDdmPacket(uint32_t id,
   // the adb_write_event_fd_ will ensure that the adb_connection_socket_ will not go away until
   // after we have sent our data.
   static constexpr uint32_t kDdmPacketHeaderSize =
-      kJDWPHeaderLen       // jdwp command packet size
+      kJdwpHeaderLen       // jdwp command packet size
       + sizeof(uint32_t)   // Type
       + sizeof(uint32_t);  // length
   alignas(sizeof(uint32_t)) std::array<uint8_t, kDdmPacketHeaderSize> pkt;
@@ -352,9 +360,9 @@ void AdbConnectionState::SendDdmPacket(uint32_t id,
   switch (packet_type) {
     case DdmPacketType::kCmd: {
       // Now the cmd-set
-      *(pkt_data++) = kJDWPDdmCmdSet;
+      *(pkt_data++) = kJdwpDdmCmdSet;
       // Now the command
-      *(pkt_data++) = kJDWPDdmCmd;
+      *(pkt_data++) = kJdwpDdmCmd;
       break;
     }
     case DdmPacketType::kReply: {
@@ -447,57 +455,27 @@ void AdbConnectionState::SendAgentFds(bool require_handshake) {
 }
 
 android::base::unique_fd AdbConnectionState::ReadFdFromAdb() {
-  // We don't actually care about the data that is sent. We do need to receive something though.
-  char dummy = '!';
-  union {
-    cmsghdr cm;
-    char buffer[CMSG_SPACE(sizeof(int))];
-  } cm_un;
-
-  iovec iov;
-  iov.iov_base       = &dummy;
-  iov.iov_len        = 1;
-
-  msghdr msg;
-  msg.msg_name       = nullptr;
-  msg.msg_namelen    = 0;
-  msg.msg_iov        = &iov;
-  msg.msg_iovlen     = 1;
-  msg.msg_flags      = 0;
-  msg.msg_control    = cm_un.buffer;
-  msg.msg_controllen = sizeof(cm_un.buffer);
-
-  cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
-  cmsg->cmsg_len   = msg.msg_controllen;
-  cmsg->cmsg_level = SOL_SOCKET;
-  cmsg->cmsg_type  = SCM_RIGHTS;
-  (reinterpret_cast<int*>(CMSG_DATA(cmsg)))[0] = -1;
-
-  int rc = TEMP_FAILURE_RETRY(recvmsg(control_sock_, &msg, 0));
-
-  if (rc <= 0) {
-    return android::base::unique_fd(-1);
-  } else {
-    VLOG(jdwp) << "Fds have been received from ADB!";
-  }
-
-  return android::base::unique_fd((reinterpret_cast<int*>(CMSG_DATA(cmsg)))[0]);
+  return android::base::unique_fd(adbconnection_client_receive_jdwp_fd(control_ctx_.get()));
 }
 
 bool AdbConnectionState::SetupAdbConnection() {
-  int        sleep_ms     = 500;
-  const int  sleep_max_ms = 2*1000;
+  int sleep_ms = 500;
+  const int sleep_max_ms = 2 * 1000;
 
-  android::base::unique_fd sock(socket(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0));
-  if (sock < 0) {
-    PLOG(ERROR) << "Could not create ADB control socket";
-    return false;
-  }
-  struct timeval timeout;
-  timeout.tv_sec = kControlSockSendTimeout;
-  timeout.tv_usec = 0;
-  setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
-  int32_t pid = getpid();
+  const char* isa = GetInstructionSetString(art::Runtime::Current()->GetInstructionSet());
+  const AdbConnectionClientInfo infos[] = {
+      {.type = AdbConnectionClientInfoType::pid,
+       .data.pid = static_cast<uint64_t>(getpid())},
+      {.type = AdbConnectionClientInfoType::debuggable,
+       .data.debuggable = IsDebuggingPossible()},
+      {.type = AdbConnectionClientInfoType::profileable,
+       .data.profileable = art::Runtime::Current()->IsProfileableFromShell()},
+      {.type = AdbConnectionClientInfoType::architecture,
+       // GetInstructionSetString() returns a null-terminating C-style string.
+       .data.architecture.name = isa,
+       .data.architecture.size = strlen(isa)},
+  };
+  const AdbConnectionClientInfo *info_ptrs[] = {&infos[0], &infos[1], &infos[2], &infos[3]};
 
   while (!shutting_down_) {
     // If adbd isn't running, because USB debugging was disabled or
@@ -511,55 +489,37 @@ bool AdbConnectionState::SetupAdbConnection() {
     // of battery life, we should consider timing out and giving
     // up after a few minutes in case somebody ships an app with
     // the debuggable flag set.
-    int ret = connect(sock, &control_addr_.controlAddrPlain, control_addr_len_);
-    if (ret == 0) {
-      bool trusted = sock >= 0 && art::SocketPeerIsTrusted(sock);
-      if (!trusted) {
-        LOG(ERROR) << "adb socket is not trusted. Aborting connection.";
-        if (sock >= 0 && shutdown(sock, SHUT_RDWR)) {
-          PLOG(ERROR) << "trouble shutting down socket";
-        }
-        return false;
-      }
-      /* now try to send our pid to the ADB daemon */
-      ret = TEMP_FAILURE_RETRY(send(sock, &pid, sizeof(pid), 0));
-      if (ret == sizeof(pid)) {
-        VLOG(jdwp) << "PID " << pid << " sent to adb";
-        control_sock_ = std::move(sock);
-        return true;
-      } else {
-        PLOG(ERROR) << "Weird, can't send JDWP process pid to ADB. Aborting connection.";
-        return false;
-      }
-    } else {
-      if (VLOG_IS_ON(jdwp)) {
-        PLOG(ERROR) << "Can't connect to ADB control socket. Will retry.";
-      }
+    control_ctx_.reset(adbconnection_client_new(info_ptrs, std::size(infos)));
+    if (control_ctx_) {
+      return true;
+    }
 
-      usleep(sleep_ms * 1000);
+    // We failed to connect.
+    usleep(sleep_ms * 1000);
 
-      sleep_ms += (sleep_ms >> 1);
-      if (sleep_ms > sleep_max_ms) {
-        sleep_ms = sleep_max_ms;
-      }
+    sleep_ms += (sleep_ms >> 1);
+    if (sleep_ms > sleep_max_ms) {
+      sleep_ms = sleep_max_ms;
     }
   }
+
   return false;
 }
 
 void AdbConnectionState::RunPollLoop(art::Thread* self) {
+  DCHECK(IsDebuggingPossible() || art::Runtime::Current()->IsProfileableFromShell());
   CHECK_NE(agent_name_, "");
   CHECK_EQ(self->GetState(), art::kNative);
   art::Locks::mutator_lock_->AssertNotHeld(self);
   self->SetState(art::kWaitingInMainDebuggerLoop);
   // shutting_down_ set by StopDebuggerThreads
   while (!shutting_down_) {
-    // First get the control_sock_ from adb if we don't have one. We only need to do this once.
-    if (control_sock_ == -1 && !SetupAdbConnection()) {
+    // First, connect to adbd if we haven't already.
+    if (!control_ctx_ && !SetupAdbConnection()) {
       LOG(ERROR) << "Failed to setup adb connection.";
       return;
     }
-    while (!shutting_down_ && control_sock_ != -1) {
+    while (!shutting_down_ && control_ctx_) {
       bool should_listen_on_connection = !agent_has_socket_ && !sent_agent_fds_;
       struct pollfd pollfds[4] = {
         { sleep_event_fd_, POLLIN, 0 },
@@ -567,7 +527,8 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
         { (agent_loaded_ ? local_agent_control_sock_ : -1), POLLIN, 0 },
         // Check for the control_sock_ actually going away. Only do this if we don't have an active
         // connection.
-        { (adb_connection_socket_ == -1 ? control_sock_ : -1), POLLIN | POLLRDHUP, 0 },
+        { (adb_connection_socket_ == -1 ? adbconnection_client_pollfd(control_ctx_.get()) : -1),
+          POLLIN | POLLRDHUP, 0 },
         // if we have not loaded the agent either the adb_connection_socket_ is -1 meaning we don't
         // have a real connection yet or the socket through adb needs to be listened to for incoming
         // data that the agent or this plugin can handle.
@@ -584,6 +545,7 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
       const struct pollfd& control_sock_poll       = pollfds[2];
       const struct pollfd& adb_socket_poll         = pollfds[3];
       if (FlagsSet(agent_control_sock_poll.revents, POLLIN)) {
+        CHECK(IsDebuggingPossible());  // This path is unexpected for a profileable process.
         DCHECK(agent_loaded_);
         char buf[257];
         res = TEMP_FAILURE_RETRY(recv(local_agent_control_sock_, buf, sizeof(buf) - 1, 0));
@@ -613,14 +575,19 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
           LOG(ERROR) << "Unknown message received from debugger! '" << std::string(buf) << "'";
         }
       } else if (FlagsSet(control_sock_poll.revents, POLLIN)) {
+        if (!IsDebuggingPossible()) {
+            // For a profielable process, this path can execute when the adbd restarts.
+            control_ctx_.reset();
+            break;
+        }
         bool maybe_send_fds = false;
         {
           // Hold onto this lock so that concurrent ddm publishes don't try to use an illegal fd.
           ScopedEventFdLock sefdl(adb_write_event_fd_);
-          android::base::unique_fd new_fd(ReadFdFromAdb());
+          android::base::unique_fd new_fd(adbconnection_client_receive_jdwp_fd(control_ctx_.get()));
           if (new_fd == -1) {
             // Something went wrong. We need to retry getting the control socket.
-            control_sock_.reset();
+            control_ctx_.reset();
             break;
           } else if (adb_connection_socket_ != -1) {
             // We already have a connection.
@@ -643,11 +610,13 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
       } else if (FlagsSet(control_sock_poll.revents, POLLRDHUP)) {
         // The other end of the adb connection just dropped it.
         // Reset the connection since we don't have an active socket through the adb server.
+        // Note this path is expected for either debuggable or profileable processes.
         DCHECK(!agent_has_socket_) << "We shouldn't be doing anything if there is already a "
                                    << "connection active";
-        control_sock_.reset();
+        control_ctx_.reset();
         break;
       } else if (FlagsSet(adb_socket_poll.revents, POLLIN)) {
+        CHECK(IsDebuggingPossible());  // This path is unexpected for a profileable process.
         DCHECK(!agent_has_socket_);
         if (!agent_loaded_) {
           HandleDataWithoutAgent(self);
@@ -657,6 +626,7 @@ void AdbConnectionState::RunPollLoop(art::Thread* self) {
           SendAgentFds(/*require_handshake=*/ true);
         }
       } else if (FlagsSet(adb_socket_poll.revents, POLLRDHUP)) {
+        CHECK(IsDebuggingPossible());  // This path is unexpected for a profileable process.
         DCHECK(!agent_has_socket_);
         CloseFds();
       } else {
@@ -881,17 +851,12 @@ void AdbConnectionState::StopDebuggerThreads() {
 extern "C" bool ArtPlugin_Initialize() {
   DCHECK(art::Runtime::Current()->GetJdwpProvider() == art::JdwpProvider::kAdbConnection);
   // TODO Provide some way for apps to set this maybe?
-  DCHECK(gState == nullptr);
-  gState = new AdbConnectionState(kDefaultJdwpAgentName);
+  gState.emplace(kDefaultJdwpAgentName);
   return ValidateJdwpOptions(art::Runtime::Current()->GetJdwpOptions());
 }
 
 extern "C" bool ArtPlugin_Deinitialize() {
   gState->StopDebuggerThreads();
-  if (!gState->DebuggerThreadsStarted()) {
-    // If debugger threads were started then those threads will delete the state once they are done.
-    delete gState;
-  }
   return true;
 }
 

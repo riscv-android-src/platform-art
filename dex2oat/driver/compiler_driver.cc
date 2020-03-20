@@ -298,6 +298,11 @@ std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateJniDlsymLookup
   CREATE_TRAMPOLINE(JNI, kJniAbi, pDlsymLookup)
 }
 
+std::unique_ptr<const std::vector<uint8_t>>
+CompilerDriver::CreateJniDlsymLookupCriticalTrampoline() const {
+  CREATE_TRAMPOLINE(JNI, kJniAbi, pDlsymLookupCritical)
+}
+
 std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateQuickGenericJniTrampoline()
     const {
   CREATE_TRAMPOLINE(QUICK, kQuickAbi, pQuickGenericJniTrampoline)
@@ -405,8 +410,6 @@ static bool InstructionSetHasGenericJniStub(InstructionSet isa) {
     case InstructionSet::kArm:
     case InstructionSet::kArm64:
     case InstructionSet::kThumb2:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64: return true;
     default: return false;
@@ -849,7 +852,11 @@ void CompilerDriver::PreCompile(jobject class_loader,
   VLOG(compiler) << "Before precompile " << GetMemoryUsageString(false);
 
   compiled_classes_.AddDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
-  dex_to_dex_compiler_.SetDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
+
+  if (GetCompilerOptions().IsAnyCompilationEnabled()) {
+    TimingLogger::ScopedTiming t2("Dex2Dex SetDexFiles", timings);
+    dex_to_dex_compiler_.SetDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
+  }
 
   // Precompile:
   // 1) Load image classes.
@@ -880,67 +887,60 @@ void CompilerDriver::PreCompile(jobject class_loader,
   if (compiler_options_->AssumeClassesAreVerified()) {
     VLOG(compiler) << "Verify none mode specified, skipping verification.";
     SetVerified(class_loader, dex_files, timings);
-  }
+  } else if (compiler_options_->IsVerificationEnabled()) {
+    Verify(class_loader, dex_files, timings, verification_results);
+    VLOG(compiler) << "Verify: " << GetMemoryUsageString(false);
 
-  if (!compiler_options_->IsVerificationEnabled()) {
-    return;
-  }
-
-  Verify(class_loader, dex_files, timings, verification_results);
-  VLOG(compiler) << "Verify: " << GetMemoryUsageString(false);
-
-  if (GetCompilerOptions().IsForceDeterminism() &&
-      (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension())) {
-    // Resolve strings from const-string. Do this now to have a deterministic image.
-    ResolveConstStrings(dex_files, /*only_startup_strings=*/ false, timings);
-    VLOG(compiler) << "Resolve const-strings: " << GetMemoryUsageString(false);
-  } else if (GetCompilerOptions().ResolveStartupConstStrings()) {
-    ResolveConstStrings(dex_files, /*only_startup_strings=*/ true, timings);
-  }
-
-  if (had_hard_verifier_failure_ && GetCompilerOptions().AbortOnHardVerifierFailure()) {
-    // Avoid dumping threads. Even if we shut down the thread pools, there will still be three
-    // instances of this thread's stack.
-    LOG(FATAL_WITHOUT_ABORT) << "Had a hard failure verifying all classes, and was asked to abort "
-                             << "in such situations. Please check the log.";
-    _exit(1);
-  } else if (number_of_soft_verifier_failures_ > 0 &&
-             GetCompilerOptions().AbortOnSoftVerifierFailure()) {
-    LOG(FATAL_WITHOUT_ABORT) << "Had " << number_of_soft_verifier_failures_ << " soft failure(s) "
-                             << "verifying all classes, and was asked to abort in such situations. "
-                             << "Please check the log.";
-    _exit(1);
-  }
-
-  if (compiler_options_->IsAnyCompilationEnabled()) {
-    if (kIsDebugBuild) {
-      EnsureVerifiedOrVerifyAtRuntime(class_loader, dex_files);
+    if (GetCompilerOptions().IsForceDeterminism() &&
+        (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension())) {
+      // Resolve strings from const-string. Do this now to have a deterministic image.
+      ResolveConstStrings(dex_files, /*only_startup_strings=*/ false, timings);
+      VLOG(compiler) << "Resolve const-strings: " << GetMemoryUsageString(false);
+    } else if (GetCompilerOptions().ResolveStartupConstStrings()) {
+      ResolveConstStrings(dex_files, /*only_startup_strings=*/ true, timings);
     }
-    InitializeClasses(class_loader, dex_files, timings);
-    VLOG(compiler) << "InitializeClasses: " << GetMemoryUsageString(false);
+
+    if (had_hard_verifier_failure_ && GetCompilerOptions().AbortOnHardVerifierFailure()) {
+      // Avoid dumping threads. Even if we shut down the thread pools, there will still be three
+      // instances of this thread's stack.
+      LOG(FATAL_WITHOUT_ABORT) << "Had a hard failure verifying all classes, and was asked to abort "
+                               << "in such situations. Please check the log.";
+      _exit(1);
+    } else if (number_of_soft_verifier_failures_ > 0 &&
+               GetCompilerOptions().AbortOnSoftVerifierFailure()) {
+      LOG(FATAL_WITHOUT_ABORT) << "Had " << number_of_soft_verifier_failures_ << " soft failure(s) "
+                               << "verifying all classes, and was asked to abort in such situations. "
+                               << "Please check the log.";
+      _exit(1);
+    }
   }
 
-  UpdateImageClasses(timings, image_classes);
-  VLOG(compiler) << "UpdateImageClasses: " << GetMemoryUsageString(false);
+  if (GetCompilerOptions().IsGeneratingImage()) {
+    // We can only initialize classes when their verification bit is set.
+    if (compiler_options_->AssumeClassesAreVerified() ||
+        compiler_options_->IsVerificationEnabled()) {
+      if (kIsDebugBuild) {
+        EnsureVerifiedOrVerifyAtRuntime(class_loader, dex_files);
+      }
+      InitializeClasses(class_loader, dex_files, timings);
+      VLOG(compiler) << "InitializeClasses: " << GetMemoryUsageString(false);
+    }
 
-  if (kBitstringSubtypeCheckEnabled &&
-      GetCompilerOptions().IsForceDeterminism() && GetCompilerOptions().IsBootImage()) {
-    // Initialize type check bit string used by check-cast and instanceof.
-    // Do this now to have a deterministic image.
-    // Note: This is done after UpdateImageClasses() at it relies on the image classes to be final.
-    InitializeTypeCheckBitstrings(this, dex_files, timings);
+    UpdateImageClasses(timings, image_classes);
+    VLOG(compiler) << "UpdateImageClasses: " << GetMemoryUsageString(false);
+
+    if (kBitstringSubtypeCheckEnabled &&
+        GetCompilerOptions().IsForceDeterminism() && GetCompilerOptions().IsBootImage()) {
+      // Initialize type check bit string used by check-cast and instanceof.
+      // Do this now to have a deterministic image.
+      // Note: This is done after UpdateImageClasses() at it relies on the image
+      // classes to be final.
+      InitializeTypeCheckBitstrings(this, dex_files, timings);
+    }
   }
 }
 
 bool CompilerDriver::ShouldCompileBasedOnProfile(const MethodReference& method_ref) const {
-  // If compiling the apex image, filter out methods not in an apex file (the profile used
-  // for boot classpath is the same between the apex image and the boot image, so it includes
-  /// framewkro methods).
-  if (compiler_options_->IsApexBootImage() &&
-      !android::base::StartsWith(method_ref.dex_file->GetLocation(), "/apex")) {
-    return false;
-  }
-
   // Profile compilation info may be null if no profile is passed.
   if (!CompilerFilter::DependsOnProfile(compiler_options_->GetCompilerFilter())) {
     // Use the compiler filter instead of the presence of profile_compilation_info_ since
@@ -1027,14 +1027,40 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
   std::vector<ObjPtr<mirror::Class>> classes_;
 };
 
+static inline bool CanIncludeInCurrentImage(ObjPtr<mirror::Class> klass)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  DCHECK(klass != nullptr);
+  gc::Heap* heap = Runtime::Current()->GetHeap();
+  if (heap->GetBootImageSpaces().empty()) {
+    return true;  // We can include any class when compiling the primary boot image.
+  }
+  if (heap->ObjectIsInBootImageSpace(klass)) {
+    return false;  // Already included in the boot image we're compiling against.
+  }
+  return AotClassLinker::CanReferenceInBootImageExtension(klass, heap);
+}
+
 class RecordImageClassesVisitor : public ClassVisitor {
  public:
   explicit RecordImageClassesVisitor(HashSet<std::string>* image_classes)
       : image_classes_(image_classes) {}
 
   bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
+    bool resolved = klass->IsResolved();
+    DCHECK(resolved || klass->IsErroneousUnresolved());
+    bool can_include_in_image = LIKELY(resolved) && CanIncludeInCurrentImage(klass);
     std::string temp;
-    image_classes_->insert(klass->GetDescriptor(&temp));
+    std::string_view descriptor(klass->GetDescriptor(&temp));
+    if (can_include_in_image) {
+      image_classes_->insert(std::string(descriptor));  // Does nothing if already present.
+    } else {
+      auto it = image_classes_->find(descriptor);
+      if (it != image_classes_->end()) {
+        VLOG(compiler) << "Removing " << (resolved ? "unsuitable" : "unresolved")
+            << " class from image classes: " << descriptor;
+        image_classes_->erase(it);
+      }
+    }
     return true;
   }
 
@@ -1048,6 +1074,12 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
   CHECK(timings != nullptr);
   if (!GetCompilerOptions().IsBootImage() && !GetCompilerOptions().IsBootImageExtension()) {
     return;
+  }
+
+  // Make sure the File[] class is in the primary boot image. b/150319075
+  // TODO: Implement support for array classes in profiles and remove this workaround. b/148067697
+  if (GetCompilerOptions().IsBootImage()) {
+    image_classes->insert("[Ljava/io/File;");
   }
 
   TimingLogger::ScopedTiming t("LoadImageClasses", timings);
@@ -1116,7 +1148,9 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
   RecordImageClassesVisitor visitor(image_classes);
   class_linker->VisitClasses(&visitor);
 
-  CHECK(!image_classes->empty());
+  if (GetCompilerOptions().IsBootImage()) {
+    CHECK(!image_classes->empty());
+  }
 }
 
 static void MaybeAddToImageClasses(Thread* self,
@@ -1222,14 +1256,14 @@ class ClinitImageUpdate {
       DCHECK(resolved || klass->IsErroneousUnresolved());
       bool can_include_in_image = LIKELY(resolved) && CanIncludeInCurrentImage(klass);
       std::string temp;
-      std::string_view name(klass->GetDescriptor(&temp));
-      auto it = data_->image_class_descriptors_->find(name);
+      std::string_view descriptor(klass->GetDescriptor(&temp));
+      auto it = data_->image_class_descriptors_->find(descriptor);
       if (it != data_->image_class_descriptors_->end()) {
         if (can_include_in_image) {
           data_->image_classes_.push_back(data_->hs_.NewHandle(klass));
         } else {
           VLOG(compiler) << "Removing " << (resolved ? "unsuitable" : "unresolved")
-              << " class from image classes: " << name;
+              << " class from image classes: " << descriptor;
           data_->image_class_descriptors_->erase(it);
         }
       } else if (can_include_in_image) {
@@ -1272,19 +1306,6 @@ class ClinitImageUpdate {
     if (!object->IsDexCache()) {
       object->VisitReferences(*this, *this);
     }
-  }
-
-  static bool CanIncludeInCurrentImage(ObjPtr<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(klass != nullptr);
-    gc::Heap* heap = Runtime::Current()->GetHeap();
-    if (heap->GetBootImageSpaces().empty()) {
-      return true;  // We can include any class when compiling the primary boot image.
-    }
-    if (heap->ObjectIsInBootImageSpace(klass)) {
-      return false;  // Already included in the boot image we're compiling against.
-    }
-    return AotClassLinker::CanReferenceInBootImageExtension(klass, heap);
   }
 
   mutable VariableSizedHandleScope hs_;
@@ -1771,7 +1792,9 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
     return false;
   }
 
-  bool compiler_only_verifies = !GetCompilerOptions().IsAnyCompilationEnabled();
+  bool compiler_only_verifies =
+      !GetCompilerOptions().IsAnyCompilationEnabled() &&
+      !GetCompilerOptions().IsGeneratingImage();
 
   // We successfully validated the dependencies, now update class status
   // of verified classes. Note that the dependencies also record which classes
@@ -2083,7 +2106,7 @@ void CompilerDriver::SetVerifiedDexFile(jobject class_loader,
                                         ThreadPool* thread_pool,
                                         size_t thread_count,
                                         TimingLogger* timings) {
-  TimingLogger::ScopedTiming t("Verify Dex File", timings);
+  TimingLogger::ScopedTiming t("Set Verified Dex File", timings);
   if (!compiled_classes_.HaveDexFile(&dex_file)) {
     compiled_classes_.AddDexFile(&dex_file);
   }

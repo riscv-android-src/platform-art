@@ -100,9 +100,7 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, top_handle_scope, class_loader_override, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, class_loader_override, long_jump_context, sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, long_jump_context, instrumentation_stack, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, instrumentation_stack, debug_invoke_req, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, debug_invoke_req, single_step_control, sizeof(void*));
-    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, single_step_control, stacked_shadow_frame_record,
+    EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, instrumentation_stack, stacked_shadow_frame_record,
                         sizeof(void*));
     EXPECT_OFFSET_DIFFP(Thread, tlsPtr_, stacked_shadow_frame_record,
                         deoptimization_context_stack, sizeof(void*));
@@ -149,8 +147,12 @@ class EntrypointsOrderTest : public CommonRuntimeTest {
   void CheckJniEntryPoints() {
     CHECKED(OFFSETOF_MEMBER(JniEntryPoints, pDlsymLookup) == 0,
             JniEntryPoints_start_with_dlsymlookup);
-    CHECKED(OFFSETOF_MEMBER(JniEntryPoints, pDlsymLookup)
-            + sizeof(void*) == sizeof(JniEntryPoints), JniEntryPoints_all);
+    CHECKED(OFFSETOF_MEMBER(JniEntryPoints, pDlsymLookup) + sizeof(void*) ==
+                OFFSETOF_MEMBER(JniEntryPoints, pDlsymLookupCritical),
+            JniEntryPoints_dlsymlookup_critical);
+    CHECKED(OFFSETOF_MEMBER(JniEntryPoints, pDlsymLookupCritical) + sizeof(void*) ==
+                sizeof(JniEntryPoints),
+            JniEntryPoints_all);
   }
 
   void CheckQuickEntryPoints() {

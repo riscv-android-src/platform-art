@@ -83,10 +83,6 @@
 #include "handle_scope.h"
 #include "instrumentation.h"
 #include "intern_table.h"
-#include "jdwp/jdwp.h"
-#include "jdwp/jdwp_constants.h"
-#include "jdwp/jdwp_event.h"
-#include "jdwp/object_registry.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
 #include "jni/jni_env_ext-inl.h"
@@ -105,6 +101,7 @@
 #include "mirror/dex_cache.h"
 #include "mirror/executable-inl.h"
 #include "mirror/field-inl.h"
+#include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/method_handle_impl-inl.h"
 #include "mirror/object.h"
@@ -464,17 +461,44 @@ jvmtiError Redefiner::GetClassRedefinitionError(art::Handle<art::mirror::Class> 
           "safe to structurally redefine it.";
       return ERR(UNMODIFIABLE_CLASS);
     }
-    // Check for fields/methods which were returned before moving to index jni id type.
-    // TODO We might want to rework how this is done. Once full redefinition is implemented we will
-    // need to check any subtypes too.
-    art::ObjPtr<art::mirror::ClassExt> ext(klass->GetExtData());
-    if (!ext.IsNull()) {
-      if (ext->HasInstanceFieldPointerIdMarker() ||
-          ext->HasMethodPointerIdMarker() ||
-          ext->HasStaticFieldPointerIdMarker()) {
-        return ERR(UNMODIFIABLE_CLASS);
-      }
+    auto has_pointer_marker =
+        [](art::ObjPtr<art::mirror::Class> k) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+          // Check for fields/methods which were returned before moving to index jni id type.
+          // TODO We might want to rework how this is done. Once full redefinition is implemented we
+          // will need to check any subtypes too.
+          art::ObjPtr<art::mirror::ClassExt> ext(k->GetExtData());
+          if (!ext.IsNull()) {
+            if (ext->HasInstanceFieldPointerIdMarker() || ext->HasMethodPointerIdMarker() ||
+                ext->HasStaticFieldPointerIdMarker()) {
+              return true;
+            }
+          }
+          return false;
+        };
+    if (has_pointer_marker(klass.Get())) {
+      *error_msg =
+          StringPrintf("%s has active pointer jni-ids and cannot be redefined structurally",
+                       klass->PrettyClass().c_str());
+      return ERR(UNMODIFIABLE_CLASS);
     }
+    jvmtiError res = OK;
+    art::ClassFuncVisitor cfv(
+      [&](art::ObjPtr<art::mirror::Class> k) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+        // if there is any class 'K' that is a subtype (i.e. extends) klass and has pointer-jni-ids
+        // we cannot structurally redefine the class 'k' since we would structurally redefine the
+        // subtype.
+        if (k->IsLoaded() && klass->IsAssignableFrom(k) && has_pointer_marker(k)) {
+          *error_msg = StringPrintf(
+              "%s has active pointer jni-ids from subtype %s and cannot be redefined structurally",
+              klass->PrettyClass().c_str(),
+              k->PrettyClass().c_str());
+          res = ERR(UNMODIFIABLE_CLASS);
+          return false;
+        }
+        return true;
+      });
+    art::Runtime::Current()->GetClassLinker()->VisitClasses(&cfv);
+    return res;
   }
   return OK;
 }
@@ -1131,10 +1155,6 @@ bool Redefiner::ClassRedefinition::CheckRedefinable() {
   jvmtiError res;
   if (driver_->type_ == RedefinitionType::kStructural && this->IsStructuralRedefinition()) {
     res = Redefiner::GetClassRedefinitionError<RedefinitionType::kStructural>(h_klass, &err);
-    if (res == OK && HasVirtualMembers() && h_klass->IsFinalizable()) {
-      res = ERR(INTERNAL);
-      err = "Cannot redefine finalizable objects at this time.";
-    }
   } else {
     res = Redefiner::GetClassRedefinitionError<RedefinitionType::kNormal>(h_klass, &err);
   }
@@ -1713,6 +1733,8 @@ bool Redefiner::ClassRedefinition::CollectAndCreateNewInstances(
       hs.NewHandle(cur_data->GetOldClasses()));
   art::Handle<art::mirror::ObjectArray<art::mirror::Class>> new_classes_arr(
       hs.NewHandle(cur_data->GetNewClasses()));
+  DCHECK_EQ(old_classes_arr->GetLength(), new_classes_arr->GetLength());
+  DCHECK_GT(old_classes_arr->GetLength(), 0);
   art::Handle<art::mirror::Class> obj_array_class(
       hs.NewHandle(art::GetClassRoot<art::mirror::ObjectArray<art::mirror::Object>>(
           driver_->runtime_->GetClassLinker())));
@@ -1744,13 +1766,30 @@ bool Redefiner::ClassRedefinition::CollectAndCreateNewInstances(
     int32_t i = pair.second;
     auto iterator = art::ZipLeft(old_classes_arr.Iterate<art::mirror::Class>(),
                                  new_classes_arr.Iterate<art::mirror::Class>());
-    auto [_, new_type] =
-        *(std::find_if(iterator.begin(),
-                       iterator.end(),
-                       [&](auto class_pair) REQUIRES_SHARED(art::Locks::mutator_lock_) {
-                         return class_pair.first == hinstance->GetClass();
-                       }));
-    art::ObjPtr<art::mirror::Object> new_instance(new_type->AllocObject(driver_->self_));
+    auto it = std::find_if(iterator.begin(),
+                           iterator.end(),
+                           [&](auto class_pair) REQUIRES_SHARED(art::Locks::mutator_lock_) {
+                             return class_pair.first == hinstance->GetClass();
+                           });
+    DCHECK(it != iterator.end()) << "Unable to find class pair for "
+                                 << hinstance->GetClass()->PrettyClass() << " (instance " << i
+                                 << ")";
+    auto [_, new_type] = *it;
+    // Make sure when allocating the new instance we don't add it's finalizer since we will directly
+    // replace the old object in the finalizer reference. If we added it here to we would call
+    // finalize twice.
+    // NB If a type is changed from being non-finalizable to finalizable the finalizers on any
+    //    objects created before the redefine will never be called. This is (sort of) allowable by
+    //    the spec and greatly simplifies implementation.
+    // TODO Make it so we will always call all finalizers, even if the object when it was created
+    // wasn't finalizable. To do this we need to be careful of handling failure correctly and making
+    // sure that objects aren't finalized multiple times and that instances of failed redefinitions
+    // aren't finalized.
+    art::ObjPtr<art::mirror::Object> new_instance(
+        new_type->Alloc</*kIsInstrumented=*/true,
+                        art::mirror::Class::AddFinalizer::kNoAddFinalizer,
+                        /*kCheckAddFinalizer=*/false>(
+            driver_->self_, driver_->runtime_->GetHeap()->GetCurrentAllocator()));
     if (new_instance.IsNull()) {
       driver_->self_->AssertPendingOOMException();
       driver_->self_->ClearException();
@@ -1863,6 +1902,7 @@ bool Redefiner::ClassRedefinition::FinishNewClassAllocations(RedefinitionDataHol
         old_types.push_back(hs.NewHandle(obj->AsClass()));
       }
     });
+    DCHECK_GT(old_types.size(), 0u) << "Expected to find at least old_klass!";
     VLOG(plugin) << "Found " << old_types.size() << " types that are/are subtypes of "
                 << old_klass->PrettyClass();
   }
@@ -1891,9 +1931,11 @@ bool Redefiner::ClassRedefinition::FinishNewClassAllocations(RedefinitionDataHol
               });
   }
   for (uint32_t i = 0; i < old_types.size(); ++i) {
+    DCHECK(!old_types[i].IsNull()) << i;
     old_classes_arr->Set(i, old_types[i].Get());
   }
   cur_data->SetOldClasses(old_classes_arr.Get());
+  DCHECK_GT(old_classes_arr->GetLength(), 0);
 
   art::Handle<art::mirror::ObjectArray<art::mirror::Class>> new_classes_arr(
       hs.NewHandle(art::mirror::ObjectArray<art::mirror::Class>::Alloc(
@@ -2109,19 +2151,8 @@ void Redefiner::ClassRedefinition::UnregisterJvmtiBreakpoints() {
   BreakpointUtil::RemoveBreakpointsInClass(driver_->env_, GetMirrorClass().Ptr());
 }
 
-void Redefiner::ClassRedefinition::UnregisterBreakpoints() {
-  if (LIKELY(!art::Dbg::IsDebuggerActive())) {
-    return;
-  }
-  art::JDWP::JdwpState* state = art::Dbg::GetJdwpState();
-  if (state != nullptr) {
-    state->UnregisterLocationEventsOnClass(GetMirrorClass());
-  }
-}
-
 void Redefiner::UnregisterAllBreakpoints() {
   for (Redefiner::ClassRedefinition& redef : redefinitions_) {
-    redef.UnregisterBreakpoints();
     redef.UnregisterJvmtiBreakpoints();
   }
 }
@@ -2252,19 +2283,26 @@ class ClassDefinitionPauser : public art::ClassLoadCallback {
   }
   ~ClassDefinitionPauser() REQUIRES_SHARED(art::Locks::mutator_lock_) {
     art::Locks::mutator_lock_->AssertSharedHeld(self_);
+    CHECK(release_) << "Must call Release()";
+  }
+  void Release() REQUIRES(art::Locks::mutator_lock_) {
     if (is_running_) {
+      art::Locks::mutator_lock_->AssertExclusiveHeld(self_);
       uint32_t count;
       // Wake up everything.
       {
         art::MutexLock mu(self_, release_mu_);
         release_ = true;
+        // We have an exclusive mutator so all threads must be suspended and therefore they've
+        // either already incremented this count_ or they are stuck somewhere before it.
         count = count_;
         release_cond_.Broadcast(self_);
       }
       // Wait for all threads to leave this structs code.
-      art::ScopedThreadSuspension sts(self_, art::ThreadState::kWaiting);
       VLOG(plugin) << "Resuming " << count << " threads paused before class-allocation!";
-      release_barrier_.Increment(self_, count);
+      release_barrier_.Increment</*locks=*/art::Barrier::kAllowHoldingLocks>(self_, count);
+    } else {
+      release_ = true;
     }
   }
   void BeginDefineClass() override REQUIRES_SHARED(art::Locks::mutator_lock_) {
@@ -2279,22 +2317,22 @@ class ClassDefinitionPauser : public art::ClassLoadCallback {
                    << " allowed to proceed despite class-def pause initiated by " << *self_;
       return;
     }
+    // If we are suspended (no mutator-lock) then the pausing thread could do everything before the
+    // count_++ including destroying this object, causing UAF/deadlock.
+    art::Locks::mutator_lock_->AssertSharedHeld(this_thread);
+    ++count_;
     art::ScopedThreadSuspension sts(this_thread, art::ThreadState::kSuspended);
     {
       art::MutexLock mu(this_thread, release_mu_);
-      if (release_) {
-        // Count already retrieved, no need to pass.
-        return;
-      }
       VLOG(plugin) << "Suspending " << *this_thread << " due to class definition. class-def pause "
                    << "initiated by " << *self_;
-      count_++;
       while (!release_) {
         release_cond_.Wait(this_thread);
       }
     }
     release_barrier_.Pass(this_thread);
   }
+
   void EndDefineClass() override REQUIRES_SHARED(art::Locks::mutator_lock_) {
     art::Thread* this_thread = art::Thread::Current();
     if (this_thread == self_) {
@@ -2325,7 +2363,7 @@ class ClassDefinitionPauser : public art::ClassLoadCallback {
   art::Mutex release_mu_;
   art::Barrier release_barrier_;
   art::ConditionVariable release_cond_;
-  uint32_t count_ GUARDED_BY(release_mu_);
+  std::atomic<uint32_t> count_;
   bool release_;
 };
 
@@ -2333,44 +2371,45 @@ class ScopedSuspendClassLoading {
  public:
   ScopedSuspendClassLoading(art::Thread* self, art::Runtime* runtime, RedefinitionDataHolder& h)
       REQUIRES_SHARED(art::Locks::mutator_lock_)
-      : self_(self), runtime_(runtime), paused_(false), pauser_(self_) {
+      : self_(self), runtime_(runtime), pauser_() {
     if (std::any_of(h.begin(), h.end(), [](auto r) REQUIRES_SHARED(art::Locks::mutator_lock_) {
           return r.GetRedefinition().IsStructuralRedefinition();
         })) {
       VLOG(plugin) << "Pausing Class loading for structural redefinition.";
-      paused_ = true;
+      pauser_.emplace(self);
       {
         art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
         uint32_t in_progress_defines = 0;
         {
           art::ScopedSuspendAll ssa(__FUNCTION__);
-          pauser_.SetRunning();
-          runtime_->GetRuntimeCallbacks()->AddClassLoadCallback(&pauser_);
+          pauser_->SetRunning();
+          runtime_->GetRuntimeCallbacks()->AddClassLoadCallback(&pauser_.value());
           art::MutexLock mu(self_, *art::Locks::thread_list_lock_);
           runtime_->GetThreadList()->ForEach([&](art::Thread* t) {
             if (t != self_ && t->GetDefineClassCount() != 0) {
               in_progress_defines++;
             }
           });
-          VLOG(plugin) << "Waiting for " << in_progress_defines << " in progress class-loads to finish";
+          VLOG(plugin) << "Waiting for " << in_progress_defines
+                       << " in progress class-loads to finish";
         }
-        pauser_.WaitFor(in_progress_defines);
+        pauser_->WaitFor(in_progress_defines);
       }
     }
   }
   ~ScopedSuspendClassLoading() {
-    if (paused_) {
+    if (pauser_.has_value()) {
       art::ScopedThreadSuspension sts(self_, art::ThreadState::kNative);
       art::ScopedSuspendAll ssa(__FUNCTION__);
-      runtime_->GetRuntimeCallbacks()->RemoveClassLoadCallback(&pauser_);
+      pauser_->Release();
+      runtime_->GetRuntimeCallbacks()->RemoveClassLoadCallback(&pauser_.value());
     }
   }
 
  private:
   art::Thread* self_;
   art::Runtime* runtime_;
-  bool paused_;
-  ClassDefinitionPauser pauser_;
+  std::optional<ClassDefinitionPauser> pauser_;
 };
 
 class ScopedSuspendAllocations {
@@ -2562,8 +2601,9 @@ void Redefiner::ClassRedefinition::UpdateFields(art::ObjPtr<art::mirror::Class> 
       const art::dex::FieldId* new_field_id =
           dex_file_->FindFieldId(*new_declaring_id, *new_name_id, *new_type_id);
       CHECK(new_field_id != nullptr);
+      uint32_t new_field_index = dex_file_->GetIndexForFieldId(*new_field_id);
       // We only need to update the index since the other data in the ArtField cannot be updated.
-      field.SetDexFieldIndex(dex_file_->GetIndexForFieldId(*new_field_id));
+      field.SetDexFieldIndex(new_field_index);
     }
   }
 }

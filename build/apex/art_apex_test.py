@@ -51,6 +51,12 @@ ARCHS = ["arm", "arm64", "x86", "x86_64"]
 # package.
 ART_TEST_DIR = 'bin/art'
 
+
+# Test if a given variable is set to a string "true".
+def isEnvTrue(var):
+  return var in os.environ and os.environ[var] == 'true'
+
+
 class FSObject:
   def __init__(self, name, is_dir, is_exec, is_symlink, size):
     self.name = name
@@ -164,7 +170,11 @@ class TargetFlattenedApexProvider:
         is_dir = os.path.isdir(filepath)
         is_exec = os.access(filepath, os.X_OK)
         is_symlink = os.path.islink(filepath)
-        size = os.path.getsize(filepath)
+        if is_symlink:
+          # Report the length of the symlink's target's path as file size, like `ls`.
+          size = len(os.readlink(filepath))
+        else:
+          size = os.path.getsize(filepath)
         apex_map[basename] = FSObject(basename, is_dir, is_exec, is_symlink, size)
     self._folder_cache[apex_dir] = apex_map
     return apex_map
@@ -341,8 +351,6 @@ class Checker:
 
   def check_dexpreopt(self, basename):
     dirs = self.arch_dirs_for_path('javalib')
-    if not dirs:
-      self.fail('Could not find javalib directory for any arch.')
     for dir in dirs:
       for ext in ['art', 'oat', 'vdex']:
         self.check_file('%s/%s.%s' % (dir, basename, ext))
@@ -486,13 +494,13 @@ class ReleaseChecker:
     self._checker.check_native_library('libnativebridge')
     self._checker.check_native_library('libnativehelper')
     self._checker.check_native_library('libnativeloader')
-    self._checker.check_native_library('libadbconnection_server')
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libadbconnection')
     self._checker.check_native_library('libart')
     self._checker.check_native_library('libart-compiler')
     self._checker.check_native_library('libart-dexlayout')
+    self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
     self._checker.check_native_library('libdexfile')
@@ -509,6 +517,9 @@ class ReleaseChecker:
     self._checker.check_java_library('core-libart')
     self._checker.check_java_library('core-oj')
     self._checker.check_java_library('okhttp')
+    if isEnvTrue('EMMA_INSTRUMENT_FRAMEWORK'):
+      # In coverage builds jacoco is added to the list of ART apex jars.
+      self._checker.check_java_library('jacocoagent')
 
     # Check internal native libraries for Managed Core Library.
     self._checker.check_native_library('libjavacore')
@@ -542,17 +553,16 @@ class ReleaseChecker:
     self._checker.check_optional_native_library('libclang_rt.hwasan*')
     self._checker.check_optional_native_library('libclang_rt.ubsan*')
 
-    # Check dexpreopt files for libcore bootclasspath jars, unless this is a
-    # coverage build with EMMA_INSTRUMENT_FRAMEWORK=true (in that case we do not
-    # generate dexpreopt files because ART boot jars depend on framework and
-    # cannot be dexpreopted in isolation).
-    if 'EMMA_INSTRUMENT_FRAMEWORK' not in os.environ or not os.environ['EMMA_INSTRUMENT_FRAMEWORK']:
-      self._checker.check_dexpreopt('boot')
-      self._checker.check_dexpreopt('boot-apache-xml')
-      self._checker.check_dexpreopt('boot-bouncycastle')
-      self._checker.check_dexpreopt('boot-core-icu4j')
-      self._checker.check_dexpreopt('boot-core-libart')
-      self._checker.check_dexpreopt('boot-okhttp')
+    # Check dexpreopt files for libcore bootclasspath jars.
+    self._checker.check_dexpreopt('boot')
+    self._checker.check_dexpreopt('boot-apache-xml')
+    self._checker.check_dexpreopt('boot-bouncycastle')
+    self._checker.check_dexpreopt('boot-core-icu4j')
+    self._checker.check_dexpreopt('boot-core-libart')
+    self._checker.check_dexpreopt('boot-okhttp')
+    if isEnvTrue('EMMA_INSTRUMENT_FRAMEWORK'):
+      # In coverage builds the ART boot image includes jacoco.
+      self._checker.check_dexpreopt('boot-jacocoagent')
 
 class ReleaseTargetChecker:
   def __init__(self, checker):
@@ -604,7 +614,7 @@ class ReleaseHostChecker:
   def run(self):
     # Check binaries for ART.
     self._checker.check_executable('hprof-conv')
-    self._checker.check_symlinked_multilib_executable('dex2oatd')
+    self._checker.check_executable('dex2oatd')
 
     # Check exported native libraries for Managed Core Library.
     self._checker.check_native_library('libandroidicu-host')
@@ -721,6 +731,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('linker_patch_test')
     self._checker.check_art_test_executable('live_interval_test')
     self._checker.check_art_test_executable('load_store_analysis_test')
+    self._checker.check_art_test_executable('load_store_elimination_test')
     self._checker.check_art_test_executable('loop_optimization_test')
     self._checker.check_art_test_executable('nodes_test')
     self._checker.check_art_test_executable('nodes_vector_test')
@@ -747,7 +758,6 @@ class TestingTargetChecker:
     self._checker.check_optional_art_test_executable('liveness_test')
     self._checker.check_optional_art_test_executable('managed_register_arm64_test')
     self._checker.check_optional_art_test_executable('managed_register_arm_test')
-    self._checker.check_optional_art_test_executable('managed_register_mips64_test')
     self._checker.check_optional_art_test_executable('managed_register_x86_64_test')
     self._checker.check_optional_art_test_executable('managed_register_x86_test')
     self._checker.check_optional_art_test_executable('register_allocator_test')
@@ -766,9 +776,6 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('verifier_deps_test')
     # These tests depend on a specific code generator and are conditionally included.
     self._checker.check_optional_art_test_executable('relative_patcher_arm64_test')
-    self._checker.check_optional_art_test_executable('relative_patcher_mips32r6_test')
-    self._checker.check_optional_art_test_executable('relative_patcher_mips64_test')
-    self._checker.check_optional_art_test_executable('relative_patcher_mips_test')
     self._checker.check_optional_art_test_executable('relative_patcher_thumb2_test')
     self._checker.check_optional_art_test_executable('relative_patcher_x86_64_test')
     self._checker.check_optional_art_test_executable('relative_patcher_x86_test')
@@ -817,7 +824,6 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('membarrier_test')
     self._checker.check_art_test_executable('memfd_test')
     self._checker.check_art_test_executable('memory_region_test')
-    self._checker.check_art_test_executable('memory_type_table_test')
     self._checker.check_art_test_executable('safe_copy_test')
     self._checker.check_art_test_executable('scoped_flock_test')
     self._checker.check_art_test_executable('time_utils_test')
@@ -888,15 +894,12 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('indirect_reference_table_test')
     self._checker.check_art_test_executable('instruction_set_features_arm64_test')
     self._checker.check_art_test_executable('instruction_set_features_arm_test')
-    self._checker.check_art_test_executable('instruction_set_features_mips64_test')
-    self._checker.check_art_test_executable('instruction_set_features_mips_test')
     self._checker.check_art_test_executable('instruction_set_features_test')
     self._checker.check_art_test_executable('instruction_set_features_x86_64_test')
     self._checker.check_art_test_executable('instruction_set_features_x86_test')
     self._checker.check_art_test_executable('instrumentation_test')
     self._checker.check_art_test_executable('intern_table_test')
     self._checker.check_art_test_executable('java_vm_ext_test')
-    self._checker.check_art_test_executable('jdwp_options_test')
     self._checker.check_art_test_executable('jit_memory_region_test')
     self._checker.check_art_test_executable('jni_internal_test')
     self._checker.check_art_test_executable('large_object_space_test')

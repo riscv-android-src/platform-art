@@ -32,7 +32,6 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "dex/class_accessor.h"
-#include "dex/dex_cache_resolved_classes.h"
 #include "dex/dex_file_types.h"
 #include "gc_root.h"
 #include "handle.h"
@@ -104,6 +103,18 @@ class ClassVisitor {
   virtual bool operator()(ObjPtr<mirror::Class> klass) = 0;
 };
 
+template <typename Func>
+class ClassFuncVisitor final : public ClassVisitor {
+ public:
+  explicit ClassFuncVisitor(Func func) : func_(func) {}
+  bool operator()(ObjPtr<mirror::Class> klass) override REQUIRES_SHARED(Locks::mutator_lock_) {
+    return func_(klass);
+  }
+
+ private:
+  Func func_;
+};
+
 class ClassLoaderVisitor {
  public:
   virtual ~ClassLoaderVisitor() {}
@@ -163,8 +174,6 @@ class ClassLinker {
   // properly handle read barriers and object marking.
   bool AddImageSpace(gc::space::ImageSpace* space,
                      Handle<mirror::ClassLoader> class_loader,
-                     jobjectArray dex_elements,
-                     const char* dex_location,
                      std::vector<std::unique_ptr<const DexFile>>* out_dex_files,
                      std::string* error_msg)
       REQUIRES(!Locks::dex_lock_)
@@ -585,6 +594,9 @@ class ClassLinker {
   // Is the given entry point the JNI dlsym lookup stub?
   bool IsJniDlsymLookupStub(const void* entry_point) const;
 
+  // Is the given entry point the JNI dlsym lookup critical stub?
+  bool IsJniDlsymLookupCriticalStub(const void* entry_point) const;
+
   const void* GetQuickToInterpreterBridgeTrampoline() const {
     return quick_to_interpreter_bridge_trampoline_;
   }
@@ -696,9 +708,6 @@ class ClassLinker {
 
   static bool ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* quick_code)
       REQUIRES_SHARED(Locks::mutator_lock_);
-
-  std::set<DexCacheResolvedClasses> GetResolvedClasses(bool ignore_boot_classes)
-      REQUIRES(!Locks::dex_lock_);
 
   static bool IsBootClassLoader(ScopedObjectAccessAlreadyRunnable& soa,
                                 ObjPtr<mirror::ClassLoader> class_loader)
@@ -1046,19 +1055,15 @@ class ClassLinker {
                              ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES(Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  DexCacheData FindDexCacheDataLocked(const DexFile& dex_file)
+  const DexCacheData* FindDexCacheDataLocked(const DexFile& dex_file)
       REQUIRES(Locks::dex_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<mirror::DexCache> DecodeDexCache(Thread* self, const DexCacheData& data)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  // Called to ensure that the dex cache has been registered with the same class loader.
-  // If yes, returns the dex cache, otherwise throws InternalError and returns null.
-  ObjPtr<mirror::DexCache> EnsureSameClassLoader(Thread* self,
-                                                 ObjPtr<mirror::DexCache> dex_cache,
-                                                 const DexCacheData& data,
-                                                 ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES(!Locks::dex_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  static ObjPtr<mirror::DexCache> DecodeDexCacheLocked(Thread* self, const DexCacheData* data)
+      REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_);
+  bool IsSameClassLoader(ObjPtr<mirror::DexCache> dex_cache,
+                         const DexCacheData* data,
+                         ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::dex_lock_, Locks::mutator_lock_);
 
   bool InitializeDefaultInterfaceRecursive(Thread* self,
                                            Handle<mirror::Class> klass,
@@ -1420,6 +1425,7 @@ class ClassLinker {
   // Trampolines within the image the bounce to runtime entrypoints. Done so that there is a single
   // patch point within the image. TODO: make these proper relocations.
   const void* jni_dlsym_lookup_trampoline_;
+  const void* jni_dlsym_lookup_critical_trampoline_;
   const void* quick_resolution_trampoline_;
   const void* quick_imt_conflict_trampoline_;
   const void* quick_generic_jni_trampoline_;

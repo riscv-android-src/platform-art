@@ -19,9 +19,10 @@ package art
 // arches on the device.
 
 import (
-	"android/soong/android"
 	"sort"
 	"strings"
+
+	"android/soong/android"
 )
 
 type moduleType struct {
@@ -40,14 +41,14 @@ var (
 func codegen(ctx android.LoadHookContext, c *codegenProperties, t moduleType) {
 	var hostArches, deviceArches []string
 
-	e := envDefault(ctx, "ART_HOST_CODEGEN_ARCHS", "")
+	e := ctx.Config().Getenv("ART_HOST_CODEGEN_ARCHS")
 	if e == "" {
 		hostArches = supportedArches
 	} else {
 		hostArches = strings.Split(e, " ")
 	}
 
-	e = envDefault(ctx, "ART_TARGET_CODEGEN_ARCHS", "")
+	e = ctx.Config().Getenv("ART_TARGET_CODEGEN_ARCHS")
 	if e == "" {
 		deviceArches = defaultDeviceCodegenArches(ctx)
 	} else {
@@ -61,10 +62,6 @@ func codegen(ctx android.LoadHookContext, c *codegenProperties, t moduleType) {
 			arch = &c.Codegen.Arm
 		case "arm64":
 			arch = &c.Codegen.Arm64
-		case "mips":
-			arch = &c.Codegen.Mips
-		case "mips64":
-			arch = &c.Codegen.Mips64
 		case "x86":
 			arch = &c.Codegen.X86
 		case "x86_64":
@@ -191,7 +188,7 @@ type codegenArchProperties struct {
 
 type codegenProperties struct {
 	Codegen struct {
-		Arm, Arm64, Mips, Mips64, X86, X86_64 codegenArchProperties
+		Arm, Arm64, X86, X86_64 codegenArchProperties
 	}
 }
 
@@ -202,8 +199,6 @@ func defaultDeviceCodegenArches(ctx android.LoadHookContext) []string {
 		arches[s] = true
 		if s == "arm64" {
 			arches["arm"] = true
-		} else if s == "mips64" {
-			arches["mips"] = true
 		} else if s == "x86_64" {
 			arches["x86"] = true
 		}

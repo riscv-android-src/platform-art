@@ -18,6 +18,7 @@
 #define ART_LIBNATIVELOADER_PUBLIC_LIBRARIES_H_
 
 #include <algorithm>
+#include <map>
 #include <string>
 
 #include <android-base/result.h>
@@ -32,12 +33,21 @@ using android::base::Result;
 const std::string& preloadable_public_libraries();
 const std::string& default_public_libraries();
 const std::string& art_public_libraries();
-const std::string& cronet_public_libraries();
+const std::string& statsd_public_libraries();
 const std::string& vendor_public_libraries();
 const std::string& extended_public_libraries();
 const std::string& neuralnetworks_public_libraries();
-const std::string& llndk_libraries();
-const std::string& vndksp_libraries();
+const std::string& llndk_libraries_product();
+const std::string& llndk_libraries_vendor();
+const std::string& vndksp_libraries_product();
+const std::string& vndksp_libraries_vendor();
+const std::string& apex_jni_libraries(const std::string& apex_name);
+
+// Returns true if libnativeloader is running on devices and the device has
+// ro.product.vndk.version property. It returns false for host.
+bool is_product_vndk_version_defined();
+
+std::string get_vndk_version(bool is_product_vndk);
 
 // These are exported for testing
 namespace internal {
@@ -53,6 +63,9 @@ struct ConfigEntry {
 Result<std::vector<std::string>> ParseConfig(
     const std::string& file_content,
     const std::function<Result<bool>(const ConfigEntry& /* entry */)>& filter_fn);
+
+Result<std::map<std::string, std::string>> ParseJniConfig(
+    const std::string& file_content);
 
 }  // namespace internal
 

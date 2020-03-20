@@ -294,9 +294,6 @@ public class Main {
   /// CHECK-DAG: VecStore loop:<<Loop>>      outer_loop:none
   //
   // NOTE: should correctly deal with compressed and uncompressed cases.
-  //
-  /// CHECK-START-MIPS64: void Main.string2Bytes(char[], java.lang.String) loop_optimization (after)
-  /// CHECK-NOT: VecLoad
   private static void string2Bytes(char[] a, String b) {
     int min = Math.min(a.length, b.length());
     for (int i = 0; i < min; i++) {
@@ -357,12 +354,6 @@ public class Main {
   /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi:i\d+>>,<<Repl>>] loop:<<Loop:B\d+>> outer_loop:none
   /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<Repl>>]      loop:<<Loop>>      outer_loop:none
   //
-  /// CHECK-START-MIPS64: void Main.oneBoth(short[], char[]) loop_optimization (after)
-  /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                             loop:none
-  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<One>>]              loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi:i\d+>>,<<Repl>>] loop:<<Loop:B\d+>> outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi>>,<<Repl>>]      loop:<<Loop>>      outer_loop:none
-  //
   // Bug b/37764324: integral same-length packed types can be mixed freely.
   private static void oneBoth(short[] a, char[] b) {
     for (int i = 0; i < Math.min(a.length, b.length); i++) {
@@ -401,17 +392,6 @@ public class Main {
   /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi2>>,<<Cnv>>]  loop:<<Loop2>>      outer_loop:none
   //
   /// CHECK-START-ARM64: void Main.typeConv(byte[], byte[]) loop_optimization (after)
-  /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                         loop:none
-  /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<One>>]          loop:none
-  /// CHECK-DAG: <<Load:d\d+>> VecLoad [{{l\d+}},<<Phi1:i\d+>>]      loop:<<Loop1:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Vadd:d\d+>> VecAdd [<<Load>>,<<Repl>>]            loop:<<Loop1>>      outer_loop:none
-  /// CHECK-DAG:               VecStore [{{l\d+}},<<Phi1>>,<<Vadd>>] loop:<<Loop1>>      outer_loop:none
-  /// CHECK-DAG: <<Get:b\d+>>  ArrayGet [{{l\d+}},<<Phi2:i\d+>>]     loop:<<Loop2:B\d+>> outer_loop:none
-  /// CHECK-DAG: <<Add:i\d+>>  Add [<<Get>>,<<One>>]                 loop:<<Loop2>>      outer_loop:none
-  /// CHECK-DAG: <<Cnv:b\d+>>  TypeConversion [<<Add>>]              loop:<<Loop2>>      outer_loop:none
-  /// CHECK-DAG:               ArraySet [{{l\d+}},<<Phi2>>,<<Cnv>>]  loop:<<Loop2>>      outer_loop:none
-  //
-  /// CHECK-START-MIPS64: void Main.typeConv(byte[], byte[]) loop_optimization (after)
   /// CHECK-DAG: <<One:i\d+>>  IntConstant 1                         loop:none
   /// CHECK-DAG: <<Repl:d\d+>> VecReplicateScalar [<<One>>]          loop:none
   /// CHECK-DAG: <<Load:d\d+>> VecLoad [{{l\d+}},<<Phi1:i\d+>>]      loop:<<Loop1:B\d+>> outer_loop:none
@@ -609,6 +589,205 @@ public class Main {
     return a[3];
   }
 
+  // Dot product and SAD vectorization idioms used to have a bug when some
+  // instruction in the loop was visited twice causing a compiler crash.
+  // It happened when two vectorization idioms' matched patterns had a common
+  // sub-expression.
+
+  // Idioms common sub-expression bug: DotProduct and ArraySet.
+  //
+  /// CHECK-START-ARM64: int Main.testDotProdAndSet(byte[], byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecDotProd
+  /// CHECK-DAG:       VecStore
+  public static final int testDotProdAndSet(byte[] a, byte[] b, byte[] c) {
+    int s = 1;
+    for (int i = 0; i < b.length; i++) {
+      int temp = a[i] * b[i];
+      c[i]= (byte)temp;
+      s += temp;
+    }
+    return s - 1;
+  }
+
+  // Idioms common sub-expression bug: DotProduct and DotProduct.
+  //
+  /// CHECK-START-ARM64: int Main.testDotProdAndDotProd(byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecDotProd
+  /// CHECK-DAG:       VecDotProd
+  public static final int testDotProdAndDotProd(byte[] a, byte[] b) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < b.length; i++) {
+      int temp = a[i] * b[i];
+      s0 += temp;
+      s1 += temp;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: SAD and ArraySet.
+  //
+  /// CHECK-START-{ARM,ARM64}: int Main.testSADAndSet(int[], int[], int[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecStore
+  public static int testSADAndSet(int[] x, int[] y, int[] z) {
+    int min_length = Math.min(x.length, y.length);
+    int sad = 0;
+    for (int i = 0; i < min_length; i++) {
+      int temp = Math.abs(x[i] - y[i]);
+      z[i] = temp;
+      sad += temp;
+    }
+    return sad;
+  }
+
+  // Idioms common sub-expression bug: SAD and SAD.
+  /// CHECK-START-{ARM,ARM64}: int Main.testSADAndSAD(int[], int[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecSADAccumulate
+  public static final int testSADAndSAD(int[] x, int[] y) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < x.length; i++) {
+      int temp = Math.abs(x[i] - y[i]);
+      s0 += temp;
+      s1 += temp;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: DotProd and DotProd with extra mul.
+  //
+  /// CHECK-START-ARM64: int Main.testDotProdAndDotProdExtraMul0(byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecMul
+  /// CHECK-DAG:       VecDotProd
+  /// CHECK-DAG:       VecDotProd
+  public static final int testDotProdAndDotProdExtraMul0(byte[] a, byte[] b) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < b.length; i++) {
+      int temp0 = a[i] * b[i];
+      int temp1 = (byte)(temp0) * a[i];
+      s0 += temp1;
+      s1 += temp0;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: DotProd and DotProd with extra mul (reversed order).
+  //
+  /// CHECK-START-ARM64: int Main.testDotProdAndDotProdExtraMul1(byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecMul
+  /// CHECK-DAG:       VecDotProd
+  /// CHECK-DAG:       VecDotProd
+  public static final int testDotProdAndDotProdExtraMul1(byte[] a, byte[] b) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < b.length; i++) {
+      int temp0 = a[i] * b[i];
+      int temp1 = (byte)(temp0) * a[i];
+      s0 += temp0;
+      s1 += temp1;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: SAD and SAD with extra abs.
+  //
+  /// CHECK-START-{ARM,ARM64}: int Main.testSADAndSADExtraAbs0(int[], int[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSub
+  /// CHECK-DAG:       VecAbs
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecSADAccumulate
+  public static final int testSADAndSADExtraAbs0(int[] x, int[] y) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < x.length; i++) {
+      int temp0 = Math.abs(x[i] - y[i]);
+      int temp1 = Math.abs(temp0 - y[i]);
+      s0 += temp1;
+      s1 += temp0;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: SAD and SAD with extra abs (reversed order).
+  //
+  /// CHECK-START-{ARM,ARM64}: int Main.testSADAndSADExtraAbs1(int[], int[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSub
+  /// CHECK-DAG:       VecAbs
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecSADAccumulate
+  public static final int testSADAndSADExtraAbs1(int[] x, int[] y) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < x.length; i++) {
+      int temp0 = Math.abs(x[i] - y[i]);
+      int temp1 = Math.abs(temp0 - y[i]);
+      s0 += temp0;
+      s1 += temp1;
+    }
+    return s0 + s1;
+  }
+
+
+  // Idioms common sub-expression bug: SAD and DotProd combined.
+  //
+  /// CHECK-START-ARM64: int Main.testSADAndDotProdCombined0(byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSub
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecDotProd
+  public static final int testSADAndDotProdCombined0(byte[] x, byte[] y) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < x.length; i++) {
+      int temp0 = x[i] - y[i];
+      int temp1 = Math.abs(temp0);
+      int temp2 = x[i] * (byte)(temp0);
+
+      s0 += temp1;
+      s1 += temp2;
+    }
+    return s0 + s1;
+  }
+
+  // Idioms common sub-expression bug: SAD and DotProd combined (reversed order).
+  /// CHECK-START-ARM64: int Main.testSADAndDotProdCombined1(byte[], byte[]) loop_optimization (after)
+  /// CHECK-DAG:       VecSub
+  /// CHECK-DAG:       VecSADAccumulate
+  /// CHECK-DAG:       VecDotProd
+  public static final int testSADAndDotProdCombined1(byte[] x, byte[] y) {
+    int s0 = 1;
+    int s1 = 1;
+    for (int i = 0; i < x.length; i++) {
+      int temp0 = x[i] - y[i];
+      int temp1 = Math.abs(temp0);
+      int temp2 = x[i] * (byte)(temp0);
+
+      s0 += temp2;
+      s1 += temp1;
+    }
+    return s0 + s1;
+  }
+
+  public static final int ARRAY_SIZE = 512;
+
+  private static byte[] createAndInitByteArray(int x) {
+    byte[] a = new byte[ARRAY_SIZE];
+    for (int i = 0; i < a.length; i++) {
+      a[i] = (byte)((~i) + x);
+    }
+    return a;
+  }
+
+  private static int[] createAndInitIntArray(int x) {
+    int[] a = new int[ARRAY_SIZE];
+    for (int i = 0; i < a.length; i++) {
+      a[i] = (~i) + x;
+    }
+    return a;
+  }
+
   public static void main(String[] args) {
     System.loadLibrary(args[0]);
 
@@ -799,6 +978,59 @@ public class Main {
     }
 
     expectEquals(10, reductionIntoReplication());
+
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        byte[] b_c = createAndInitByteArray(3);
+        expectEquals(2731008, testDotProdAndSet(b_a, b_b, b_c));
+    }
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        expectEquals(5462018, testDotProdAndDotProd(b_a, b_b));
+    }
+    {
+        int[] i_a = createAndInitIntArray(1);
+        int[] i_b = createAndInitIntArray(2);
+        int[] i_c = createAndInitIntArray(3);
+        expectEquals(512, testSADAndSet(i_a, i_b, i_c));
+    }
+    {
+        int[] i_a = createAndInitIntArray(1);
+        int[] i_b = createAndInitIntArray(2);
+        expectEquals(1026, testSADAndSAD(i_a, i_b));
+    }
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        expectEquals(2731266, testDotProdAndDotProdExtraMul0(b_a, b_b));
+    }
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        expectEquals(2731266, testDotProdAndDotProdExtraMul1(b_a, b_b));
+    }
+    {
+        int[] i_a = createAndInitIntArray(1);
+        int[] i_b = createAndInitIntArray(2);
+        expectEquals(131330, testSADAndSADExtraAbs0(i_a, i_b));
+    }
+    {
+        int[] i_a = createAndInitIntArray(1);
+        int[] i_b = createAndInitIntArray(2);
+        expectEquals(131330, testSADAndSADExtraAbs1(i_a, i_b));
+    }
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        expectEquals(1278, testSADAndDotProdCombined0(b_a, b_b));
+    }
+    {
+        byte[] b_a = createAndInitByteArray(1);
+        byte[] b_b = createAndInitByteArray(2);
+        expectEquals(1278, testSADAndDotProdCombined1(b_a, b_b));
+    }
 
     System.out.println("passed");
   }

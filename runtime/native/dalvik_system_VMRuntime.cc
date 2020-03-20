@@ -34,6 +34,7 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "base/enums.h"
 #include "base/sdk_version.h"
 #include "class_linker-inl.h"
+#include "class_loader_context.h"
 #include "common_throws.h"
 #include "debugger.h"
 #include "dex/class_accessor-inl.h"
@@ -181,10 +182,6 @@ static void VMRuntime_clampGrowthLimit(JNIEnv*, jobject) {
   Runtime::Current()->GetHeap()->ClampGrowthLimit();
 }
 
-static jboolean VMRuntime_isDebuggerActive(JNIEnv*, jobject) {
-  return Dbg::IsDebuggerActive();
-}
-
 static jboolean VMRuntime_isNativeDebuggable(JNIEnv*, jobject) {
   return Runtime::Current()->IsNativeDebuggable();
 }
@@ -280,15 +277,13 @@ static void VMRuntime_setDisabledCompatChangesNative(JNIEnv* env, jobject,
   if (disabled_compat_changes == nullptr) {
     return;
   }
-  std::set<uint64_t> disabled_compat_changes_vec;
+  std::set<uint64_t> disabled_compat_changes_set;
   int length = env->GetArrayLength(disabled_compat_changes);
   jlong* elements = env->GetLongArrayElements(disabled_compat_changes, /*isCopy*/nullptr);
   for (int i = 0; i < length; i++) {
-    disabled_compat_changes_vec.insert(static_cast<uint64_t>(elements[i]));
+    disabled_compat_changes_set.insert(static_cast<uint64_t>(elements[i]));
   }
-  Runtime::Current()->SetDisabledCompatChanges(disabled_compat_changes_vec);
-
-  // TODO(145743810): pipe into libc as well.
+  Runtime::Current()->SetDisabledCompatChanges(disabled_compat_changes_set);
 }
 
 static inline size_t clamp_to_size_t(jlong n) {
@@ -685,11 +680,7 @@ static jboolean VMRuntime_isBootClassPathOnDisk(JNIEnv* env, jclass, jstring jav
     env->ThrowNew(iae.get(), message.c_str());
     return JNI_FALSE;
   }
-  std::string error_msg;
-  Runtime* runtime = Runtime::Current();
-  std::unique_ptr<ImageHeader> image_header(gc::space::ImageSpace::ReadImageHeader(
-      runtime->GetImageLocation().c_str(), isa, runtime->GetImageSpaceLoadingOrder(), &error_msg));
-  return image_header.get() != nullptr;
+  return gc::space::ImageSpace::IsBootClassPathOnDisk(isa);
 }
 
 static jstring VMRuntime_getCurrentInstructionSet(JNIEnv* env, jclass) {
@@ -777,6 +768,18 @@ static void VMRuntime_resetJitCounters(JNIEnv* env, jclass klass ATTRIBUTE_UNUSE
   Runtime::Current()->GetClassLinker()->VisitClasses(&visitor);
 }
 
+static jboolean VMRuntime_isValidClassLoaderContext(JNIEnv* env,
+                                                    jclass klass ATTRIBUTE_UNUSED,
+                                                    jstring jencoded_class_loader_context) {
+  if (UNLIKELY(jencoded_class_loader_context == nullptr)) {
+    ScopedFastNativeObjectAccess soa(env);
+    ThrowNullPointerException("encoded_class_loader_context == null");
+    return false;
+  }
+  ScopedUtfChars encoded_class_loader_context(env, jencoded_class_loader_context);
+  return ClassLoaderContext::IsValidEncoding(encoded_class_loader_context.c_str());
+}
+
 static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
@@ -789,7 +792,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
-  FAST_NATIVE_METHOD(VMRuntime, isDebuggerActive, "()Z"),
   FAST_NATIVE_METHOD(VMRuntime, isNativeDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, isJavaDebuggable, "()Z"),
   NATIVE_METHOD(VMRuntime, nativeSetTargetHeapUtilization, "(F)V"),
@@ -829,6 +831,7 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setProcessDataDirectory, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, bootCompleted, "()V"),
   NATIVE_METHOD(VMRuntime, resetJitCounters, "()V"),
+  NATIVE_METHOD(VMRuntime, isValidClassLoaderContext, "(Ljava/lang/String;)Z"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

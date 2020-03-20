@@ -40,7 +40,7 @@ FuncPtr GetFuncPtr(const char* function_name) {
   return f;
 }
 
-#define GET_FUNC_PTR(name) GetFuncPtr<decltype(&name)>(#name)
+#define GET_FUNC_PTR(name) GetFuncPtr<decltype(&(name))>(#name)
 
 }  // namespace
 
@@ -58,6 +58,11 @@ bool NeedsNativeBridge(const char* instruction_set) {
 bool PreInitializeNativeBridge(const char* app_data_dir, const char* instruction_set) {
   static auto f = GET_FUNC_PTR(PreInitializeNativeBridge);
   return f(app_data_dir, instruction_set);
+}
+
+void PreZygoteForkNativeBridge() {
+  static auto f = GET_FUNC_PTR(PreZygoteForkNativeBridge);
+  return f();
 }
 
 bool InitializeNativeBridge(JNIEnv* env, const char* instruction_set) {

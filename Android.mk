@@ -97,40 +97,6 @@ TEST_ART_ADB_ROOT_AND_REMOUNT := \
        $(ADB) wait-for-device root && \
        $(ADB) wait-for-device remount)))
 
-# Sync test files to the target, depends upon all things that must be pushed to the target.
-.PHONY: test-art-target-sync
-# Check if we need to sync. In case ART_TEST_CHROOT or ART_TEST_ANDROID_ROOT
-# is not empty, the code below uses 'adb push' instead of 'adb sync',
-# which does not check if the files on the device have changed.
-# TODO: Remove support for ART_TEST_ANDROID_ROOT when it is no longer needed.
-ifneq ($(ART_TEST_NO_SYNC),true)
-# Sync system and data partitions.
-ifeq ($(ART_TEST_ANDROID_ROOT),)
-ifeq ($(ART_TEST_CHROOT),)
-test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
-	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
-	$(ADB) sync system && $(ADB) sync data
-else
-# TEST_ART_ADB_ROOT_AND_REMOUNT is not needed here, as we are only
-# pushing things to the chroot dir, which is expected to be under
-# /data on the device.
-test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
-	$(ADB) wait-for-device
-	$(ADB) push $(PRODUCT_OUT)/system $(ART_TEST_CHROOT)/
-	$(ADB) push $(PRODUCT_OUT)/data $(ART_TEST_CHROOT)/
-endif
-else
-test-art-target-sync: $(TEST_ART_TARGET_SYNC_DEPS)
-	$(TEST_ART_ADB_ROOT_AND_REMOUNT)
-	$(ADB) wait-for-device
-	$(ADB) push $(PRODUCT_OUT)/system $(ART_TEST_CHROOT)$(ART_TEST_ANDROID_ROOT)
-# Push the contents of the `data` dir into `$(ART_TEST_CHROOT)/data` on the device (note
-# that $(ART_TEST_CHROOT) can be empty).  If `$(ART_TEST_CHROOT)/data` already exists on
-# the device, it is not overwritten, but its content is updated.
-	$(ADB) push $(PRODUCT_OUT)/data $(ART_TEST_CHROOT)/
-endif
-endif
-
 # "mm test-art" to build and run all tests on host and device
 .PHONY: test-art
 test-art: test-art-host test-art-target
@@ -407,16 +373,16 @@ LOCAL_MODULE := art-runtime
 
 # Base requirements.
 LOCAL_REQUIRED_MODULES := \
-    dalvikvm \
-    dex2oat \
-    dexoptanalyzer \
-    libart \
-    libart-compiler \
-    libopenjdkjvm \
-    libopenjdkjvmti \
-    profman \
-    libadbconnection \
-    libperfetto_hprof \
+    dalvikvm.com.android.art.release \
+    dex2oat.com.android.art.release \
+    dexoptanalyzer.com.android.art.release \
+    libart.com.android.art.release \
+    libart-compiler.com.android.art.release \
+    libopenjdkjvm.com.android.art.release \
+    libopenjdkjvmti.com.android.art.release \
+    profman.com.android.art.release \
+    libadbconnection.com.android.art.release \
+    libperfetto_hprof.com.android.art.release \
 
 # Potentially add in debug variants:
 #
@@ -430,16 +396,16 @@ ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
 endif
 ifeq (true,$(art_target_include_debug_build))
 LOCAL_REQUIRED_MODULES += \
-    dex2oatd \
-    dexoptanalyzerd \
-    libartd \
-    libartd-compiler \
-    libopenjdkd \
-    libopenjdkjvmd \
-    libopenjdkjvmtid \
-    profmand \
-    libadbconnectiond \
-    libperfetto_hprofd \
+    dex2oatd.com.android.art.debug \
+    dexoptanalyzerd.com.android.art.debug \
+    libartd.com.android.art.debug \
+    libartd-compiler.com.android.art.debug \
+    libopenjdkd.com.android.art.debug \
+    libopenjdkjvmd.com.android.art.debug \
+    libopenjdkjvmtid.com.android.art.debug \
+    profmand.com.android.art.debug \
+    libadbconnectiond.com.android.art.debug \
+    libperfetto_hprofd.com.android.art.debug \
 
 endif
 endif
@@ -527,19 +493,129 @@ PRIVATE_BIONIC_FILES := \
   lib64/bootstrap/libdl.so \
   lib64/bootstrap/libdl_android.so \
 
+PRIVATE_ART_APEX_DEPENDENCY_FILES := \
+  bin/dalvikvm32 \
+  bin/dalvikvm64 \
+  bin/dalvikvm \
+  bin/dex2oat \
+  bin/dex2oatd \
+  bin/dexdump \
+
 PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
-  lib/libnativebridge.so \
-  lib64/libnativebridge.so \
-  lib/libnativehelper.so \
-  lib64/libnativehelper.so \
-  lib/libdexfile_external.so \
-  lib64/libdexfile_external.so \
-  lib/libdexfiled_external.so \
-  lib64/libdexfiled_external.so \
-  lib/libnativeloader.so \
-  lib64/libnativeloader.so \
+  lib/libadbconnectiond.so \
+  lib/libadbconnection.so \
+  lib/libandroidicu.so \
   lib/libandroidio.so \
+  lib/libartbased.so \
+  lib/libartbase.so \
+  lib/libart-compiler.so \
+  lib/libartd-compiler.so \
+  lib/libartd-dexlayout.so \
+  lib/libartd-disassembler.so \
+  lib/libart-dexlayout.so \
+  lib/libart-disassembler.so \
+  lib/libartd.so \
+  lib/libartpalette.so \
+  lib/libart.so \
+  lib/libbacktrace.so \
+  lib/libbase.so \
+  lib/libcrypto.so \
+  lib/libdexfiled_external.so \
+  lib/libdexfiled.so \
+  lib/libdexfile_external.so \
+  lib/libdexfile.so \
+  lib/libdexfile_support.so \
+  lib/libdt_fd_forward.so \
+  lib/libdt_socket.so \
+  lib/libexpat.so \
+  lib/libicui18n.so \
+  lib/libicu_jni.so \
+  lib/libicuuc.so \
+  lib/libjavacore.so \
+  lib/libjdwp.so \
+  lib/liblzma.so \
+  lib/libmeminfo.so \
+  lib/libnativebridge.so \
+  lib/libnativehelper.so \
+  lib/libnativeloader.so \
+  lib/libnpt.so \
+  lib/libopenjdkd.so \
+  lib/libopenjdkjvmd.so \
+  lib/libopenjdkjvm.so \
+  lib/libopenjdkjvmtid.so \
+  lib/libopenjdkjvmti.so \
+  lib/libopenjdk.so \
+  lib/libpac.so \
+  lib/libprocinfo.so \
+  lib/libprofiled.so \
+  lib/libprofile.so \
+  lib/libsigchain.so \
+  lib/libunwindstack.so \
+  lib/libvixld.so \
+  lib/libvixl.so \
+  lib/libziparchive.so \
+  lib/libz.so \
+  lib64/libadbconnectiond.so \
+  lib64/libadbconnection.so \
+  lib64/libandroidicu.so \
   lib64/libandroidio.so \
+  lib64/libartbased.so \
+  lib64/libartbase.so \
+  lib64/libart-compiler.so \
+  lib64/libartd-compiler.so \
+  lib64/libartd-dexlayout.so \
+  lib64/libartd-disassembler.so \
+  lib64/libart-dexlayout.so \
+  lib64/libart-disassembler.so \
+  lib64/libartd.so \
+  lib64/libartpalette.so \
+  lib64/libart.so \
+  lib64/libbacktrace.so \
+  lib64/libbase.so \
+  lib64/libcrypto.so \
+  lib64/libdexfiled_external.so \
+  lib64/libdexfiled.so \
+  lib64/libdexfile_external.so \
+  lib64/libdexfile.so \
+  lib64/libdexfile_support.so \
+  lib64/libdt_fd_forward.so \
+  lib64/libdt_socket.so \
+  lib64/libexpat.so \
+  lib64/libicui18n.so \
+  lib64/libicu_jni.so \
+  lib64/libicuuc.so \
+  lib64/libjavacore.so \
+  lib64/libjdwp.so \
+  lib64/liblzma.so \
+  lib64/libmeminfo.so \
+  lib64/libnativebridge.so \
+  lib64/libnativehelper.so \
+  lib64/libnativeloader.so \
+  lib64/libnpt.so \
+  lib64/libopenjdkd.so \
+  lib64/libopenjdkjvmd.so \
+  lib64/libopenjdkjvm.so \
+  lib64/libopenjdkjvmtid.so \
+  lib64/libopenjdkjvmti.so \
+  lib64/libopenjdk.so \
+  lib64/libpac.so \
+  lib64/libprocinfo.so \
+  lib64/libprofiled.so \
+  lib64/libprofile.so \
+  lib64/libsigchain.so \
+  lib64/libunwindstack.so \
+  lib64/libvixld.so \
+  lib64/libvixl.so \
+  lib64/libziparchive.so \
+  lib64/libz.so \
+
+PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS := \
+  lib/libcrypto.so \
+  lib/libjavacrypto.so \
+  lib/libssl.so \
+  lib64/libcrypto.so \
+  lib64/libjavacrypto.so \
+  lib64/libssl.so \
 
 # Generate copies of Bionic bootstrap artifacts and ART APEX
 # libraries in the `system` (TARGET_OUT) directory. This is dangerous
@@ -552,7 +628,7 @@ PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
 # - Bionic bootstrap libraries, copied from
 #   `$(TARGET_OUT)/lib(64)/bootstrap` (the `/system/lib(64)/bootstrap`
 #   directory to be sync'd to the target);
-# - Some libraries which are part of the ART APEX; if the product
+# - Programs and libraries from the ART APEX; if the product
 #   to build uses flattened APEXes, these libraries are copied from
 #   `$(TARGET_OUT)/apex/com.android.art.debug` (the flattened
 #   (Debug) ART APEX directory to be sync'd to the target);
@@ -560,26 +636,47 @@ PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
 #   `$(TARGET_OUT)/../apex/com.android.art.debug` (the local
 #   directory under the build tree containing the (Debug) ART APEX
 #   artifacts, which is not sync'd to the target).
+# - Libraries from the Conscrypt APEX may be loaded during golem runs.
 #
 # This target is only used by Golem now.
+#
+# NB Android build does not use cp from:
+#  $ANDROID_BUILD_TOP/prebuilts/build-tools/path/{linux-x86,darwin-x86}
+# which has a non-standard set of command-line flags.
 #
 # TODO(b/129332183): Remove this when Golem has full support for the
 # ART APEX.
 .PHONY: standalone-apex-files
-standalone-apex-files: libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap linker $(DEBUG_ART_APEX)
+standalone-apex-files: libc.bootstrap \
+                       libdl.bootstrap \
+                       libdl_android.bootstrap \
+                       libm.bootstrap \
+                       linker \
+                       $(DEBUG_ART_APEX) \
+                       $(CONSCRYPT_APEX)
 	for f in $(PRIVATE_BIONIC_FILES); do \
 	  tf=$(TARGET_OUT)/$$f; \
 	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
 	done
 	if [ "x$(TARGET_FLATTEN_APEX)" = xtrue ]; then \
-	  art_apex_orig_dir=$(TARGET_OUT)/apex/$(DEBUG_ART_APEX); \
+          apex_orig_dir=$(TARGET_OUT)/apex; \
 	else \
-	  art_apex_orig_dir=$(TARGET_OUT)/../apex/$(DEBUG_ART_APEX); \
+          apex_orig_dir=""; \
 	fi; \
-	for f in $(PRIVATE_ART_APEX_DEPENDENCY_LIBS); do \
+	art_apex_orig_dir=$$apex_orig_dir/$(DEBUG_ART_APEX); \
+	for f in $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES); do \
 	  tf="$$art_apex_orig_dir/$$f"; \
+	  df="$(TARGET_OUT)/$$f"; \
+	  if [ -f $$tf ]; then \
+            if [ -h $$df ]; then rm $$df; fi; \
+            cp -fd $$tf $$df; \
+          fi; \
+	done; \
+	conscrypt_apex_orig_dir=$$apex_orig_dir/$(CONSCRYPT_APEX); \
+	for f in $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS); do \
+	  tf="$$conscrypt_apex_orig_dir/$$f"; \
 	  if [ -f $$tf ]; then cp -f $$tf $(TARGET_OUT)/$$f; fi; \
-	done
+	done; \
 
 ########################################################################
 # Phony target for only building what go/lem requires for pushing ART on /data.
@@ -625,10 +722,11 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
                         $(TARGET_OUT_EXECUTABLES)/art \
                         $(TARGET_OUT)/etc/public.libraries.txt \
                         $(ART_TARGET_DEX_DEPENDENCIES) \
-                        $(ART_TARGET_SHARED_LIBRARY_DEPENDENCIES) \
+                        $(ART_DEBUG_TARGET_SHARED_LIBRARY_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
                         $(TARGET_CORE_IMG_OUT_BASE).art \
                         $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art \
+                        libartpalette-system \
                         libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap \
                         icu-data-art-test-i18n \
                         tzdata-art-test-tzdata tzlookup.xml-art-test-tzdata \

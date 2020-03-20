@@ -42,7 +42,6 @@
 #include "android-base/strings.h"
 
 #include "arch/instruction_set_features.h"
-#include "arch/mips/instruction_set_features_mips.h"
 #include "art_method-inl.h"
 #include "base/callee_save_type.h"
 #include "base/dumpable.h"
@@ -87,7 +86,7 @@
 #include "linker/image_writer.h"
 #include "linker/multi_oat_relative_patcher.h"
 #include "linker/oat_writer.h"
-#include "mirror/class-inl.h"
+#include "mirror/class-alloc-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
@@ -310,7 +309,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --android-root=out/host/linux-x86");
   UsageError("      Default: $ANDROID_ROOT");
   UsageError("");
-  UsageError("  --instruction-set=(arm|arm64|mips|mips64|x86|x86_64): compile for a particular");
+  UsageError("  --instruction-set=(arm|arm64|x86|x86_64): compile for a particular");
   UsageError("      instruction set.");
   UsageError("      Example: --instruction-set=x86");
   UsageError("      Default: arm");
@@ -341,7 +340,8 @@ NO_RETURN static void Usage(const char* fmt, ...) {
                 "|everything):");
   UsageError("      select compiler filter.");
   UsageError("      Example: --compiler-filter=everything");
-  UsageError("      Default: speed");
+  UsageError("      Default: speed-profile if --profile-file or --profile-file-fd is used,");
+  UsageError("               speed otherwise");
   UsageError("");
   UsageError("  --huge-method-max=<method-instruction-count>: threshold size for a huge");
   UsageError("      method for compiler filter tuning.");
@@ -698,6 +698,70 @@ class WatchDog {
 pthread_mutex_t WatchDog::runtime_mutex_ = PTHREAD_MUTEX_INITIALIZER;
 Runtime* WatchDog::runtime_ = nullptr;
 
+// Helper class for overriding `java.lang.ThreadLocal.nextHashCode`.
+//
+// The class ThreadLocal has a static field nextHashCode used for assigning hash codes to
+// new ThreadLocal objects. Since the class and the object referenced by the field are
+// in the boot image, they cannot be modified under normal rules for AOT compilation.
+// However, since this is a private detail that's used only for assigning hash codes and
+// everything should work fine with different hash codes, we override the field for the
+// compilation, providing another object that the AOT class initialization can modify.
+class ThreadLocalHashOverride {
+ public:
+  ThreadLocalHashOverride(bool apply, int32_t initial_value) {
+    Thread* self = Thread::Current();
+    ScopedObjectAccess soa(self);
+    hs_.emplace(self);  // While holding the mutator lock.
+    Runtime* runtime = Runtime::Current();
+    klass_ = hs_->NewHandle(apply
+        ? runtime->GetClassLinker()->LookupClass(self,
+                                                 "Ljava/lang/ThreadLocal;",
+                                                 /*class_loader=*/ nullptr)
+        : nullptr);
+    field_ = (klass_ != nullptr)
+        ? klass_->FindDeclaredStaticField("nextHashCode",
+                                          "Ljava/util/concurrent/atomic/AtomicInteger;")
+        : nullptr;
+    old_field_value_ =
+        hs_->NewHandle(field_ != nullptr ? field_->GetObject(klass_.Get()) : nullptr);
+    if (old_field_value_ != nullptr) {
+      gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
+      StackHandleScope<1u> hs2(self);
+      Handle<mirror::Object> new_field_value = hs2.NewHandle(
+          old_field_value_->GetClass()->Alloc(self, allocator_type));
+      PointerSize pointer_size = runtime->GetClassLinker()->GetImagePointerSize();
+      ArtMethod* constructor = old_field_value_->GetClass()->FindConstructor("(I)V", pointer_size);
+      CHECK(constructor != nullptr);
+      uint32_t args[] = {
+          reinterpret_cast32<uint32_t>(new_field_value.Get()),
+          static_cast<uint32_t>(initial_value)
+      };
+      JValue result;
+      constructor->Invoke(self, args, sizeof(args), &result, /*shorty=*/ "VI");
+      CHECK(!self->IsExceptionPending());
+      field_->SetObject</*kTransactionActive=*/ false>(klass_.Get(), new_field_value.Get());
+    }
+    if (apply && old_field_value_ == nullptr) {
+      LOG(ERROR) << "Failed to override ThreadLocal.nextHashCode";
+    }
+  }
+
+  ~ThreadLocalHashOverride() {
+    ScopedObjectAccess soa(hs_->Self());
+    if (old_field_value_ != nullptr) {
+      // Allow the overriding object to be collected.
+      field_->SetObject</*kTransactionActive=*/ false>(klass_.Get(), old_field_value_.Get());
+    }
+    hs_.reset();  // While holding the mutator lock.
+  }
+
+ private:
+  std::optional<StackHandleScope<2u>> hs_;
+  Handle<mirror::Class> klass_;
+  ArtField* field_;
+  Handle<mirror::Object> old_field_value_;
+};
+
 class Dex2Oat final {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
@@ -828,13 +892,11 @@ class Dex2Oat final {
 
     DCHECK(compiler_options_->image_type_ == CompilerOptions::ImageType::kNone);
     if (!image_filenames_.empty() || image_fd_ != -1) {
-      if (!boot_image_filename_.empty()) {
-        compiler_options_->image_type_ = CompilerOptions::ImageType::kBootImageExtension;
-      } else if (android::base::EndsWith(image_filenames_[0], "apex.art")) {
-        compiler_options_->image_type_ = CompilerOptions::ImageType::kApexBootImage;
-      } else {
-        compiler_options_->image_type_ = CompilerOptions::ImageType::kBootImage;
-      }
+      // If no boot image is provided, then dex2oat is compiling the primary boot image,
+      // otherwise it is compiling the boot image extension.
+      compiler_options_->image_type_ = boot_image_filename_.empty()
+          ? CompilerOptions::ImageType::kBootImage
+          : CompilerOptions::ImageType::kBootImageExtension;
     }
     if (app_image_fd_ != -1 || !app_image_file_name_.empty()) {
       if (compiler_options_->IsBootImage() || compiler_options_->IsBootImageExtension()) {
@@ -1012,8 +1074,6 @@ class Dex2Oat final {
       case InstructionSet::kArm64:
       case InstructionSet::kX86:
       case InstructionSet::kX86_64:
-      case InstructionSet::kMips:
-      case InstructionSet::kMips64:
         compiler_options_->implicit_null_checks_ = true;
         compiler_options_->implicit_so_checks_ = true;
         break;
@@ -1048,6 +1108,28 @@ class Dex2Oat final {
         Usage("Failed to read list of passes to run.");
       }
     }
+
+    // Trim the boot image location to not include any specified profile. Note
+    // that the logic below will include the first boot image extension, but not
+    // the ones that could be listed after the profile of that extension. This
+    // works for our current top use case:
+    // boot.art:/system/framework/boot-framework.art
+    // But this would need to be adjusted if we had to support different use
+    // cases.
+    size_t profile_separator_pos = boot_image_filename_.find(ImageSpace::kProfileSeparator);
+    if (profile_separator_pos != std::string::npos) {
+      DCHECK(!IsBootImage());  // For primary boot image the boot_image_filename_ is empty.
+      if (IsBootImageExtension()) {
+        Usage("Unsupported profile specification in boot image location (%s) for extension.",
+              boot_image_filename_.c_str());
+      }
+      VLOG(compiler)
+          << "Truncating boot image location " << boot_image_filename_
+          << " because it contains profile specification. Truncated: "
+          << boot_image_filename_.substr(/*pos*/ 0u, /*length*/ profile_separator_pos);
+      boot_image_filename_.resize(profile_separator_pos);
+    }
+
     compiler_options_->passes_to_run_ = passes_to_run_.get();
     compiler_options_->compiling_with_core_image_ =
         !boot_image_filename_.empty() &&
@@ -1313,6 +1395,14 @@ class Dex2Oat final {
     } else if (args.Exists(M::StoredClassLoaderContext)) {
       Usage("Option --stored-class-loader-context should only be used if "
             "--class-loader-context is also specified");
+    }
+
+    // If we have a profile, change the default compiler filter to speed-profile
+    // before reading compiler options.
+    static_assert(CompilerFilter::kDefaultCompilerFilter == CompilerFilter::kSpeed);
+    DCHECK_EQ(compiler_options_->GetCompilerFilter(), CompilerFilter::kSpeed);
+    if (UseProfile()) {
+      compiler_options_->SetCompilerFilter(CompilerFilter::kSpeedProfile);
     }
 
     if (!ReadCompilerOptions(args, compiler_options_.get(), &error_msg)) {
@@ -1584,7 +1674,8 @@ class Dex2Oat final {
         std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
         // No need to verify the dex file when we have a vdex file, which means it was already
         // verified.
-        const bool verify = (input_vdex_file_ == nullptr);
+        const bool verify =
+            (input_vdex_file_ == nullptr) && !compiler_options_->AssumeDexFilesAreVerified();
         if (!oat_writers_[i]->WriteAndOpenDexFiles(
             vdex_files_[i].get(),
             verify,
@@ -1629,8 +1720,10 @@ class Dex2Oat final {
       }
     }
 
-    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter())) {
-      // Only modes with compilation require verification results, do this here instead of when we
+    if (CompilerFilter::IsAnyCompilationEnabled(compiler_options_->GetCompilerFilter()) ||
+        IsImage()) {
+      // Only modes with compilation or image generation require verification results.
+      // Do this here instead of when we
       // create the compilation callbacks since the compilation mode may have been changed by the
       // very large app logic.
       // Avoiding setting the verification results saves RAM by not adding the dex files later in
@@ -1888,6 +1981,14 @@ class Dex2Oat final {
         !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter());
   }
 
+  uint32_t GetCombinedChecksums() const {
+    uint32_t combined_checksums = 0u;
+    for (const DexFile* dex_file : compiler_options_->GetDexFilesForOatFile()) {
+      combined_checksums ^= dex_file->GetLocationChecksum();
+    }
+    return combined_checksums;
+  }
+
   // Set up and create the compiler driver and then invoke it to compile all the dex files.
   jobject Compile() {
     ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
@@ -1985,6 +2086,12 @@ class Dex2Oat final {
       // the results for all the dex files, not just the results for the current dex file.
       callbacks_->SetVerifierDeps(new verifier::VerifierDeps(dex_files));
     }
+
+    // To allow initialization of classes that construct ThreadLocal objects in class initializer,
+    // re-initialize the ThreadLocal.nextHashCode to a new object that's not in the boot image.
+    ThreadLocalHashOverride thread_local_hash_override(
+        /*apply=*/ !IsBootImage(), /*initial_value=*/ 123456789u ^ GetCombinedChecksums());
+
     // Invoke the compilation.
     if (compile_individually) {
       CompileDexFilesIndividually();
@@ -2001,7 +2108,7 @@ class Dex2Oat final {
     jobject class_loader = nullptr;
     if (!IsBootImage() && !IsBootImageExtension()) {
       class_loader =
-          class_loader_context_->CreateClassLoader(compiler_options_->dex_files_for_oat_file_);
+          class_loader_context_->CreateClassLoader(compiler_options_->GetDexFilesForOatFile());
     }
     if (!IsBootImage()) {
       callbacks_->SetDexFiles(&dex_files);
@@ -2127,9 +2234,13 @@ class Dex2Oat final {
                                                   class_loader,
                                                   dirty_image_objects_.get()));
 
-      // We need to prepare method offsets in the image address space for direct method patching.
+      // We need to prepare method offsets in the image address space for resolving linker patches.
       TimingLogger::ScopedTiming t2("dex2oat Prepare image address space", timings_);
-      if (!image_writer_->PrepareImageAddressSpace(timings_)) {
+      // Do not preload dex caches for "assume-verified". This filter is used for in-memory
+      // compilation of boot image extension; in that scenario it is undesirable to use a lot
+      // of time to look up things now in hope it will be somewhat useful later.
+      bool preload_dex_caches = !compiler_options_->AssumeDexFilesAreVerified();
+      if (!image_writer_->PrepareImageAddressSpace(preload_dex_caches, timings_)) {
         LOG(ERROR) << "Failed to prepare image address space.";
         return false;
       }
@@ -2535,7 +2646,6 @@ class Dex2Oat final {
     } else {
       DCHECK_EQ(oat_writers_.size(), 1u);
       DCHECK_EQ(dex_filenames_.size(), dex_locations_.size());
-      DCHECK_NE(dex_filenames_.size(), 0u);
       for (size_t i = 0; i != dex_filenames_.size(); ++i) {
         if (!oat_writers_[0]->AddDexFileSource(dex_filenames_[i].c_str(),
                                                dex_locations_[i].c_str())) {
@@ -2625,11 +2735,6 @@ class Dex2Oat final {
     // foreground collector by default for dex2oat.
     raw_options.push_back(std::make_pair("-XX:DisableHSpaceCompactForOOM", nullptr));
 
-    if (compiler_options_->IsForceDeterminism()) {
-      // To make identity hashcode deterministic, set a known seed.
-      mirror::Object::SetHashCodeSeed(987654321U);
-    }
-
     if (!Runtime::ParseOptions(raw_options, false, runtime_options)) {
       LOG(ERROR) << "Failed to parse runtime options";
       return false;
@@ -2639,6 +2744,11 @@ class Dex2Oat final {
 
   // Create a runtime necessary for compilation.
   bool CreateRuntime(RuntimeArgumentMap&& runtime_options) {
+    // To make identity hashcode deterministic, set a seed based on the dex file checksums.
+    // That makes the seed also most likely different for different inputs, for example
+    // for primary boot image and different extensions that could be loaded together.
+    mirror::Object::SetHashCodeSeed(987654321u ^ GetCombinedChecksums());
+
     TimingLogger::ScopedTiming t_runtime("Create runtime", timings_);
     if (!Runtime::Create(std::move(runtime_options))) {
       LOG(ERROR) << "Failed to create runtime";

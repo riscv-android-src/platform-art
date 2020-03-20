@@ -138,6 +138,7 @@ debuggable="no"
 prebuild_mode="yes"
 target_mode="yes"
 dev_mode="no"
+create_runner="no"
 update_mode="no"
 debug_mode="no"
 relocate="no"
@@ -162,7 +163,6 @@ android_root="/system"
 bisection_search="no"
 timeout=""
 suspend_timeout="500000"
-image_suffix=""
 run_optimizing="false"
 
 # To cause tests to fail fast, limit the file sizes created by dx, dex2oat and
@@ -330,11 +330,9 @@ while true; do
         shift
     elif [ "x$1" = "x--interpreter" ]; then
         run_args+=(--interpreter)
-        image_suffix="-interpreter"
         shift
     elif [ "x$1" = "x--jit" ]; then
         run_args+=(--jit)
-        image_suffix="-interpreter"
         shift
     elif [ "x$1" = "x--baseline" ]; then
         run_args+=(--baseline)
@@ -347,7 +345,6 @@ while true; do
         shift
     elif [ "x$1" = "x--verify-soft-fail" ]; then
         run_args+=(--verify-soft-fail)
-        image_suffix="-interp-ac"
         shift
     elif [ "x$1" = "x--no-optimize" ]; then
         run_args+=(--no-optimize)
@@ -364,6 +361,12 @@ while true; do
             break
         fi
         run_args+=(--invoke-with "${what}")
+        shift
+    elif [ "x$1" = "x--create-runner" ]; then
+        run_args+=(--create-runner --dry-run)
+        dev_mode="yes"
+        never_clean="yes"
+        create_runner="yes"
         shift
     elif [ "x$1" = "x--dev" ]; then
         run_args+=(--dev)
@@ -624,8 +627,8 @@ function guess_target_arch_name() {
             target_arch_name=x86
         fi
     else
-        grep32bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm|x86|mips)$'`
-        grep64bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm64|x86_64|mips64)$'`
+        grep32bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm|x86)$'`
+        grep64bit=`ls ${ANDROID_PRODUCT_OUT}/data/art-test | grep -E '^(arm64|x86_64)$'`
         if [ "x${suffix64}" = "x64" ]; then
             target_arch_name=${grep64bit}
         else
@@ -672,12 +675,12 @@ if [ "$runtime" = "dalvik" ]; then
 elif [ "$runtime" = "art" ]; then
     if [ "$target_mode" = "no" ]; then
         guess_host_arch_name
-        run_args+=(--boot "${ANDROID_HOST_OUT}/framework/core${image_suffix}.art:*")
+        run_args+=(--boot "${ANDROID_HOST_OUT}/framework/core.art:*")
         run_args+=(--runtime-option "-Djava.library.path=${host_lib_root}/lib${suffix64}:${host_lib_root}/nativetest${suffix64}")
     else
         guess_target_arch_name
         run_args+=(--runtime-option "-Djava.library.path=/data/nativetest${suffix64}/art/${target_arch_name}")
-        run_args+=(--boot "/data/art-test/core${image_suffix}.art:/data/art-test/*")
+        run_args+=(--boot "/data/art-test/core.art:/data/art-test/*")
     fi
     if [ "$relocate" = "yes" ]; then
       run_args+=(--relocate)
@@ -695,6 +698,11 @@ if [ "$have_image" = "no" ]; then
         exit 1
     fi
     run_args+=(--no-image)
+fi
+
+if [ "$create_runner" = "yes" -a "$target_mode" = "yes" ]; then
+    err_echo "--create-runner does not function for non --host tests"
+    usage="yes"
 fi
 
 if [ "$dev_mode" = "yes" -a "$update_mode" = "yes" ]; then
@@ -746,6 +754,11 @@ if [ "$usage" = "yes" ]; then
         echo "  $prog [options] [test-name]           Run test normally."
         echo "  $prog --dev [options] [test-name]     Development mode" \
              "(dumps to stdout)."
+        echo "  $prog --create-runner [options] [test-name]"
+        echo "              Creates a runner script for use with other " \
+             "tools (e.g. parallel_run.py)."
+        echo "              The script will only run the test portion, and " \
+             "share oat and dex files."
         echo "  $prog --update [options] [test-name]  Update mode" \
              "(replaces expected.txt)."
         echo '  Omitting the test name or specifying "-" will use the' \
@@ -897,7 +910,7 @@ export TEST_NAME=`basename ${test_dir}`
 # Tests named '<number>-checker-*' will also have their CFGs verified with
 # Checker when compiled with Optimizing on host.
 if [[ "$TEST_NAME" =~ ^[0-9]+-checker- ]]; then
-  if [ "$runtime" = "art" -a "$image_suffix" = "" -a "$run_optimizing" = "true" ]; then
+  if [ "$runtime" = "art" -a "$run_optimizing" = "true" ]; then
     # In no-prebuild or no-image mode, the compiler only quickens so disable the checker.
     if [ "$prebuild_mode" = "yes" -a "$have_image" = "yes" ]; then
       run_checker="yes"
@@ -1059,7 +1072,12 @@ fi
         echo '#################### info'
         cat "${td_info}" | sed 's/^/# /g'
         echo '#################### diffs'
-        diff --strip-trailing-cr -u "$expected" "$output" | tail -n 3000
+        if [ "$run_checker" == "yes" ]; then
+          # Checker failures dump the whole CFG, so we output the whole diff.
+          diff --strip-trailing-cr -u "$expected" "$output"
+        else
+          diff --strip-trailing-cr -u "$expected" "$output" | tail -n 10000
+        fi
         echo '####################'
         if [ "$strace" = "yes" ]; then
             echo '#################### strace output'

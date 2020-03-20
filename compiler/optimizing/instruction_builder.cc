@@ -1002,14 +1002,27 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                              resolved_method->GetMethodIndex());
   } else {
     DCHECK_EQ(invoke_type, kInterface);
-    ScopedObjectAccess soa(Thread::Current());  // Needed for the IMT index.
-    invoke = new (allocator_) HInvokeInterface(allocator_,
+    ScopedObjectAccess soa(Thread::Current());  // Needed for the IMT index and class check below.
+    if (resolved_method->GetDeclaringClass()->IsObjectClass()) {
+      // If the resolved method is from j.l.Object, emit a virtual call instead.
+      // The IMT conflict stub only handles interface methods.
+      invoke = new (allocator_) HInvokeVirtual(allocator_,
                                                number_of_arguments,
                                                return_type,
                                                dex_pc,
                                                method_idx,
                                                resolved_method,
-                                               ImTable::GetImtIndex(resolved_method));
+                                               resolved_method->GetMethodIndex());
+    } else {
+      DCHECK(resolved_method->GetDeclaringClass()->IsInterface());
+      invoke = new (allocator_) HInvokeInterface(allocator_,
+                                                 number_of_arguments,
+                                                 return_type,
+                                                 dex_pc,
+                                                 method_idx,
+                                                 resolved_method,
+                                                 ImTable::GetImtIndex(resolved_method));
+    }
   }
   return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false, clinit_check);
 }
@@ -1140,12 +1153,15 @@ void HInstructionBuilder::BuildConstructorFenceForAllocation(HInstruction* alloc
 
 static bool IsInBootImage(ObjPtr<mirror::Class> cls, const CompilerOptions& compiler_options)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  if (compiler_options.IsBootImage()) {
+  if (Runtime::Current()->GetHeap()->ObjectIsInBootImageSpace(cls)) {
+    return true;
+  }
+  if (compiler_options.IsBootImage() || compiler_options.IsBootImageExtension()) {
     std::string temp;
     const char* descriptor = cls->GetDescriptor(&temp);
     return compiler_options.IsImageClass(descriptor);
   } else {
-    return Runtime::Current()->GetHeap()->FindSpaceFromObject(cls, false)->IsImageSpace();
+    return false;
   }
 }
 

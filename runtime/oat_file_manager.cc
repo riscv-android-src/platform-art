@@ -393,6 +393,12 @@ OatFileManager::CheckCollisionResult OatFileManager::CheckCollision(
     return CheckCollisionResult::kSkippedUnsupportedClassLoader;
   }
 
+  if (!CompilerFilter::IsVerificationEnabled(oat_file->GetCompilerFilter())) {
+    // If verification is not enabled we don't need to check for collisions as the oat file
+    // is either extracted or assumed verified.
+    return CheckCollisionResult::kSkippedVerificationDisabled;
+  }
+
   // If the oat file loading context matches the context used during compilation then we accept
   // the oat file without addition checks
   ClassLoaderContext::VerificationResult result = context->VerifyClassLoaderContextMatch(
@@ -571,8 +577,6 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
             ScopedTrace trace2(StringPrintf("Adding image space for location %s", dex_location));
             added_image_space = runtime->GetClassLinker()->AddImageSpace(image_space.get(),
                                                                          h_loader,
-                                                                         dex_elements,
-                                                                         dex_location,
                                                                          /*out*/&dex_files,
                                                                          /*out*/&temp_error_msg);
           }
@@ -1033,21 +1037,20 @@ void OatFileManager::WaitForBackgroundVerificationTasks() {
   }
 }
 
-void OatFileManager::SetOnlyUseSystemOatFiles(bool enforce, bool assert_no_files_loaded) {
+void OatFileManager::SetOnlyUseSystemOatFiles() {
   ReaderMutexLock mu(Thread::Current(), *Locks::oat_file_manager_lock_);
-  if (!only_use_system_oat_files_ && enforce && assert_no_files_loaded) {
-    // Make sure all files that were loaded up to this point are on /system. Skip the image
-    // files.
-    std::vector<const OatFile*> boot_vector = GetBootOatFiles();
-    std::unordered_set<const OatFile*> boot_set(boot_vector.begin(), boot_vector.end());
+  // Make sure all files that were loaded up to this point are on /system.
+  // Skip the image files as they can encode locations that don't exist (eg not
+  // containing the arch in the path, or for JIT zygote /nonx/existent).
+  std::vector<const OatFile*> boot_vector = GetBootOatFiles();
+  std::unordered_set<const OatFile*> boot_set(boot_vector.begin(), boot_vector.end());
 
-    for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
-      if (boot_set.find(oat_file.get()) == boot_set.end()) {
-        CHECK(LocationIsOnSystem(oat_file->GetLocation().c_str())) << oat_file->GetLocation();
-      }
+  for (const std::unique_ptr<const OatFile>& oat_file : oat_files_) {
+    if (boot_set.find(oat_file.get()) == boot_set.end()) {
+      CHECK(LocationIsOnSystem(oat_file->GetLocation().c_str())) << oat_file->GetLocation();
     }
   }
-  only_use_system_oat_files_ = enforce;
+  only_use_system_oat_files_ = true;
 }
 
 void OatFileManager::DumpForSigQuit(std::ostream& os) {

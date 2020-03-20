@@ -149,8 +149,18 @@ ObjPtr<mirror::Object> StackVisitor::GetThisObject() const {
     return nullptr;
   } else if (m->IsNative()) {
     if (cur_quick_frame_ != nullptr) {
-      HandleScope* hs = reinterpret_cast<HandleScope*>(
-          reinterpret_cast<char*>(cur_quick_frame_) + sizeof(ArtMethod*));
+      HandleScope* hs;
+      if (cur_oat_quick_method_header_ != nullptr) {
+        hs = reinterpret_cast<HandleScope*>(
+            reinterpret_cast<char*>(cur_quick_frame_) + sizeof(ArtMethod*));
+      } else {
+        // GenericJNI frames have the HandleScope under the managed frame.
+        uint32_t shorty_len;
+        const char* shorty = m->GetShorty(&shorty_len);
+        const size_t num_handle_scope_references =
+            /* this */ 1u + std::count(shorty + 1, shorty + shorty_len, 'L');
+        hs = GetGenericJniHandleScope(cur_quick_frame_, num_handle_scope_references);
+      }
       return hs->GetReference(0);
     } else {
       return cur_shadow_frame_->GetVRegReference(0);
@@ -360,14 +370,6 @@ bool StackVisitor::GetRegisterIfAccessible(uint32_t reg, VRegKind kind, uint32_t
     reg = (kind == kDoubleHiVReg) ? (2 * reg + 1) : (2 * reg);
   }
 
-  // MIPS32 float registers are used as 64-bit (for MIPS32r2 it is pair
-  // F(2n)-F(2n+1), and for MIPS32r6 it is 64-bit register F(2n)). When
-  // accessing upper 32-bits from double, reg + 1 should be used.
-  if ((kRuntimeISA == InstructionSet::kMips) && (kind == kDoubleHiVReg)) {
-    DCHECK_ALIGNED(reg, 2);
-    reg++;
-  }
-
   if (!IsAccessibleRegister(reg, is_float)) {
     return false;
   }
@@ -415,16 +417,22 @@ bool StackVisitor::GetVRegPair(ArtMethod* m, uint16_t vreg, VRegKind kind_lo,
   if (GetVRegPairFromDebuggerShadowFrame(vreg, kind_lo, kind_hi, val)) {
     return true;
   }
-  if (cur_quick_frame_ != nullptr) {
-    DCHECK(context_ != nullptr);  // You can't reliably read registers without a context.
-    DCHECK(m == GetMethod());
-    DCHECK(cur_oat_quick_method_header_->IsOptimized());
-    return GetVRegPairFromOptimizedCode(m, vreg, kind_lo, kind_hi, val);
-  } else {
+  if (cur_quick_frame_ == nullptr) {
     DCHECK(cur_shadow_frame_ != nullptr);
     *val = cur_shadow_frame_->GetVRegLong(vreg);
     return true;
   }
+  if (cur_oat_quick_method_header_->IsNterpMethodHeader()) {
+    uint64_t val_lo = NterpGetVReg(cur_quick_frame_, vreg);
+    uint64_t val_hi = NterpGetVReg(cur_quick_frame_, vreg + 1);
+    *val = (val_hi << 32) + val_lo;
+    return true;
+  }
+
+  DCHECK(context_ != nullptr);  // You can't reliably read registers without a context.
+  DCHECK(m == GetMethod());
+  DCHECK(cur_oat_quick_method_header_->IsOptimized());
+  return GetVRegPairFromOptimizedCode(m, vreg, kind_lo, kind_hi, val);
 }
 
 bool StackVisitor::GetVRegPairFromOptimizedCode(ArtMethod* m, uint16_t vreg,
@@ -550,18 +558,18 @@ uintptr_t StackVisitor::GetFPR(uint32_t reg) const {
   return context_->GetFPR(reg);
 }
 
+uintptr_t StackVisitor::GetReturnPcAddr() const {
+  uintptr_t sp = reinterpret_cast<uintptr_t>(GetCurrentQuickFrame());
+  DCHECK_NE(sp, 0u);
+  return sp + GetCurrentQuickFrameInfo().GetReturnPcOffset();
+}
+
 uintptr_t StackVisitor::GetReturnPc() const {
-  uint8_t* sp = reinterpret_cast<uint8_t*>(GetCurrentQuickFrame());
-  DCHECK(sp != nullptr);
-  uint8_t* pc_addr = sp + GetCurrentQuickFrameInfo().GetReturnPcOffset();
-  return *reinterpret_cast<uintptr_t*>(pc_addr);
+  return *reinterpret_cast<uintptr_t*>(GetReturnPcAddr());
 }
 
 void StackVisitor::SetReturnPc(uintptr_t new_ret_pc) {
-  uint8_t* sp = reinterpret_cast<uint8_t*>(GetCurrentQuickFrame());
-  CHECK(sp != nullptr);
-  uint8_t* pc_addr = sp + GetCurrentQuickFrameInfo().GetReturnPcOffset();
-  *reinterpret_cast<uintptr_t*>(pc_addr) = new_ret_pc;
+  *reinterpret_cast<uintptr_t*>(GetReturnPcAddr()) = new_ret_pc;
 }
 
 size_t StackVisitor::ComputeNumFrames(Thread* thread, StackWalkKind walk_kind) {
@@ -766,21 +774,6 @@ void StackVisitor::SanityCheckFrame() const {
   }
 }
 
-// Counts the number of references in the parameter list of the corresponding method.
-// Note: Thus does _not_ include "this" for non-static methods.
-static uint32_t GetNumberOfReferenceArgsWithoutReceiver(ArtMethod* method)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
-  uint32_t shorty_len;
-  const char* shorty = method->GetShorty(&shorty_len);
-  uint32_t refs = 0;
-  for (uint32_t i = 1; i < shorty_len ; ++i) {
-    if (shorty[i] == 'L') {
-      refs++;
-    }
-  }
-  return refs;
-}
-
 QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
   if (cur_oat_quick_method_header_ != nullptr) {
     if (cur_oat_quick_method_header_->IsOptimized()) {
@@ -812,10 +805,12 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
     return RuntimeCalleeSaveFrame::GetMethodFrameInfo(CalleeSaveType::kSaveRefsAndArgs);
   }
 
-  // The only remaining case is if the method is native and uses the generic JNI stub,
-  // called either directly or through some (resolution, instrumentation) trampoline.
+  // The only remaining cases are for native methods that either
+  //   - use the Generic JNI stub, called either directly or through some
+  //     (resolution, instrumentation) trampoline; or
+  //   - fake a Generic JNI frame in art_jni_dlsym_lookup_critical_stub.
   DCHECK(method->IsNative());
-  if (kIsDebugBuild) {
+  if (kIsDebugBuild && !method->IsCriticalNative()) {
     ClassLinker* class_linker = runtime->GetClassLinker();
     const void* entry_point = runtime->GetInstrumentation()->GetQuickCodeFor(method,
                                                                              kRuntimePointerSize);
@@ -825,18 +820,9 @@ QuickMethodFrameInfo StackVisitor::GetCurrentQuickFrameInfo() const {
           (runtime->GetJit() != nullptr &&
            runtime->GetJit()->GetCodeCache()->ContainsPc(entry_point))) << method->PrettyMethod();
   }
-  // Generic JNI frame.
-  uint32_t handle_refs = GetNumberOfReferenceArgsWithoutReceiver(method) + 1;
-  size_t scope_size = HandleScope::SizeOf(handle_refs);
-  constexpr QuickMethodFrameInfo callee_info =
-      RuntimeCalleeSaveFrame::GetMethodFrameInfo(CalleeSaveType::kSaveRefsAndArgs);
-
-  // Callee saves + handle scope + method ref + alignment
-  // Note: -sizeof(void*) since callee-save frame stores a whole method pointer.
-  size_t frame_size = RoundUp(
-      callee_info.FrameSizeInBytes() - sizeof(void*) + sizeof(ArtMethod*) + scope_size,
-      kStackAlignment);
-  return QuickMethodFrameInfo(frame_size, callee_info.CoreSpillMask(), callee_info.FpSpillMask());
+  // Generic JNI frame is just like the SaveRefsAndArgs frame.
+  // Note that HandleScope, if any, is below the frame.
+  return RuntimeCalleeSaveFrame::GetMethodFrameInfo(CalleeSaveType::kSaveRefsAndArgs);
 }
 
 template <StackVisitor::CountTransitions kCount>
@@ -845,8 +831,6 @@ void StackVisitor::WalkStack(bool include_transitions) {
     DCHECK(thread_ == Thread::Current() || thread_->IsSuspended());
   }
   CHECK_EQ(cur_depth_, 0U);
-  bool exit_stubs_installed = Runtime::Current()->GetInstrumentation()->AreExitStubsInstalled();
-  uint32_t instrumentation_stack_depth = 0;
   size_t inlined_frames_count = 0;
 
   for (const ManagedStack* current_fragment = thread_->GetManagedStack();
@@ -854,7 +838,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
     cur_shadow_frame_ = current_fragment->GetTopShadowFrame();
     cur_quick_frame_ = current_fragment->GetTopQuickFrame();
     cur_quick_frame_pc_ = 0;
-    cur_oat_quick_method_header_ = nullptr;
+    DCHECK(cur_oat_quick_method_header_ == nullptr);
     if (cur_quick_frame_ != nullptr) {  // Handle quick stack frames.
       // Can't be both a shadow and a quick fragment.
       DCHECK(current_fragment->GetTopShadowFrame() == nullptr);
@@ -937,47 +921,37 @@ void StackVisitor::WalkStack(bool include_transitions) {
         }
         // Compute PC for next stack frame from return PC.
         size_t frame_size = frame_info.FrameSizeInBytes();
-        size_t return_pc_offset = frame_size - sizeof(void*);
-        uint8_t* return_pc_addr = reinterpret_cast<uint8_t*>(cur_quick_frame_) + return_pc_offset;
+        uintptr_t return_pc_addr = GetReturnPcAddr();
         uintptr_t return_pc = *reinterpret_cast<uintptr_t*>(return_pc_addr);
 
-        if (UNLIKELY(exit_stubs_installed ||
-                     reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == return_pc)) {
+        if (UNLIKELY(reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == return_pc)) {
           // While profiling, the return pc is restored from the side stack, except when walking
           // the stack for an exception where the side stack will be unwound in VisitFrame.
-          if (reinterpret_cast<uintptr_t>(GetQuickInstrumentationExitPc()) == return_pc) {
-            CHECK_LT(instrumentation_stack_depth, thread_->GetInstrumentationStack()->size());
-            const instrumentation::InstrumentationStackFrame& instrumentation_frame =
-                (*thread_->GetInstrumentationStack())[instrumentation_stack_depth];
-            instrumentation_stack_depth++;
-            if (GetMethod() ==
-                Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveAllCalleeSaves)) {
-              // Skip runtime save all callee frames which are used to deliver exceptions.
-            } else if (instrumentation_frame.interpreter_entry_) {
-              ArtMethod* callee =
-                  Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs);
-              CHECK_EQ(GetMethod(), callee) << "Expected: " << ArtMethod::PrettyMethod(callee)
-                                            << " Found: " << ArtMethod::PrettyMethod(GetMethod());
-            } else {
-              // Instrumentation generally doesn't distinguish between a method's obsolete and
-              // non-obsolete version.
-              CHECK_EQ(instrumentation_frame.method_->GetNonObsoleteMethod(),
-                       GetMethod()->GetNonObsoleteMethod())
-                  << "Expected: "
-                  << ArtMethod::PrettyMethod(instrumentation_frame.method_->GetNonObsoleteMethod())
-                  << " Found: " << ArtMethod::PrettyMethod(GetMethod()->GetNonObsoleteMethod());
-            }
-            if (num_frames_ != 0) {
-              // Check agreement of frame Ids only if num_frames_ is computed to avoid infinite
-              // recursion.
-              size_t frame_id = instrumentation::Instrumentation::ComputeFrameId(
-                  thread_,
-                  cur_depth_,
-                  inlined_frames_count);
-              CHECK_EQ(instrumentation_frame.frame_id_, frame_id);
-            }
-            return_pc = instrumentation_frame.return_pc_;
+          const std::map<uintptr_t, instrumentation::InstrumentationStackFrame>&
+              instrumentation_stack = *thread_->GetInstrumentationStack();
+          auto it = instrumentation_stack.find(return_pc_addr);
+          CHECK(it != instrumentation_stack.end());
+          const instrumentation::InstrumentationStackFrame& instrumentation_frame = it->second;
+          if (GetMethod() ==
+              Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveAllCalleeSaves)) {
+            // Skip runtime save all callee frames which are used to deliver exceptions.
+          } else if (instrumentation_frame.interpreter_entry_) {
+            ArtMethod* callee =
+                Runtime::Current()->GetCalleeSaveMethod(CalleeSaveType::kSaveRefsAndArgs);
+            CHECK_EQ(GetMethod(), callee) << "Expected: " << ArtMethod::PrettyMethod(callee)
+                                          << " Found: " << ArtMethod::PrettyMethod(GetMethod());
+          } else if (!instrumentation_frame.method_->IsRuntimeMethod()) {
+            // Trampolines get replaced with their actual method in the stack,
+            // so don't do the check below for runtime methods.
+            // Instrumentation generally doesn't distinguish between a method's obsolete and
+            // non-obsolete version.
+            CHECK_EQ(instrumentation_frame.method_->GetNonObsoleteMethod(),
+                     GetMethod()->GetNonObsoleteMethod())
+                << "Expected: "
+                << ArtMethod::PrettyMethod(instrumentation_frame.method_->GetNonObsoleteMethod())
+                << " Found: " << ArtMethod::PrettyMethod(GetMethod()->GetNonObsoleteMethod());
           }
+          return_pc = instrumentation_frame.return_pc_;
         }
 
         cur_quick_frame_pc_ = return_pc;
@@ -1001,6 +975,8 @@ void StackVisitor::WalkStack(bool include_transitions) {
         }
         method = *cur_quick_frame_;
       }
+      // We reached a transition frame, it doesn't have a method header.
+      cur_oat_quick_method_header_ = nullptr;
     } else if (cur_shadow_frame_ != nullptr) {
       do {
         SanityCheckFrame();

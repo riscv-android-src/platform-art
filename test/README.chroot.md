@@ -70,11 +70,11 @@ Note that using this chroot-based approach requires root access to the device
     ```
 4. Clean up the device:
     ```bash
-    art/tools/cleanup-buildbot-device.sh
+    art/tools/buildbot-cleanup-device.sh
     ```
 5. Setup the device (including setting up mount points and files in the chroot directory):
     ```bash
-    art/tools/setup-buildbot-device.sh
+    art/tools/buildbot-setup-device.sh
     ```
 6. Populate the chroot tree on the device (including "activating" APEX packages
    in the chroot environment):
@@ -114,17 +114,17 @@ Note that using this chroot-based approach requires root access to the device
 10. Run JDWP tests:
     * On a 64-bit target:
         ```bash
-        art/tools/run-jdwp-tests.sh --mode=device --variant=X64
+        art/tools/run-libjdwp-tests.sh --mode=device --variant=X64
         ```
     * On a 32-bit target:
         ```bash
-        art/tools/run-jdwp-tests.sh --mode=device --variant=X32
+        art/tools/run-libjdwp-tests.sh --mode=device --variant=X32
         ```
 11. Tear down device setup:
     ```bash
-    art/tools/teardown-buildbot-device.sh
+    art/tools/buildbot-teardown-device.sh
     ```
 12. Clean up the device:
     ```bash
-    art/tools/cleanup-buildbot-device.sh
+    art/tools/buildbot-cleanup-device.sh
     ```

@@ -23,30 +23,32 @@
 namespace art {
 namespace arm {
 
-constexpr size_t kFramePointerSize = static_cast<size_t>(PointerSize::k32);
-
 class ArmManagedRuntimeCallingConvention final : public ManagedRuntimeCallingConvention {
  public:
   ArmManagedRuntimeCallingConvention(bool is_static, bool is_synchronized, const char* shorty)
       : ManagedRuntimeCallingConvention(is_static,
                                         is_synchronized,
                                         shorty,
-                                        PointerSize::k32) {}
+                                        PointerSize::k32),
+        gpr_index_(1u),  // Skip r0 for ArtMethod*
+        float_index_(0u),
+        double_index_(0u) {}
   ~ArmManagedRuntimeCallingConvention() override {}
   // Calling convention
   ManagedRegister ReturnRegister() override;
-  ManagedRegister InterproceduralScratchRegister() override;
+  void ResetIterator(FrameOffset displacement) override;
   // Managed runtime calling convention
   ManagedRegister MethodRegister() override;
+  void Next() override;
   bool IsCurrentParamInRegister() override;
   bool IsCurrentParamOnStack() override;
   ManagedRegister CurrentParamRegister() override;
   FrameOffset CurrentParamStackOffset() override;
-  const ManagedRegisterEntrySpills& EntrySpills() override;
 
  private:
-  ManagedRegisterEntrySpills entry_spills_;
-
+  size_t gpr_index_;
+  size_t float_index_;
+  size_t double_index_;
   DISALLOW_COPY_AND_ASSIGN(ArmManagedRuntimeCallingConvention);
 };
 
@@ -60,11 +62,10 @@ class ArmJniCallingConvention final : public JniCallingConvention {
   // Calling convention
   ManagedRegister ReturnRegister() override;
   ManagedRegister IntReturnRegister() override;
-  ManagedRegister InterproceduralScratchRegister() override;
   // JNI calling convention
   void Next() override;  // Override default behavior for AAPCS
-  size_t FrameSize() override;
-  size_t OutArgSize() override;
+  size_t FrameSize() const override;
+  size_t OutArgSize() const override;
   ArrayRef<const ManagedRegister> CalleeSaveRegisters() const override;
   ManagedRegister ReturnScratchRegister() const override;
   uint32_t CoreSpillMask() const override;
@@ -79,8 +80,11 @@ class ArmJniCallingConvention final : public JniCallingConvention {
     return false;
   }
 
- protected:
-  size_t NumberOfOutgoingStackArgs() override;
+  // Hidden argument register, used to pass the method pointer for @CriticalNative call.
+  ManagedRegister HiddenArgumentRegister() const override;
+
+  // Whether to use tail call (used only for @CriticalNative).
+  bool UseTailCall() const override;
 
  private:
   // Padding to ensure longs and doubles are not split in AAPCS

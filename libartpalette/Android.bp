@@ -41,12 +41,7 @@ art_cc_library {
         // and binds the methods in the libartpalette-system library.
         android: {
             srcs: ["apex/palette.cc"],
-            shared: {
-                shared_libs: ["liblog"],
-            },
-            static: {
-                static_libs: ["liblog"],
-            },
+            shared_libs: ["liblog"],
             version_script: "libartpalette.map.txt",
         },
         linux_bionic: {
@@ -92,6 +87,15 @@ art_cc_library {
             ],
         },
     },
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+        // TODO(b/142944931): remove this
+        "com.android.runtime", // due to the transitive dependency from linker
+        // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
+        // from /system/core, etc.
+        "//apex_available:platform",
+    ],
 }
 
 art_cc_test {

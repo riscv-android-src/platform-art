@@ -45,8 +45,6 @@
 #include "arch/arm64/registers_arm64.h"
 #include "arch/context.h"
 #include "arch/instruction_set_features.h"
-#include "arch/mips/registers_mips.h"
-#include "arch/mips64/registers_mips64.h"
 #include "arch/x86/registers_x86.h"
 #include "arch/x86_64/registers_x86_64.h"
 #include "art_field-inl.h"
@@ -88,7 +86,6 @@
 #include "gc/task_processor.h"
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
-#include "hidden_api_jni.h"
 #include "image-inl.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
@@ -117,6 +114,7 @@
 #include "mirror/var_handle.h"
 #include "monitor.h"
 #include "native/dalvik_system_DexFile.h"
+#include "native/dalvik_system_BaseDexClassLoader.h"
 #include "native/dalvik_system_VMDebug.h"
 #include "native/dalvik_system_VMRuntime.h"
 #include "native/dalvik_system_VMStack.h"
@@ -195,8 +193,6 @@ static constexpr double kNormalMaxLoadFactor = 0.7;
 // Extra added to the default heap growth multiplier. Used to adjust the GC ergonomics for the read
 // barrier config.
 static constexpr double kExtraDefaultHeapGrowthMultiplier = kUseReadBarrier ? 1.0 : 0.0;
-
-static constexpr const char* kApexBootImageLocation = "/system/framework/apex.art";
 
 Runtime* Runtime::instance_ = nullptr;
 
@@ -416,7 +412,7 @@ Runtime::~Runtime() {
   // Shutdown any trace running.
   Trace::Shutdown();
 
-  // Report death. Clients me require a working thread, still, so do it before GC completes and
+  // Report death. Clients may require a working thread, still, so do it before GC completes and
   // all non-daemon threads are done.
   {
     ScopedObjectAccess soa(self);
@@ -439,9 +435,14 @@ Runtime::~Runtime() {
 
   // Make sure our internal threads are dead before we start tearing down things they're using.
   GetRuntimeCallbacks()->StopDebugger();
+  // Deletion ordering is tricky. Null out everything we've deleted.
   delete signal_catcher_;
+  signal_catcher_ = nullptr;
 
   // Make sure all other non-daemon threads have terminated, and all daemon threads are suspended.
+  // Also wait for daemon threads to quiesce, so that in addition to being "suspended", they
+  // no longer access monitor and thread list data structures. We leak user daemon threads
+  // themselves, since we have no mechanism for shutting them down.
   {
     ScopedTrace trace2("Delete thread list");
     thread_list_->ShutDown();
@@ -458,7 +459,10 @@ Runtime::~Runtime() {
   }
 
   // Finally delete the thread list.
+  // Thread_list_ can be accessed by "suspended" threads, e.g. in InflateThinLocked.
+  // We assume that by this point, we've waited long enough for things to quiesce.
   delete thread_list_;
+  thread_list_ = nullptr;
 
   // Delete the JIT after thread list to ensure that there is no remaining threads which could be
   // accessing the instrumentation when we delete it.
@@ -473,11 +477,17 @@ Runtime::~Runtime() {
 
   ScopedTrace trace2("Delete state");
   delete monitor_list_;
+  monitor_list_ = nullptr;
   delete monitor_pool_;
+  monitor_pool_ = nullptr;
   delete class_linker_;
+  class_linker_ = nullptr;
   delete heap_;
+  heap_ = nullptr;
   delete intern_table_;
+  intern_table_ = nullptr;
   delete oat_file_manager_;
+  oat_file_manager_ = nullptr;
   Thread::Shutdown();
   QuasiAtomic::Shutdown();
   verifier::ClassVerifier::Shutdown();
@@ -499,8 +509,6 @@ Runtime::~Runtime() {
   // instance. We rely on a small initialization order issue in Runtime::Start() that requires
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
-
-  hiddenapi::JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -673,6 +681,7 @@ void Runtime::PreZygoteFork() {
     GetJit()->PreZygoteFork();
   }
   heap_->PreZygoteFork();
+  PreZygoteForkNativeBridge();
 }
 
 void Runtime::PostZygoteFork() {
@@ -880,6 +889,10 @@ bool Runtime::Start() {
   // needs the SignaturePolymorphic annotation class which is initialized in WellKnownClasses::Init.
   InitializeIntrinsics();
 
+  // InitializeCorePlatformApiPrivateFields() needs to be called after well known class
+  // initializtion in InitNativeMethods().
+  art::hiddenapi::InitializeCorePlatformApiPrivateFields();
+
   // Initialize well known thread group values that may be accessed threads while attaching.
   InitThreadGroups(self);
 
@@ -920,6 +933,7 @@ bool Runtime::Start() {
         : NativeBridgeAction::kUnload;
     InitNonZygoteOrPostFork(self->GetJniEnv(),
                             /* is_system_server= */ false,
+                            /* is_child_zygote= */ false,
                             action,
                             GetInstructionSetString(kRuntimeISA));
   }
@@ -984,11 +998,13 @@ void Runtime::EndThreadBirth() REQUIRES(Locks::runtime_shutdown_lock_) {
 void Runtime::InitNonZygoteOrPostFork(
     JNIEnv* env,
     bool is_system_server,
+    // This is true when we are initializing a child-zygote. It requires
+    // native bridge initialization to be able to run guest native code in
+    // doPreload().
+    bool is_child_zygote,
     NativeBridgeAction action,
     const char* isa,
     bool profile_system_server) {
-  DCHECK(!IsZygote());
-
   if (is_native_bridge_loaded_) {
     switch (action) {
       case NativeBridgeAction::kUnload:
@@ -1000,6 +1016,16 @@ void Runtime::InitNonZygoteOrPostFork(
         break;
     }
   }
+
+  if (is_child_zygote) {
+    // If creating a child-zygote we only initialize native bridge. The rest of
+    // runtime post-fork logic would spin up threads for Binder and JDWP.
+    // Instead, the Java side of the child process will call a static main in a
+    // class specified by the parent.
+    return;
+  }
+
+  DCHECK(!IsZygote());
 
   if (is_system_server && profile_system_server) {
     // Set the system server package name to "android".
@@ -1032,14 +1058,10 @@ void Runtime::InitNonZygoteOrPostFork(
 
   StartSignalCatcher();
 
-  // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
-  // this will pause the runtime (in the internal debugger implementation), so we probably want
-  // this to come last.
   ScopedObjectAccess soa(Thread::Current());
-  GetRuntimeCallbacks()->StartDebugger();
-
   if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable()) {
     std::string err;
+    ScopedTrace tr("perfetto_hprof init.");
     ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
     if (!EnsurePerfettoPlugin(&err)) {
       LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
@@ -1052,6 +1074,10 @@ void Runtime::InitNonZygoteOrPostFork(
       SetJniIdType(JniIdType::kPointer);
     }
   }
+  // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
+  // this will pause the runtime (in the internal debugger implementation), so we probably want
+  // this to come last.
+  GetRuntimeCallbacks()->StartDebugger();
 }
 
 void Runtime::StartSignalCatcher() {
@@ -1101,13 +1127,6 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
       continue;
     }
     bool verify = Runtime::Current()->IsVerificationEnabled();
-    // In the case we're using the apex boot image, we don't have support yet
-    // on reading vdex files of boot classpath. So just assume all boot classpath
-    // dex files have been verified (this should always be the case as the default boot
-    // image has been generated at build time).
-    if (Runtime::Current()->IsUsingApexBootImageLocation() && !kIsDebugBuild) {
-      verify = false;
-    }
     if (!dex_file_loader.Open(dex_filename,
                               dex_location,
                               verify,
@@ -1215,10 +1234,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                 runtime_options.GetOrDefault(Opt::StackDumpLockProfThreshold));
 
   image_location_ = runtime_options.GetOrDefault(Opt::Image);
-  {
-    std::string error_msg;
-    is_using_apex_boot_image_location_ = (image_location_ == kApexBootImageLocation);
-  }
 
   SetInstructionSet(runtime_options.GetOrDefault(Opt::ImageInstructionSet));
   boot_class_path_ = runtime_options.ReleaseOrDefault(Opt::BootClassPath);
@@ -1412,27 +1427,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       VLOG(jdwp) << "Disabling all JDWP support.";
       if (!jdwp_options_.empty()) {
         bool has_transport = jdwp_options_.find("transport") != std::string::npos;
-        const char* transport_internal = !has_transport ? "transport=dt_android_adb," : "";
         std::string adb_connection_args =
             std::string("  -XjdwpProvider:adbconnection -XjdwpOptions:") + jdwp_options_;
         LOG(WARNING) << "Jdwp options given when jdwp is disabled! You probably want to enable "
                      << "jdwp with one of:" << std::endl
-                     << "  -XjdwpProvider:internal "
-                     << "-XjdwpOptions:" << transport_internal << jdwp_options_ << std::endl
                      << "  -Xplugin:libopenjdkjvmti" << (kIsDebugBuild ? "d" : "") << ".so "
                      << "-agentpath:libjdwp.so=" << jdwp_options_ << std::endl
                      << (has_transport ? "" : adb_connection_args);
-      }
-      break;
-    }
-    case JdwpProvider::kInternal: {
-      if (runtime_options.Exists(Opt::JdwpOptions)) {
-        JDWP::JdwpOptions ops;
-        if (!JDWP::ParseJdwpOptions(runtime_options.GetOrDefault(Opt::JdwpOptions), &ops)) {
-          LOG(ERROR) << "failed to parse jdwp options!";
-          return false;
-        }
-        Dbg::ConfigureJdwp(ops);
       }
       break;
     }
@@ -1485,8 +1486,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     case InstructionSet::kX86:
     case InstructionSet::kArm64:
     case InstructionSet::kX86_64:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
       implicit_null_checks_ = true;
       // Historical note: Installing stack protection was not playing well with Valgrind.
       implicit_so_checks_ = true;
@@ -1785,9 +1784,8 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   VLOG(startup) << "Runtime::Init exiting";
 
   // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (is_zygote_ || runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles(/*enforce=*/ true,
-                                                /*assert_no_files_loaded=*/ true);
+  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
+    oat_file_manager_->SetOnlyUseSystemOatFiles();
   }
 
   return true;
@@ -1911,10 +1909,6 @@ void Runtime::InitNativeMethods() {
   // Initialize well known classes that may invoke runtime native methods.
   WellKnownClasses::LateInit(env);
 
-  // Having loaded native libraries for Managed Core library, enable field and
-  // method resolution checks via JNI from native code.
-  hiddenapi::JniInitializeNativeCallerCheck();
-
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
 
@@ -1954,6 +1948,7 @@ jobject Runtime::GetSystemClassLoader() const {
 
 void Runtime::RegisterRuntimeNativeMethods(JNIEnv* env) {
   register_dalvik_system_DexFile(env);
+  register_dalvik_system_BaseDexClassLoader(env);
   register_dalvik_system_VMDebug(env);
   register_dalvik_system_VMRuntime(env);
   register_dalvik_system_VMStack(env);
@@ -2191,7 +2186,6 @@ void Runtime::VisitConcurrentRoots(RootVisitor* visitor, VisitRootFlags flags) {
     // Guaranteed to have no new roots in the constant roots.
     VisitConstantRoots(visitor);
   }
-  Dbg::VisitRoots(visitor);
 }
 
 void Runtime::VisitTransactionRoots(RootVisitor* visitor) {
@@ -2372,8 +2366,6 @@ void Runtime::SetInstructionSet(InstructionSet instruction_set) {
       break;
     case InstructionSet::kArm:
     case InstructionSet::kArm64:
-    case InstructionSet::kMips:
-    case InstructionSet::kMips64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64:
       break;
@@ -2742,9 +2734,10 @@ bool Runtime::IsAsyncDeoptimizeable(uintptr_t code) const {
   // We could look at the oat file where `code` is being defined,
   // and check whether it's been compiled debuggable, but we decided to
   // only rely on the JIT for debuggable apps.
-  return IsJavaDebuggable() &&
-      GetJit() != nullptr &&
-      GetJit()->GetCodeCache()->ContainsPc(reinterpret_cast<const void*>(code));
+  // The JIT-zygote is not debuggable so we need to be sure to exclude code from the non-private
+  // region as well.
+  return IsJavaDebuggable() && GetJit() != nullptr &&
+         GetJit()->GetCodeCache()->PrivateRegionContainsPc(reinterpret_cast<const void*>(code));
 }
 
 LinearAlloc* Runtime::CreateLinearAlloc() {
@@ -2836,6 +2829,20 @@ class UpdateEntryPointsClassVisitor : public ClassVisitor {
           !m.IsProxyMethod()) {
         instrumentation_->UpdateMethodsCodeForJavaDebuggable(&m, GetQuickToInterpreterBridge());
       }
+
+      if (Runtime::Current()->GetJit() != nullptr &&
+          Runtime::Current()->GetJit()->GetCodeCache()->IsInZygoteExecSpace(code) &&
+          !m.IsNative()) {
+        DCHECK(!m.IsProxyMethod());
+        instrumentation_->UpdateMethodsCodeForJavaDebuggable(&m, GetQuickToInterpreterBridge());
+      }
+
+      if (m.IsPreCompiled()) {
+        // Precompilation is incompatible with debuggable, so clear the flag
+        // and update the entrypoint in case it has been compiled.
+        m.ClearPreCompiled();
+        instrumentation_->UpdateMethodsCodeForJavaDebuggable(&m, GetQuickToInterpreterBridge());
+      }
     }
     return true;
   }
@@ -2858,8 +2865,8 @@ void Runtime::DeoptimizeBootImage() {
     GetClassLinker()->VisitClasses(&visitor);
     jit::Jit* jit = GetJit();
     if (jit != nullptr) {
-      // Code JITted by the zygote is not compiled debuggable.
-      jit->GetCodeCache()->ClearEntryPointsInZygoteExecSpace();
+      // Code previously compiled may not be compiled debuggable.
+      jit->GetCodeCache()->TransitionToDebuggable();
     }
   }
   // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping

@@ -58,6 +58,7 @@ cc_defaults {
         "transform.cc",
     ],
     header_libs: [
+        "art_cmdlineparser_headers",
         "libnativehelper_header_only",
         "libopenjdkjvmti_headers",
     ],
@@ -76,6 +77,10 @@ art_cc_library {
         "libdexfile",
         "libartbase",
     ],
+    apex_available: [
+        "com.android.art.release",
+        "com.android.art.debug",
+    ],
 }
 
 art_cc_library {
@@ -90,5 +95,8 @@ art_cc_library {
         "libartd-dexlayout",
         "libdexfiled",
         "libartbased",
+    ],
+    apex_available: [
+        "com.android.art.debug",
     ],
 }

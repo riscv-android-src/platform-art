@@ -113,6 +113,24 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
   bool StartDex2OatCommandLine(/*out*/std::vector<std::string>* argv,
                                /*out*/std::string* error_msg);
 
+  bool CompileBootImage(const std::vector<std::string>& extra_args,
+                        const std::string& image_file_name_prefix,
+                        ArrayRef<const std::string> dex_files,
+                        ArrayRef<const std::string> dex_locations,
+                        std::string* error_msg,
+                        const std::string& use_fd_prefix = "");
+
+  bool CompileBootImage(const std::vector<std::string>& extra_args,
+                        const std::string& image_file_name_prefix,
+                        ArrayRef<const std::string> dex_files,
+                        std::string* error_msg,
+                        const std::string& use_fd_prefix = "") {
+    return CompileBootImage(
+        extra_args, image_file_name_prefix, dex_files, dex_files, error_msg, use_fd_prefix);
+  }
+
+  bool RunDex2Oat(const std::vector<std::string>& args, std::string* error_msg);
+
  protected:
   // Allow subclases such as CommonCompilerTest to add extra options.
   virtual void SetUpRuntimeOptions(RuntimeOptions* options ATTRIBUTE_UNUSED) {}
@@ -134,9 +152,12 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
   jobject LoadDexInPathClassLoader(const std::string& dex_name,
                                    jobject parent_loader,
                                    jobject shared_libraries = nullptr);
+  jobject LoadDexInPathClassLoader(const std::vector<std::string>& dex_names,
+                                   jobject parent_loader,
+                                   jobject shared_libraries = nullptr);
   jobject LoadDexInDelegateLastClassLoader(const std::string& dex_name, jobject parent_loader);
   jobject LoadDexInInMemoryDexClassLoader(const std::string& dex_name, jobject parent_loader);
-  jobject LoadDexInWellKnownClassLoader(const std::string& dex_name,
+  jobject LoadDexInWellKnownClassLoader(const std::vector<std::string>& dex_names,
                                         jclass loader_class,
                                         jobject parent_loader,
                                         jobject shared_libraries = nullptr);
@@ -221,6 +242,12 @@ class CheckJniAbortCatcher {
   DISALLOW_COPY_AND_ASSIGN(CheckJniAbortCatcher);
 };
 
+#define TEST_DISABLED() \
+  do { \
+    printf("WARNING: TEST DISABLED\n"); \
+    return; \
+  } while (false)
+
 #define TEST_DISABLED_FOR_ARM() \
   if (kRuntimeISA == InstructionSet::kArm || kRuntimeISA == InstructionSet::kThumb2) { \
     printf("WARNING: TEST DISABLED FOR ARM\n"); \
@@ -233,21 +260,15 @@ class CheckJniAbortCatcher {
     return; \
   }
 
-#define TEST_DISABLED_FOR_MIPS() \
-  if (kRuntimeISA == InstructionSet::kMips) { \
-    printf("WARNING: TEST DISABLED FOR MIPS\n"); \
-    return; \
-  }
-
-#define TEST_DISABLED_FOR_MIPS64() \
-  if (kRuntimeISA == InstructionSet::kMips64) { \
-    printf("WARNING: TEST DISABLED FOR MIPS64\n"); \
-    return; \
-  }
-
 #define TEST_DISABLED_FOR_X86() \
   if (kRuntimeISA == InstructionSet::kX86) { \
     printf("WARNING: TEST DISABLED FOR X86\n"); \
+    return; \
+  }
+
+#define TEST_DISABLED_FOR_X86_64() \
+  if (kRuntimeISA == InstructionSet::kX86_64) { \
+    printf("WARNING: TEST DISABLED FOR X86_64\n"); \
     return; \
   }
 
