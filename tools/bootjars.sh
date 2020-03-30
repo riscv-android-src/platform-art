@@ -75,11 +75,9 @@ if [[ $core_jars_only == y ]]; then
   # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
   # because that's what we use for compiling the core.art image.
   # It may contain additional modules from TEST_CORE_JARS.
-  core_jars_list="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
+  core_jars_list="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml"
   core_jars_suffix=
-  if [[ $mode == target ]]; then
-    core_jars_suffix=-testdex
-  elif [[ $mode == host ]]; then
+  if [[ $mode == host ]]; then
     core_jars_suffix=-hostdex
   fi
   boot_jars_list=""
@@ -106,6 +104,16 @@ pushd "$TOP" >/dev/null
 intermediates_dir=$(readlink -m "$intermediates_dir")
 popd >/dev/null
 
-for jar in $boot_jars_list; do
-  echo "$intermediates_dir/JAVA_LIBRARIES/${jar}_intermediates/classes.jar"
-done
+if [[ $mode == target ]]; then
+  for jar in $boot_jars_list; do
+    if [[ $jar == "conscrypt" ]]; then
+      echo "$intermediates_dir/JAVA_LIBRARIES/${jar}.com.android.conscrypt_intermediates/classes.jar"
+    else
+      echo "$intermediates_dir/JAVA_LIBRARIES/${jar}.com.android.art.testing_intermediates/classes.jar"
+    fi
+  done
+else
+  for jar in $boot_jars_list; do
+    echo "$intermediates_dir/JAVA_LIBRARIES/${jar}_intermediates/classes.jar"
+  done
+fi

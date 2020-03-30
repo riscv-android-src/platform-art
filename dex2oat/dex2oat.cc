@@ -718,7 +718,7 @@ class ThreadLocalHashOverride {
                                                  "Ljava/lang/ThreadLocal;",
                                                  /*class_loader=*/ nullptr)
         : nullptr);
-    field_ = (klass_ != nullptr)
+    field_ = ((klass_ != nullptr) && klass_->IsVisiblyInitialized())
         ? klass_->FindDeclaredStaticField("nextHashCode",
                                           "Ljava/util/concurrent/atomic/AtomicInteger;")
         : nullptr;
@@ -742,7 +742,13 @@ class ThreadLocalHashOverride {
       field_->SetObject</*kTransactionActive=*/ false>(klass_.Get(), new_field_value.Get());
     }
     if (apply && old_field_value_ == nullptr) {
-      LOG(ERROR) << "Failed to override ThreadLocal.nextHashCode";
+      if ((klass_ != nullptr) && klass_->IsVisiblyInitialized()) {
+        // This would mean that the implementation of ThreadLocal has changed
+        // and the code above is no longer applicable.
+        LOG(ERROR) << "Failed to override ThreadLocal.nextHashCode";
+      } else {
+        VLOG(compiler) << "ThreadLocal is not initialized in the primary boot image.";
+      }
     }
   }
 
@@ -800,7 +806,9 @@ class Dex2Oat final {
       app_image_fd_(kInvalidFd),
       profile_file_fd_(kInvalidFd),
       timings_(timings),
-      force_determinism_(false)
+      force_determinism_(false),
+      check_linkage_conditions_(false),
+      crash_on_linkage_violation_(false)
       {}
 
   ~Dex2Oat() {
@@ -1100,6 +1108,9 @@ class Dex2Oat final {
     }
     compiler_options_->force_determinism_ = force_determinism_;
 
+    compiler_options_->check_linkage_conditions_ = check_linkage_conditions_;
+    compiler_options_->crash_on_linkage_violation_ = crash_on_linkage_violation_;
+
     if (passes_to_run_filename_ != nullptr) {
       passes_to_run_ = ReadCommentedInputFromFile<std::vector<std::string>>(
           passes_to_run_filename_,
@@ -1318,6 +1329,8 @@ class Dex2Oat final {
     AssignIfExists(args, M::DirtyImageObjects, &dirty_image_objects_filename_);
     AssignIfExists(args, M::ImageFormat, &image_storage_mode_);
     AssignIfExists(args, M::CompilationReason, &compilation_reason_);
+    AssignTrueIfExists(args, M::CheckLinkageConditions, &check_linkage_conditions_);
+    AssignTrueIfExists(args, M::CrashOnLinkageViolation, &crash_on_linkage_violation_);
 
     AssignIfExists(args, M::Backend, &compiler_kind_);
     parser_options->requested_specific_compiler = args.Exists(M::Backend);
@@ -2052,6 +2065,9 @@ class Dex2Oat final {
                                      compiler_kind_,
                                      thread_count_,
                                      swap_fd_));
+
+    driver_->PrepareDexFilesForOatFile(timings_);
+
     if (!IsBootImage() && !IsBootImageExtension()) {
       driver_->SetClasspathDexFiles(class_loader_context_->FlattenOpenedDexFiles());
     }
@@ -3010,6 +3026,10 @@ class Dex2Oat final {
 
   // See CompilerOptions.force_determinism_.
   bool force_determinism_;
+  // See CompilerOptions.crash_on_linkage_violation_.
+  bool check_linkage_conditions_;
+  // See CompilerOptions.crash_on_linkage_violation_.
+  bool crash_on_linkage_violation_;
 
   // Directory of relative classpaths.
   std::string classpath_dir_;

@@ -177,8 +177,6 @@ art_cc_library {
     apex_available: [
         "com.android.art.release",
         "com.android.art.debug",
-        // TODO(b/142944931): remove this
-        "com.android.runtime", // due to the transitive dependency from linker
         // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
         // from /system/core, etc.
         "//apex_available:platform",
@@ -311,8 +309,6 @@ cc_library {
     apex_available: [
         "com.android.art.release",
         "com.android.art.debug",
-        // TODO(b/142944931): remove this
-        "com.android.runtime", // due to the transitive dependency from linker
         // TODO(b/142944931) Clean this up. This is due to the dependency to libdexfile_support_static
         // from /system/core, etc.
         "//apex_available:platform",
@@ -342,6 +338,7 @@ art_cc_test {
     name: "art_libdexfile_external_tests",
     host_supported: true,
     test_per_src: true, // For consistency with other ART gtests.
+    test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_ext_c_test.c",
     ],
@@ -377,6 +374,7 @@ art_cc_test {
         "art_test_defaults",
     ],
     host_supported: true,
+    test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_supp_test.cc",
     ],
@@ -410,9 +408,8 @@ cc_library_static {
     name: "libdexfile_support_static",
     visibility: [
         "//art:__subpackages__",
-        // TODO(b/133140750): Clean this up.
-        "//system/core/debuggerd",
-        "//system/core/init", // Dependency from Android.mk file, so not enforced.
+        // Required for the simpleperf binary in the NDK. No other modules than
+        // //system/extras/simpleperf:simpleperf_ndk are allowed to use it.
         "//system/extras/simpleperf",
     ],
     defaults: [
@@ -443,6 +440,7 @@ cc_library_static {
 art_cc_test {
     name: "art_libdexfile_support_static_tests",
     host_supported: true,
+    test_suites: ["general-tests"],
     srcs: [
         "external/dex_file_supp_test.cc",
     ],

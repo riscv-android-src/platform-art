@@ -842,6 +842,15 @@ static void EnsureVerifiedOrVerifyAtRuntime(jobject jclass_loader,
   }
 }
 
+void CompilerDriver::PrepareDexFilesForOatFile(TimingLogger* timings) {
+  compiled_classes_.AddDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
+
+  if (GetCompilerOptions().IsAnyCompilationEnabled()) {
+    TimingLogger::ScopedTiming t2("Dex2Dex SetDexFiles", timings);
+    dex_to_dex_compiler_.SetDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
+  }
+}
+
 void CompilerDriver::PreCompile(jobject class_loader,
                                 const std::vector<const DexFile*>& dex_files,
                                 TimingLogger* timings,
@@ -850,13 +859,6 @@ void CompilerDriver::PreCompile(jobject class_loader,
   CheckThreadPools();
 
   VLOG(compiler) << "Before precompile " << GetMemoryUsageString(false);
-
-  compiled_classes_.AddDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
-
-  if (GetCompilerOptions().IsAnyCompilationEnabled()) {
-    TimingLogger::ScopedTiming t2("Dex2Dex SetDexFiles", timings);
-    dex_to_dex_compiler_.SetDexFiles(GetCompilerOptions().GetDexFilesForOatFile());
-  }
 
   // Precompile:
   // 1) Load image classes.
@@ -1596,7 +1598,7 @@ class ResolveClassFieldsAndMethodsVisitor : public CompilationVisitor {
     // generated code.
     const dex::ClassDef& class_def = dex_file.GetClassDef(class_def_index);
     ScopedObjectAccess soa(self);
-    StackHandleScope<2> hs(soa.Self());
+    StackHandleScope<5> hs(soa.Self());
     Handle<mirror::ClassLoader> class_loader(
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(jclass_loader)));
     Handle<mirror::DexCache> dex_cache(hs.NewHandle(class_linker->FindDexCache(
@@ -1611,6 +1613,40 @@ class ResolveClassFieldsAndMethodsVisitor : public CompilationVisitor {
       CheckAndClearResolveException(soa.Self());
       resolve_fields_and_methods = false;
     } else {
+      Handle<mirror::Class> hklass(hs.NewHandle(klass));
+      if (manager_->GetCompiler()->GetCompilerOptions().IsCheckLinkageConditions() &&
+          !manager_->GetCompiler()->GetCompilerOptions().IsBootImage()) {
+        bool is_fatal = manager_->GetCompiler()->GetCompilerOptions().IsCrashOnLinkageViolation();
+        ObjPtr<mirror::ClassLoader> resolving_class_loader = hklass->GetClassLoader();
+        if (resolving_class_loader != soa.Decode<mirror::ClassLoader>(jclass_loader)) {
+          // Redefinition via different ClassLoaders.
+          // This OptStat stuff is to enable logging from the APK scanner.
+          if (is_fatal)
+            LOG(FATAL) << "OptStat#" << hklass->PrettyClassAndClassLoader() << ": 1";
+          else
+            LOG(ERROR)
+                << "LINKAGE VIOLATION: "
+                << hklass->PrettyClassAndClassLoader()
+                << " was redefined";
+        }
+        // Check that the current class is not a subclass of java.lang.ClassLoader.
+        if (!hklass->IsInterface() &&
+            hklass->IsSubClass(class_linker->FindClass(self,
+                                                       "Ljava/lang/ClassLoader;",
+                                                       hs.NewHandle(resolving_class_loader)))) {
+          // Subclassing of java.lang.ClassLoader.
+          // This OptStat stuff is to enable logging from the APK scanner.
+          if (is_fatal)
+            LOG(FATAL) << "OptStat#" << hklass->PrettyClassAndClassLoader() << ": 1";
+          else
+            LOG(ERROR)
+                << "LINKAGE VIOLATION: "
+                << hklass->PrettyClassAndClassLoader()
+                << " is a subclass of java.lang.ClassLoader";
+        }
+        CHECK(hklass->IsResolved()) << hklass->PrettyClass();
+        klass.Assign(hklass.Get());
+      }
       // We successfully resolved a class, should we skip it?
       if (SkipClass(jclass_loader, dex_file, klass)) {
         return;

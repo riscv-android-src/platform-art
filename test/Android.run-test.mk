@@ -49,9 +49,6 @@ ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += libnativebridgetest-target libnativebri
 # Also need signal_dumper.
 ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += signal_dumper-target
 
-ART_TEST_TARGET_RUN_TEST_DEPENDENCIES += \
-  $(foreach jar,$(TARGET_TEST_CORE_JARS),$(TARGET_OUT_JAVA_LIBRARIES)/$(jar).jar)
-
 # All tests require the host executables. The tests also depend on the core images, but on
 # specific version depending on the compiler.
 ART_TEST_HOST_RUN_TEST_DEPENDENCIES := \
@@ -74,7 +71,7 @@ ART_TEST_HOST_RUN_TEST_DEPENDENCIES := \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$(ART_HOST_SHLIB_EXTENSION) \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkjvmti$(ART_HOST_SHLIB_EXTENSION) \
   $(ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkjvmtid$(ART_HOST_SHLIB_EXTENSION) \
-  $(HOST_CORE_DEX_LOCATIONS) \
+  $(ART_HOST_DEX_DEPENDENCIES) \
 
 ifneq ($(HOST_PREFER_32_BIT),true)
 ART_TEST_HOST_RUN_TEST_DEPENDENCIES += \
