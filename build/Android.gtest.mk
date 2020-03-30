@@ -197,9 +197,15 @@ $(ART_TEST_HOST_GTEST_VerifySoftFailDuringClinit_DEX): $(ART_TEST_GTEST_VerifySo
 $(ART_TEST_TARGET_GTEST_VerifySoftFailDuringClinit_DEX): $(ART_TEST_GTEST_VerifySoftFailDuringClinit_SRC) $(HOST_OUT_EXECUTABLES)/smali
 	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
 
+# Linkage test artifacts.
+ART_TEST_GTEST_LinkageTest_SRC := $(abspath $(wildcard $(LOCAL_PATH)/LinkageTest/*.smali))
+ART_TEST_HOST_GTEST_LinkageTest_DEX := $(dir $(ART_TEST_HOST_GTEST_Main_DEX))$(subst Main,LinkageTest,$(basename $(notdir $(ART_TEST_HOST_GTEST_Main_DEX))))$(suffix $(ART_TEST_HOST_GTEST_Main_DEX))
+$(ART_TEST_HOST_GTEST_LinkageTest_DEX): $(ART_TEST_GTEST_LinkageTest_SRC) $(HOST_OUT_EXECUTABLES)/smali
+	 $(HOST_OUT_EXECUTABLES)/smali assemble --output $@ $(filter %.smali,$^)
+
 # Dex file dependencies for each gtest.
 ART_GTEST_art_dex_file_loader_test_DEX_DEPS := GetMethodSignature Main Nested MultiDex
-ART_GTEST_dex2oat_environment_tests_DEX_DEPS := Main MainStripped MultiDex MultiDexModifiedSecondary MyClassNatives Nested VerifierDeps VerifierDepsMulti
+ART_GTEST_dex2oat_environment_tests_DEX_DEPS := Main MainStripped MultiDex MultiDexModifiedSecondary MyClassNatives Nested VerifierDeps VerifierDepsMulti LinkageTest
 
 ART_GTEST_atomic_dex_ref_map_test_DEX_DEPS := Interfaces
 ART_GTEST_class_linker_test_DEX_DEPS := AllFields ErroneousA ErroneousB ErroneousInit ForClassLoaderA ForClassLoaderB ForClassLoaderC ForClassLoaderD Interfaces MethodTypes MultiDex MyClass Nested Statics StaticsFromCode
@@ -487,7 +493,8 @@ define define-art-gtest-rule-host
   $$(call dist-for-goals,$$(gtest_rule),$$(gtest_output):gtest/$$(gtest_suffix))
   gtest_exe := $(2)
   # Dependencies for all host gtests.
-  gtest_deps := $$(HOST_CORE_DEX_LOCATIONS) \
+  gtest_deps := $$(ART_HOST_DEX_DEPENDENCIES) \
+    $$(HOST_BOOT_IMAGE_JARS) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libicu_jni$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libjavacore$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$$(ART_HOST_SHLIB_EXTENSION) \
@@ -495,6 +502,28 @@ define define-art-gtest-rule-host
     $$(ART_GTEST_$(1)_HOST_DEPS) \
     $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX)) \
     $(HOST_OUT_EXECUTABLES)/signal_dumper
+
+  # Note: The "host arch" Make variables defined in build/make/core/envsetup.mk
+  # and art/build/Android.common.mk have different meanings:
+  #
+  #   * In build/make/core/envsetup.mk:
+  #     * HOST_ARCH := x86_64
+  #     * HOST_2ND_ARCH := x86
+  #
+  #   * In art/build/Android.common.mk:
+  #     * When `HOST_PREFER_32_BIT` is `true`:
+  #       * ART_HOST_ARCH := x86
+  #       * 2ND_ART_HOST_ARCH :=
+  #       * 2ND_HOST_ARCH :=
+  #     * Otherwise:
+  #       * ART_HOST_ARCH := x86_64
+  #       * 2ND_ART_HOST_ARCH := x86
+  #       * 2ND_HOST_ARCH := x86
+  ifeq ($(HOST_PREFER_32_BIT),true)
+    gtest_deps += $$(2ND_HOST_BOOT_IMAGE) # Depend on the 32-bit boot image.
+  else
+    gtest_deps += $$($(3)HOST_BOOT_IMAGE)
+  endif
 
   ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -595,7 +624,8 @@ ifeq ($(ART_BUILD_TARGET),true)
     libicu_jni.com.android.art.debug \
     libjavacore.com.android.art.debug \
     libopenjdkd.com.android.art.debug \
-    $(foreach jar,$(TARGET_TEST_CORE_JARS),$(TARGET_OUT_JAVA_LIBRARIES)/$(jar).jar)
+    com.android.art.testing \
+    com.android.conscrypt
 endif
 ifeq ($(ART_BUILD_HOST),true)
   $(foreach file,$(ART_HOST_GTEST_FILES), $(eval $(call define-art-gtest-host,$(file),)))

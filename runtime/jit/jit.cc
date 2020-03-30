@@ -980,6 +980,10 @@ static void CopyIfDifferent(void* s1, const void* s2, size_t n) {
 }
 
 void Jit::MapBootImageMethods() {
+  if (Runtime::Current()->IsJavaDebuggable()) {
+    LOG(INFO) << "Not mapping boot image methods due to process being debuggable";
+    return;
+  }
   CHECK_NE(fd_methods_.get(), -1);
   if (!code_cache_->GetZygoteMap()->CanMapBootImageMethods()) {
     LOG(WARNING) << "Not mapping boot image methods due to error from zygote";
@@ -1024,6 +1028,10 @@ void Jit::MapBootImageMethods() {
     // such methods, we need their entrypoints to be stubs that do the
     // initialization check.
     header.VisitPackedArtMethods([&](ArtMethod& method) NO_THREAD_SAFETY_ANALYSIS {
+      // Methods in the boot image should never have their single
+      // implementation flag set (and therefore never have a `data_` pointing
+      // to an ArtMethod for single implementation).
+      CHECK(method.IsIntrinsic() || !method.HasSingleImplementationFlag());
       if (method.IsRuntimeMethod()) {
         return;
       }
@@ -1223,7 +1231,10 @@ void Jit::RegisterDexFiles(const std::vector<std::unique_ptr<const DexFile>>& de
     return;
   }
   Runtime* runtime = Runtime::Current();
-  if (runtime->IsSystemServer() && UseJitCompilation() && HasImageWithProfile()) {
+  // If the runtime is debuggable, no need to precompile methods.
+  if (runtime->IsSystemServer() &&
+      UseJitCompilation() && HasImageWithProfile() &&
+      !runtime->IsJavaDebuggable()) {
     thread_pool_->AddTask(Thread::Current(), new JitProfileTask(dex_files, class_loader));
   }
 }

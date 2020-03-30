@@ -266,6 +266,8 @@ class JitCodeCache {
               ArrayRef<const uint8_t> reserved_data,  // Uninitialized destination.
               const std::vector<Handle<mirror::Object>>& roots,
               ArrayRef<const uint8_t> stack_map,      // Compiler output (source).
+              const std::vector<uint8_t>& debug_info,
+              bool is_full_debug_info,
               bool osr,
               bool has_should_deoptimize_flag,
               const ArenaSet<ArtMethod*>& cha_single_implementation_list)
@@ -403,6 +405,11 @@ class JitCodeCache {
     return region->IsValid() && !IsSharedRegion(*region);
   }
 
+  // Return whether the given `ptr` is in the zygote executable memory space.
+  bool IsInZygoteExecSpace(const void* ptr) const {
+    return shared_region_.IsInExecSpace(ptr);
+  }
+
  private:
   JitCodeCache();
 
@@ -426,7 +433,7 @@ class JitCodeCache {
   // Remove CHA dependents and underlying allocations for entries in `method_headers`.
   void FreeAllMethodHeaders(const std::unordered_set<OatQuickMethodHeader*>& method_headers)
       REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::jit_lock_)
+      REQUIRES(Locks::jit_lock_)
       REQUIRES(!Locks::cha_lock_);
 
   // Removes method from the cache. The caller must ensure that all threads
@@ -434,6 +441,10 @@ class JitCodeCache {
   bool RemoveMethodLocked(ArtMethod* method, bool release_memory)
       REQUIRES(Locks::jit_lock_)
       REQUIRES(Locks::mutator_lock_);
+
+  // Call given callback for every compiled method in the code cache.
+  void VisitAllMethods(const std::function<void(const void*, ArtMethod*)>& cb)
+      REQUIRES(Locks::jit_lock_);
 
   // Free code and data allocations for `code_ptr`.
   void FreeCodeAndData(const void* code_ptr)
@@ -478,10 +489,6 @@ class JitCodeCache {
 
   bool IsInZygoteDataSpace(const void* ptr) const {
     return shared_region_.IsInDataSpace(ptr);
-  }
-
-  bool IsInZygoteExecSpace(const void* ptr) const {
-    return shared_region_.IsInExecSpace(ptr);
   }
 
   bool IsWeakAccessEnabled(Thread* self) const;
