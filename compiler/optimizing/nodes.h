@@ -4149,8 +4149,6 @@ class HCompare final : public HBinaryOperation {
                          SideEffectsForArchRuntimeCalls(comparison_type),
                          dex_pc) {
     SetPackedField<ComparisonBiasField>(bias);
-    DCHECK_EQ(comparison_type, DataType::Kind(first->GetType()));
-    DCHECK_EQ(comparison_type, DataType::Kind(second->GetType()));
   }
 
   template <typename T>
@@ -5542,8 +5540,6 @@ class HRor final : public HBinaryOperation {
  public:
   HRor(DataType::Type result_type, HInstruction* value, HInstruction* distance)
       : HBinaryOperation(kRor, result_type, value, distance) {
-    DCHECK_EQ(result_type, DataType::Kind(value->GetType()));
-    DCHECK_EQ(DataType::Type::kInt32, DataType::Kind(distance->GetType()));
   }
 
   template <typename T>
@@ -8119,6 +8115,10 @@ inline HInstruction* HuntForDeclaration(HInstruction* instruction) {
         : instruction->InputAt(0);
   }
   return instruction;
+}
+
+inline bool IsAddOrSub(const HInstruction* instruction) {
+  return instruction->IsAdd() || instruction->IsSub();
 }
 
 void RemoveEnvironmentUses(HInstruction* instruction);

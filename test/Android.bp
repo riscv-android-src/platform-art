@@ -65,8 +65,6 @@ art_cc_defaults {
         "libartbased",
 
         "libbase",
-        "libicuuc",
-        "libicui18n",
         "libnativehelper",
         "libz",
     ],
@@ -606,7 +604,7 @@ cc_defaults {
     ],
 }
 
-filegroup {
+java_library {
     name: "art_cts_jvmti_test_library",
     visibility: [
         "//cts/hostsidetests/jvmti:__subpackages__",
