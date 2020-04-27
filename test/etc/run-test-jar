@@ -30,8 +30,8 @@ WITH_AGENT=()
 DEBUGGER_AGENT=""
 WRAP_DEBUGGER_AGENT="n"
 DEV_MODE="n"
-DEX2OAT_NDEBUG_BINARY="dex2oat"
-DEX2OAT_DEBUG_BINARY="dex2oatd"
+DEX2OAT_NDEBUG_BINARY="dex2oat32"
+DEX2OAT_DEBUG_BINARY="dex2oatd32"
 EXPERIMENTAL=""
 FALSE_BIN="false"
 FLAGS=""
@@ -113,7 +113,7 @@ COMPILER_FLAGS="${COMPILER_FLAGS} --runtime-arg -XX:SlowDebug=true"
 
 # Let the compiler and runtime know that we are running tests.
 COMPILE_FLAGS="${COMPILE_FLAGS} --compile-art-test"
-FLAGS="${FLAGS} -Xcompiler-option --compile-art-test"
+ANDROID_FLAGS="${ANDROID_FLAGS} -Xcompiler-option --compile-art-test"
 
 while true; do
     if [ "x$1" = "x--quiet" ]; then
@@ -266,6 +266,11 @@ while true; do
         ANDROID_ART_ROOT="${ANDROID_HOST_OUT}/com.android.art"
         ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
         ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
+        # On host, we default to using the symlink, as the PREFER_32BIT
+        # configuration is the only configuration building a 32bit version of
+        # dex2oat.
+        DEX2OAT_DEBUG_BINARY="dex2oatd"
+        DEX2OAT_NDEBUG_BINARY="dex2oat"
         shift
     elif [ "x$1" = "x--bionic" ]; then
         BIONIC="y"
@@ -427,6 +432,8 @@ while true; do
         TEST_DIRECTORY="nativetest64"
         ARCHITECTURES_PATTERN="${ARCHITECTURES_64}"
         GET_DEVICE_ISA_BITNESS_FLAG="--64"
+        DEX2OAT_NDEBUG_BINARY="dex2oat64"
+        DEX2OAT_DEBUG_BINARY="dex2oatd64"
         shift
     elif [ "x$1" = "x--experimental" ]; then
         if [ "$#" -lt 2 ]; then
@@ -501,7 +508,7 @@ fi
 CHROOT_DEX_LOCATION="$CHROOT$DEX_LOCATION"
 
 # If running on device, determine the ISA of the device.
-if [ "$HOST" = "n" ]; then
+if [ "$HOST" = "n" -a "$USE_JVM" = "n" ]; then
   ISA=$("$ANDROID_BUILD_TOP/art/test/utils/get-device-isa" "$GET_DEVICE_ISA_BITNESS_FLAG")
 fi
 
