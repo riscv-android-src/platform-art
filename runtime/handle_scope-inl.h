@@ -22,7 +22,6 @@
 #include "base/mutex.h"
 #include "handle.h"
 #include "handle_wrapper.h"
-#include "mirror/object_reference-inl.h"
 #include "obj_ptr-inl.h"
 #include "thread-current-inl.h"
 #include "verify_object.h"
@@ -31,7 +30,7 @@ namespace art {
 
 template<size_t kNumReferences>
 inline FixedSizeHandleScope<kNumReferences>::FixedSizeHandleScope(BaseHandleScope* link,
-                                                                  ObjPtr<mirror::Object> fill_value)
+                                                                  mirror::Object* fill_value)
     : HandleScope(link, kNumReferences) {
   if (kDebugLocking) {
     Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
@@ -44,8 +43,7 @@ inline FixedSizeHandleScope<kNumReferences>::FixedSizeHandleScope(BaseHandleScop
 }
 
 template<size_t kNumReferences>
-inline StackHandleScope<kNumReferences>::StackHandleScope(Thread* self,
-                                                          ObjPtr<mirror::Object> fill_value)
+inline StackHandleScope<kNumReferences>::StackHandleScope(Thread* self, mirror::Object* fill_value)
     : FixedSizeHandleScope<kNumReferences>(self->GetTopHandleScope(), fill_value),
       self_(self) {
   DCHECK_EQ(self, Thread::Current());
@@ -74,7 +72,7 @@ inline size_t HandleScope::SizeOf(PointerSize pointer_size, uint32_t num_referen
   return header_size + data_size;
 }
 
-inline ObjPtr<mirror::Object> HandleScope::GetReference(size_t i) const {
+inline mirror::Object* HandleScope::GetReference(size_t i) const {
   DCHECK_LT(i, NumberOfReferences());
   if (kDebugLocking) {
     Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
@@ -92,7 +90,7 @@ inline MutableHandle<mirror::Object> HandleScope::GetMutableHandle(size_t i) {
   return MutableHandle<mirror::Object>(&GetReferences()[i]);
 }
 
-inline void HandleScope::SetReference(size_t i, ObjPtr<mirror::Object> object) {
+inline void HandleScope::SetReference(size_t i, mirror::Object* object) {
   if (kDebugLocking) {
     Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
   }
@@ -120,16 +118,16 @@ inline void HandleScope::VisitRoots(Visitor& visitor) {
 
 template<size_t kNumReferences> template<class T>
 inline MutableHandle<T> FixedSizeHandleScope<kNumReferences>::NewHandle(T* object) {
-  return NewHandle(ObjPtr<T>(object));
+  SetReference(pos_, object);
+  MutableHandle<T> h(GetHandle<T>(pos_));
+  pos_++;
+  return h;
 }
 
 template<size_t kNumReferences> template<class MirrorType>
 inline MutableHandle<MirrorType> FixedSizeHandleScope<kNumReferences>::NewHandle(
     ObjPtr<MirrorType> object) {
-  SetReference(pos_, object);
-  MutableHandle<MirrorType> h(GetHandle<MirrorType>(pos_));
-  ++pos_;
-  return h;
+  return NewHandle(object.Ptr());
 }
 
 template<size_t kNumReferences> template<class T>
@@ -144,8 +142,7 @@ inline HandleWrapperObjPtr<T> FixedSizeHandleScope<kNumReferences>::NewHandleWra
 }
 
 template<size_t kNumReferences>
-inline void FixedSizeHandleScope<kNumReferences>::SetReference(size_t i,
-                                                               ObjPtr<mirror::Object> object) {
+inline void FixedSizeHandleScope<kNumReferences>::SetReference(size_t i, mirror::Object* object) {
   if (kDebugLocking) {
     Locks::mutator_lock_->AssertSharedHeld(Thread::Current());
   }
@@ -197,16 +194,16 @@ inline const HandleScope* BaseHandleScope::AsHandleScope() const {
 }
 
 template<class T>
-inline MutableHandle<T> VariableSizedHandleScope::NewHandle(T* object) {
-  return NewHandle(ObjPtr<T>(object));
+MutableHandle<T> VariableSizedHandleScope::NewHandle(T* object) {
+  if (current_scope_->RemainingSlots() == 0) {
+    current_scope_ = new LocalScopeType(current_scope_);
+  }
+  return current_scope_->NewHandle(object);
 }
 
 template<class MirrorType>
 inline MutableHandle<MirrorType> VariableSizedHandleScope::NewHandle(ObjPtr<MirrorType> ptr) {
-  if (current_scope_->RemainingSlots() == 0) {
-    current_scope_ = new LocalScopeType(current_scope_);
-  }
-  return current_scope_->NewHandle(ptr);
+  return NewHandle(ptr.Ptr());
 }
 
 inline VariableSizedHandleScope::VariableSizedHandleScope(Thread* const self)

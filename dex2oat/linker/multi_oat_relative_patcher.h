@@ -114,13 +114,6 @@ class MultiOatRelativePatcher final {
     relative_patcher_->PatchPcRelativeReference(code, patch, patch_offset, target_offset);
   }
 
-  void PatchEntrypointCall(std::vector<uint8_t>* code,
-                           const LinkerPatch& patch,
-                           uint32_t patch_offset) {
-    patch_offset += adjustment_;
-    relative_patcher_->PatchEntrypointCall(code, patch, patch_offset);
-  }
-
   void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code,
                                    const LinkerPatch& patch,
                                    uint32_t patch_offset) {

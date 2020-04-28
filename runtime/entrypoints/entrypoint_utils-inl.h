@@ -39,7 +39,6 @@
 #include "mirror/object-inl.h"
 #include "mirror/throwable.h"
 #include "nth_caller_visitor.h"
-#include "reflective_handle_scope-inl.h"
 #include "runtime.h"
 #include "stack_map.h"
 #include "thread.h"
@@ -115,35 +114,6 @@ inline ArtMethod* GetResolvedMethod(ArtMethod* outer_method,
   return method;
 }
 
-ALWAYS_INLINE
-inline ObjPtr<mirror::Class> CheckClassInitializedForObjectAlloc(ObjPtr<mirror::Class> klass,
-                                                                 Thread* self,
-                                                                 bool* slow_path)
-    REQUIRES_SHARED(Locks::mutator_lock_)
-    REQUIRES(!Roles::uninterruptible_) {
-  if (UNLIKELY(!klass->IsVisiblyInitialized())) {
-    StackHandleScope<1> hs(self);
-    Handle<mirror::Class> h_class(hs.NewHandle(klass));
-    // EnsureInitialized (the class initializer) might cause a GC.
-    // may cause us to suspend meaning that another thread may try to
-    // change the allocator while we are stuck in the entrypoints of
-    // an old allocator. Also, the class initialization may fail. To
-    // handle these cases we mark the slow path boolean as true so
-    // that the caller knows to check the allocator type to see if it
-    // has changed and to null-check the return value in case the
-    // initialization fails.
-    *slow_path = true;
-    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
-      DCHECK(self->IsExceptionPending());
-      return nullptr;  // Failure
-    } else {
-      DCHECK(!self->IsExceptionPending());
-    }
-    return h_class.Get();
-  }
-  return klass;
-}
-
 ALWAYS_INLINE inline ObjPtr<mirror::Class> CheckObjectAlloc(ObjPtr<mirror::Class> klass,
                                                             Thread* self,
                                                             bool* slow_path)
@@ -160,7 +130,54 @@ ALWAYS_INLINE inline ObjPtr<mirror::Class> CheckObjectAlloc(ObjPtr<mirror::Class
     *slow_path = true;
     return nullptr;  // Failure
   }
-  return CheckClassInitializedForObjectAlloc(klass, self, slow_path);
+  if (UNLIKELY(!klass->IsInitialized())) {
+    StackHandleScope<1> hs(self);
+    Handle<mirror::Class> h_klass(hs.NewHandle(klass));
+    // EnsureInitialized (the class initializer) might cause a GC.
+    // may cause us to suspend meaning that another thread may try to
+    // change the allocator while we are stuck in the entrypoints of
+    // an old allocator. Also, the class initialization may fail. To
+    // handle these cases we mark the slow path boolean as true so
+    // that the caller knows to check the allocator type to see if it
+    // has changed and to null-check the return value in case the
+    // initialization fails.
+    *slow_path = true;
+    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_klass, true, true)) {
+      DCHECK(self->IsExceptionPending());
+      return nullptr;  // Failure
+    } else {
+      DCHECK(!self->IsExceptionPending());
+    }
+    return h_klass.Get();
+  }
+  return klass;
+}
+
+ALWAYS_INLINE
+inline ObjPtr<mirror::Class> CheckClassInitializedForObjectAlloc(ObjPtr<mirror::Class> klass,
+                                                                 Thread* self,
+                                                                 bool* slow_path)
+    REQUIRES_SHARED(Locks::mutator_lock_)
+    REQUIRES(!Roles::uninterruptible_) {
+  if (UNLIKELY(!klass->IsInitialized())) {
+    StackHandleScope<1> hs(self);
+    Handle<mirror::Class> h_class(hs.NewHandle(klass));
+    // EnsureInitialized (the class initializer) might cause a GC.
+    // may cause us to suspend meaning that another thread may try to
+    // change the allocator while we are stuck in the entrypoints of
+    // an old allocator. Also, the class initialization may fail. To
+    // handle these cases we mark the slow path boolean as true so
+    // that the caller knows to check the allocator type to see if it
+    // has changed and to null-check the return value in case the
+    // initialization fails.
+    *slow_path = true;
+    if (!Runtime::Current()->GetClassLinker()->EnsureInitialized(self, h_class, true, true)) {
+      DCHECK(self->IsExceptionPending());
+      return nullptr;  // Failure
+    }
+    return h_class.Get();
+  }
+  return klass;
 }
 
 // Allocate an instance of klass. Throws InstantationError if klass is not instantiable,
@@ -202,11 +219,10 @@ inline ObjPtr<mirror::Object> AllocObjectFromCodeResolved(ObjPtr<mirror::Class> 
     // Pass in false since the object cannot be finalizable.
     // CheckClassInitializedForObjectAlloc can cause thread suspension which means we may now be
     // instrumented.
-    return klass->Alloc</*kInstrumented=*/true, /*kCheckAddFinalizer=*/false>(
-        self, heap->GetCurrentAllocator());
+    return klass->Alloc</*kInstrumented=*/true, false>(self, heap->GetCurrentAllocator());
   }
   // Pass in false since the object cannot be finalizable.
-  return klass->Alloc<kInstrumented, /*kCheckAddFinalizer=*/false>(self, allocator_type);
+  return klass->Alloc<kInstrumented, false>(self, allocator_type);
 }
 
 // Given the context of a calling Method and an initialized class, create an instance.
@@ -217,7 +233,7 @@ inline ObjPtr<mirror::Object> AllocObjectFromCodeInitialized(ObjPtr<mirror::Clas
                                                              gc::AllocatorType allocator_type) {
   DCHECK(klass != nullptr);
   // Pass in false since the object cannot be finalizable.
-  return klass->Alloc<kInstrumented, /*kCheckAddFinalizer=*/false>(self, allocator_type);
+  return klass->Alloc<kInstrumented, false>(self, allocator_type);
 }
 
 
@@ -280,11 +296,8 @@ inline ObjPtr<mirror::Array> AllocArrayFromCode(dex::TypeIndex type_idx,
                                                         klass->GetComponentSizeShift(),
                                                         heap->GetCurrentAllocator());
   }
-  return mirror::Array::Alloc<kInstrumented>(self,
-                                             klass,
-                                             component_count,
-                                             klass->GetComponentSizeShift(),
-                                             allocator_type);
+  return mirror::Array::Alloc<kInstrumented>(self, klass, component_count,
+                                             klass->GetComponentSizeShift(), allocator_type);
 }
 
 template <bool kInstrumented>
@@ -300,11 +313,8 @@ inline ObjPtr<mirror::Array> AllocArrayFromCodeResolved(ObjPtr<mirror::Class> kl
   }
   // No need to retry a slow-path allocation as the above code won't cause a GC or thread
   // suspension.
-  return mirror::Array::Alloc<kInstrumented>(self,
-                                             klass,
-                                             component_count,
-                                             klass->GetComponentSizeShift(),
-                                             allocator_type);
+  return mirror::Array::Alloc<kInstrumented>(self, klass, component_count,
+                                             klass->GetComponentSizeShift(), allocator_type);
 }
 
 template<FindFieldType type, bool access_check>
@@ -378,15 +388,13 @@ inline ArtField* FindFieldFromCode(uint32_t field_idx,
     return resolved_field;
   } else {
     // If the class is initialized we're done.
-    if (LIKELY(fields_class->IsVisiblyInitialized())) {
+    if (LIKELY(fields_class->IsInitialized())) {
       return resolved_field;
     } else {
       StackHandleScope<1> hs(self);
-      StackArtFieldHandleScope<1> rhs(self);
-      ReflectiveHandle<ArtField> resolved_field_handle(rhs.NewHandle(resolved_field));
       if (LIKELY(class_linker->EnsureInitialized(self, hs.NewHandle(fields_class), true, true))) {
         // Otherwise let's ensure the class is initialized before resolving the field.
-        return resolved_field_handle.Get();
+        return resolved_field;
       }
       DCHECK(self->IsExceptionPending());  // Throw exception and unwind
       return nullptr;  // Failure.
@@ -622,7 +630,7 @@ inline ArtField* FindFieldFast(uint32_t field_idx, ArtMethod* referrer, FindFiel
   if (is_static) {
     // Check class is initialized else fail so that we can contend to initialize the class with
     // other threads that may be racing to do this.
-    if (UNLIKELY(!fields_class->IsVisiblyInitialized())) {
+    if (UNLIKELY(!fields_class->IsInitialized())) {
       return nullptr;
     }
   }
@@ -769,13 +777,6 @@ inline INT_TYPE art_float_to_integral(FLOAT_TYPE f) {
   } else {
     return (f != f) ? 0 : kMinInt;  // f != f implies NaN
   }
-}
-
-inline bool NeedsClinitCheckBeforeCall(ArtMethod* method) {
-  // The class needs to be visibly initialized before we can use entrypoints to
-  // compiled code for static methods. See b/18161648 . The class initializer is
-  // special as it is invoked during initialization and does not need the check.
-  return method->IsStatic() && !method->IsConstructor();
 }
 
 }  // namespace art

@@ -76,12 +76,8 @@
     #define CFI_DEF_CFA_REGISTER(reg) .cfi_def_cfa_register reg
     #define CFI_RESTORE(reg) .cfi_restore reg
     #define CFI_REL_OFFSET(reg,size) .cfi_rel_offset reg,size
+    #define CFI_RESTORE_STATE .cfi_restore_state
     #define CFI_REMEMBER_STATE .cfi_remember_state
-    // The spec is not clear whether the CFA is part of the saved state and tools
-    // differ in the behaviour, so explicitly set the CFA to avoid any ambiguity.
-    // The restored CFA state should match the CFA state during CFI_REMEMBER_STATE.
-    // `objdump -Wf libart.so | egrep "_cfa|_state"` is useful to audit the opcodes.
-    #define CFI_RESTORE_STATE_AND_DEF_CFA(reg,off) .cfi_restore_state .cfi_def_cfa reg,off
 #else
     // Mac OS' doesn't like cfi_* directives.
     #define CFI_STARTPROC
@@ -91,8 +87,8 @@
     #define CFI_DEF_CFA_REGISTER(reg)
     #define CFI_RESTORE(reg)
     #define CFI_REL_OFFSET(reg,size)
+    #define CFI_RESTORE_STATE
     #define CFI_REMEMBER_STATE
-    #define CFI_RESTORE_STATE_AND_DEF_CFA(off)
 #endif
 
     // Symbols.
@@ -113,11 +109,7 @@
 
     /* Cache alignment for function entry */
 MACRO0(ALIGN_FUNCTION_ENTRY)
-    // ART-compiled functions have OatQuickMethodHeader but assembly funtions do not.
-    // Prefix the assembly code with 0xFFs, which means there is no method header.
-    .byte 0xFF, 0xFF, 0xFF, 0xFF
-    // Cache alignment for function entry.
-    .balign 16, 0xFF
+    .balign 16
 END_MACRO
 
 // TODO: we might need to use SYMBOL() here to add the underscore prefix

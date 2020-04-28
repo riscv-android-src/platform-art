@@ -1,2 +1,0 @@
-hello
-I say hello and you say goodbye!

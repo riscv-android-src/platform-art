@@ -17,20 +17,7 @@
 import java.lang.reflect.Method;
 
 public class Main {
-  public static String smallString = generateString(100);
-  public static String mediumString = generateString(300);
-  public static String largeString = generateString(2000);
-
-  public static String generateString(int length) {
-    // Generate a string in the ASCII range that will
-    // use string compression.
-    StringBuilder sb = new StringBuilder();
-    for (int i = 0; i < length; i++) {
-      // Generate repeating alphabet.
-      sb.append(Character.valueOf((char)('a' + (i % 26))));
-    }
-    return sb.toString();
-  }
+  public static boolean doThrow = false;
 
   public static void assertIntEquals(int expected, int result) {
     if (expected != result) {
@@ -46,12 +33,6 @@ public class Main {
 
   public static void assertCharEquals(char expected, char result) {
     if (expected != result) {
-      throw new Error("Expected: " + expected + ", found: " + result);
-    }
-  }
-
-  public static void assertStringEquals(String expected, String result) {
-    if (!expected.equals(result)) {
       throw new Error("Expected: " + expected + ", found: " + result);
     }
   }
@@ -80,30 +61,6 @@ public class Main {
     assertCharEquals('c', $opt$noinline$stringCharAt("abc", 2));
     assertCharEquals('7', $opt$noinline$stringCharAt("0123456789", 7));
 
-    // Single character.
-    assertStringEquals("a", stringGetCharsAndBack("a"));
-    // Strings < 8 characters.
-    assertStringEquals("foobar", stringGetCharsAndBack("foobar"));
-    // Strings > 8 characters of various lengths.
-    assertStringEquals(smallString, stringGetCharsAndBack(smallString));
-    assertStringEquals(mediumString, stringGetCharsAndBack(mediumString));
-    assertStringEquals(largeString, stringGetCharsAndBack(largeString));
-
-    // Get only a substring:
-    // Substring < 8 characters.
-    assertStringEquals(smallString.substring(5, 10), stringGetCharsRange(smallString, 5, 10, 0));
-    // Substring > 8 characters.
-    assertStringEquals(smallString.substring(7, 28), stringGetCharsRange(smallString, 7, 28, 0));
-
-    // Get full string with offset in the char array.
-    assertStringEquals(smallString, stringGetCharsAndBackOffset(smallString, 17));
-
-    // Get a substring with an offset in the char array.
-    // Substring < 8 characters.
-    assertStringEquals(smallString.substring(5, 10), stringGetCharsRange(smallString, 5, 10, 17));
-    // Substring > 8 characters.
-    assertStringEquals(smallString.substring(7, 28), stringGetCharsRange(smallString, 7, 28, 17));
-
     try {
       $opt$noinline$stringCharAt("abc", -1);
       throw new Error("Should throw SIOOB.");
@@ -127,9 +84,9 @@ public class Main {
     }
 
     assertCharEquals('7', $opt$noinline$stringCharAtCatch("0123456789", 7));
-    assertCharEquals('7', $noinline$runSmaliTest("$noinline$stringCharAtCatch", "0123456789", 7));
+    assertCharEquals('7', $noinline$runSmaliTest("stringCharAtCatch", "0123456789", 7));
     assertCharEquals('\0', $opt$noinline$stringCharAtCatch("0123456789", 10));
-    assertCharEquals('\0', $noinline$runSmaliTest("$noinline$stringCharAtCatch","0123456789", 10));
+    assertCharEquals('\0', $noinline$runSmaliTest("stringCharAtCatch","0123456789", 10));
 
     assertIntEquals('a' + 'b' + 'c', $opt$noinline$stringSumChars("abc"));
     assertIntEquals('a' + 'b' + 'c', $opt$noinline$stringSumLeadingChars("abcdef", 3));
@@ -166,6 +123,7 @@ public class Main {
   /// CHECK-NOT:                    InvokeVirtual intrinsic:StringLength
 
   static public int $opt$noinline$getStringLength(String s) {
+    if (doThrow) { throw new Error(); }
     return s.length();
   }
 
@@ -185,6 +143,7 @@ public class Main {
   /// CHECK-NOT:                    InvokeVirtual intrinsic:StringIsEmpty
 
   static public boolean $opt$noinline$isStringEmpty(String s) {
+    if (doThrow) { throw new Error(); }
     return s.isEmpty();
   }
 
@@ -205,6 +164,7 @@ public class Main {
   /// CHECK-NOT:                    InvokeVirtual intrinsic:StringCharAt
 
   static public char $opt$noinline$stringCharAt(String s, int pos) {
+    if (doThrow) { throw new Error(); }
     return s.charAt(pos);
   }
 
@@ -231,6 +191,7 @@ public class Main {
   /// CHECK-NOT:                    InvokeVirtual intrinsic:StringCharAt
 
   static public char $opt$noinline$stringCharAtCatch(String s, int pos) {
+    if (doThrow) { throw new Error(); }
     try {
       return s.charAt(pos);
     } catch (StringIndexOutOfBoundsException ignored) {
@@ -260,6 +221,7 @@ public class Main {
   /// CHECK-NOT:                    BoundsCheck
 
   static public int $opt$noinline$stringSumChars(String s) {
+    if (doThrow) { throw new Error(); }
     int sum = 0;
     int len = s.length();
     for (int i = 0; i < len; ++i) {
@@ -286,6 +248,7 @@ public class Main {
   /// CHECK-NOT:                    BoundsCheck is_string_char_at:true
 
   static public int $opt$noinline$stringSumLeadingChars(String s, int n) {
+    if (doThrow) { throw new Error(); }
     int sum = 0;
     for (int i = 0; i < n; ++i) {
       sum += s.charAt(i);
@@ -323,6 +286,7 @@ public class Main {
   /// CHECK-NOT:                    BoundsCheck is_string_char_at:true
 
   static public int $opt$noinline$stringSum4LeadingChars(String s) {
+    if (doThrow) { throw new Error(); }
     int sum = s.charAt(0) + s.charAt(1) + s.charAt(2) + s.charAt(3);
     return sum;
   }
@@ -475,23 +439,5 @@ public class Main {
     } catch (Exception ex) {
       throw new Error(ex);
     }
-  }
-
-  public static String stringGetCharsAndBack(String src) {
-    char[] dst = new char[src.length()];
-    src.getChars(0, src.length(), dst, 0);
-    return new String(dst);
-  }
-
-  public static String stringGetCharsAndBackOffset(String src, int offset) {
-    char[] dst = new char[src.length() + offset];
-    src.getChars(0, src.length(), dst, offset);
-    return new String(dst, offset, src.length());
-  }
-
-  public static String stringGetCharsRange(String src, int srcBegin, int srcEnd, int offset) {
-    char[] dst = new char[srcEnd - srcBegin + offset];
-    src.getChars(srcBegin, srcEnd, dst, offset);
-    return new String(dst, offset, srcEnd - srcBegin);
   }
 }

@@ -96,11 +96,11 @@ class BumpPointerSpace final : public ContinuousMemMapAllocSpace {
     return GetMemMap()->Size();
   }
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
     return nullptr;
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() override {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     return nullptr;
   }
 

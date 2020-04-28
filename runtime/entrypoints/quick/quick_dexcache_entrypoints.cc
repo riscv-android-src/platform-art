@@ -53,10 +53,7 @@ static void StoreObjectInBss(ArtMethod* outer_method,
   DCHECK_LT(slot, oat_file->GetBssGcRoots().data() + oat_file->GetBssGcRoots().size());
   if (slot->IsNull()) {
     // This may race with another thread trying to store the very same value but that's OK.
-    std::atomic<GcRoot<mirror::Object>>* atomic_slot =
-        reinterpret_cast<std::atomic<GcRoot<mirror::Object>>*>(slot);
-    static_assert(sizeof(*slot) == sizeof(*atomic_slot), "Size check");
-    atomic_slot->store(GcRoot<mirror::Object>(object), std::memory_order_release);
+    *slot = GcRoot<mirror::Object>(object);
     // We need a write barrier for the class loader that holds the GC roots in the .bss.
     ObjPtr<mirror::ClassLoader> class_loader = outer_method->GetClassLoader();
     Runtime* runtime = Runtime::Current();

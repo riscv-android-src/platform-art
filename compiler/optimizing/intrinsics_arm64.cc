@@ -90,8 +90,8 @@ static void MoveFromReturnRegister(Location trg,
     Register res_reg = RegisterFrom(ARM64ReturnLocation(type), type);
     __ Mov(trg_reg, res_reg, kDiscardForSameWReg);
   } else {
-    VRegister trg_reg = FPRegisterFrom(trg, type);
-    VRegister res_reg = FPRegisterFrom(ARM64ReturnLocation(type), type);
+    FPRegister trg_reg = FPRegisterFrom(trg, type);
+    FPRegister res_reg = FPRegisterFrom(ARM64ReturnLocation(type), type);
     __ Fmov(trg_reg, res_reg);
   }
 }
@@ -435,7 +435,7 @@ static void GenBitCount(HInvoke* instr, DataType::Type type, MacroAssembler* mas
 
   Register src = InputRegisterAt(instr, 0);
   Register dst = RegisterFrom(instr->GetLocations()->Out(), type);
-  VRegister fpr = (type == DataType::Type::kInt64) ? temps.AcquireD() : temps.AcquireS();
+  FPRegister fpr = (type == DataType::Type::kInt64) ? temps.AcquireD() : temps.AcquireS();
 
   __ Fmov(fpr, src);
   __ Cnt(fpr.V8B(), fpr.V8B());
@@ -591,8 +591,8 @@ static void GenMathRound(HInvoke* invoke, bool is_double, vixl::aarch64::MacroAs
   // For example, FCVTPS(-1.9) = -1 and FCVTPS(1.1) = 2.
   // If we were using this instruction, for most inputs, more handling code would be needed.
   LocationSummary* l = invoke->GetLocations();
-  VRegister in_reg = is_double ? DRegisterFrom(l->InAt(0)) : SRegisterFrom(l->InAt(0));
-  VRegister tmp_fp = is_double ? DRegisterFrom(l->GetTemp(0)) : SRegisterFrom(l->GetTemp(0));
+  FPRegister in_reg = is_double ? DRegisterFrom(l->InAt(0)) : SRegisterFrom(l->InAt(0));
+  FPRegister tmp_fp = is_double ? DRegisterFrom(l->GetTemp(0)) : SRegisterFrom(l->GetTemp(0));
   Register out_reg = is_double ? XRegisterFrom(l->Out()) : WRegisterFrom(l->Out());
   vixl::aarch64::Label done;
 
@@ -1960,8 +1960,7 @@ void IntrinsicCodeGeneratorARM64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   Register tmp2 = temps.AcquireX();
 
   vixl::aarch64::Label done;
-  vixl::aarch64::Label compressed_string_vector_loop;
-  vixl::aarch64::Label compressed_string_remainder;
+  vixl::aarch64::Label compressed_string_loop;
   __ Sub(num_chr, srcEnd, srcBegin);
   // Early out for valid zero-length retrievals.
   __ Cbz(num_chr, &done);
@@ -2014,39 +2013,16 @@ void IntrinsicCodeGeneratorARM64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   __ B(&done);
 
   if (mirror::kUseStringCompression) {
-    // For compressed strings, acquire a SIMD temporary register.
-    VRegister vtmp1 = temps.AcquireVRegisterOfSize(kQRegSize);
     const size_t c_char_size = DataType::Size(DataType::Type::kInt8);
     DCHECK_EQ(c_char_size, 1u);
     __ Bind(&compressed_string_preloop);
     __ Add(src_ptr, src_ptr, Operand(srcBegin));
-
-    // Save repairing the value of num_chr on the < 8 character path.
-    __ Subs(tmp1, num_chr, 8);
-    __ B(lt, &compressed_string_remainder);
-
-    // Keep the result of the earlier subs, we are going to fetch at least 8 characters.
-    __ Mov(num_chr, tmp1);
-
-    // Main loop for compressed src, copying 8 characters (8-bit) to (16-bit) at a time.
-    // Uses SIMD instructions.
-    __ Bind(&compressed_string_vector_loop);
-    __ Ld1(vtmp1.V8B(), MemOperand(src_ptr, c_char_size * 8, PostIndex));
-    __ Subs(num_chr, num_chr, 8);
-    __ Uxtl(vtmp1.V8H(), vtmp1.V8B());
-    __ St1(vtmp1.V8H(), MemOperand(dst_ptr, char_size * 8, PostIndex));
-    __ B(ge, &compressed_string_vector_loop);
-
-    __ Adds(num_chr, num_chr, 8);
-    __ B(eq, &done);
-
-    // Loop for < 8 character case and remainder handling with a compressed src.
-    // Copies 1 character (8-bit) to (16-bit) at a time.
-    __ Bind(&compressed_string_remainder);
+    // Copy loop for compressed src, copying 1 character (8-bit) to (16-bit) at a time.
+    __ Bind(&compressed_string_loop);
     __ Ldrb(tmp1, MemOperand(src_ptr, c_char_size, PostIndex));
     __ Strh(tmp1, MemOperand(dst_ptr, char_size, PostIndex));
     __ Subs(num_chr, num_chr, Operand(1));
-    __ B(gt, &compressed_string_remainder);
+    __ B(gt, &compressed_string_loop);
   }
 
   __ Bind(&done);
@@ -3193,53 +3169,6 @@ void IntrinsicCodeGeneratorARM64::VisitCRC32UpdateByteBuffer(HInvoke* invoke) {
   GenerateCodeForCalculationCRC32ValueOfBytes(masm, crc, ptr, length, out);
 }
 
-void IntrinsicLocationsBuilderARM64::VisitFP16ToFloat(HInvoke* invoke) {
-  if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
-    return;
-  }
-
-  LocationSummary* locations = new (allocator_) LocationSummary(invoke,
-                                                                LocationSummary::kNoCall,
-                                                                kIntrinsified);
-  locations->SetInAt(0, Location::RequiresRegister());
-  locations->SetOut(Location::RequiresFpuRegister());
-}
-
-void IntrinsicCodeGeneratorARM64::VisitFP16ToFloat(HInvoke* invoke) {
-  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
-  MacroAssembler* masm = GetVIXLAssembler();
-  UseScratchRegisterScope scratch_scope(masm);
-  Register bits = InputRegisterAt(invoke, 0);
-  VRegister out = SRegisterFrom(invoke->GetLocations()->Out());
-  VRegister half = scratch_scope.AcquireH();
-  __ Fmov(half, bits);  // ARMv8.2
-  __ Fcvt(out, half);
-}
-
-void IntrinsicLocationsBuilderARM64::VisitFP16ToHalf(HInvoke* invoke) {
-  if (!codegen_->GetInstructionSetFeatures().HasFP16()) {
-    return;
-  }
-
-  LocationSummary* locations = new (allocator_) LocationSummary(invoke,
-                                                                LocationSummary::kNoCall,
-                                                                kIntrinsified);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetOut(Location::RequiresRegister());
-}
-
-void IntrinsicCodeGeneratorARM64::VisitFP16ToHalf(HInvoke* invoke) {
-  DCHECK(codegen_->GetInstructionSetFeatures().HasFP16());
-  MacroAssembler* masm = GetVIXLAssembler();
-  UseScratchRegisterScope scratch_scope(masm);
-  VRegister in = SRegisterFrom(invoke->GetLocations()->InAt(0));
-  VRegister half = scratch_scope.AcquireH();
-  Register out = WRegisterFrom(invoke->GetLocations()->Out());
-  __ Fcvt(half, in);
-  __ Fmov(out, half);
-  __ Sxth(out, out);  // sign extend due to returning a short type.
-}
-
 UNIMPLEMENTED_INTRINSIC(ARM64, ReferenceGetReferent)
 
 UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOf);
@@ -3247,16 +3176,7 @@ UNIMPLEMENTED_INTRINSIC(ARM64, StringStringIndexOfAfter);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferAppend);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferLength);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringBufferToString);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendObject);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendString);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendCharSequence);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendCharArray);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendBoolean);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendChar);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendInt);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendLong);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendFloat);
-UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppendDouble);
+UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderAppend);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderLength);
 UNIMPLEMENTED_INTRINSIC(ARM64, StringBuilderToString);
 

@@ -39,7 +39,6 @@
 
 #include "art_jvmti.h"
 #include "ti_class_definition.h"
-#include "ti_redefine.h"
 
 namespace openjdkjvmti {
 
@@ -49,7 +48,7 @@ jvmtiError GetClassLocation(ArtJvmTiEnv* env, jclass klass, /*out*/std::string* 
 
 class Transformer {
  public:
-  static void Register(EventHandler* eh);
+  static void Setup();
 
   template<ArtJvmtiEvent kEvent>
   static void TransformSingleClassDirect(
@@ -57,14 +56,18 @@ class Transformer {
       art::Thread* self,
       /*in-out*/ArtClassDefinition* def);
 
-  template<RedefinitionType kType>
-  static void RetransformClassesDirect(
+  static jvmtiError RetransformClassesDirect(
+      EventHandler* event_handler,
       art::Thread* self,
       /*in-out*/std::vector<ArtClassDefinition>* definitions);
 
-  static jvmtiError RetransformClasses(jvmtiEnv* env,
+  static jvmtiError RetransformClasses(ArtJvmTiEnv* env,
+                                       EventHandler* event_handler,
+                                       art::Runtime* runtime,
+                                       art::Thread* self,
                                        jint class_count,
-                                       const jclass* classes);
+                                       const jclass* classes,
+                                       /*out*/std::string* error_msg);
 };
 
 }  // namespace openjdkjvmti

@@ -37,15 +37,12 @@
 #include "gc/collector_type.h"
 #include "gc/gc_cause.h"
 #include "gc/scoped_gc_critical_section.h"
-#include "jit/jit.h"
 #include "jit/profiling_info.h"
 #include "oat_file_manager.h"
 #include "profile/profile_compilation_info.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
-
-using Hotness = ProfileCompilationInfo::MethodHotness;
 
 ProfileSaver* ProfileSaver::instance_ = nullptr;
 pthread_t ProfileSaver::profiler_pthread_ = 0U;
@@ -124,10 +121,6 @@ void ProfileSaver::NotifyStartupCompleted() {
 
 void ProfileSaver::Run() {
   Thread* self = Thread::Current();
-
-  // For thread annotalysis, the setup is more complicated than it should be. Run needs to start
-  // under mutex, but should drop it.
-  Locks::profiler_lock_->ExclusiveUnlock(self);
 
   // Fetch the resolved classes for the app images after sleeping for
   // options_.GetSaveResolvedClassesDelayMs().
@@ -424,12 +417,9 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
     MutexLock mu(self, *Locks::profiler_lock_);
     profiler_pthread = profiler_pthread_;
   }
-  uint32_t hot_method_sample_threshold = std::numeric_limits<uint32_t>::max();
-  if (startup) {
-    hot_method_sample_threshold = options_.GetHotStartupMethodSamples(is_low_ram);
-  } else if (Runtime::Current()->GetJit() != nullptr) {
-    hot_method_sample_threshold = Runtime::Current()->GetJit()->WarmMethodThreshold();
-  }
+  const uint32_t hot_method_sample_threshold = startup ?
+      options_.GetHotStartupMethodSamples(is_low_ram) :
+      std::numeric_limits<uint32_t>::max();
   SampleClassesAndExecutedMethods(profiler_pthread,
                                   options_.GetProfileBootClassPath(),
                                   &allocator,
@@ -440,6 +430,7 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
                                   &sampled_methods);
   MutexLock mu(self, *Locks::profiler_lock_);
   uint64_t total_number_of_profile_entries_cached = 0;
+  using Hotness = ProfileCompilationInfo::MethodHotness;
 
   for (const auto& it : tracked_dex_base_locations_) {
     std::set<DexCacheResolvedClasses> resolved_classes_for_location;
@@ -448,8 +439,7 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
     if (info_it == profile_cache_.end()) {
       info_it = profile_cache_.Put(
           filename,
-          new ProfileCompilationInfo(
-              Runtime::Current()->GetArenaPool(), options_.GetProfileBootClassPath()));
+          new ProfileCompilationInfo(Runtime::Current()->GetArenaPool()));
     }
     ProfileCompilationInfo* cached_info = info_it->second;
 
@@ -465,14 +455,13 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
                      << " found=" << (locations.find(base_location) != locations.end())
                      << " indices size=" << indices.size();
       if (locations.find(base_location) != locations.end()) {
-        uint32_t flags = Hotness::kFlagHot;
+        uint8_t flags = Hotness::kFlagHot;
         flags |= startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup;
         cached_info->AddMethodsForDex(
-            AnnotateSampleFlags(flags),
+            static_cast<Hotness::Flag>(flags),
             dex_file,
             indices.begin(),
-            indices.end(),
-            GetProfileSampleAnnotation());
+            indices.end());
       }
     }
     for (const auto& pair : sampled_methods.GetMap()) {
@@ -483,12 +472,10 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
                      << " found=" << (locations.find(base_location) != locations.end())
                      << " indices size=" << indices.size();
       if (locations.find(base_location) != locations.end()) {
-        cached_info->AddMethodsForDex(
-            AnnotateSampleFlags(startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup),
-            dex_file,
-            indices.begin(),
-            indices.end(),
-            GetProfileSampleAnnotation());
+        cached_info->AddMethodsForDex(startup ? Hotness::kFlagStartup : Hotness::kFlagPostStartup,
+                                      dex_file,
+                                      indices.begin(),
+                                      indices.end());
       }
     }
     for (const auto& pair : resolved_classes.GetMap()) {
@@ -499,10 +486,7 @@ void ProfileSaver::FetchAndCacheResolvedClassesAndMethods(bool startup) {
         VLOG(profiler) << "Added " << classes.size() << " classes for location "
                        << base_location
                        << " (" << dex_file->GetLocation() << ")";
-        cached_info->AddClassesForDex(dex_file,
-                                      classes.begin(),
-                                      classes.end(),
-                                      GetProfileSampleAnnotation());
+        cached_info->AddClassesForDex(dex_file, classes.begin(), classes.end());
       } else {
         VLOG(profiler) << "Location not found " << base_location;
       }
@@ -560,8 +544,7 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
       total_number_of_code_cache_queries_++;
     }
     {
-      ProfileCompilationInfo info(
-          Runtime::Current()->GetArenaPool(), options_.GetProfileBootClassPath());
+      ProfileCompilationInfo info(Runtime::Current()->GetArenaPool());
       if (!info.Load(filename, /*clear_if_invalid=*/ true)) {
         LOG(WARNING) << "Could not forcefully load profile " << filename;
         continue;
@@ -575,10 +558,8 @@ bool ProfileSaver::ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number
       // Try to add the method data. Note this may fail is the profile loaded from disk contains
       // outdated data (e.g. the previous profiled dex files might have been updated).
       // If this happens we clear the profile data and for the save to ensure the file is cleared.
-      if (!info.AddMethods(
-              profile_methods,
-              AnnotateSampleFlags(Hotness::kFlagHot | Hotness::kFlagPostStartup),
-              GetProfileSampleAnnotation())) {
+      if (!info.AddMethods(profile_methods,
+              ProfileCompilationInfo::MethodHotness::kFlagPostStartup)) {
         LOG(WARNING) << "Could not add methods to the existing profiler. "
             << "Clearing the profile data.";
         info.ClearData();
@@ -666,11 +647,8 @@ void* ProfileSaver::RunProfileSaverThread(void* arg) {
     return nullptr;
   }
 
-  {
-    Locks::profiler_lock_->ExclusiveLock(Thread::Current());
-    CHECK_EQ(reinterpret_cast<ProfileSaver*>(arg), instance_);
-    instance_->Run();
-  }
+  ProfileSaver* profile_saver = reinterpret_cast<ProfileSaver*>(arg);
+  profile_saver->Run();
 
   runtime->DetachCurrentThread();
   VLOG(profiler) << "Profile saver shutdown";
@@ -703,7 +681,7 @@ static bool ShouldProfileLocation(const std::string& location, bool profile_aot_
   return true;
 }
 
-void  ProfileSaver::Start(const ProfileSaverOptions& options,
+void ProfileSaver::Start(const ProfileSaverOptions& options,
                          const std::string& output_filename,
                          jit::JitCodeCache* jit_code_cache,
                          const std::vector<std::string>& code_paths) {
@@ -728,14 +706,12 @@ void  ProfileSaver::Start(const ProfileSaverOptions& options,
   if (options.GetProfileBootClassPath()) {
     std::set<std::string> code_paths_keys;
     for (const std::string& location : code_paths) {
-      // Use the profile base key for checking file uniqueness (as it is constructed solely based
-      // on the location and ignores other metadata like origin package).
-      code_paths_keys.insert(ProfileCompilationInfo::GetProfileDexFileBaseKey(location));
+      code_paths_keys.insert(ProfileCompilationInfo::GetProfileDexFileKey(location));
     }
     for (const DexFile* dex_file : runtime->GetClassLinker()->GetBootClassPath()) {
       // Don't check ShouldProfileLocation since the boot class path may be speed compiled.
       const std::string& location = dex_file->GetLocation();
-      const std::string key = ProfileCompilationInfo::GetProfileDexFileBaseKey(location);
+      const std::string key = ProfileCompilationInfo::GetProfileDexFileKey(location);
       VLOG(profiler) << "Registering boot dex file " << location;
       if (code_paths_keys.find(key) != code_paths_keys.end()) {
         LOG(WARNING) << "Boot class path location key conflicts with code path " << location;
@@ -808,7 +784,7 @@ void ProfileSaver::Stop(bool dump_info) {
 
   // Force save everything before destroying the thread since we want profiler_pthread_ to remain
   // valid.
-  profile_saver->ProcessProfilingInfo(/*force_save=*/true, /*number_of_new_methods=*/nullptr);
+  instance_->ProcessProfilingInfo(/*force_save=*/true, /*number_of_new_methods=*/nullptr);
 
   // Wait for the saver thread to stop.
   CHECK_PTHREAD_CALL(pthread_join, (profiler_pthread, nullptr), "profile saver thread shutdown");
@@ -933,8 +909,11 @@ bool ProfileSaver::HasSeenMethod(const std::string& profile, bool hot, MethodRef
     if (!info.Load(profile, /*clear_if_invalid=*/false)) {
       return false;
     }
-    const ProfileCompilationInfo::MethodHotness hotness = info.GetMethodHotness(ref);
-    return hot ? hotness.IsHot() : hotness.IsInProfile();
+    ProfileCompilationInfo::MethodHotness hotness = info.GetMethodHotness(ref);
+    // Ignore hot parameter for now since it was causing test 595 to be flaky. TODO: Investigate.
+    // b/63635729
+    UNUSED(hot);
+    return hotness.IsInProfile();
   }
   return false;
 }
@@ -971,34 +950,6 @@ void ProfileSaver::ResolveTrackedLocations() {
   for (const auto& it : resolved_locations_map) {
     AddTrackedLocationsToMap(it.first, it.second, &tracked_dex_base_locations_);
   }
-}
-
-ProfileCompilationInfo::ProfileSampleAnnotation ProfileSaver::GetProfileSampleAnnotation() {
-  // Ideally, this would be cached in the ProfileSaver class, when we start the thread.
-  // However the profile is initialized before the process package name is set and fixing this
-  // would require unnecessary complex synchronizations.
-  std::string package_name = Runtime::Current()->GetProcessPackageName();
-  if (package_name.empty()) {
-    package_name = "unknown";
-  }
-  // We only use annotation for the boot image profiles. Regular apps do not use the extra
-  // metadata and as such there is no need to pay the cost (storage and computational)
-  // that comes with the annotations.
-  return options_.GetProfileBootClassPath()
-      ? ProfileCompilationInfo::ProfileSampleAnnotation(package_name)
-      : ProfileCompilationInfo::ProfileSampleAnnotation::kNone;
-}
-
-Hotness::Flag ProfileSaver::AnnotateSampleFlags(uint32_t flags) {
-  uint32_t extra_flags = 0;
-  // We only add the extra flags for the boot image profile because individual apps do not use
-  // this information.
-  if (options_.GetProfileBootClassPath()) {
-    extra_flags = Is64BitInstructionSet(Runtime::Current()->GetInstructionSet())
-        ? Hotness::kFlag64bit
-        : Hotness::kFlag32bit;
-  }
-  return static_cast<Hotness::Flag>(flags | extra_flags);
 }
 
 }   // namespace art

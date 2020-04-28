@@ -27,7 +27,6 @@
 #include "base/utils.h"
 #include "debugger.h"
 #include "gc/heap.h"
-#include "jni_id_type.h"
 #include "monitor.h"
 #include "runtime.h"
 #include "ti/agent.h"
@@ -83,8 +82,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
   parser_builder->
        Define("-Xzygote")
           .IntoKey(M::Zygote)
-      .Define("-Xprimaryzygote")
-          .IntoKey(M::PrimaryZygote)
       .Define("-help")
           .IntoKey(M::Help)
       .Define("-showversion")
@@ -141,9 +138,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:NonMovingSpaceCapacity=_")
           .WithType<MemoryKiB>()
           .IntoKey(M::NonMovingSpaceCapacity)
-      .Define("-XX:StopForNativeAllocs=_")
-          .WithType<MemoryKiB>()
-          .IntoKey(M::StopForNativeAllocs)
       .Define("-XX:HeapTargetUtilization=_")
           .WithType<double>().WithRange(0.1, 0.9)
           .IntoKey(M::HeapTargetUtilization)
@@ -368,19 +362,6 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
           .IntoKey(M::FastClassNotFoundException)
-      .Define("-Xopaque-jni-ids:_")
-          .WithType<JniIdType>()
-          .WithValueMap({{"true", JniIdType::kIndices},
-                         {"false", JniIdType::kPointer},
-                         {"swapable", JniIdType::kSwapablePointer},
-                         {"pointer", JniIdType::kPointer},
-                         {"indices", JniIdType::kIndices},
-                         {"default", JniIdType::kDefault}})
-          .IntoKey(M::OpaqueJniIds)
-      .Define("-XX:VerifierMissingKThrowFatal=_")
-          .WithType<bool>()
-          .WithValueMap({{"false", false}, {"true", true}})
-          .IntoKey(M::VerifierMissingKThrowFatal)
       .Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
@@ -497,7 +478,6 @@ static void MaybeOverrideVerbosity() {
   //  gLogVerbosity.deopt = true;  // TODO: don't check this in!
   //  gLogVerbosity.gc = true;  // TODO: don't check this in!
   //  gLogVerbosity.heap = true;  // TODO: don't check this in!
-  //  gLogVerbosity.interpreter = true;  // TODO: don't check this in!
   //  gLogVerbosity.jdwp = true;  // TODO: don't check this in!
   //  gLogVerbosity.jit = true;  // TODO: don't check this in!
   //  gLogVerbosity.jni = true;  // TODO: don't check this in!
@@ -597,7 +577,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   MaybeOverrideVerbosity();
 
-  SetRuntimeDebugFlagsEnabled(args.GetOrDefault(M::SlowDebug));
+  SetRuntimeDebugFlagsEnabled(args.Get(M::SlowDebug));
 
   // -Xprofile:
   Trace::SetDefaultClockSource(args.GetOrDefault(M::ProfileClock));
@@ -608,6 +588,7 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
 
   {
     // If not set, background collector type defaults to homogeneous compaction.
+    // If foreground is GSS, use GSS as background collector.
     // If not low memory mode, semispace otherwise.
 
     gc::CollectorType background_collector_type_;
@@ -623,8 +604,12 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
     }
 
     if (background_collector_type_ == gc::kCollectorTypeNone) {
-      background_collector_type_ = low_memory_mode_ ?
-          gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
+      if (collector_type_ != gc::kCollectorTypeGSS) {
+        background_collector_type_ = low_memory_mode_ ?
+            gc::kCollectorTypeSS : gc::kCollectorTypeHomogeneousSpaceCompact;
+      } else {
+        background_collector_type_ = collector_type_;
+      }
     }
 
     args.Set(M::BackgroundGc, BackgroundGcOption { background_collector_type_ });
@@ -698,19 +683,15 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "The following standard options are supported:\n");
   UsageMessage(stream, "  -classpath classpath (-cp classpath)\n");
   UsageMessage(stream, "  -Dproperty=value\n");
-  UsageMessage(stream, "  -verbose:tag[,tag...] (currently valid tags: 'agents', 'class',\n"
-                       "    'collector', 'compiler', 'deopt', 'dex', 'gc', 'heap', 'image',\n"
-                       "    'interpreter', 'jdwp', 'jit', 'jni', 'monitor', 'oat', 'profiler',\n"
-                       "    'signals', 'simulator', 'startup', 'systrace-locks',\n"
-                       "    'third-party-jni', 'threads', 'verifier', 'verifier-debug')\n");
+  UsageMessage(stream, "  -verbose:tag ('gc', 'jit', 'jni', or 'class')\n");
   UsageMessage(stream, "  -showversion\n");
   UsageMessage(stream, "  -help\n");
   UsageMessage(stream, "  -agentlib:jdwp=options\n");
   // TODO add back in once -agentlib actually does something.
   // UsageMessage(stream, "  -agentlib:library=options (Experimental feature, "
   //                      "requires -Xexperimental:agent, some features might not be supported)\n");
-  UsageMessage(stream, "  -agentpath:library_path=options (Experimental feature, requires\n"
-                       "    -Xexperimental:agent, some features might not be supported)\n");
+  UsageMessage(stream, "  -agentpath:library_path=options (Experimental feature, "
+                       "requires -Xexperimental:agent, some features might not be supported)\n");
   UsageMessage(stream, "\n");
 
   UsageMessage(stream, "The following extended options are supported:\n");
@@ -763,12 +744,11 @@ void ParsedOptions::Usage(const char* fmt, ...) {
   UsageMessage(stream, "  -XX:BackgroundGC=none\n");
   UsageMessage(stream, "  -XX:LargeObjectSpace={disabled,map,freelist}\n");
   UsageMessage(stream, "  -XX:LargeObjectThreshold=N\n");
-  UsageMessage(stream, "  -XX:StopForNativeAllocs=N\n");
   UsageMessage(stream, "  -XX:DumpNativeStackOnSigQuit=booleanvalue\n");
   UsageMessage(stream, "  -XX:MadviseRandomAccess:booleanvalue\n");
   UsageMessage(stream, "  -XX:SlowDebug={false,true}\n");
   UsageMessage(stream, "  -Xmethod-trace\n");
-  UsageMessage(stream, "  -Xmethod-trace-file:filename\n");
+  UsageMessage(stream, "  -Xmethod-trace-file:filename");
   UsageMessage(stream, "  -Xmethod-trace-file-size:integervalue\n");
   UsageMessage(stream, "  -Xps-min-save-period-ms:integervalue\n");
   UsageMessage(stream, "  -Xps-save-resolved-classes-delay-ms:integervalue\n");
@@ -798,8 +778,6 @@ void ParsedOptions::Usage(const char* fmt, ...) {
                        "(Enable new and experimental agent support)\n");
   UsageMessage(stream, "  -Xexperimental:agents"
                        "(Enable new and experimental agent support)\n");
-  UsageMessage(stream, "  -Xopaque-jni-ids:{true,false,swapable}");
-  UsageMessage(stream, "(Use opauque integers for jni ids, yes, no or punt for later)\n");
   UsageMessage(stream, "\n");
 
   UsageMessage(stream, "The following previously supported Dalvik options are ignored:\n");

@@ -54,7 +54,7 @@
 // Common ENTRY declaration code for ARM and thumb, an ENTRY should always be paired with an END.
 // Declares the RUNTIME_CURRENT[123] macros that can be used within an ENTRY and will have literals
 // generated at END.
-.macro DEF_ENTRY thumb_or_arm, name, alignment
+.macro DEF_ENTRY thumb_or_arm, name
     \thumb_or_arm
 // Clang ignores .thumb_func and requires an explicit .thumb. Investigate whether we should still
 // carry around the .thumb_func.
@@ -64,12 +64,8 @@
     .type \name, #function
     .hidden \name  // Hide this as a global symbol, so we do not incur plt calls.
     .global \name
-    // ART-compiled functions have OatQuickMethodHeader but assembly funtions do not.
-    // Prefix the assembly code with 0xFFs, which means there is no method header.
-    .byte 0xFF, 0xFF, 0xFF, 0xFF
     // Cache alignment for function entry.
-    // NB: 0xFF because there is a bug in balign where 0x00 creates nop instructions.
-    .balign \alignment, 0xFF
+    .balign 16
 \name:
     .cfi_startproc
     .fnstart
@@ -92,15 +88,12 @@
 
 // A thumb2 style ENTRY.
 .macro ENTRY name
-    DEF_ENTRY .thumb_func, \name, 16
-.endm
-.macro ENTRY_ALIGNED name, alignment
-    DEF_ENTRY .thumb_func, \name, \alignment
+    DEF_ENTRY .thumb_func, \name
 .endm
 
 // A ARM style ENTRY.
 .macro ARM_ENTRY name
-    DEF_ENTRY .arm, \name, 16
+    DEF_ENTRY .arm, \name
 .endm
 
 // Terminate an ENTRY and generate GOT_PREL references.

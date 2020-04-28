@@ -20,7 +20,7 @@
 // (empty) body is called.
 JIT_DEBUG_REGISTER_CODE_LDFLAGS = [
     "-Wl,--keep-unique,__jit_debug_register_code",
-    "-Wl,--keep-unique,__dex_debug_register_code",
+    "-Wl,--keep-unique,__dex_debug_register_code"
 ]
 
 libart_cc_defaults {
@@ -87,7 +87,6 @@ libart_cc_defaults {
         "gc/task_processor.cc",
         "gc/verification.cc",
         "hidden_api.cc",
-        "hidden_api_jni.cc",
         "hprof/hprof.cc",
         "image.cc",
         "index_bss_mapping.cc",
@@ -116,13 +115,11 @@ libart_cc_defaults {
         "jit/debugger_interface.cc",
         "jit/jit.cc",
         "jit/jit_code_cache.cc",
-        "jit/jit_memory_region.cc",
         "jit/profiling_info.cc",
         "jit/profile_saver.cc",
         "jni/check_jni.cc",
         "jni/java_vm_ext.cc",
         "jni/jni_env_ext.cc",
-        "jni/jni_id_manager.cc",
         "jni/jni_internal.cc",
         "linear_alloc.cc",
         "managed_stack.cc",
@@ -189,8 +186,6 @@ libart_cc_defaults {
         "read_barrier.cc",
         "reference_table.cc",
         "reflection.cc",
-        "reflective_handle_scope.cc",
-        "reflective_value_visitor.cc",
         "runtime.cc",
         "runtime_callbacks.cc",
         "runtime_common.cc",
@@ -200,7 +195,6 @@ libart_cc_defaults {
         "signal_catcher.cc",
         "stack.cc",
         "stack_map.cc",
-        "string_builder_append.cc",
         "thread.cc",
         "thread_list.cc",
         "thread_pool.cc",
@@ -246,7 +240,6 @@ libart_cc_defaults {
         "entrypoints/quick/quick_jni_entrypoints.cc",
         "entrypoints/quick/quick_lock_entrypoints.cc",
         "entrypoints/quick/quick_math_entrypoints.cc",
-        "entrypoints/quick/quick_string_builder_append_entrypoints.cc",
         "entrypoints/quick/quick_thread_entrypoints.cc",
         "entrypoints/quick/quick_throw_entrypoints.cc",
         "entrypoints/quick/quick_trampoline_entrypoints.cc",
@@ -294,12 +287,6 @@ libart_cc_defaults {
                 "arch/x86/thread_x86.cc",
                 "arch/x86/fault_handler_x86.cc",
             ],
-            avx: {
-                asflags: ["-DMTERP_USE_AVX"],
-            },
-            avx2: {
-                asflags: ["-DMTERP_USE_AVX"],
-            },
         },
         x86_64: {
             srcs: [
@@ -316,12 +303,6 @@ libart_cc_defaults {
                 "monitor_pool.cc",
                 "arch/x86/fault_handler_x86.cc",
             ],
-            avx: {
-                asflags: ["-DMTERP_USE_AVX"],
-            },
-            avx2: {
-                asflags: ["-DMTERP_USE_AVX"],
-            },
         },
         mips: {
             srcs: [
@@ -363,7 +344,7 @@ libart_cc_defaults {
                 "libdl_android",
             ],
             static_libs: [
-                "libz", // For adler32.
+                "libz",  // For adler32.
             ],
             cflags: [
                 // ART is allowed to link to libicuuc directly
@@ -390,7 +371,7 @@ libart_cc_defaults {
                 "thread_linux.cc",
             ],
             shared_libs: [
-                "libz", // For adler32.
+                "libz",  // For adler32.
             ],
         },
     },
@@ -400,6 +381,10 @@ libart_cc_defaults {
     generated_headers: ["cpp-define-generator-asm-support"],
     // export our headers so the libart-gtest targets can use it as well.
     export_generated_headers: ["cpp-define-generator-asm-support"],
+    include_dirs: [
+        "art/sigchainlib",
+        "external/zlib",
+    ],
     header_libs: [
         "art_cmdlineparser_headers",
         "cpp-define-generator-definitions",
@@ -415,9 +400,13 @@ libart_cc_defaults {
         "liblog",
         // For common macros.
         "libbase",
-        "libunwindstack",
-        "libsigchain",
     ],
+    static: {
+        static_libs: ["libsigchain_dummy"],
+    },
+    shared: {
+        shared_libs: ["libsigchain"],
+    },
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
@@ -431,6 +420,8 @@ libart_static_cc_defaults {
         "libartpalette",
         "libbacktrace",
         "libbase",
+        "libdexfile_external",  // libunwindstack dependency
+        "libdexfile_support",  // libunwindstack dependency
         "liblog",
         "libnativebridge",
         "libnativeloader",
@@ -450,7 +441,6 @@ cc_defaults {
     ],
     static_libs: [
         "libart",
-        "libdexfile_support_static",
         "libelffile",
     ],
 }
@@ -465,7 +455,6 @@ cc_defaults {
     ],
     static_libs: [
         "libartd",
-        "libdexfiled_support_static",
         "libelffiled",
     ],
 }
@@ -495,12 +484,10 @@ gensrcs {
         "jdwp_provider.h",
         "jdwp/jdwp.h",
         "jdwp/jdwp_constants.h",
-        "jni_id_type.h",
         "lock_word.h",
-        "oat_file.h",
+        "oat.h",
         "object_callbacks.h",
         "process_state.h",
-        "reflective_value_visitor.h",
         "stack.h",
         "suspend_reason.h",
         "thread.h",
@@ -531,8 +518,6 @@ art_cc_library {
     shared_libs: [
         "libartbase",
         "libdexfile",
-        // We need to eagerly load it so libdexfile_support used from libunwindstack can find it.
-        "libdexfile_external",
         "libprofile",
     ],
     export_shared_lib_headers: [
@@ -541,7 +526,7 @@ art_cc_library {
     target: {
         android: {
             lto: {
-                thin: true,
+                 thin: true,
             },
         },
     },
@@ -561,9 +546,6 @@ art_cc_library {
     shared_libs: [
         "libartbased",
         "libdexfiled",
-        // We need to eagerly preload it, so that libunwindstack can find it.
-        // Otherwise, it would try to load the non-debug version with dlopen.
-        "libdexfiled_external",
         "libprofiled",
     ],
     export_shared_lib_headers: [
@@ -643,8 +625,6 @@ art_cc_test {
         "interpreter/safe_math_test.cc",
         "interpreter/unstarted_runtime_test.cc",
         "jdwp/jdwp_options_test.cc",
-        "jit/jit_memory_region_test.cc",
-        "jit/profile_saver_test.cc",
         "jit/profiling_info_test.cc",
         "jni/java_vm_ext_test.cc",
         "jni/jni_internal_test.cc",
@@ -678,6 +658,9 @@ art_cc_test {
     header_libs: [
         "art_cmdlineparser_headers", // For parsed_options_test.
     ],
+    include_dirs: [
+        "external/zlib",
+    ],
 }
 
 art_cc_test {
@@ -696,74 +679,55 @@ art_cc_test {
 }
 
 cc_library_headers {
-    name: "libart_runtime_headers_ndk",
+    name: "libart_runtime_headers",
     host_supported: true,
     export_include_dirs: ["."],
-    sdk_version: "current",
 }
 
 genrule {
-    name: "libart_mterp.arm",
-    out: ["mterp_arm.S"],
-    srcs: ["interpreter/mterp/arm/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.arm",
+  out: ["mterp_arm.S"],
+  srcs: ["interpreter/mterp/arm/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
 
 genrule {
-    name: "libart_mterp.arm64",
-    out: ["mterp_arm64.S"],
-    srcs: ["interpreter/mterp/arm64/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.arm64",
+  out: ["mterp_arm64.S"],
+  srcs: ["interpreter/mterp/arm64/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
 
 genrule {
-    name: "libart_mterp.mips",
-    out: ["mterp_mips.S"],
-    srcs: ["interpreter/mterp/mips/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.mips",
+  out: ["mterp_mips.S"],
+  srcs: ["interpreter/mterp/mips/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
 
 genrule {
-    name: "libart_mterp.mips64",
-    out: ["mterp_mips64.S"],
-    srcs: ["interpreter/mterp/mips64/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.mips64",
+  out: ["mterp_mips64.S"],
+  srcs: ["interpreter/mterp/mips64/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
 
 genrule {
-    name: "libart_mterp.x86",
-    out: ["mterp_x86.S"],
-    srcs: ["interpreter/mterp/x86/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.x86",
+  out: ["mterp_x86.S"],
+  srcs: ["interpreter/mterp/x86/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
 
 genrule {
-    name: "libart_mterp.x86_64",
-    out: ["mterp_x86_64.S"],
-    srcs: ["interpreter/mterp/x86_64/*.S"],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+  name: "libart_mterp.x86_64",
+  out: ["mterp_x86_64.S"],
+  srcs: ["interpreter/mterp/x86_64/*.S"],
+  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
+  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }

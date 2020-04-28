@@ -51,7 +51,6 @@ class ConditionVariable;
 enum class InstructionSet;
 class IsMarkedVisitor;
 class Mutex;
-class ReflectiveValueVisitor;
 class RootVisitor;
 class StackVisitor;
 class Thread;
@@ -69,7 +68,6 @@ namespace gc {
 class AllocationListener;
 class AllocRecordObjectMap;
 class GcPauseListener;
-class HeapTask;
 class ReferenceProcessor;
 class TaskProcessor;
 class Verification;
@@ -164,7 +162,7 @@ class Heap {
   static constexpr uint32_t kNotifyNativeInterval = 32;
 #else
   // Some host mallinfo() implementations are slow. And memory is less scarce.
-  static constexpr uint32_t kNotifyNativeInterval = 512;
+  static constexpr uint32_t kNotifyNativeInterval = 128;
 #endif
 
   // RegisterNativeAllocation checks immediately whether GC is needed if size exceeds the
@@ -189,7 +187,6 @@ class Heap {
        size_t max_free,
        double target_utilization,
        double foreground_heap_growth_multiplier,
-       size_t stop_for_native_allocs,
        size_t capacity,
        size_t non_moving_space_capacity,
        const std::vector<std::string>& boot_class_path,
@@ -225,7 +222,7 @@ class Heap {
   ~Heap();
 
   // Allocates and initializes storage for an object instance.
-  template <bool kInstrumented = true, typename PreFenceVisitor>
+  template <bool kInstrumented, typename PreFenceVisitor>
   mirror::Object* AllocObject(Thread* self,
                               ObjPtr<mirror::Class> klass,
                               size_t num_bytes,
@@ -235,14 +232,14 @@ class Heap {
                !*pending_task_lock_,
                !*backtrace_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented>(self,
-                                                   klass,
-                                                   num_bytes,
-                                                   GetCurrentAllocator(),
-                                                   pre_fence_visitor);
+    return AllocObjectWithAllocator<kInstrumented, true>(self,
+                                                         klass,
+                                                         num_bytes,
+                                                         GetCurrentAllocator(),
+                                                         pre_fence_visitor);
   }
 
-  template <bool kInstrumented = true, typename PreFenceVisitor>
+  template <bool kInstrumented, typename PreFenceVisitor>
   mirror::Object* AllocNonMovableObject(Thread* self,
                                         ObjPtr<mirror::Class> klass,
                                         size_t num_bytes,
@@ -252,14 +249,14 @@ class Heap {
                !*pending_task_lock_,
                !*backtrace_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented>(self,
-                                                   klass,
-                                                   num_bytes,
-                                                   GetCurrentNonMovingAllocator(),
-                                                   pre_fence_visitor);
+    return AllocObjectWithAllocator<kInstrumented, true>(self,
+                                                         klass,
+                                                         num_bytes,
+                                                         GetCurrentNonMovingAllocator(),
+                                                         pre_fence_visitor);
   }
 
-  template <bool kInstrumented = true, bool kCheckLargeObject = true, typename PreFenceVisitor>
+  template <bool kInstrumented, bool kCheckLargeObject, typename PreFenceVisitor>
   ALWAYS_INLINE mirror::Object* AllocObjectWithAllocator(Thread* self,
                                                          ObjPtr<mirror::Class> klass,
                                                          size_t byte_count,
@@ -288,9 +285,6 @@ class Heap {
   ALWAYS_INLINE void VisitObjectsPaused(Visitor&& visitor)
       REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
 
-  void VisitReflectiveTargets(ReflectiveValueVisitor* visitor)
-      REQUIRES(Locks::mutator_lock_, !Locks::heap_bitmap_lock_, !*gc_complete_lock_);
-
   void CheckPreconditionsForAllocObject(ObjPtr<mirror::Class> c, size_t byte_count)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -313,6 +307,9 @@ class Heap {
   // Change the allocator, updates entrypoints.
   void ChangeAllocator(AllocatorType allocator)
       REQUIRES(Locks::mutator_lock_, !Locks::runtime_shutdown_lock_);
+
+  // Transition the garbage collector during runtime, may copy objects from one space to another.
+  void TransitionCollector(CollectorType collector_type) REQUIRES(!*gc_complete_lock_);
 
   // Change the collector to be one of the possible options (MS, CMS, SS).
   void ChangeCollector(CollectorType collector_type)
@@ -553,15 +550,13 @@ class Heap {
   uint64_t GetBytesAllocatedEver() const;
 
   // Returns the total number of objects freed since the heap was created.
-  // With default memory order, this should be viewed only as a hint.
-  uint64_t GetObjectsFreedEver(std::memory_order mo = std::memory_order_relaxed) const {
-    return total_objects_freed_ever_.load(mo);
+  uint64_t GetObjectsFreedEver() const {
+    return total_objects_freed_ever_;
   }
 
   // Returns the total number of bytes freed since the heap was created.
-  // With default memory order, this should be viewed only as a hint.
-  uint64_t GetBytesFreedEver(std::memory_order mo = std::memory_order_relaxed) const {
-    return total_bytes_freed_ever_.load(mo);
+  uint64_t GetBytesFreedEver() const {
+    return total_bytes_freed_ever_;
   }
 
   space::RegionSpace* GetRegionSpace() const {
@@ -691,20 +686,13 @@ class Heap {
   bool IsInBootImageOatFile(const void* p) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Get the start address of the boot images if any; otherwise returns 0.
-  uint32_t GetBootImagesStartAddress() const {
-    return boot_images_start_address_;
-  }
+  void GetBootImagesSize(uint32_t* boot_image_begin,
+                         uint32_t* boot_image_end,
+                         uint32_t* boot_oat_begin,
+                         uint32_t* boot_oat_end);
 
-  // Get the size of all boot images, including the heap and oat areas.
-  uint32_t GetBootImagesSize() const {
-    return boot_images_size_;
-  }
-
-  // Check if a pointer points to a boot image.
-  bool IsBootImageAddress(const void* p) const {
-    return reinterpret_cast<uintptr_t>(p) - boot_images_start_address_ < boot_images_size_;
-  }
+  // Permenantly disable moving garbage collection.
+  void DisableMovingGc() REQUIRES(!*gc_complete_lock_);
 
   space::DlMallocSpace* GetDlMallocSpace() const {
     return dlmalloc_space_;
@@ -909,10 +897,6 @@ class Heap {
 
   void PostForkChildAction(Thread* self);
 
-  void TraceHeapSize(size_t heap_size);
-
-  bool AddHeapTask(gc::HeapTask* task);
-
  private:
   class ConcurrentGCTask;
   class CollectorTransitionTask;
@@ -972,6 +956,7 @@ class Heap {
     return
         collector_type == kCollectorTypeCC ||
         collector_type == kCollectorTypeSS ||
+        collector_type == kCollectorTypeGSS ||
         collector_type == kCollectorTypeCCBackground ||
         collector_type == kCollectorTypeHomogeneousSpaceCompact;
   }
@@ -1191,8 +1176,7 @@ class Heap {
 
   ALWAYS_INLINE void IncrementNumberOfBytesFreedRevoke(size_t freed_bytes_revoke);
 
-  // Update *_freed_ever_ counters to reflect current GC values.
-  void IncrementFreedEver();
+  void TraceHeapSize(size_t heap_size);
 
   // Remove a vlog code from heap-inl.h which is transitively included in half the world.
   static void VlogHeapGrowth(size_t max_allowed_footprint, size_t new_footprint, size_t alloc_size);
@@ -1347,10 +1331,10 @@ class Heap {
   size_t concurrent_start_bytes_;
 
   // Since the heap was created, how many bytes have been freed.
-  std::atomic<uint64_t> total_bytes_freed_ever_;
+  uint64_t total_bytes_freed_ever_;
 
   // Since the heap was created, how many objects have been freed.
-  std::atomic<uint64_t> total_objects_freed_ever_;
+  uint64_t total_objects_freed_ever_;
 
   // Number of bytes currently allocated and not yet reclaimed. Includes active
   // TLABS in their entirety, even if they have not yet been parceled out.
@@ -1463,13 +1447,6 @@ class Heap {
   // How much more we grow the heap when we are a foreground app instead of background.
   double foreground_heap_growth_multiplier_;
 
-  // The amount of native memory allocation since the last GC required to cause us to wait for a
-  // collection as a result of native allocation. Very large values can cause the device to run
-  // out of memory, due to lack of finalization to reclaim native memory.  Making it too small can
-  // cause jank in apps like launcher that intentionally allocate large amounts of memory in rapid
-  // succession. (b/122099093) 1/4 to 1/3 of physical memory seems to be a good number.
-  const size_t stop_for_native_allocs_;
-
   // Total time which mutators are paused or waiting for GC to complete.
   uint64_t total_wait_time_;
 
@@ -1574,10 +1551,6 @@ class Heap {
   // Boot image spaces.
   std::vector<space::ImageSpace*> boot_image_spaces_;
 
-  // Boot image address range. Includes images and oat files.
-  uint32_t boot_images_start_address_;
-  uint32_t boot_images_size_;
-
   // An installed allocation listener.
   Atomic<AllocationListener*> alloc_listener_;
   // An installed GC Pause listener.
@@ -1593,7 +1566,6 @@ class Heap {
   friend class GCCriticalSection;
   friend class ReferenceQueue;
   friend class ScopedGCCriticalSection;
-  friend class ScopedInterruptibleGCCriticalSection;
   friend class VerifyReferenceCardVisitor;
   friend class VerifyReferenceVisitor;
   friend class VerifyObjectVisitor;

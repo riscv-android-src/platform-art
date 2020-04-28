@@ -295,7 +295,6 @@ class OptimizingCompiler final : public Compiler {
 
   bool JitCompile(Thread* self,
                   jit::JitCodeCache* code_cache,
-                  jit::JitMemoryRegion* region,
                   ArtMethod* method,
                   bool baseline,
                   bool osr,
@@ -384,7 +383,6 @@ class OptimizingCompiler final : public Compiler {
                             ArtMethod* method,
                             bool baseline,
                             bool osr,
-                            bool is_shared_jit_code,
                             VariableSizedHandleScope* handles) const;
 
   CodeGenerator* TryCompileIntrinsic(ArenaAllocator* allocator,
@@ -406,7 +404,9 @@ class OptimizingCompiler final : public Compiler {
                                 PassObserver* pass_observer,
                                 VariableSizedHandleScope* handles) const;
 
-  void GenerateJitDebugInfo(const debug::MethodDebugInfo& method_debug_info);
+  void GenerateJitDebugInfo(ArtMethod* method,
+                            const debug::MethodDebugInfo& method_debug_info)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   std::unique_ptr<OptimizingCompilerStats> compilation_stats_;
 
@@ -782,7 +782,6 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
                                               ArtMethod* method,
                                               bool baseline,
                                               bool osr,
-                                              bool is_shared_jit_code,
                                               VariableSizedHandleScope* handles) const {
   MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kAttemptBytecodeCompilation);
   const CompilerOptions& compiler_options = GetCompilerOptions();
@@ -850,8 +849,7 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
       kInvalidInvokeType,
       dead_reference_safe,
       compiler_options.GetDebuggable(),
-      /* osr= */ osr,
-      /* is_shared_jit_code= */ is_shared_jit_code);
+      /* osr= */ osr);
 
   if (method != nullptr) {
     graph->SetArtMethod(method);
@@ -910,11 +908,6 @@ CodeGenerator* OptimizingCompiler::TryCompile(ArenaAllocator* allocator,
         case kAnalysisFailIrreducibleLoopAndStringInit: {
           MaybeRecordStat(compilation_stats_.get(),
                           MethodCompilationStat::kNotCompiledIrreducibleLoopAndStringInit);
-          break;
-        }
-        case kAnalysisFailPhiEquivalentInOsr: {
-          MaybeRecordStat(compilation_stats_.get(),
-                          MethodCompilationStat::kNotCompiledPhiEquivalentInOsr);
           break;
         }
         case kAnalysisSuccess:
@@ -1113,7 +1106,6 @@ CompiledMethod* OptimizingCompiler::Compile(const dex::CodeItem* code_item,
                        method,
                        compiler_options.IsBaseline(),
                        /* osr= */ false,
-                       /* is_shared_jit_code= */ false,
                        &handles));
       }
     }
@@ -1256,7 +1248,6 @@ bool EncodeArtMethodInInlineInfo(ArtMethod* method ATTRIBUTE_UNUSED) {
 
 bool OptimizingCompiler::JitCompile(Thread* self,
                                     jit::JitCodeCache* code_cache,
-                                    jit::JitMemoryRegion* region,
                                     ArtMethod* method,
                                     bool baseline,
                                     bool osr,
@@ -1288,24 +1279,39 @@ bool OptimizingCompiler::JitCompile(Thread* self,
     ScopedArenaAllocator stack_map_allocator(&arena_stack);  // Will hold the stack map.
     ScopedArenaVector<uint8_t> stack_map = CreateJniStackMap(&stack_map_allocator,
                                                              jni_compiled_method);
-
-    ArrayRef<const uint8_t> reserved_code;
-    ArrayRef<const uint8_t> reserved_data;
-    if (!code_cache->Reserve(self,
-                             region,
-                             jni_compiled_method.GetCode().size(),
-                             stack_map.size(),
-                             /* number_of_roots= */ 0,
-                             method,
-                             /*out*/ &reserved_code,
-                             /*out*/ &reserved_data)) {
+    uint8_t* stack_map_data = nullptr;
+    uint8_t* roots_data = nullptr;
+    uint32_t data_size = code_cache->ReserveData(self,
+                                                 stack_map.size(),
+                                                 /* number_of_roots= */ 0,
+                                                 method,
+                                                 &stack_map_data,
+                                                 &roots_data);
+    if (stack_map_data == nullptr || roots_data == nullptr) {
       MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kJitOutOfMemoryForCommit);
       return false;
     }
-    const uint8_t* code = reserved_code.data() + OatQuickMethodHeader::InstructionAlignedSize();
+    memcpy(stack_map_data, stack_map.data(), stack_map.size());
 
-    // Add debug info after we know the code location but before we update entry-point.
+    const void* code = code_cache->CommitCode(
+        self,
+        method,
+        stack_map_data,
+        roots_data,
+        jni_compiled_method.GetCode().data(),
+        jni_compiled_method.GetCode().size(),
+        data_size,
+        osr,
+        roots,
+        /* has_should_deoptimize_flag= */ false,
+        cha_single_implementation_list);
+    if (code == nullptr) {
+      return false;
+    }
+
     if (compiler_options.GenerateAnyDebugInfo()) {
+      const auto* method_header = reinterpret_cast<const OatQuickMethodHeader*>(code);
+      const uintptr_t code_address = reinterpret_cast<uintptr_t>(method_header->GetCode());
       debug::MethodDebugInfo info = {};
       info.custom_name = "art_jni_trampoline";
       info.dex_file = dex_file;
@@ -1318,27 +1324,12 @@ bool OptimizingCompiler::JitCompile(Thread* self,
       info.is_native_debuggable = compiler_options.GetNativeDebuggable();
       info.is_optimized = true;
       info.is_code_address_text_relative = false;
-      info.code_address = reinterpret_cast<uintptr_t>(code);
+      info.code_address = code_address;
       info.code_size = jni_compiled_method.GetCode().size();
-      info.frame_size_in_bytes = jni_compiled_method.GetFrameSize();
+      info.frame_size_in_bytes = method_header->GetFrameSizeInBytes();
       info.code_info = nullptr;
       info.cfi = jni_compiled_method.GetCfi();
-      GenerateJitDebugInfo(info);
-    }
-
-    if (!code_cache->Commit(self,
-                            region,
-                            method,
-                            reserved_code,
-                            jni_compiled_method.GetCode(),
-                            reserved_data,
-                            roots,
-                            ArrayRef<const uint8_t>(stack_map),
-                            osr,
-                            /* has_should_deoptimize_flag= */ false,
-                            cha_single_implementation_list)) {
-      code_cache->Free(self, region, reserved_code.data(), reserved_data.data());
-      return false;
+      GenerateJitDebugInfo(method, info);
     }
 
     Runtime::Current()->GetJit()->AddMemoryUsage(method, allocator.BytesUsed());
@@ -1377,7 +1368,6 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                    method,
                    baseline,
                    osr,
-                   /* is_shared_jit_code= */ code_cache->IsSharedRegion(*region),
                    &handles));
     if (codegen.get() == nullptr) {
       return false;
@@ -1385,23 +1375,20 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   }
 
   ScopedArenaVector<uint8_t> stack_map = codegen->BuildStackMaps(code_item);
-
-  ArrayRef<const uint8_t> reserved_code;
-  ArrayRef<const uint8_t> reserved_data;
-  if (!code_cache->Reserve(self,
-                           region,
-                           code_allocator.GetMemory().size(),
-                           stack_map.size(),
-                           /*number_of_roots=*/codegen->GetNumberOfJitRoots(),
-                           method,
-                           /*out*/ &reserved_code,
-                           /*out*/ &reserved_data)) {
+  size_t number_of_roots = codegen->GetNumberOfJitRoots();
+  uint8_t* stack_map_data = nullptr;
+  uint8_t* roots_data = nullptr;
+  uint32_t data_size = code_cache->ReserveData(self,
+                                               stack_map.size(),
+                                               number_of_roots,
+                                               method,
+                                               &stack_map_data,
+                                               &roots_data);
+  if (stack_map_data == nullptr || roots_data == nullptr) {
     MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kJitOutOfMemoryForCommit);
     return false;
   }
-  const uint8_t* code = reserved_code.data() + OatQuickMethodHeader::InstructionAlignedSize();
-  const uint8_t* roots_data = reserved_data.data();
-
+  memcpy(stack_map_data, stack_map.data(), stack_map.size());
   std::vector<Handle<mirror::Object>> roots;
   codegen->EmitJitRoots(code_allocator.GetData(), roots_data, &roots);
   // The root Handle<>s filled by the codegen reference entries in the VariableSizedHandleScope.
@@ -1411,9 +1398,29 @@ bool OptimizingCompiler::JitCompile(Thread* self,
                        return handles.Contains(root.GetReference());
                      }));
 
-  // Add debug info after we know the code location but before we update entry-point.
+  const void* code = code_cache->CommitCode(
+      self,
+      method,
+      stack_map_data,
+      roots_data,
+      code_allocator.GetMemory().data(),
+      code_allocator.GetMemory().size(),
+      data_size,
+      osr,
+      roots,
+      codegen->GetGraph()->HasShouldDeoptimizeFlag(),
+      codegen->GetGraph()->GetCHASingleImplementationList());
+
+  if (code == nullptr) {
+    MaybeRecordStat(compilation_stats_.get(), MethodCompilationStat::kJitOutOfMemoryForCommit);
+    code_cache->ClearData(self, stack_map_data, roots_data);
+    return false;
+  }
+
   const CompilerOptions& compiler_options = GetCompilerOptions();
   if (compiler_options.GenerateAnyDebugInfo()) {
+    const auto* method_header = reinterpret_cast<const OatQuickMethodHeader*>(code);
+    const uintptr_t code_address = reinterpret_cast<uintptr_t>(method_header->GetCode());
     debug::MethodDebugInfo info = {};
     DCHECK(info.custom_name.empty());
     info.dex_file = dex_file;
@@ -1426,27 +1433,12 @@ bool OptimizingCompiler::JitCompile(Thread* self,
     info.is_native_debuggable = compiler_options.GetNativeDebuggable();
     info.is_optimized = true;
     info.is_code_address_text_relative = false;
-    info.code_address = reinterpret_cast<uintptr_t>(code);
+    info.code_address = code_address;
     info.code_size = code_allocator.GetMemory().size();
-    info.frame_size_in_bytes = codegen->GetFrameSize();
-    info.code_info = stack_map.size() == 0 ? nullptr : stack_map.data();
+    info.frame_size_in_bytes = method_header->GetFrameSizeInBytes();
+    info.code_info = stack_map.size() == 0 ? nullptr : stack_map_data;
     info.cfi = ArrayRef<const uint8_t>(*codegen->GetAssembler()->cfi().data());
-    GenerateJitDebugInfo(info);
-  }
-
-  if (!code_cache->Commit(self,
-                          region,
-                          method,
-                          reserved_code,
-                          code_allocator.GetMemory(),
-                          reserved_data,
-                          roots,
-                          ArrayRef<const uint8_t>(stack_map),
-                          osr,
-                          codegen->GetGraph()->HasShouldDeoptimizeFlag(),
-                          codegen->GetGraph()->GetCHASingleImplementationList())) {
-    code_cache->Free(self, region, reserved_code.data(), reserved_data.data());
-    return false;
+    GenerateJitDebugInfo(method, info);
   }
 
   Runtime::Current()->GetJit()->AddMemoryUsage(method, allocator.BytesUsed());
@@ -1470,22 +1462,31 @@ bool OptimizingCompiler::JitCompile(Thread* self,
   return true;
 }
 
-void OptimizingCompiler::GenerateJitDebugInfo(const debug::MethodDebugInfo& info) {
+void OptimizingCompiler::GenerateJitDebugInfo(ArtMethod* method ATTRIBUTE_UNUSED,
+                                              const debug::MethodDebugInfo& info) {
   const CompilerOptions& compiler_options = GetCompilerOptions();
-  if (compiler_options.GenerateAnyDebugInfo()) {
+  DCHECK(compiler_options.GenerateAnyDebugInfo());
+  TimingLogger logger("Generate JIT debug info logger", true, VLOG_IS_ON(jit));
+  {
+    TimingLogger::ScopedTiming st("Generate JIT debug info", &logger);
+
     // If both flags are passed, generate full debug info.
     const bool mini_debug_info = !compiler_options.GetGenerateDebugInfo();
 
     // Create entry for the single method that we just compiled.
-    InstructionSet isa = compiler_options.GetInstructionSet();
-    const InstructionSetFeatures* features = compiler_options.GetInstructionSetFeatures();
-    std::vector<uint8_t> elf = debug::MakeElfFileForJIT(isa, features, mini_debug_info, info);
-
-    // NB: Don't allow packing of full info since it would remove non-backtrace data.
-    MutexLock mu(Thread::Current(), *Locks::jit_lock_);
-    const void* code_ptr = reinterpret_cast<const void*>(info.code_address);
-    AddNativeDebugInfoForJit(code_ptr, elf, /*allow_packing=*/ mini_debug_info);
+    std::vector<uint8_t> elf_file = debug::MakeElfFileForJIT(
+        compiler_options.GetInstructionSet(),
+        compiler_options.GetInstructionSetFeatures(),
+        mini_debug_info,
+        info);
+    AddNativeDebugInfoForJit(Thread::Current(),
+                             reinterpret_cast<const void*>(info.code_address),
+                             elf_file,
+                             debug::PackElfFileForJIT,
+                             compiler_options.GetInstructionSet(),
+                             compiler_options.GetInstructionSetFeatures());
   }
+  Runtime::Current()->GetJit()->AddTimingLogger(logger);
 }
 
 }  // namespace art

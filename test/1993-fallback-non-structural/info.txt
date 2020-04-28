@@ -1,4 +1,0 @@
-Tests basic functions in the jvmti plugin.
-
-Tests that using the structural redefinition functions will fall back to non-structural
-redefinition when possible.

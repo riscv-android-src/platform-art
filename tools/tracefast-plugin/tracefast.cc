@@ -14,7 +14,6 @@
  * limitations under the License.
  */
 
-#include "android-base/macros.h"
 #include "gc/scoped_gc_critical_section.h"
 #include "instrumentation.h"
 #include "runtime.h"
@@ -53,16 +52,14 @@ class Tracer final : public art::instrumentation::InstrumentationListener {
                     art::Handle<art::mirror::Object> this_object ATTRIBUTE_UNUSED,
                     art::ArtMethod* method ATTRIBUTE_UNUSED,
                     uint32_t dex_pc ATTRIBUTE_UNUSED,
-                    art::instrumentation::OptionalFrame frame ATTRIBUTE_UNUSED,
-                    art::MutableHandle<art::mirror::Object>& return_value ATTRIBUTE_UNUSED)
+                    art::Handle<art::mirror::Object> return_value ATTRIBUTE_UNUSED)
       override REQUIRES_SHARED(art::Locks::mutator_lock_) { }
 
   void MethodExited(art::Thread* thread ATTRIBUTE_UNUSED,
                     art::Handle<art::mirror::Object> this_object ATTRIBUTE_UNUSED,
                     art::ArtMethod* method ATTRIBUTE_UNUSED,
                     uint32_t dex_pc ATTRIBUTE_UNUSED,
-                    art::instrumentation::OptionalFrame frame ATTRIBUTE_UNUSED,
-                    art::JValue& return_value ATTRIBUTE_UNUSED)
+                    const art::JValue& return_value ATTRIBUTE_UNUSED)
       override REQUIRES_SHARED(art::Locks::mutator_lock_) { }
 
   void MethodUnwind(art::Thread* thread ATTRIBUTE_UNUSED,
@@ -156,10 +153,10 @@ class TraceFastPhaseCB : public art::RuntimePhaseCallback {
 TraceFastPhaseCB gPhaseCallback;
 
 // The plugin initialization function.
-extern "C" bool ArtPlugin_Initialize() {
+extern "C" bool ArtPlugin_Initialize() REQUIRES_SHARED(art::Locks::mutator_lock_) {
   art::Runtime* runtime = art::Runtime::Current();
-  art::ScopedThreadStateChange stsc(art::Thread::Current(),
-                                    art::ThreadState::kWaitingForMethodTracingStart);
+  art::ScopedThreadSuspension stsc(art::Thread::Current(),
+                                   art::ThreadState::kWaitingForMethodTracingStart);
   art::ScopedSuspendAll ssa("Add phase callback");
   runtime->GetRuntimeCallbacks()->AddRuntimePhaseCallback(&gPhaseCallback);
   return true;

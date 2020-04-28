@@ -99,10 +99,7 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
     return ERR(INVALID_THREAD_GROUP);
   }
 
-  art::StackHandleScope<2> hs(soa.Self());
-  art::Handle<art::mirror::Class> tg_class(
-      hs.NewHandle(soa.Decode<art::mirror::Class>(art::WellKnownClasses::java_lang_ThreadGroup)));
-  art::Handle<art::mirror::Object> obj(hs.NewHandle(soa.Decode<art::mirror::Object>(group)));
+  art::ObjPtr<art::mirror::Object> obj = soa.Decode<art::mirror::Object>(group);
 
   // Do the name first. It's the only thing that can fail.
   {
@@ -110,7 +107,7 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
         art::jni::DecodeArtField(art::WellKnownClasses::java_lang_ThreadGroup_name);
     CHECK(name_field != nullptr);
     art::ObjPtr<art::mirror::String> name_obj =
-        art::ObjPtr<art::mirror::String>::DownCast(name_field->GetObject(obj.Get()));
+        art::ObjPtr<art::mirror::String>::DownCast(name_field->GetObject(obj));
     std::string tmp_str;
     const char* tmp_cstr;
     if (name_obj == nullptr) {
@@ -132,7 +129,7 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
     art::ArtField* parent_field =
         art::jni::DecodeArtField(art::WellKnownClasses::java_lang_ThreadGroup_parent);
     CHECK(parent_field != nullptr);
-    art::ObjPtr<art::mirror::Object> parent_group = parent_field->GetObject(obj.Get());
+    art::ObjPtr<art::mirror::Object> parent_group = parent_field->GetObject(obj);
     info_ptr->parent = parent_group == nullptr
                            ? nullptr
                            : soa.AddLocalReference<jthreadGroup>(parent_group);
@@ -140,16 +137,16 @@ jvmtiError ThreadGroupUtil::GetThreadGroupInfo(jvmtiEnv* env,
 
   // Max priority.
   {
-    art::ArtField* prio_field = tg_class->FindDeclaredInstanceField("maxPriority", "I");
+    art::ArtField* prio_field = obj->GetClass()->FindDeclaredInstanceField("maxPriority", "I");
     CHECK(prio_field != nullptr);
-    info_ptr->max_priority = static_cast<jint>(prio_field->GetInt(obj.Get()));
+    info_ptr->max_priority = static_cast<jint>(prio_field->GetInt(obj));
   }
 
   // Daemon.
   {
-    art::ArtField* daemon_field = tg_class->FindDeclaredInstanceField("daemon", "Z");
+    art::ArtField* daemon_field = obj->GetClass()->FindDeclaredInstanceField("daemon", "Z");
     CHECK(daemon_field != nullptr);
-    info_ptr->is_daemon = daemon_field->GetBoolean(obj.Get()) == 0 ? JNI_FALSE : JNI_TRUE;
+    info_ptr->is_daemon = daemon_field->GetBoolean(obj) == 0 ? JNI_FALSE : JNI_TRUE;
   }
 
   return ERR(NONE);

@@ -77,8 +77,6 @@ void InitPlatformSignalHandlersCommon(void (*newact)(int, siginfo_t*, void*),
                                       struct sigaction* oldact,
                                       bool handle_timeout_signal);
 
-void FlagRuntimeAbort();
-
 }  // namespace art
 
 #endif  // ART_RUNTIME_RUNTIME_COMMON_H_

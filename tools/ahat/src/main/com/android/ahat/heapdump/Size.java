@@ -16,8 +16,6 @@
 
 package com.android.ahat.heapdump;
 
-import java.util.Objects;
-
 /**
  * Used to represent how much space an instance takes up.
  * An abstraction is introduced rather than using a long directly in order to
@@ -110,11 +108,6 @@ public class Size {
    */
   public Size plusRegisteredNativeSize(long size) {
     return new Size(mJavaSize, mRegisteredNativeSize + size);
-  }
-
-  @Override
-  public int hashCode() {
-    return Objects.hash(mJavaSize, mRegisteredNativeSize);
   }
 
   @Override public boolean equals(Object other) {

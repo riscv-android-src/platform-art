@@ -25,8 +25,6 @@
 #include "class_root.h"
 #include "dex/dex_file-inl.h"
 #include "gc/accounting/card_table-inl.h"
-#include "mirror/object.h"
-#include "mirror/object_array.h"
 #include "object-inl.h"
 #include "object_array-alloc-inl.h"
 #include "object_array-inl.h"
@@ -54,9 +52,10 @@ void ClassExt::SetObsoleteArrays(ObjPtr<PointerArray> methods,
 // We really need to be careful how we update this. If we ever in the future make it so that
 // these arrays are written into without all threads being suspended we have a race condition! This
 // race could cause obsolete methods to be missed.
-bool ClassExt::ExtendObsoleteArrays(Handle<ClassExt> h_this, Thread* self, uint32_t increase) {
+bool ClassExt::ExtendObsoleteArrays(Thread* self, uint32_t increase) {
   // TODO It would be good to check that we have locked the class associated with this ClassExt.
-  StackHandleScope<4> hs(self);
+  StackHandleScope<5> hs(self);
+  Handle<ClassExt> h_this(hs.NewHandle(this));
   Handle<PointerArray> old_methods(hs.NewHandle(h_this->GetObsoleteMethods()));
   Handle<ObjectArray<DexCache>> old_dex_caches(hs.NewHandle(h_this->GetObsoleteDexCaches()));
   ClassLinker* cl = Runtime::Current()->GetClassLinker();
@@ -101,10 +100,6 @@ bool ClassExt::ExtendObsoleteArrays(Handle<ClassExt> h_this, Thread* self, uint3
   h_this->SetObsoleteArrays(new_methods.Get(), new_dex_caches.Get());
 
   return true;
-}
-
-void ClassExt::SetObsoleteClass(ObjPtr<Class> klass) {
-  SetFieldObject<false>(OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_class_), klass);
 }
 
 ObjPtr<ClassExt> ClassExt::Alloc(Thread* self) {

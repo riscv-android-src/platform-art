@@ -1200,11 +1200,13 @@ ENTRY \c_name
 
     ldr    r3, [r0, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3)
     cmp    r3, #ROSALLOC_MAX_THREAD_LOCAL_BRACKET_SIZE        // Check if the size is for a thread
-                                                              // local allocation.
-    // If the class is not yet visibly initialized, or it is finalizable,
-    // the object size will be very large to force the branch below to be taken.
+                                                              // local allocation. Also does the
+                                                              // initialized and finalizable checks.
+    // When isInitialized == 0, then the class is potentially not yet initialized.
+    // If the class is not yet initialized, the object size will be very large to force the branch
+    // below to be taken.
     //
-    // See Class::SetStatus() in class.cc for more details.
+    // See InitializeClassVisitors in class-inl.h for more details.
     bhs    .Lslow_path\c_name
                                                               // Compute the rosalloc bracket index
                                                               // from the size. Since the size is
@@ -1272,9 +1274,19 @@ ENTRY \c_name
     str    r1, [r12, #(ROSALLOC_RUN_FREE_LIST_OFFSET + ROSALLOC_RUN_FREE_LIST_SIZE_OFFSET)]
 
     mov    r0, r3                                             // Set the return value and return.
-    // No barrier. The class is already observably initialized (otherwise the fast
-    // path size check above would fail) and new-instance allocations are protected
+.if \isInitialized == 0
+    // This barrier is only necessary when the allocation also requires
+    // a class initialization check.
+    //
+    // If the class is already observably initialized, then new-instance allocations are protected
     // from publishing by the compiler which inserts its own StoreStore barrier.
+    dmb    ish
+    // Use a "dmb ish" fence here because if there are later loads of statics (e.g. class size),
+    // they should happen-after the implicit initialization check.
+    //
+    // TODO: Remove this dmb for class initialization checks (b/36692143) by introducing
+    // a new observably-initialized class state.
+.endif
     bx     lr
 
 .Lslow_path\c_name:
@@ -1309,10 +1321,11 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
     sub    r12, r3, r12                                       // Compute the remaining buf size.
     ldr    r3, [r0, #MIRROR_CLASS_OBJECT_SIZE_ALLOC_FAST_PATH_OFFSET]  // Load the object size (r3).
     cmp    r3, r12                                            // Check if it fits.
-    // If the class is not yet visibly initialized, or it is finalizable,
-    // the object size will be very large to force the branch below to be taken.
+    // When isInitialized == 0, then the class is potentially not yet initialized.
+    // If the class is not yet initialized, the object size will be very large to force the branch
+    // below to be taken.
     //
-    // See Class::SetStatus() in class.cc for more details.
+    // See InitializeClassVisitors in class-inl.h for more details.
     bhi    \slowPathLabel
     // "Point of no slow path". Won't go to the slow path from here on. OK to clobber r0 and r1.
                                                               // Reload old thread_local_pos (r0)
@@ -1347,9 +1360,18 @@ ART_QUICK_ALLOC_OBJECT_ROSALLOC art_quick_alloc_object_initialized_rosalloc, art
                                                               // site will see the right values in
                                                               // the fields of the class.
     mov    r0, r2
-    // No barrier. The class is already observably initialized (otherwise the fast
-    // path size check above would fail) and new-instance allocations are protected
+.if \isInitialized == 0
+    // This barrier is only necessary when the allocation also requires
+    // a class initialization check.
+    //
+    // If the class is already observably initialized, then new-instance allocations are protected
     // from publishing by the compiler which inserts its own StoreStore barrier.
+    dmb    ish
+    // Use a "dmb ish" fence here because if there are later loads of statics (e.g. class size),
+    // they should happen-after the implicit initialization check.
+    //
+    // TODO: Remove dmb for class initialization checks (b/36692143)
+.endif
     bx     lr
 .endm
 
@@ -2193,17 +2215,6 @@ ENTRY art_quick_l2f
     pop   {pc}
 END art_quick_l2f
 
-    .extern artStringBuilderAppend
-ENTRY art_quick_string_builder_append
-    SETUP_SAVE_REFS_ONLY_FRAME r2       @ save callee saves in case of GC
-    add    r1, sp, #(FRAME_SIZE_SAVE_REFS_ONLY + __SIZEOF_POINTER__)  @ pass args
-    mov    r2, rSELF                    @ pass Thread::Current
-    bl     artStringBuilderAppend       @ (uint32_t, const unit32_t*, Thread*)
-    RESTORE_SAVE_REFS_ONLY_FRAME
-    REFRESH_MARKING_REGISTER
-    RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
-END art_quick_string_builder_append
-
 .macro CONDITIONAL_CBZ reg, reg_if, dest
 .ifc \reg, \reg_if
     cbz \reg, \dest
@@ -2617,7 +2628,8 @@ art_quick_read_barrier_mark_introspection_gc_roots\label_suffix:
      *     (6 bytes). Loads the return register and jumps to the runtime call.
      */
 #if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
-ENTRY_ALIGNED art_quick_read_barrier_mark_introspection, 512
+    .balign 512
+ENTRY art_quick_read_barrier_mark_introspection
     // At this point, IP contains the reference, rMR is clobbered by the thunk
     // and can be freely used as it will be set back to 1 before returning.
     // For heap poisoning, the reference is poisoned, so unpoison it first.

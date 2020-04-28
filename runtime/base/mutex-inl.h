@@ -82,9 +82,7 @@ static inline void CheckUnattachedThread(LockLevel level) NO_THREAD_SAFETY_ANALY
           // Avoid recursive death.
           level == kAbortLock ||
           // Locks at the absolute top of the stack can be locked at any time.
-          level == kTopLockLevel ||
-          // The unexpected signal handler may be catching signals from any thread.
-          level == kUnexpectedSignalLock) << level;
+          level == kTopLockLevel) << level;
   }
 }
 
@@ -206,10 +204,13 @@ inline void ReaderWriterMutex::SharedUnlock(Thread* self) {
     int32_t cur_state = state_.load(std::memory_order_relaxed);
     if (LIKELY(cur_state > 0)) {
       // Reduce state by 1 and impose lock release load/store ordering.
-      // Note, the num_contenders_ load below musn't reorder before the CompareAndSet.
+      // Note, the relaxed loads below musn't reorder before the CompareAndSet.
+      // TODO: the ordering here is non-trivial as state is split across 3 fields, fix by placing
+      // a status bit into the state on contention.
       done = state_.CompareAndSetWeakSequentiallyConsistent(cur_state, cur_state - 1);
       if (done && (cur_state - 1) == 0) {  // Weak CAS may fail spuriously.
-        if (num_contenders_.load(std::memory_order_seq_cst) > 0) {
+        if (num_pending_writers_.load(std::memory_order_seq_cst) > 0 ||
+            num_pending_readers_.load(std::memory_order_seq_cst) > 0) {
           // Wake any exclusive waiters as there are now no readers.
           futex(state_.Address(), FUTEX_WAKE_PRIVATE, kWakeAll, nullptr, nullptr, 0);
         }

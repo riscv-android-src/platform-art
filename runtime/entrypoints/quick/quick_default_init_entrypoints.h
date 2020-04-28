@@ -121,9 +121,6 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
 
   // Deoptimize
   qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
-
-  // StringBuilder append
-  qpoints->pStringBuilderAppend = art_quick_string_builder_append;
 }
 
 }  // namespace art

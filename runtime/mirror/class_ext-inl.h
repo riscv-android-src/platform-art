@@ -19,89 +19,11 @@
 
 #include "class_ext.h"
 
-#include "array-inl.h"
 #include "art_method-inl.h"
-#include "base/enums.h"
-#include "handle_scope.h"
-#include "mirror/object.h"
 #include "object-inl.h"
-#include "verify_object.h"
 
 namespace art {
 namespace mirror {
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::EnsureJniIdsArrayPresent(MemberOffset off, size_t count) {
-  ObjPtr<PointerArray> existing(
-      GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(off));
-  if (!existing.IsNull()) {
-    return existing;
-  }
-  Thread* self = Thread::Current();
-  StackHandleScope<2> hs(self);
-  Handle<ClassExt> h_this(hs.NewHandle(this));
-  Handle<PointerArray> new_arr(
-      hs.NewHandle(Runtime::Current()->GetClassLinker()->AllocPointerArray(self, count)));
-  if (new_arr.IsNull()) {
-    // Fail.
-    self->AssertPendingOOMException();
-    return nullptr;
-  }
-  bool set;
-  // Set the ext_data_ field using CAS semantics.
-  if (Runtime::Current()->IsActiveTransaction()) {
-    set = h_this->CasFieldObject<true>(
-        off, nullptr, new_arr.Get(), CASMode::kStrong, std::memory_order_seq_cst);
-  } else {
-    set = h_this->CasFieldObject<false>(
-        off, nullptr, new_arr.Get(), CASMode::kStrong, std::memory_order_seq_cst);
-  }
-  ObjPtr<PointerArray> ret(
-      set ? new_arr.Get()
-          : h_this->GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(off));
-  CHECK(!ret.IsNull());
-  return ret;
-}
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::EnsureJMethodIDsArrayPresent(size_t count) {
-  return EnsureJniIdsArrayPresent<kVerifyFlags, kReadBarrierOption>(
-      MemberOffset(OFFSET_OF_OBJECT_MEMBER(ClassExt, jmethod_ids_)), count);
-}
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::EnsureStaticJFieldIDsArrayPresent(size_t count) {
-  return EnsureJniIdsArrayPresent<kVerifyFlags, kReadBarrierOption>(
-      MemberOffset(OFFSET_OF_OBJECT_MEMBER(ClassExt, static_jfield_ids_)), count);
-}
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::EnsureInstanceJFieldIDsArrayPresent(size_t count) {
-  return EnsureJniIdsArrayPresent<kVerifyFlags, kReadBarrierOption>(
-      MemberOffset(OFFSET_OF_OBJECT_MEMBER(ClassExt, instance_jfield_ids_)), count);
-}
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::GetInstanceJFieldIDs() {
-  return GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(
-      OFFSET_OF_OBJECT_MEMBER(ClassExt, instance_jfield_ids_));
-}
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::GetStaticJFieldIDs() {
-  return GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(
-      OFFSET_OF_OBJECT_MEMBER(ClassExt, static_jfield_ids_));
-}
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<Class> ClassExt::GetObsoleteClass() {
-  return GetFieldObject<Class, kVerifyFlags, kReadBarrierOption>(
-      OFFSET_OF_OBJECT_MEMBER(ClassExt, obsolete_class_));
-}
-
-template <VerifyObjectFlags kVerifyFlags, ReadBarrierOption kReadBarrierOption>
-inline ObjPtr<PointerArray> ClassExt::GetJMethodIDs() {
-  return GetFieldObject<PointerArray, kVerifyFlags, kReadBarrierOption>(
-      OFFSET_OF_OBJECT_MEMBER(ClassExt, jmethod_ids_));
-}
 
 inline ObjPtr<Object> ClassExt::GetVerifyError() {
   return GetFieldObject<ClassExt>(OFFSET_OF_OBJECT_MEMBER(ClassExt, verify_error_));
@@ -125,58 +47,15 @@ inline ObjPtr<Object> ClassExt::GetOriginalDexFile() {
 
 template<ReadBarrierOption kReadBarrierOption, class Visitor>
 void ClassExt::VisitNativeRoots(Visitor& visitor, PointerSize pointer_size) {
-  VisitMethods<kReadBarrierOption>([&](ArtMethod* method) {
-    method->VisitRoots<kReadBarrierOption>(visitor, pointer_size);
-  }, pointer_size);
-}
-
-template<ReadBarrierOption kReadBarrierOption, class Visitor>
-void ClassExt::VisitMethods(Visitor visitor, PointerSize pointer_size) {
   ObjPtr<PointerArray> arr(GetObsoleteMethods<kDefaultVerifyFlags, kReadBarrierOption>());
-  if (!arr.IsNull()) {
-    int32_t len = arr->GetLength();
-    for (int32_t i = 0; i < len; i++) {
-      ArtMethod* method = arr->GetElementPtrSize<ArtMethod*>(i, pointer_size);
-      if (method != nullptr) {
-        visitor(method);
-      }
-    }
+  if (arr.IsNull()) {
+    return;
   }
-}
-
-template<ReadBarrierOption kReadBarrierOption, class Visitor>
-void ClassExt::VisitJMethodIDs(Visitor v) {
-  ObjPtr<PointerArray> marr(GetJMethodIDs<kDefaultVerifyFlags, kReadBarrierOption>());
-  if (!marr.IsNull()) {
-    int32_t len = marr->GetLength();
-    for (int32_t i = 0; i < len; i++) {
-      jmethodID id = marr->GetElementPtrSize<jmethodID>(i, kRuntimePointerSize);
-      if (id != nullptr) {
-        v(id, i);
-      }
-    }
-  }
-}
-template<ReadBarrierOption kReadBarrierOption, class Visitor>
-void ClassExt::VisitJFieldIDs(Visitor v) {
-  ObjPtr<PointerArray> sarr(GetStaticJFieldIDs<kDefaultVerifyFlags, kReadBarrierOption>());
-  if (!sarr.IsNull()) {
-    int32_t len = sarr->GetLength();
-    for (int32_t i = 0; i < len; i++) {
-      jfieldID id = sarr->GetElementPtrSize<jfieldID>(i, kRuntimePointerSize);
-      if (id != nullptr) {
-        v(id, i, true);
-      }
-    }
-  }
-  ObjPtr<PointerArray> iarr(GetInstanceJFieldIDs<kDefaultVerifyFlags, kReadBarrierOption>());
-  if (!iarr.IsNull()) {
-    int32_t len = iarr->GetLength();
-    for (int32_t i = 0; i < len; i++) {
-      jfieldID id = iarr->GetElementPtrSize<jfieldID>(i, kRuntimePointerSize);
-      if (id != nullptr) {
-        v(id, i, false);
-      }
+  int32_t len = arr->GetLength();
+  for (int32_t i = 0; i < len; i++) {
+    ArtMethod* method = arr->GetElementPtrSize<ArtMethod*, kDefaultVerifyFlags>(i, pointer_size);
+    if (method != nullptr) {
+      method->VisitRoots<kReadBarrierOption>(visitor, pointer_size);
     }
   }
 }

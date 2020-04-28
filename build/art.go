@@ -86,7 +86,7 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 	if len(ctx.AConfig().SanitizeDevice()) > 0 || len(ctx.AConfig().SanitizeHost()) > 0 {
 		cflags = append(cflags,
 			"-DART_STACK_OVERFLOW_GAP_arm=8192",
-			"-DART_STACK_OVERFLOW_GAP_arm64=16384",
+			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
 			"-DART_STACK_OVERFLOW_GAP_mips=16384",
 			"-DART_STACK_OVERFLOW_GAP_mips64=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86=16384",
@@ -276,31 +276,13 @@ func testInstall(ctx android.InstallHookContext) {
 	defer artTestMutex.Unlock()
 
 	tests := testMap[name]
-	tests = append(tests, ctx.Path().ToMakePath().String())
+	tests = append(tests, ctx.Path().RelPathString())
 	testMap[name] = tests
 }
 
 var artTestMutex sync.Mutex
 
 func init() {
-	artModuleTypes := []string{
-		"art_cc_library",
-		"art_cc_library_static",
-		"art_cc_binary",
-		"art_cc_test",
-		"art_cc_test_library",
-		"art_cc_defaults",
-		"libart_cc_defaults",
-		"libart_static_cc_defaults",
-		"art_global_defaults",
-		"art_debug_defaults",
-		"art_apex_test_host",
-	}
-	android.AddNeverAllowRules(
-		android.NeverAllow().
-			NotIn("art", "external/vixl").
-			ModuleType(artModuleTypes...))
-
 	android.RegisterModuleType("art_cc_library", artLibrary)
 	android.RegisterModuleType("art_cc_library_static", artStaticLibrary)
 	android.RegisterModuleType("art_cc_binary", artBinary)
@@ -312,29 +294,17 @@ func init() {
 	android.RegisterModuleType("art_global_defaults", artGlobalDefaultsFactory)
 	android.RegisterModuleType("art_debug_defaults", artDebugDefaultsFactory)
 
-	// ART apex is special because it must include dexpreopt files for bootclasspath jars.
-	android.RegisterModuleType("art_apex", artApexBundleFactory)
-	android.RegisterModuleType("art_apex_test", artTestApexBundleFactory)
-
 	// TODO: This makes the module disable itself for host if HOST_PREFER_32_BIT is
 	// set. We need this because the multilib types of binaries listed in the apex
 	// rule must match the declared type. This is normally not difficult but HOST_PREFER_32_BIT
 	// changes this to 'prefer32' on all host binaries. Since HOST_PREFER_32_BIT is
 	// only used for testing we can just disable the module.
 	// See b/120617876 for more information.
-	android.RegisterModuleType("art_apex_test_host", artHostTestApexBundleFactory)
-}
-
-func artApexBundleFactory() android.Module {
-	return apex.ApexBundleFactory(false /*testApex*/, true /*artApex*/)
+	android.RegisterModuleType("art_apex_test", artTestApexBundleFactory)
 }
 
 func artTestApexBundleFactory() android.Module {
-	return apex.ApexBundleFactory(true /*testApex*/, true /*artApex*/)
-}
-
-func artHostTestApexBundleFactory() android.Module {
-	module := apex.ApexBundleFactory(true /*testApex*/, true /*artApex*/)
+	module := apex.ApexBundleFactory( /*testApex*/ true)
 	android.AddLoadHook(module, func(ctx android.LoadHookContext) {
 		if envTrue(ctx, "HOST_PREFER_32_BIT") {
 			type props struct {
@@ -372,7 +342,7 @@ func artDebugDefaultsFactory() android.Module {
 func artDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
-	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, staticAndSharedLibrary) })
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
 	return module
 }
@@ -380,7 +350,7 @@ func artDefaultsFactory() android.Module {
 func libartDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
-	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, staticAndSharedLibrary) })
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
 	return module
 }
@@ -388,7 +358,7 @@ func libartDefaultsFactory() android.Module {
 func libartStaticDefaultsFactory() android.Module {
 	c := &codegenProperties{}
 	module := cc.DefaultsFactory(c)
-	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, staticLibrary) })
+	android.AddLoadHook(module, func(ctx android.LoadHookContext) { codegen(ctx, c, true) })
 
 	return module
 }
@@ -397,7 +367,7 @@ func artLibrary() android.Module {
 	m, _ := cc.NewLibrary(android.HostAndDeviceSupported)
 	module := m.Init()
 
-	installCodegenCustomizer(module, staticAndSharedLibrary)
+	installCodegenCustomizer(module, true)
 
 	return module
 }
@@ -407,7 +377,7 @@ func artStaticLibrary() android.Module {
 	library.BuildOnlyStatic()
 	module := m.Init()
 
-	installCodegenCustomizer(module, staticLibrary)
+	installCodegenCustomizer(module, true)
 
 	return module
 }
@@ -425,7 +395,7 @@ func artTest() android.Module {
 	test := cc.NewTest(android.HostAndDeviceSupported)
 	module := test.Init()
 
-	installCodegenCustomizer(module, binary)
+	installCodegenCustomizer(module, false)
 
 	android.AddLoadHook(module, customLinker)
 	android.AddLoadHook(module, prefer32Bit)
@@ -437,7 +407,7 @@ func artTestLibrary() android.Module {
 	test := cc.NewTestLibrary(android.HostAndDeviceSupported)
 	module := test.Init()
 
-	installCodegenCustomizer(module, staticAndSharedLibrary)
+	installCodegenCustomizer(module, false)
 
 	android.AddLoadHook(module, prefer32Bit)
 	android.AddInstallHook(module, testInstall)

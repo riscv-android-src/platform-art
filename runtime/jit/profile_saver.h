@@ -34,10 +34,13 @@ class ProfileSaver {
                     const std::string& output_filename,
                     jit::JitCodeCache* jit_code_cache,
                     const std::vector<std::string>& code_paths)
-      REQUIRES(!Locks::profiler_lock_, !instance_->wait_lock_);
+      REQUIRES(!Locks::profiler_lock_, !wait_lock_);
 
   // Stops the profile saver thread.
-  static void Stop(bool dump_info_) REQUIRES(!Locks::profiler_lock_, !instance_->wait_lock_);
+  // NO_THREAD_SAFETY_ANALYSIS for static function calling into member function with excludes lock.
+  static void Stop(bool dump_info_)
+      REQUIRES(!Locks::profiler_lock_, !wait_lock_)
+      NO_THREAD_SAFETY_ANALYSIS;
 
   // Returns true if the profile saver is started.
   static bool IsStarted() REQUIRES(!Locks::profiler_lock_);
@@ -45,17 +48,19 @@ class ProfileSaver {
   // If the profile saver is running, dumps statistics to the `os`. Otherwise it does nothing.
   static void DumpInstanceInfo(std::ostream& os);
 
-  static void NotifyJitActivity() REQUIRES(!Locks::profiler_lock_, !instance_->wait_lock_);
+  // NO_THREAD_SAFETY_ANALYSIS for static function calling into member function with excludes lock.
+  static void NotifyJitActivity()
+      REQUIRES(!Locks::profiler_lock_, !wait_lock_)
+      NO_THREAD_SAFETY_ANALYSIS;
 
   // For testing or manual purposes (SIGUSR1).
-  static void ForceProcessProfiles() REQUIRES(!Locks::profiler_lock_, !Locks::mutator_lock_);
+  static void ForceProcessProfiles();
 
   // Just for testing purposes.
-  static bool HasSeenMethod(const std::string& profile, bool hot, MethodReference ref)
-      REQUIRES(!Locks::profiler_lock_);
+  static bool HasSeenMethod(const std::string& profile, bool hot, MethodReference ref);
 
   // Notify that startup has completed.
-  static void NotifyStartupCompleted() REQUIRES(!Locks::profiler_lock_, !instance_->wait_lock_);
+  static void NotifyStartupCompleted();
 
  private:
   ProfileSaver(const ProfileSaverOptions& options,
@@ -64,13 +69,13 @@ class ProfileSaver {
                const std::vector<std::string>& code_paths);
   ~ProfileSaver();
 
+  // NO_THREAD_SAFETY_ANALYSIS for static function calling into member function with excludes lock.
   static void* RunProfileSaverThread(void* arg)
-      REQUIRES(!Locks::profiler_lock_, !instance_->wait_lock_);
+      REQUIRES(!Locks::profiler_lock_, !wait_lock_)
+      NO_THREAD_SAFETY_ANALYSIS;
 
   // The run loop for the saver.
-  void Run()
-      REQUIRES(Locks::profiler_lock_, !wait_lock_)
-      RELEASE(Locks::profiler_lock_);
+  void Run() REQUIRES(!Locks::profiler_lock_, !wait_lock_);
 
   // Processes the existing profiling info from the jit code cache and returns
   // true if it needed to be saved to disk.
@@ -79,8 +84,8 @@ class ProfileSaver {
   // If force_save is true, the saver will ignore any constraints which limit IO (e.g. will write
   // the profile to disk even if it's just one new method).
   bool ProcessProfilingInfo(bool force_save, /*out*/uint16_t* number_of_new_methods)
-      REQUIRES(!Locks::profiler_lock_)
-      REQUIRES(!Locks::mutator_lock_);
+    REQUIRES(!Locks::profiler_lock_)
+    REQUIRES(!Locks::mutator_lock_);
 
   void NotifyJitActivityInternal() REQUIRES(!wait_lock_);
   void WakeUpSaver() REQUIRES(wait_lock_);
@@ -94,20 +99,13 @@ class ProfileSaver {
 
   // Fetches the current resolved classes and methods from the ClassLinker and stores them in the
   // profile_cache_ for later save.
-  void FetchAndCacheResolvedClassesAndMethods(bool startup) REQUIRES(!Locks::profiler_lock_);
+  void FetchAndCacheResolvedClassesAndMethods(bool startup);
 
   void DumpInfo(std::ostream& os);
 
   // Resolve the realpath of the locations stored in tracked_dex_base_locations_to_be_resolved_
   // and put the result in tracked_dex_base_locations_.
   void ResolveTrackedLocations() REQUIRES(!Locks::profiler_lock_);
-
-  // Get the profile metadata that should be associated with the profile session during the current
-  // profile saver session.
-  ProfileCompilationInfo::ProfileSampleAnnotation GetProfileSampleAnnotation();
-
-  // Extends the given set of flags with global flags if necessary (e.g. the running architecture).
-  ProfileCompilationInfo::MethodHotness::Flag AnnotateSampleFlags(uint32_t flags);
 
   // The only instance of the saver.
   static ProfileSaver* instance_ GUARDED_BY(Locks::profiler_lock_);
@@ -155,10 +153,6 @@ class ProfileSaver {
   uint64_t total_number_of_wake_ups_;
 
   const ProfileSaverOptions options_;
-
-  friend class ProfileSaverTest;
-  friend class ProfileSaverForBootTest;
-
   DISALLOW_COPY_AND_ASSIGN(ProfileSaver);
 };
 

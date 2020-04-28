@@ -1,5 +1,0 @@
-SadByte passed
-SadShort passed
-SadChar passed
-SadInt passed
-SadLong passed

@@ -41,7 +41,6 @@
 #include "mirror/class-inl.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-inl.h"
-#include "oat.h"
 #include "oat_file-inl.h"
 #include "oat_writer.h"
 #include "profile/profile_compilation_info.h"
@@ -179,6 +178,8 @@ class OatTest : public CommonCompilerDriverTest {
     std::vector<std::unique_ptr<const DexFile>> opened_dex_files;
     if (!oat_writer.WriteAndOpenDexFiles(
         vdex_file,
+        oat_rodata,
+        &key_value_store,
         verify,
         /*update_input_vdex=*/ false,
         copy,
@@ -198,10 +199,7 @@ class OatTest : public CommonCompilerDriverTest {
     MultiOatRelativePatcher patcher(compiler_options_->GetInstructionSet(),
                                     compiler_options_->GetInstructionSetFeatures(),
                                     compiler_driver_->GetCompiledMethodStorage());
-    if (!oat_writer.StartRoData(dex_files, oat_rodata, &key_value_store)) {
-      return false;
-    }
-    oat_writer.Initialize(compiler_driver_.get(), /*image_writer=*/ nullptr, dex_files);
+    oat_writer.Initialize(compiler_driver_.get(), nullptr, dex_files);
     oat_writer.PrepareLayout(&patcher);
     elf_writer->PrepareDynamicSection(oat_writer.GetOatHeader().GetExecutableOffset(),
                                       oat_writer.GetCodeSize(),
@@ -471,7 +469,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   EXPECT_EQ(56U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
   EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
-  EXPECT_EQ(167 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
+  EXPECT_EQ(166 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
 

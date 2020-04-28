@@ -23,10 +23,12 @@ cc_object {
         "art_debug_defaults",
         "art_defaults",
     ],
-    header_libs: [
-        "art_libartbase_headers", // For base/bit_utils.h
-        "libart_runtime_headers_ndk",
-        "libdexfile_all_headers", // For dex/modifiers.h
+    include_dirs: [
+        "art/libartbase",
+        "art/libdexfile",
+        "art/libartbase",
+        "art/runtime",
+        "system/core/base/include",
     ],
     // Produce text file rather than binary.
     cflags: ["-S"],
@@ -42,11 +44,6 @@ cc_genrule {
     out: ["asm_defines.h"],
     tool_files: ["make_header.py"],
     cmd: "$(location make_header.py) \"$(in)\" > \"$(out)\"",
-    target: {
-        darwin: {
-            enabled: false,
-        },
-    },
 }
 
 cc_library_headers {

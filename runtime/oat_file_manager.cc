@@ -473,7 +473,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
 
   OatFileAssistant oat_file_assistant(dex_location,
                                       kRuntimeISA,
-                                      runtime->GetOatFilesExecutable(),
+                                      !runtime->IsAotCompiler(),
                                       only_use_system_oat_files_);
 
   // Get the oat file on disk.
@@ -641,14 +641,15 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
         error_msgs->push_back("Fallback mode disabled, skipping dex files.");
       }
     } else {
-      std::string msg = StringPrintf("No original dex files found for dex location (%s) %s",
-          GetInstructionSetString(kRuntimeISA), dex_location);
-      error_msgs->push_back(msg);
+      error_msgs->push_back("No original dex files found for dex location "
+          + std::string(dex_location));
     }
   }
 
   if (Runtime::Current()->GetJit() != nullptr) {
-    Runtime::Current()->GetJit()->RegisterDexFiles(dex_files, class_loader);
+    ScopedObjectAccess soa(self);
+    Runtime::Current()->GetJit()->RegisterDexFiles(
+        dex_files, soa.Decode<mirror::ClassLoader>(class_loader));
   }
 
   return dex_files;

@@ -107,11 +107,11 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
     UNIMPLEMENTED(FATAL);
     return 0;
   }
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
-    return &mark_bitmap_;
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
+    return mark_bitmap_.get();
   }
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() override {
-    return &mark_bitmap_;
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
+    return mark_bitmap_.get();
   }
 
   void Clear() override REQUIRES(!region_lock_);
@@ -367,10 +367,6 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
 
   uint32_t Time() {
     return time_;
-  }
-
-  size_t EvacBytes() const NO_THREAD_SAFETY_ANALYSIS {
-    return num_evac_regions_ * kRegionSize;
   }
 
  private:
@@ -639,8 +635,6 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
     return RefToRegionLocked(ref);
   }
 
-  void TraceHeapSize() REQUIRES(region_lock_);
-
   Region* RefToRegionUnlocked(mirror::Object* ref) NO_THREAD_SAFETY_ANALYSIS {
     // For a performance reason (this is frequently called via
     // RegionSpace::IsInFromSpace, etc.) we avoid taking a lock here.
@@ -762,7 +756,7 @@ class RegionSpace final : public ContinuousMemMapAllocSpace {
   size_t cyclic_alloc_region_index_ GUARDED_BY(region_lock_);
 
   // Mark bitmap used by the GC.
-  accounting::ContinuousSpaceBitmap mark_bitmap_;
+  std::unique_ptr<accounting::ContinuousSpaceBitmap> mark_bitmap_;
 
   DISALLOW_COPY_AND_ASSIGN(RegionSpace);
 };

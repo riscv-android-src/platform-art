@@ -1358,8 +1358,7 @@ void UnstartedRuntime::UnstartedStringFactoryNewStringFromChars(
       hs.NewHandle(shadow_frame->GetVRegReference(arg_offset + 2)->AsCharArray()));
   Runtime* runtime = Runtime::Current();
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
-  result->SetL(
-      mirror::String::AllocFromCharArray(self, char_count, h_char_array, offset, allocator));
+  result->SetL(mirror::String::AllocFromCharArray<true>(self, char_count, h_char_array, offset, allocator));
 }
 
 // This allows creating the new style of String objects during compilation.
@@ -1374,8 +1373,8 @@ void UnstartedRuntime::UnstartedStringFactoryNewStringFromString(
   Handle<mirror::String> h_string(hs.NewHandle(to_copy));
   Runtime* runtime = Runtime::Current();
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
-  result->SetL(
-      mirror::String::AllocFromString(self, h_string->GetLength(), h_string, 0, allocator));
+  result->SetL(mirror::String::AllocFromString<true>(self, h_string->GetLength(), h_string, 0,
+                                                     allocator));
 }
 
 void UnstartedRuntime::UnstartedStringFastSubstring(
@@ -1391,21 +1390,19 @@ void UnstartedRuntime::UnstartedStringFastSubstring(
   DCHECK_LE(start + length, h_string->GetLength());
   Runtime* runtime = Runtime::Current();
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
-  result->SetL(mirror::String::AllocFromString(self, length, h_string, start, allocator));
+  result->SetL(mirror::String::AllocFromString<true>(self, length, h_string, start, allocator));
 }
 
 // This allows getting the char array for new style of String objects during compilation.
 void UnstartedRuntime::UnstartedStringToCharArray(
     Thread* self, ShadowFrame* shadow_frame, JValue* result, size_t arg_offset)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  StackHandleScope<1> hs(self);
-  Handle<mirror::String> string =
-      hs.NewHandle(shadow_frame->GetVRegReference(arg_offset)->AsString());
+  ObjPtr<mirror::String> string = shadow_frame->GetVRegReference(arg_offset)->AsString();
   if (string == nullptr) {
     AbortTransactionOrFail(self, "String.charAt with null object");
     return;
   }
-  result->SetL(mirror::String::ToCharArray(string, self));
+  result->SetL(string->ToCharArray(self));
 }
 
 // This allows statically initializing ConcurrentHashMap and SynchronousQueue.
@@ -1723,8 +1720,11 @@ void UnstartedRuntime::UnstartedJNIVMRuntimeNewUnpaddedArray(
       runtime->GetClassLinker()->FindArrayClass(self, element_class->AsClass());
   DCHECK(array_class != nullptr);
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
-  result->SetL(mirror::Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-      self, array_class, length, array_class->GetComponentSizeShift(), allocator));
+  result->SetL(mirror::Array::Alloc<true, true>(self,
+                                                array_class,
+                                                length,
+                                                array_class->GetComponentSizeShift(),
+                                                allocator));
 }
 
 void UnstartedRuntime::UnstartedJNIVMStackGetCallingClassLoader(
@@ -1799,9 +1799,7 @@ void UnstartedRuntime::UnstartedJNIFloatIntBitsToFloat(
 void UnstartedRuntime::UnstartedJNIObjectInternalClone(
     Thread* self, ArtMethod* method ATTRIBUTE_UNUSED, mirror::Object* receiver,
     uint32_t* args ATTRIBUTE_UNUSED, JValue* result) {
-  StackHandleScope<1> hs(self);
-  Handle<mirror::Object> h_receiver = hs.NewHandle(receiver);
-  result->SetL(mirror::Object::Clone(h_receiver, self));
+  result->SetL(receiver->Clone(self));
 }
 
 void UnstartedRuntime::UnstartedJNIObjectNotifyAll(

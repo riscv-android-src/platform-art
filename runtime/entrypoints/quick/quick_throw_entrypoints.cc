@@ -54,7 +54,7 @@ extern "C" NO_RETURN void artDeliverExceptionFromCode(mirror::Throwable* excepti
    */
   ScopedQuickEntrypointChecks sqec(self);
   if (exception == nullptr) {
-    self->ThrowNewException("Ljava/lang/NullPointerException;", nullptr);
+    self->ThrowNewException("Ljava/lang/NullPointerException;", "throw with null exception");
   } else {
     self->SetException(exception);
   }

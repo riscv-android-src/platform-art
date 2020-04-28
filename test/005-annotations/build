@@ -41,6 +41,4 @@ export JAVAC=javac_wrapper
 
 ######################################################################
 
-# Build intermediate object to preserve class-retention annotations.
-export D8_FLAGS=--intermediate
 ./default-build "$@"

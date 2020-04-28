@@ -33,6 +33,12 @@ inline ObjPtr<mirror::MethodType> MethodHandle::GetNominalType() {
   return GetFieldObject<mirror::MethodType>(OFFSET_OF_OBJECT_MEMBER(MethodHandle, nominal_type_));
 }
 
+inline ObjPtr<mirror::Class> MethodHandle::GetTargetClass() {
+  Kind kind = GetHandleKind();
+  return (kind <= kLastValidKind) ?
+      GetTargetMethod()->GetDeclaringClass() : GetTargetField()->GetDeclaringClass();
+}
+
 }  // namespace mirror
 }  // namespace art
 

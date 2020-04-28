@@ -20,7 +20,7 @@ import org.apache.bcel.classfile.JavaClass;
 
 /**
  */
-public abstract class AnnotationContext implements ErrorReporter {
+public abstract class AnnotationContext {
 
   public final Status status;
   public final JavaClass definingClass;
@@ -42,4 +42,10 @@ public abstract class AnnotationContext implements ErrorReporter {
    * the greylist.
    */
   public abstract String getMemberDescriptor();
+
+  /**
+   * Report an error in this context. The final error message will include
+   * the class and member names, and the source file name.
+   */
+  public abstract void reportError(String message, Object... args);
 }

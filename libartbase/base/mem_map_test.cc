@@ -902,5 +902,6 @@ class DumpMapsOnFailListener : public testing::EmptyTestEventListener {
 extern "C"
 __attribute__((visibility("default"))) __attribute__((used))
 void ArtTestGlobalInit() {
+  LOG(ERROR) << "Installing listener";
   testing::UnitTest::GetInstance()->listeners().Append(new DumpMapsOnFailListener());
 }

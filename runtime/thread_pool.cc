@@ -120,12 +120,6 @@ void ThreadPool::AddTask(Thread* self, Task* task) {
 }
 
 void ThreadPool::RemoveAllTasks(Thread* self) {
-  // The ThreadPool is responsible for calling Finalize (which usually delete
-  // the task memory) on all the tasks.
-  Task* task = nullptr;
-  while ((task = TryGetTask(self)) != nullptr) {
-    task->Finalize();
-  }
   MutexLock mu(self, task_queue_lock_);
   tasks_.clear();
 }
@@ -201,7 +195,6 @@ void ThreadPool::SetMaxActiveWorkers(size_t max_workers) {
 
 ThreadPool::~ThreadPool() {
   DeleteThreads();
-  RemoveAllTasks(Thread::Current());
 }
 
 void ThreadPool::StartWorkers(Thread* self) {

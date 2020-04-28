@@ -43,37 +43,34 @@ void SchedulingGraph::AddDependency(SchedulingNode* node,
   }
 
   if (is_data_dependency) {
-    node->AddDataPredecessor(dependency);
-  } else {
+    if (!HasImmediateDataDependency(node, dependency)) {
+      node->AddDataPredecessor(dependency);
+    }
+  } else if (!HasImmediateOtherDependency(node, dependency)) {
     node->AddOtherPredecessor(dependency);
   }
 }
 
-bool SideEffectDependencyAnalysis::HasReorderingDependency(const HInstruction* instr1,
-                                                           const HInstruction* instr2) {
-  SideEffects instr1_side_effects = instr1->GetSideEffects();
-  SideEffects instr2_side_effects = instr2->GetSideEffects();
-
+static bool MayHaveReorderingDependency(SideEffects node, SideEffects other) {
   // Read after write.
-  if (instr1_side_effects.MayDependOn(instr2_side_effects)) {
+  if (node.MayDependOn(other)) {
     return true;
   }
 
   // Write after read.
-  if (instr2_side_effects.MayDependOn(instr1_side_effects)) {
+  if (other.MayDependOn(node)) {
     return true;
   }
 
   // Memory write after write.
-  if (instr1_side_effects.DoesAnyWrite() && instr2_side_effects.DoesAnyWrite()) {
+  if (node.DoesAnyWrite() && other.DoesAnyWrite()) {
     return true;
   }
 
   return false;
 }
 
-size_t SideEffectDependencyAnalysis::MemoryDependencyAnalysis::ArrayAccessHeapLocation(
-    HInstruction* instruction) const {
+size_t SchedulingGraph::ArrayAccessHeapLocation(HInstruction* instruction) const {
   DCHECK(heap_location_collector_ != nullptr);
   size_t heap_loc = heap_location_collector_->GetArrayHeapLocation(instruction);
   // This array access should be analyzed and added to HeapLocationCollector before.
@@ -81,19 +78,19 @@ size_t SideEffectDependencyAnalysis::MemoryDependencyAnalysis::ArrayAccessHeapLo
   return heap_loc;
 }
 
-bool SideEffectDependencyAnalysis::MemoryDependencyAnalysis::ArrayAccessMayAlias(
-    HInstruction* instr1, HInstruction* instr2) const {
+bool SchedulingGraph::ArrayAccessMayAlias(HInstruction* node,
+                                          HInstruction* other) const {
   DCHECK(heap_location_collector_ != nullptr);
-  size_t instr1_heap_loc = ArrayAccessHeapLocation(instr1);
-  size_t instr2_heap_loc = ArrayAccessHeapLocation(instr2);
+  size_t node_heap_loc = ArrayAccessHeapLocation(node);
+  size_t other_heap_loc = ArrayAccessHeapLocation(other);
 
   // For example: arr[0] and arr[0]
-  if (instr1_heap_loc == instr2_heap_loc) {
+  if (node_heap_loc == other_heap_loc) {
     return true;
   }
 
   // For example: arr[0] and arr[i]
-  if (heap_location_collector_->MayAlias(instr1_heap_loc, instr2_heap_loc)) {
+  if (heap_location_collector_->MayAlias(node_heap_loc, other_heap_loc)) {
     return true;
   }
 
@@ -151,55 +148,55 @@ static const FieldInfo* GetFieldInfo(const HInstruction* instruction) {
   }
 }
 
-size_t SideEffectDependencyAnalysis::MemoryDependencyAnalysis::FieldAccessHeapLocation(
-    const HInstruction* instr) const {
-  DCHECK(instr != nullptr);
-  DCHECK(GetFieldInfo(instr) != nullptr);
+size_t SchedulingGraph::FieldAccessHeapLocation(HInstruction* obj, const FieldInfo* field) const {
+  DCHECK(obj != nullptr);
+  DCHECK(field != nullptr);
   DCHECK(heap_location_collector_ != nullptr);
 
-  size_t heap_loc = heap_location_collector_->GetFieldHeapLocation(instr->InputAt(0),
-                                                                   GetFieldInfo(instr));
+  size_t heap_loc = heap_location_collector_->GetFieldHeapLocation(obj, field);
   // This field access should be analyzed and added to HeapLocationCollector before.
   DCHECK(heap_loc != HeapLocationCollector::kHeapLocationNotFound);
 
   return heap_loc;
 }
 
-bool SideEffectDependencyAnalysis::MemoryDependencyAnalysis::FieldAccessMayAlias(
-    const HInstruction* instr1, const HInstruction* instr2) const {
+bool SchedulingGraph::FieldAccessMayAlias(const HInstruction* node,
+                                          const HInstruction* other) const {
   DCHECK(heap_location_collector_ != nullptr);
 
   // Static and instance field accesses should not alias.
-  if ((IsInstanceFieldAccess(instr1) && IsStaticFieldAccess(instr2)) ||
-      (IsStaticFieldAccess(instr1) && IsInstanceFieldAccess(instr2))) {
+  if ((IsInstanceFieldAccess(node) && IsStaticFieldAccess(other)) ||
+      (IsStaticFieldAccess(node) && IsInstanceFieldAccess(other))) {
     return false;
   }
 
   // If either of the field accesses is unresolved.
-  if (IsUnresolvedFieldAccess(instr1) || IsUnresolvedFieldAccess(instr2)) {
+  if (IsUnresolvedFieldAccess(node) || IsUnresolvedFieldAccess(other)) {
     // Conservatively treat these two accesses may alias.
     return true;
   }
 
   // If both fields accesses are resolved.
-  size_t instr1_field_access_heap_loc = FieldAccessHeapLocation(instr1);
-  size_t instr2_field_access_heap_loc = FieldAccessHeapLocation(instr2);
+  const FieldInfo* node_field = GetFieldInfo(node);
+  const FieldInfo* other_field = GetFieldInfo(other);
 
-  if (instr1_field_access_heap_loc == instr2_field_access_heap_loc) {
+  size_t node_loc = FieldAccessHeapLocation(node->InputAt(0), node_field);
+  size_t other_loc = FieldAccessHeapLocation(other->InputAt(0), other_field);
+
+  if (node_loc == other_loc) {
     return true;
   }
 
-  if (!heap_location_collector_->MayAlias(instr1_field_access_heap_loc,
-                                          instr2_field_access_heap_loc)) {
+  if (!heap_location_collector_->MayAlias(node_loc, other_loc)) {
     return false;
   }
 
   return true;
 }
 
-bool SideEffectDependencyAnalysis::MemoryDependencyAnalysis::HasMemoryDependency(
-    HInstruction* instr1, HInstruction* instr2) const {
-  if (!HasReorderingDependency(instr1, instr2)) {
+bool SchedulingGraph::HasMemoryDependency(HInstruction* node,
+                                          HInstruction* other) const {
+  if (!MayHaveReorderingDependency(node->GetSideEffects(), other->GetSideEffects())) {
     return false;
   }
 
@@ -211,35 +208,35 @@ bool SideEffectDependencyAnalysis::MemoryDependencyAnalysis::HasMemoryDependency
     return true;
   }
 
-  if (IsArrayAccess(instr1) && IsArrayAccess(instr2)) {
-    return ArrayAccessMayAlias(instr1, instr2);
+  if (IsArrayAccess(node) && IsArrayAccess(other)) {
+    return ArrayAccessMayAlias(node, other);
   }
-  if (IsFieldAccess(instr1) && IsFieldAccess(instr2)) {
-    return FieldAccessMayAlias(instr1, instr2);
+  if (IsFieldAccess(node) && IsFieldAccess(other)) {
+    return FieldAccessMayAlias(node, other);
   }
 
   // TODO(xueliang): LSA to support alias analysis among HVecLoad, HVecStore and ArrayAccess
-  if (instr1->IsVecMemoryOperation() && instr2->IsVecMemoryOperation()) {
+  if (node->IsVecMemoryOperation() && other->IsVecMemoryOperation()) {
     return true;
   }
-  if (instr1->IsVecMemoryOperation() && IsArrayAccess(instr2)) {
+  if (node->IsVecMemoryOperation() && IsArrayAccess(other)) {
     return true;
   }
-  if (IsArrayAccess(instr1) && instr2->IsVecMemoryOperation()) {
+  if (IsArrayAccess(node) && other->IsVecMemoryOperation()) {
     return true;
   }
 
   // Heap accesses of different kinds should not alias.
-  if (IsArrayAccess(instr1) && IsFieldAccess(instr2)) {
+  if (IsArrayAccess(node) && IsFieldAccess(other)) {
     return false;
   }
-  if (IsFieldAccess(instr1) && IsArrayAccess(instr2)) {
+  if (IsFieldAccess(node) && IsArrayAccess(other)) {
     return false;
   }
-  if (instr1->IsVecMemoryOperation() && IsFieldAccess(instr2)) {
+  if (node->IsVecMemoryOperation() && IsFieldAccess(other)) {
     return false;
   }
-  if (IsFieldAccess(instr1) && instr2->IsVecMemoryOperation()) {
+  if (IsFieldAccess(node) && other->IsVecMemoryOperation()) {
     return false;
   }
 
@@ -248,20 +245,38 @@ bool SideEffectDependencyAnalysis::MemoryDependencyAnalysis::HasMemoryDependency
   return true;
 }
 
-bool SideEffectDependencyAnalysis::HasExceptionDependency(const HInstruction* instr1,
-                                                          const HInstruction* instr2) {
-  if (instr2->CanThrow() && instr1->GetSideEffects().DoesAnyWrite()) {
+bool SchedulingGraph::HasExceptionDependency(const HInstruction* node,
+                                             const HInstruction* other) const {
+  if (other->CanThrow() && node->GetSideEffects().DoesAnyWrite()) {
     return true;
   }
-  if (instr2->GetSideEffects().DoesAnyWrite() && instr1->CanThrow()) {
+  if (other->GetSideEffects().DoesAnyWrite() && node->CanThrow()) {
     return true;
   }
-  if (instr2->CanThrow() && instr1->CanThrow()) {
+  if (other->CanThrow() && node->CanThrow()) {
     return true;
   }
 
   // Above checks should cover all cases where we cannot reorder two
   // instructions which may throw exception.
+  return false;
+}
+
+// Check whether `node` depends on `other`, taking into account `SideEffect`
+// information and `CanThrow` information.
+bool SchedulingGraph::HasSideEffectDependency(HInstruction* node,
+                                              HInstruction* other) const {
+  if (HasMemoryDependency(node, other)) {
+    return true;
+  }
+
+  // Even if above memory dependency check has passed, it is still necessary to
+  // check dependencies between instructions that can throw and instructions
+  // that write to memory.
+  if (HasExceptionDependency(node, other)) {
+    return true;
+  }
+
   return false;
 }
 
@@ -282,39 +297,8 @@ static bool IsBetterCandidateWithMoreLikelyDependencies(HInstruction* new_candid
   }
 }
 
-void SchedulingGraph::AddCrossIterationDependencies(SchedulingNode* node) {
-  for (HInstruction* instruction : node->GetInstruction()->GetInputs()) {
-    // Having a phi-function from a loop header as an input means the current node of the
-    // scheduling graph has a cross-iteration dependency because such phi-functions bring values
-    // from the previous iteration to the current iteration.
-    if (!instruction->IsLoopHeaderPhi()) {
-      continue;
-    }
-    for (HInstruction* phi_input : instruction->GetInputs()) {
-      // As a scheduling graph of the current basic block is built by
-      // processing instructions bottom-up, nullptr returned by GetNode means
-      // an instruction defining a value for the phi is either before the
-      // instruction represented by node or it is in a different basic block.
-      SchedulingNode* def_node = GetNode(phi_input);
-
-      // We don't create a dependency if there are uses besides the use in phi.
-      // In such cases a register to hold phi_input is usually allocated and
-      // a MOV instruction is generated. In cases with multiple uses and no MOV
-      // instruction, reordering creating a MOV instruction can improve
-      // performance more than an attempt to avoid a MOV instruction.
-      if (def_node != nullptr && def_node != node && phi_input->GetUses().HasExactlyOneElement()) {
-        // We have an implicit data dependency between node and def_node.
-        // AddAddDataDependency cannot be used because it is for explicit data dependencies.
-        // So AddOtherDependency is used.
-        AddOtherDependency(def_node, node);
-      }
-    }
-  }
-}
-
-void SchedulingGraph::AddDependencies(SchedulingNode* instruction_node,
-                                      bool is_scheduling_barrier) {
-  HInstruction* instruction = instruction_node->GetInstruction();
+void SchedulingGraph::AddDependencies(HInstruction* instruction, bool is_scheduling_barrier) {
+  SchedulingNode* instruction_node = GetNode(instruction);
 
   // Define-use dependencies.
   for (const HUseListNode<HInstruction*>& use : instruction->GetUses()) {
@@ -370,16 +354,12 @@ void SchedulingGraph::AddDependencies(SchedulingNode* instruction_node,
       if (other_node->IsSchedulingBarrier()) {
         // We have reached a scheduling barrier so we can stop further
         // processing.
-        //
-        // As a "other" dependency is not set up if a data dependency exists, we need to check that
-        // one of them must exist.
-        DCHECK(other_node->HasOtherDependency(instruction_node)
-               || other_node->HasDataDependency(instruction_node));
+        DCHECK(HasImmediateOtherDependency(other_node, instruction_node));
         break;
       }
-      if (side_effect_dependency_analysis_.HasSideEffectDependency(other, instruction)) {
+      if (HasSideEffectDependency(other, instruction)) {
         if (dep_chain_candidate != nullptr &&
-            side_effect_dependency_analysis_.HasSideEffectDependency(other, dep_chain_candidate)) {
+            HasSideEffectDependency(other, dep_chain_candidate)) {
           // Skip an explicit dependency to reduce memory usage, rely on the transitive dependency.
         } else {
           AddOtherDependency(other_node, instruction_node);
@@ -406,8 +386,44 @@ void SchedulingGraph::AddDependencies(SchedulingNode* instruction_node,
       AddOtherDependency(GetNode(use.GetUser()->GetHolder()), instruction_node);
     }
   }
+}
 
-  AddCrossIterationDependencies(instruction_node);
+bool SchedulingGraph::HasImmediateDataDependency(const SchedulingNode* node,
+                                                 const SchedulingNode* other) const {
+  return ContainsElement(node->GetDataPredecessors(), other);
+}
+
+bool SchedulingGraph::HasImmediateDataDependency(const HInstruction* instruction,
+                                                 const HInstruction* other_instruction) const {
+  const SchedulingNode* node = GetNode(instruction);
+  const SchedulingNode* other = GetNode(other_instruction);
+  if (node == nullptr || other == nullptr) {
+    // Both instructions must be in current basic block, i.e. the SchedulingGraph can see their
+    // corresponding SchedulingNode in the graph, and tell whether there is a dependency.
+    // Otherwise there is no dependency from SchedulingGraph's perspective, for example,
+    // instruction and other_instruction are in different basic blocks.
+    return false;
+  }
+  return HasImmediateDataDependency(node, other);
+}
+
+bool SchedulingGraph::HasImmediateOtherDependency(const SchedulingNode* node,
+                                                  const SchedulingNode* other) const {
+  return ContainsElement(node->GetOtherPredecessors(), other);
+}
+
+bool SchedulingGraph::HasImmediateOtherDependency(const HInstruction* instruction,
+                                                  const HInstruction* other_instruction) const {
+  const SchedulingNode* node = GetNode(instruction);
+  const SchedulingNode* other = GetNode(other_instruction);
+  if (node == nullptr || other == nullptr) {
+    // Both instructions must be in current basic block, i.e. the SchedulingGraph can see their
+    // corresponding SchedulingNode in the graph, and tell whether there is a dependency.
+    // Otherwise there is no dependency from SchedulingGraph's perspective, for example,
+    // instruction and other_instruction are in different basic blocks.
+    return false;
+  }
+  return HasImmediateOtherDependency(node, other);
 }
 
 static const std::string InstructionTypeId(const HInstruction* instruction) {
@@ -578,7 +594,7 @@ void HScheduler::Schedule(HBasicBlock* block,
   ScopedArenaVector<SchedulingNode*> scheduling_nodes(allocator.Adapter(kArenaAllocScheduler));
 
   // Build the scheduling graph.
-  SchedulingGraph scheduling_graph(&allocator, heap_location_collector);
+  SchedulingGraph scheduling_graph(this, &allocator, heap_location_collector);
   for (HBackwardInstructionIterator it(block->GetInstructions()); !it.Done(); it.Advance()) {
     HInstruction* instruction = it.Current();
     CHECK_EQ(instruction->GetBlock(), block)

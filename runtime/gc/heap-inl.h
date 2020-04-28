@@ -47,12 +47,6 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
                                                       size_t byte_count,
                                                       AllocatorType allocator,
                                                       const PreFenceVisitor& pre_fence_visitor) {
-  auto no_suspend_pre_fence_visitor =
-      [&pre_fence_visitor](auto... x) REQUIRES_SHARED(Locks::mutator_lock_) {
-        ScopedAssertNoThreadSuspension sants("No thread suspension during pre-fence visitor");
-        pre_fence_visitor(x...);
-      };
-
   if (kIsDebugBuild) {
     CheckPreconditionsForAllocObject(klass, byte_count);
     // Since allocation can cause a GC which will need to SuspendAll, make sure all allocations are
@@ -98,7 +92,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
     }
     bytes_allocated = byte_count;
     usable_size = bytes_allocated;
-    no_suspend_pre_fence_visitor(obj, usable_size);
+    pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
   } else if (
       !kInstrumented && allocator == kAllocatorTypeRosAlloc &&
@@ -110,7 +104,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       obj->AssertReadBarrierState();
     }
     usable_size = bytes_allocated;
-    no_suspend_pre_fence_visitor(obj, usable_size);
+    pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
   } else {
     // Bytes allocated that includes bulk thread-local buffer allocations in addition to direct
@@ -149,12 +143,18 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       obj->AssertReadBarrierState();
     }
     if (collector::SemiSpace::kUseRememberedSet && UNLIKELY(allocator == kAllocatorTypeNonMoving)) {
-      // (Note this if statement will be constant folded away for the fast-path quick entry
-      // points.) Because SetClass() has no write barrier, the GC may need a write barrier in the
-      // case the object is non movable and points to a recently allocated movable class.
+      // (Note this if statement will be constant folded away for the
+      // fast-path quick entry points.) Because SetClass() has no write
+      // barrier, if a non-moving space allocation, we need a write
+      // barrier as the class pointer may point to the bump pointer
+      // space (where the class pointer is an "old-to-young" reference,
+      // though rare) under the GSS collector with the remembered set
+      // enabled. We don't need this for kAllocatorTypeRosAlloc/DlMalloc
+      // cases because we don't directly allocate into the main alloc
+      // space (besides promotions) under the SS/GSS collector.
       WriteBarrier::ForFieldWrite(obj, mirror::Object::ClassOffset(), klass);
     }
-    no_suspend_pre_fence_visitor(obj, usable_size);
+    pre_fence_visitor(obj, usable_size);
     QuasiAtomic::ThreadFenceForConstructor();
     if (bytes_tl_bulk_allocated > 0) {
       size_t num_bytes_allocated_before =
@@ -162,15 +162,7 @@ inline mirror::Object* Heap::AllocObjectWithAllocator(Thread* self,
       new_num_bytes_allocated = num_bytes_allocated_before + bytes_tl_bulk_allocated;
       // Only trace when we get an increase in the number of bytes allocated. This happens when
       // obtaining a new TLAB and isn't often enough to hurt performance according to golem.
-      if (region_space_) {
-        // With CC collector, during a GC cycle, the heap usage increases as
-        // there are two copies of evacuated objects. Therefore, add evac-bytes
-        // to the heap size. When the GC cycle is not running, evac-bytes
-        // are 0, as required.
-        TraceHeapSize(new_num_bytes_allocated + region_space_->EvacBytes());
-      } else {
-        TraceHeapSize(new_num_bytes_allocated);
-      }
+      TraceHeapSize(new_num_bytes_allocated);
     }
   }
   if (kIsDebugBuild && Runtime::Current()->IsStarted()) {

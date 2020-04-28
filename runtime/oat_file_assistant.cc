@@ -30,7 +30,6 @@
 #include "base/os.h"
 #include "base/stl_util.h"
 #include "base/string_view_cpp20.h"
-#include "base/systrace.h"
 #include "base/utils.h"
 #include "class_linker.h"
 #include "class_loader_context.h"
@@ -306,7 +305,6 @@ bool OatFileAssistant::LoadDexFiles(
 }
 
 bool OatFileAssistant::HasOriginalDexFiles() {
-  ScopedTrace trace("HasOriginalDexFiles");
   // Ensure GetRequiredDexChecksums has been run so that
   // has_original_dex_files_ is initialized. We don't care about the result of
   // GetRequiredDexChecksums.
@@ -323,7 +321,6 @@ OatFileAssistant::OatStatus OatFileAssistant::OatFileStatus() {
 }
 
 bool OatFileAssistant::DexChecksumUpToDate(const VdexFile& file, std::string* error_msg) {
-  ScopedTrace trace("DexChecksumUpToDate(vdex)");
   const std::vector<uint32_t>* required_dex_checksums = GetRequiredDexChecksums();
   if (required_dex_checksums == nullptr) {
     LOG(WARNING) << "Required dex checksums not found. Assuming dex checksums are up to date.";
@@ -356,7 +353,6 @@ bool OatFileAssistant::DexChecksumUpToDate(const VdexFile& file, std::string* er
 }
 
 bool OatFileAssistant::DexChecksumUpToDate(const OatFile& file, std::string* error_msg) {
-  ScopedTrace trace("DexChecksumUpToDate(oat)");
   const std::vector<uint32_t>* required_dex_checksums = GetRequiredDexChecksums();
   if (required_dex_checksums == nullptr) {
     LOG(WARNING) << "Required dex checksums not found. Assuming dex checksums are up to date.";
@@ -604,59 +600,81 @@ const std::vector<uint32_t>* OatFileAssistant::GetRequiredDexChecksums() {
 }
 
 bool OatFileAssistant::ValidateBootClassPathChecksums(const OatFile& oat_file) {
-  // Get the checksums and the BCP from the oat file.
-  const char* oat_boot_class_path_checksums =
-      oat_file.GetOatHeader().GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey);
+  // Get the BCP from the oat file.
   const char* oat_boot_class_path =
       oat_file.GetOatHeader().GetStoreValueByKey(OatHeader::kBootClassPathKey);
-  if (oat_boot_class_path_checksums == nullptr || oat_boot_class_path == nullptr) {
+  if (oat_boot_class_path == nullptr) {
     return false;
   }
-  std::string_view oat_boot_class_path_checksums_view(oat_boot_class_path_checksums);
-  std::string_view oat_boot_class_path_view(oat_boot_class_path);
-  if (oat_boot_class_path_view == cached_boot_class_path_ &&
-      oat_boot_class_path_checksums_view == cached_boot_class_path_checksums_) {
-    return true;
-  }
 
+  // Check that the oat BCP is a prefix of current BCP locations and count components.
   Runtime* runtime = Runtime::Current();
-  std::string error_msg;
-  bool result = gc::space::ImageSpace::VerifyBootClassPathChecksums(
-      oat_boot_class_path_checksums_view,
-      oat_boot_class_path_view,
-      runtime->GetImageLocation(),
-      ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
-      ArrayRef<const std::string>(runtime->GetBootClassPath()),
-      isa_,
-      runtime->GetImageSpaceLoadingOrder(),
-      &error_msg);
-  if (!result) {
-    VLOG(oat) << "Failed to verify checksums of oat file " << oat_file.GetLocation()
-        << " error: " << error_msg;
-
-    if (HasOriginalDexFiles()) {
-      return false;
+  size_t component_count = 0u;
+  std::string_view remaining_bcp(oat_boot_class_path);
+  bool bcp_ok = false;
+  for (const std::string& location : runtime->GetBootClassPathLocations()) {
+    if (!StartsWith(remaining_bcp, location)) {
+      break;
     }
-
-    // If there is no original dex file to fall back to, grudgingly accept
-    // the oat file. This could technically lead to crashes, but there's no
-    // way we could find a better oat file to use for this dex location,
-    // and it's better than being stuck in a boot loop with no way out.
-    // The problem will hopefully resolve itself the next time the runtime
-    // starts up.
-    LOG(WARNING) << "Dex location " << dex_location_ << " does not seem to include dex file. "
-        << "Allow oat file use. This is potentially dangerous.";
-    return true;
+    remaining_bcp.remove_prefix(location.size());
+    ++component_count;
+    if (remaining_bcp.empty()) {
+      bcp_ok = true;
+      break;
+    }
+    if (!StartsWith(remaining_bcp, ":")) {
+      break;
+    }
+    remaining_bcp.remove_prefix(1u);
+  }
+  if (!bcp_ok) {
+    return false;
   }
 
-  // This checksum has been validated, so save it.
-  cached_boot_class_path_ = oat_boot_class_path_view;
-  cached_boot_class_path_checksums_ = oat_boot_class_path_checksums_view;
-  return true;
+  // Get the checksums.
+  const char* oat_boot_class_path_checksums =
+      oat_file.GetOatHeader().GetStoreValueByKey(OatHeader::kBootClassPathChecksumsKey);
+  if (oat_boot_class_path_checksums == nullptr) {
+    return false;
+  }
+
+  // Retrieve checksums for this portion of the BCP if we do not have them cached.
+  if (cached_boot_class_path_checksum_component_count_ != component_count) {
+    ArrayRef<const std::string> boot_class_path(runtime->GetBootClassPath());
+    std::string error_msg;
+    std::string boot_class_path_checksums = gc::space::ImageSpace::GetBootClassPathChecksums(
+        boot_class_path.SubArray(/* pos= */ 0u, component_count),
+        runtime->GetImageLocation(),
+        isa_,
+        runtime->GetImageSpaceLoadingOrder(),
+        &error_msg);
+    if (boot_class_path_checksums.empty()) {
+      VLOG(oat) << "No image for oat image checksum to match against.";
+
+      if (HasOriginalDexFiles()) {
+        return false;
+      }
+
+      // If there is no original dex file to fall back to, grudgingly accept
+      // the oat file. This could technically lead to crashes, but there's no
+      // way we could find a better oat file to use for this dex location,
+      // and it's better than being stuck in a boot loop with no way out.
+      // The problem will hopefully resolve itself the next time the runtime
+      // starts up.
+      LOG(WARNING) << "Dex location " << dex_location_ << " does not seem to include dex file. "
+          << "Allow oat file use. This is potentially dangerous.";
+
+      return true;
+    }
+    cached_boot_class_path_checksum_component_count_ = component_count;
+    cached_boot_class_path_checksums_ = boot_class_path_checksums;
+  }
+
+  // Compare the checksums.
+  return cached_boot_class_path_checksums_ == oat_boot_class_path_checksums;
 }
 
 OatFileAssistant::OatFileInfo& OatFileAssistant::GetBestInfo() {
-  ScopedTrace trace("GetBestInfo");
   // TODO(calin): Document the side effects of class loading when
   // running dalvikvm command line.
   if (dex_parent_writable_ || UseFdToReadFiles()) {
@@ -728,7 +746,6 @@ const std::string* OatFileAssistant::OatFileInfo::Filename() {
 }
 
 bool OatFileAssistant::OatFileInfo::IsUseable() {
-  ScopedTrace trace("IsUseable");
   switch (Status()) {
     case kOatCannotOpen:
     case kOatDexOutOfDate:
@@ -740,7 +757,6 @@ bool OatFileAssistant::OatFileInfo::IsUseable() {
 }
 
 OatFileAssistant::OatStatus OatFileAssistant::OatFileInfo::Status() {
-  ScopedTrace trace("Status");
   if (!status_attempted_) {
     status_attempted_ = true;
     const OatFile* file = GetFile();
@@ -954,7 +970,6 @@ std::unique_ptr<OatFile> OatFileAssistant::OatFileInfo::ReleaseFile() {
 }
 
 std::unique_ptr<OatFile> OatFileAssistant::OatFileInfo::ReleaseFileForUse() {
-  ScopedTrace trace("ReleaseFileForUse");
   if (Status() == kOatUpToDate) {
     return ReleaseFile();
   }

@@ -137,8 +137,6 @@ class PACKED(8) ImageHeader {
               uint32_t oat_file_end,
               uint32_t boot_image_begin,
               uint32_t boot_image_size,
-              uint32_t boot_image_component_count,
-              uint32_t boot_image_checksum,
               uint32_t pointer_size);
 
   bool IsValid() const;
@@ -224,21 +222,16 @@ class PACKED(8) ImageHeader {
   enum ImageRoot {
     kDexCaches,
     kClassRoots,
+    kOomeWhenThrowingException,       // Pre-allocated OOME when throwing exception.
+    kOomeWhenThrowingOome,            // Pre-allocated OOME when throwing OOME.
+    kOomeWhenHandlingStackOverflow,   // Pre-allocated OOME when handling StackOverflowError.
+    kNoClassDefFoundError,            // Pre-allocated NoClassDefFoundError.
     kSpecialRoots,                    // Different for boot image and app image, see aliases below.
     kImageRootsMax,
 
     // Aliases.
     kAppImageClassLoader = kSpecialRoots,   // The class loader used to build the app image.
     kBootImageLiveObjects = kSpecialRoots,  // Array of boot image objects that must be kept live.
-  };
-
-  enum BootImageLiveObjects {
-    kOomeWhenThrowingException,       // Pre-allocated OOME when throwing exception.
-    kOomeWhenThrowingOome,            // Pre-allocated OOME when throwing OOME.
-    kOomeWhenHandlingStackOverflow,   // Pre-allocated OOME when handling StackOverflowError.
-    kNoClassDefFoundError,            // Pre-allocated NoClassDefFoundError.
-    kClearedJniWeakSentinel,          // Pre-allocated sentinel for cleared weak JNI references.
-    kIntrinsicObjectsStart
   };
 
   /*
@@ -341,8 +334,9 @@ class PACKED(8) ImageHeader {
   ObjPtr<mirror::ObjectArray<mirror::Object>> GetImageRoots() const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void RelocateImageReferences(int64_t delta);
-  void RelocateBootImageReferences(int64_t delta);
+  void RelocateImage(int64_t delta);
+  void RelocateImageMethods(int64_t delta);
+  void RelocateImageObjects(int64_t delta);
 
   uint32_t GetBootImageBegin() const {
     return boot_image_begin_;
@@ -352,19 +346,15 @@ class PACKED(8) ImageHeader {
     return boot_image_size_;
   }
 
-  uint32_t GetBootImageComponentCount() const {
-    return boot_image_component_count_;
-  }
-
-  uint32_t GetBootImageChecksum() const {
-    return boot_image_checksum_;
-  }
-
   uint64_t GetDataSize() const {
     return data_size_;
   }
 
-  bool IsAppImage() const;
+  bool IsAppImage() const {
+    // App images currently require a boot image, if the size is non zero then it is an app image
+    // header.
+    return boot_image_size_ != 0u;
+  }
 
   // Visit mirror::Objects in the section starting at base.
   // TODO: Delete base parameter if it is always equal to GetImageBegin.
@@ -471,14 +461,9 @@ class PACKED(8) ImageHeader {
   // .so files. Used for positioning a following alloc spaces.
   uint32_t oat_file_end_ = 0u;
 
-  // Boot image begin and end (only applies to boot image extension and app image headers).
+  // Boot image begin and end (app image headers only).
   uint32_t boot_image_begin_ = 0u;
   uint32_t boot_image_size_ = 0u;  // Includes heap (*.art) and code (.oat).
-
-  // Number of boot image components that this image depends on and their composite checksum
-  // (only applies to boot image extension and app image headers).
-  uint32_t boot_image_component_count_ = 0u;
-  uint32_t boot_image_checksum_ = 0u;
 
   // Absolute address of an Object[] of objects needed to reinitialize from an image.
   uint32_t image_roots_ = 0u;

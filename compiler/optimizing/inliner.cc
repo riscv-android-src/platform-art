@@ -604,8 +604,9 @@ bool HInliner::TryInlineFromInlineCache(const DexFile& caller_dex_file,
   switch (inline_cache_type) {
     case kInlineCacheNoData: {
       LOG_FAIL_NO_STAT()
-          << "No inline cache information for call to "
-          << caller_dex_file.PrettyMethod(invoke_instruction->GetDexMethodIndex());
+          << "Interface or virtual call to "
+          << caller_dex_file.PrettyMethod(invoke_instruction->GetDexMethodIndex())
+          << " could not be statically determined";
       return false;
     }
 
@@ -692,8 +693,9 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
   }
 
   std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> offline_profile =
-      pci->GetHotMethodInfo(MethodReference(
-          &caller_dex_file, caller_compilation_unit_.GetDexMethodIndex()));
+      pci->GetMethod(caller_dex_file.GetLocation(),
+                     caller_dex_file.GetLocationChecksum(),
+                     caller_compilation_unit_.GetDexMethodIndex());
   if (offline_profile == nullptr) {
     return kInlineCacheNoData;  // no profile information for this invocation.
   }
@@ -746,7 +748,8 @@ HInliner::InlineCacheType HInliner::ExtractClassesFromOfflineProfile(
       }
     }
     if (!found) {
-      VLOG(compiler) << "Could not find profiled dex file: " << offline_profile.dex_references[i];
+      VLOG(compiler) << "Could not find profiled dex file: "
+          << offline_profile.dex_references[i].dex_location;
       return kInlineCacheMissingTypes;
     }
   }
@@ -1812,8 +1815,7 @@ bool HInliner::TryBuildAndInlineHelper(HInvoke* invoke_instruction,
       callee_dead_reference_safe,
       graph_->IsDebuggable(),
       /* osr= */ false,
-      /* is_shared_jit_code= */ graph_->IsCompilingForSharedJitCode(),
-      /* start_instruction_id= */ caller_instruction_counter);
+      caller_instruction_counter);
   callee_graph->SetArtMethod(resolved_method);
 
   // When they are needed, allocate `inline_stats_` on the Arena instead

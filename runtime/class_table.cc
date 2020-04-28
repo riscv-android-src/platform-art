@@ -34,10 +34,18 @@ void ClassTable::FreezeSnapshot() {
 }
 
 bool ClassTable::Contains(ObjPtr<mirror::Class> klass) {
-  return LookupByDescriptor(klass) == klass;
+  ReaderMutexLock mu(Thread::Current(), lock_);
+  TableSlot slot(klass);
+  for (ClassSet& class_set : classes_) {
+    auto it = class_set.find(slot);
+    if (it != class_set.end()) {
+      return it->Read() == klass;
+    }
+  }
+  return false;
 }
 
-ObjPtr<mirror::Class> ClassTable::LookupByDescriptor(ObjPtr<mirror::Class> klass) {
+mirror::Class* ClassTable::LookupByDescriptor(ObjPtr<mirror::Class> klass) {
   ReaderMutexLock mu(Thread::Current(), lock_);
   TableSlot slot(klass);
   for (ClassSet& class_set : classes_) {
@@ -49,9 +57,7 @@ ObjPtr<mirror::Class> ClassTable::LookupByDescriptor(ObjPtr<mirror::Class> klass
   return nullptr;
 }
 
-ObjPtr<mirror::Class> ClassTable::UpdateClass(const char* descriptor,
-                                              ObjPtr<mirror::Class> klass,
-                                              size_t hash) {
+mirror::Class* ClassTable::UpdateClass(const char* descriptor, mirror::Class* klass, size_t hash) {
   WriterMutexLock mu(Thread::Current(), lock_);
   // Should only be updating latest table.
   DescriptorHashPair pair(descriptor, hash);
@@ -64,7 +70,7 @@ ObjPtr<mirror::Class> ClassTable::UpdateClass(const char* descriptor,
     }
     LOG(FATAL) << "Updating class not found " << descriptor;
   }
-  const ObjPtr<mirror::Class> existing = existing_it->Read();
+  mirror::Class* const existing = existing_it->Read();
   CHECK_NE(existing, klass) << descriptor;
   CHECK(!existing->IsResolved()) << descriptor;
   CHECK_EQ(klass->GetStatus(), ClassStatus::kResolving) << descriptor;
@@ -115,7 +121,7 @@ size_t ClassTable::NumReferencedNonZygoteClasses() const {
   return classes_.back().size();
 }
 
-ObjPtr<mirror::Class> ClassTable::Lookup(const char* descriptor, size_t hash) {
+mirror::Class* ClassTable::Lookup(const char* descriptor, size_t hash) {
   DescriptorHashPair pair(descriptor, hash);
   ReaderMutexLock mu(Thread::Current(), lock_);
   for (ClassSet& class_set : classes_) {
@@ -185,35 +191,27 @@ bool ClassTable::Remove(const char* descriptor) {
 uint32_t ClassTable::ClassDescriptorHashEquals::operator()(const TableSlot& slot)
     const {
   std::string temp;
-  // No read barrier needed, we're reading a chain of constant references for comparison
-  // with null and retrieval of constant primitive data. See ReadBarrierOption.
-  return ComputeModifiedUtf8Hash(slot.Read<kWithoutReadBarrier>()->GetDescriptor(&temp));
+  return ComputeModifiedUtf8Hash(slot.Read()->GetDescriptor(&temp));
 }
 
 bool ClassTable::ClassDescriptorHashEquals::operator()(const TableSlot& a,
                                                        const TableSlot& b) const {
-  // No read barrier needed, we're reading a chain of constant references for comparison
-  // with null and retrieval of constant primitive data. See ReadBarrierOption.
   if (a.Hash() != b.Hash()) {
     std::string temp;
-    DCHECK(!a.Read<kWithoutReadBarrier>()->DescriptorEquals(
-        b.Read<kWithoutReadBarrier>()->GetDescriptor(&temp)));
+    DCHECK(!a.Read()->DescriptorEquals(b.Read()->GetDescriptor(&temp)));
     return false;
   }
   std::string temp;
-  return a.Read<kWithoutReadBarrier>()->DescriptorEquals(
-      b.Read<kWithoutReadBarrier>()->GetDescriptor(&temp));
+  return a.Read()->DescriptorEquals(b.Read()->GetDescriptor(&temp));
 }
 
 bool ClassTable::ClassDescriptorHashEquals::operator()(const TableSlot& a,
                                                        const DescriptorHashPair& b) const {
-  // No read barrier needed, we're reading a chain of constant references for comparison
-  // with null and retrieval of constant primitive data. See ReadBarrierOption.
   if (!a.MaskedHashEquals(b.second)) {
-    DCHECK(!a.Read<kWithoutReadBarrier>()->DescriptorEquals(b.first));
+    DCHECK(!a.Read()->DescriptorEquals(b.first));
     return false;
   }
-  return a.Read<kWithoutReadBarrier>()->DescriptorEquals(b.first);
+  return a.Read()->DescriptorEquals(b.first);
 }
 
 uint32_t ClassTable::ClassDescriptorHashEquals::operator()(const DescriptorHashPair& pair) const {

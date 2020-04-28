@@ -17,6 +17,7 @@
 #ifndef ART_RUNTIME_ART_FIELD_H_
 #define ART_RUNTIME_ART_FIELD_H_
 
+#include "dex/dex_file_types.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
 #include "gc_root.h"
@@ -73,10 +74,6 @@ class ArtField final {
 
   bool IsFinal() REQUIRES_SHARED(Locks::mutator_lock_) {
     return (GetAccessFlags() & kAccFinal) != 0;
-  }
-
-  bool IsPrivate() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccPrivate) != 0;
   }
 
   uint32_t GetDexFieldIndex() {
@@ -227,6 +224,11 @@ class ArtField final {
   static std::string PrettyField(ArtField* f, bool with_type = true)
       REQUIRES_SHARED(Locks::mutator_lock_);
   std::string PrettyField(bool with_type = true)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  // Update the declaring class with the passed in visitor. Does not use read barrier.
+  template <typename Visitor>
+  ALWAYS_INLINE void UpdateObjects(const Visitor& visitor)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:

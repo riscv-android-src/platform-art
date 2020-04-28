@@ -1,4 +1,2 @@
 JNI_OnLoad called
-Simple loop finishing
-Float loop finishing
-Simd loop finishing
+Finishing

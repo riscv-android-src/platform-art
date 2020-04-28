@@ -30,7 +30,7 @@ public class Main {
   //
   // class Transform {
   //   public void sayHi(Consumer<Consumer<String>> r, Consumer<String> reporter) {
-  //     reporter.accept("goodbye - Start method sayHi");
+  //    reporter.accept("goodbye - Start method sayHi");
   //     r.accept(reporter);
   //     reporter.accept("goodbye - End method sayHi");
   //   }
@@ -154,6 +154,8 @@ public class Main {
     }
 
     public void run() {
+      // Figure out if we can even JIT at all.
+      final boolean has_jit = hasJit();
       try {
         this.arrivalLatch.await();
         maybePrint("REDEFINITION THREAD: redefining something!");
@@ -196,6 +198,8 @@ public class Main {
       t.sayHi(do_nothing, w);
     }
   }
+
+  private static native boolean hasJit();
 
   private static native void ensureJitCompiled(Class c, String name);
 }

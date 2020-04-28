@@ -31,16 +31,6 @@ AotClassLinker::AotClassLinker(InternTable* intern_table)
 
 AotClassLinker::~AotClassLinker() {}
 
-bool AotClassLinker::CanAllocClass() {
-  // AllocClass doesn't work under transaction, so we abort.
-  if (Runtime::Current()->IsActiveTransaction()) {
-    Runtime::Current()->AbortTransactionAndThrowAbortError(
-        Thread::Current(), "Can't resolve type within transaction.");
-    return false;
-  }
-  return ClassLinker::CanAllocClass();
-}
-
 // Wrap the original InitializeClass with creation of transaction when in strict mode.
 bool AotClassLinker::InitializeClass(Thread* self,
                                      Handle<mirror::Class> klass,
@@ -54,13 +44,6 @@ bool AotClassLinker::InitializeClass(Thread* self,
     return ClassLinker::InitializeClass(self, klass, can_init_statics, can_init_parents);
   }
 
-  // When in strict_mode, don't initialize a class if it belongs to boot but not initialized.
-  if (strict_mode_ && klass->IsBootStrapClassLoaded()) {
-    runtime->AbortTransactionAndThrowAbortError(self, "Can't resolve "
-        + klass->PrettyTypeOf() + " because it is an uninitialized boot class.");
-    return false;
-  }
-
   // Don't initialize klass if it's superclass is not initialized, because superclass might abort
   // the transaction and rolled back after klass's change is commited.
   if (strict_mode_ && !klass->IsInterface() && klass->HasSuperClass()) {
@@ -72,7 +55,7 @@ bool AotClassLinker::InitializeClass(Thread* self,
   }
 
   if (strict_mode_) {
-    runtime->EnterTransactionMode(/*strict=*/ true, klass.Get());
+    runtime->EnterTransactionMode(true, klass.Get()->AsClass().Ptr());
   }
   bool success = ClassLinker::InitializeClass(self, klass, can_init_statics, can_init_parents);
 
@@ -81,8 +64,9 @@ bool AotClassLinker::InitializeClass(Thread* self,
       // Exit Transaction if success.
       runtime->ExitTransactionMode();
     } else {
-      // If not successfully initialized, don't rollback immediately, leave the cleanup to compiler
-      // driver which needs abort message and exception.
+      // If not successfully initialized, the last transaction must abort. Don't rollback
+      // immediately, leave the cleanup to compiler driver which needs abort message and exception.
+      DCHECK(runtime->IsTransactionAborted());
       DCHECK(self->IsExceptionPending());
     }
   }

@@ -59,11 +59,9 @@ static jobjectArray Method_getExceptionTypes(JNIEnv* env, jobject javaMethod) {
       ++i;
     }
     CHECK_NE(throws_index, -1);
-    StackHandleScope<1u> hs(soa.Self());
-    Handle<mirror::ObjectArray<mirror::Class>> declared_exceptions =
-        hs.NewHandle(klass->GetProxyThrows()->Get(throws_index));
-    return soa.AddLocalReference<jobjectArray>(
-        mirror::ObjectArray<mirror::Class>::Clone(declared_exceptions, soa.Self()));
+    ObjPtr<mirror::ObjectArray<mirror::Class>> declared_exceptions =
+        klass->GetProxyThrows()->Get(throws_index);
+    return soa.AddLocalReference<jobjectArray>(declared_exceptions->Clone(soa.Self()));
   } else {
     ObjPtr<mirror::ObjectArray<mirror::Class>> result_array =
         annotations::GetExceptionTypesForMethod(method);

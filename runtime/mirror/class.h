@@ -21,11 +21,13 @@
 
 #include "base/bit_utils.h"
 #include "base/casts.h"
+#include "base/stride_iterator.h"
 #include "class_flags.h"
 #include "class_status.h"
 #include "dex/dex_file_types.h"
 #include "dex/modifiers.h"
 #include "dex/primitive.h"
+#include "gc/allocator_type.h"
 #include "object.h"
 #include "object_array.h"
 #include "read_barrier_option.h"
@@ -36,10 +38,6 @@ namespace dex {
 struct ClassDef;
 class TypeList;
 }  // namespace dex
-
-namespace gc {
-enum AllocatorType : char;
-}  // namespace gc
 
 namespace hiddenapi {
 class AccessContext;
@@ -57,7 +55,6 @@ template <typename Iter> class IterationRange;
 template<typename T> class LengthPrefixedArray;
 enum class PointerSize : size_t;
 class Signature;
-template<typename T> class StrideIterator;
 template<size_t kNumReferences> class PACKED(4) StackHandleScope;
 class Thread;
 
@@ -89,23 +86,17 @@ class MANAGED Class final : public Object {
   static constexpr uint32_t kPrimitiveTypeSizeShiftShift = 16;
   static constexpr uint32_t kPrimitiveTypeMask = (1u << kPrimitiveTypeSizeShiftShift) - 1;
 
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           bool kWithSynchronizationBarrier = true>
+  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ClassStatus GetStatus() REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Reading the field without barrier is used exclusively for IsVisiblyInitialized().
-    int32_t field_value = kWithSynchronizationBarrier
-        ? GetField32Volatile<kVerifyFlags>(StatusOffset())
-        : GetField32<kVerifyFlags>(StatusOffset());
     // Avoid including "subtype_check_bits_and_status.h" to get the field.
     // The ClassStatus is always in the 4 most-significant bits of status_.
-    return enum_cast<ClassStatus>(static_cast<uint32_t>(field_value) >> (32 - 4));
+    return enum_cast<ClassStatus>(
+        static_cast<uint32_t>(GetField32Volatile<kVerifyFlags>(StatusOffset())) >> (32 - 4));
   }
 
   // This is static because 'this' may be moved by GC.
   static void SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
-
-  void SetStatusForPrimitiveOrArray(ClassStatus new_status) REQUIRES_SHARED(Locks::mutator_lock_);
 
   static constexpr MemberOffset StatusOffset() {
     return MemberOffset(OFFSET_OF_OBJECT_MEMBER(Class, status_));
@@ -180,15 +171,7 @@ class MANAGED Class final : public Object {
   // Returns true if the class is initialized.
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   bool IsInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return GetStatus<kVerifyFlags>() >= ClassStatus::kInitialized;
-  }
-
-  // Returns true if the class is visibly initialized.
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
-  bool IsVisiblyInitialized() REQUIRES_SHARED(Locks::mutator_lock_) {
-    // Note: Avoiding the synchronization barrier for the visibly initialized check.
-    ClassStatus status = GetStatus<kVerifyFlags, /*kWithSynchronizationBarrier=*/ false>();
-    return status == ClassStatus::kVisiblyInitialized;
+    return GetStatus<kVerifyFlags>() == ClassStatus::kInitialized;
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -310,17 +293,6 @@ class MANAGED Class final : public Object {
     uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
     if ((flags & kAccVerificationAttempted) == 0) {
       SetAccessFlags(flags | kAccVerificationAttempted);
-    }
-  }
-
-  bool IsObsoleteObject() REQUIRES_SHARED(Locks::mutator_lock_) {
-    return (GetAccessFlags() & kAccObsoleteObject) != 0;
-  }
-
-  void SetObsoleteObject() REQUIRES_SHARED(Locks::mutator_lock_) {
-    uint32_t flags = GetField32(OFFSET_OF_OBJECT_MEMBER(Class, access_flags_));
-    if ((flags & kAccObsoleteObject) == 0) {
-      SetAccessFlags(flags | kAccObsoleteObject);
     }
   }
 
@@ -492,7 +464,7 @@ class MANAGED Class final : public Object {
   bool IsPrimitiveArray() REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Creates a raw object instance but does not invoke the default constructor.
-  template<bool kIsInstrumented = true, bool kCheckAddFinalizer = true>
+  template<bool kIsInstrumented, bool kCheckAddFinalizer = true>
   ALWAYS_INLINE ObjPtr<Object> Alloc(Thread* self, gc::AllocatorType allocator_type)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
@@ -1092,7 +1064,7 @@ class MANAGED Class final : public Object {
   // Returns the ExtData for this class, allocating one if necessary. This should be the only way
   // to force ext_data_ to be set. No functions are available for changing an already set ext_data_
   // since doing so is not allowed.
-  static ObjPtr<ClassExt> EnsureExtDataPresent(Handle<Class> h_this, Thread* self)
+  ObjPtr<ClassExt> EnsureExtDataPresent(Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
   uint16_t GetDexClassDefIndex() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -1121,29 +1093,10 @@ class MANAGED Class final : public Object {
   void VisitNativeRoots(Visitor& visitor, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Visit ArtMethods directly owned by this class.
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
-  void VisitMethods(Visitor visitor, PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Visit ArtFields directly owned by this class.
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
-  void VisitFields(Visitor visitor) REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Get one of the primitive classes.
   static ObjPtr<mirror::Class> GetPrimitiveClass(ObjPtr<mirror::String> name)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Clear the kAccMustCountLocks flag on each method, for class redefinition.
-  void ClearMustCountLocksFlagOnAllMethods(PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  // Clear the kAccCompileDontBother flag on each method, for class redefinition.
-  void ClearDontCompileFlagOnAllMethods(PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Clear the kAccSkipAccessChecks flag on each method, for class redefinition.
-  void ClearSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   // When class is verified, set the kAccSkipAccessChecks flag on each method.
   void SetSkipAccessChecksFlagOnAllMethods(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1184,11 +1137,7 @@ class MANAGED Class final : public Object {
   void AssertInitializedOrInitializingInThread(Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static ObjPtr<Class> CopyOf(Handle<Class> h_this,
-                              Thread* self,
-                              int32_t new_length,
-                              ImTable* imt,
-                              PointerSize pointer_size)
+  ObjPtr<Class> CopyOf(Thread* self, int32_t new_length, ImTable* imt, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
 
   // For proxy class only.
@@ -1271,26 +1220,6 @@ class MANAGED Class final : public Object {
   // roots.
   template <VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags, typename Visitor>
   void FixupNativePointers(Class* dest, PointerSize pointer_size, const Visitor& visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Get or create the various jni id arrays in a lock-less thread safe manner.
-  static ObjPtr<PointerArray> GetOrCreateMethodIds(Handle<Class> h_this)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetMethodIds() REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<PointerArray> GetOrCreateStaticFieldIds(Handle<Class> h_this)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetStaticFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
-  static ObjPtr<PointerArray> GetOrCreateInstanceFieldIds(Handle<Class> h_this)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  ObjPtr<PointerArray> GetInstanceFieldIds() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Calculate the index in the ifields_, methods_ or sfields_ arrays a method is located at. This
-  // is to be used with the above Get{,OrCreate}...Ids functions.
-  size_t GetStaticFieldIdOffset(ArtField* field)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  size_t GetInstanceFieldIdOffset(ArtField* field)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-  size_t GetMethodIdOffset(ArtMethod* method, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
  private:

@@ -39,7 +39,6 @@
 
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "handle.h"
 #include "thread.h"
 
 namespace art {
@@ -47,9 +46,6 @@ class ArtField;
 class ScopedObjectAccessAlreadyRunnable;
 class Thread;
 class Closure;
-namespace mirror {
-class Throwable;
-}  // namespace mirror
 }  // namespace art
 
 namespace openjdkjvmti {

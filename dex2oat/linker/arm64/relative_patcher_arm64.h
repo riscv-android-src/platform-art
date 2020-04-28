@@ -47,9 +47,6 @@ class Arm64RelativePatcher final : public ArmBaseRelativePatcher {
                                 const LinkerPatch& patch,
                                 uint32_t patch_offset,
                                 uint32_t target_offset) override;
-  void PatchEntrypointCall(std::vector<uint8_t>* code,
-                           const LinkerPatch& patch,
-                           uint32_t patch_offset) override;
   void PatchBakerReadBarrierBranch(std::vector<uint8_t>* code,
                                    const LinkerPatch& patch,
                                    uint32_t patch_offset) override;
@@ -60,11 +57,10 @@ class Arm64RelativePatcher final : public ArmBaseRelativePatcher {
 
  private:
   static uint32_t PatchAdrp(uint32_t adrp, uint32_t disp);
-  static void PatchBl(std::vector<uint8_t>* code, uint32_t literal_offset, uint32_t displacement);
 
   static bool NeedsErratum843419Thunk(ArrayRef<const uint8_t> code, uint32_t literal_offset,
                                       uint32_t patch_offset);
-  static void SetInsn(std::vector<uint8_t>* code, uint32_t offset, uint32_t value);
+  void SetInsn(std::vector<uint8_t>* code, uint32_t offset, uint32_t value);
   static uint32_t GetInsn(ArrayRef<const uint8_t> code, uint32_t offset);
 
   template <typename Alloc>

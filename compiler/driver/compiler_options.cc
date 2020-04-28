@@ -20,11 +20,11 @@
 #include <string_view>
 
 #include "android-base/stringprintf.h"
+#include "android-base/strings.h"
 
 #include "arch/instruction_set.h"
 #include "arch/instruction_set_features.h"
 #include "base/runtime_debug.h"
-#include "base/string_view_cpp20.h"
 #include "base/variant_map.h"
 #include "class_linker.h"
 #include "cmdline_parser.h"
@@ -42,6 +42,8 @@ CompilerOptions::CompilerOptions()
     : compiler_filter_(CompilerFilter::kDefaultCompilerFilter),
       huge_method_threshold_(kDefaultHugeMethodThreshold),
       large_method_threshold_(kDefaultLargeMethodThreshold),
+      small_method_threshold_(kDefaultSmallMethodThreshold),
+      tiny_method_threshold_(kDefaultTinyMethodThreshold),
       num_dex_methods_threshold_(kDefaultNumDexMethodsThreshold),
       inline_max_code_units_(kUnsetInlineMaxCodeUnits),
       instruction_set_(kRuntimeISA == InstructionSet::kArm ? InstructionSet::kThumb2 : kRuntimeISA),
@@ -76,7 +78,6 @@ CompilerOptions::CompilerOptions()
       deduplicate_code_(true),
       count_hotness_in_compiled_code_(false),
       resolve_startup_const_strings_(false),
-      initialize_app_image_classes_(false),
       check_profiled_methods_(ProfileMethodsCheck::kNone),
       max_image_block_size_(std::numeric_limits<uint32_t>::max()),
       register_allocation_strategy_(RegisterAllocator::kRegisterAllocatorDefault),
@@ -185,23 +186,18 @@ bool CompilerOptions::IsMethodVerifiedWithoutFailures(uint32_t method_idx,
 }
 
 bool CompilerOptions::IsCoreImageFilename(const std::string& boot_image_filename) {
-  std::string_view filename(boot_image_filename);
-  size_t colon_pos = filename.find(':');
-  if (colon_pos != std::string_view::npos) {
-    filename = filename.substr(0u, colon_pos);
-  }
   // Look for "core.art" or "core-*.art".
-  if (EndsWith(filename, "core.art")) {
+  if (android::base::EndsWith(boot_image_filename, "core.art")) {
     return true;
   }
-  if (!EndsWith(filename, ".art")) {
+  if (!android::base::EndsWith(boot_image_filename, ".art")) {
     return false;
   }
-  size_t slash_pos = filename.rfind('/');
+  size_t slash_pos = boot_image_filename.rfind('/');
   if (slash_pos == std::string::npos) {
-    return StartsWith(filename, "core-");
+    return android::base::StartsWith(boot_image_filename, "core-");
   }
-  return filename.compare(slash_pos + 1, 5u, "core-") == 0;
+  return boot_image_filename.compare(slash_pos + 1, 5u, "core-") == 0;
 }
 
 }  // namespace art

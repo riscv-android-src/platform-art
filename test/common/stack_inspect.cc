@@ -187,11 +187,8 @@ extern "C" JNIEXPORT jobject JNICALL Java_Main_getThisOfCaller(
   jobject result = nullptr;
   StackVisitor::WalkStack(
       [&](const art::StackVisitor* stack_visitor) REQUIRES_SHARED(Locks::mutator_lock_) {
-        // Discard stubs and Main.getThisOfCaller and methods without vreg info.
-        if (stack_visitor->GetMethod() == nullptr ||
-            stack_visitor->GetMethod()->IsNative() ||
-            (stack_visitor->GetCurrentShadowFrame() == nullptr &&
-             !Runtime::Current()->IsAsyncDeoptimizeable(stack_visitor->GetCurrentQuickFramePc()))) {
+        // Discard stubs and Main.getThisOfCaller.
+        if (stack_visitor->GetMethod() == nullptr || stack_visitor->GetMethod()->IsNative()) {
           return true;
         }
         result = soa.AddLocalReference<jobject>(stack_visitor->GetThisObject());

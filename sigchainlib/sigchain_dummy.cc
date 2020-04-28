@@ -46,11 +46,6 @@ extern "C" void RemoveSpecialSignalHandlerFn(int signal ATTRIBUTE_UNUSED,
   abort();
 }
 
-extern "C" void SkipAddSignalHandler(bool value ATTRIBUTE_UNUSED) {
-  log("SkipAddSignalHandler is not exported by the main executable.");
-  abort();
-}
-
 #pragma GCC diagnostic pop
 
 }  // namespace art

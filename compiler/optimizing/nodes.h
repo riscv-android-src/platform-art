@@ -25,7 +25,6 @@
 #include "base/arena_containers.h"
 #include "base/arena_object.h"
 #include "base/array_ref.h"
-#include "base/intrusive_forward_list.h"
 #include "base/iteration_range.h"
 #include "base/mutex.h"
 #include "base/quasi_atomic.h"
@@ -46,6 +45,7 @@
 #include "mirror/class.h"
 #include "mirror/method_type.h"
 #include "offsets.h"
+#include "utils/intrusive_forward_list.h"
 
 namespace art {
 
@@ -131,7 +131,6 @@ enum GraphAnalysisResult {
   kAnalysisFailThrowCatchLoop,
   kAnalysisFailAmbiguousArrayOp,
   kAnalysisFailIrreducibleLoopAndStringInit,
-  kAnalysisFailPhiEquivalentInOsr,
   kAnalysisSuccess,
 };
 
@@ -321,7 +320,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
          bool dead_reference_safe = false,
          bool debuggable = false,
          bool osr = false,
-         bool is_shared_jit_code = false,
          int start_instruction_id = 0)
       : allocator_(allocator),
         arena_stack_(arena_stack),
@@ -336,7 +334,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         temporaries_vreg_slots_(0),
         has_bounds_checks_(false),
         has_try_catch_(false),
-        has_monitor_operations_(false),
         has_simd_(false),
         has_loops_(false),
         has_irreducible_loops_(false),
@@ -358,8 +355,7 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         art_method_(nullptr),
         inexact_object_rti_(ReferenceTypeInfo::CreateInvalid()),
         osr_(osr),
-        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)),
-        is_shared_jit_code_(is_shared_jit_code) {
+        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)) {
     blocks_.reserve(kDefaultNumberOfBlocks);
   }
 
@@ -589,10 +585,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   bool IsCompilingOsr() const { return osr_; }
 
-  bool IsCompilingForSharedJitCode() const {
-    return is_shared_jit_code_;
-  }
-
   ArenaSet<ArtMethod*>& GetCHASingleImplementationList() {
     return cha_single_implementation_list_;
   }
@@ -607,9 +599,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   bool HasTryCatch() const { return has_try_catch_; }
   void SetHasTryCatch(bool value) { has_try_catch_ = value; }
-
-  bool HasMonitorOperations() const { return has_monitor_operations_; }
-  void SetHasMonitorOperations(bool value) { has_monitor_operations_ = value; }
 
   bool HasSIMD() const { return has_simd_; }
   void SetHasSIMD(bool value) { has_simd_ = value; }
@@ -707,10 +696,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // false positives.
   bool has_try_catch_;
 
-  // Flag whether there are any HMonitorOperation in the graph. If yes this will mandate
-  // DexRegisterMap to be present to allow deadlock analysis for non-debuggable code.
-  bool has_monitor_operations_;
-
   // Flag whether SIMD instructions appear in the graph. If true, the
   // code generators may have to be more careful spilling the wider
   // contents of SIMD registers.
@@ -788,10 +773,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   // List of methods that are assumed to have single implementation.
   ArenaSet<ArtMethod*> cha_single_implementation_list_;
-
-  // Whether we are JIT compiling in the shared region area, putting
-  // restrictions on, for example, how literals are being generated.
-  bool is_shared_jit_code_;
 
   friend class SsaBuilder;           // For caching constants.
   friend class SsaLivenessAnalysis;  // For the linear order.
@@ -1118,7 +1099,7 @@ class HBasicBlock : public ArenaObject<kArenaAllocBasicBlock> {
   }
 
   // Insert `this` between `predecessor` and `successor. This method
-  // preserves the indices, and will update the first edge found between
+  // preserves the indicies, and will update the first edge found between
   // `predecessor` and `successor`.
   void InsertBetween(HBasicBlock* predecessor, HBasicBlock* successor) {
     size_t predecessor_index = successor->GetPredecessorIndexOf(predecessor);
@@ -1457,7 +1438,6 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(Shr, BinaryOperation)                                               \
   M(StaticFieldGet, Instruction)                                        \
   M(StaticFieldSet, Instruction)                                        \
-  M(StringBuilderAppend, Instruction)                                   \
   M(UnresolvedInstanceFieldGet, Instruction)                            \
   M(UnresolvedInstanceFieldSet, Instruction)                            \
   M(UnresolvedStaticFieldGet, Instruction)                              \
@@ -1540,7 +1520,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
 
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
 #define FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)                     \
-  M(X86AndNot, Instruction)                                             \
+  M(X86AndNot, Instruction)                                                \
   M(X86MaskOrResetLeastSetBit, Instruction)
 #else
 #define FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)
@@ -2157,13 +2137,12 @@ class HInstruction : public ArenaObject<kArenaAllocInstruction> {
   // If this instruction will do an implicit null check, return the `HNullCheck` associated
   // with it. Otherwise return null.
   HNullCheck* GetImplicitNullCheck() const {
-    // Go over previous non-move instructions that are emitted at use site.
-    HInstruction* prev_not_move = GetPreviousDisregardingMoves();
-    while (prev_not_move != nullptr && prev_not_move->IsEmittedAtUseSite()) {
-      if (prev_not_move->IsNullCheck()) {
-        return prev_not_move->AsNullCheck();
-      }
-      prev_not_move = prev_not_move->GetPreviousDisregardingMoves();
+    // Find the first previous instruction which is not a move.
+    HInstruction* first_prev_not_move = GetPreviousDisregardingMoves();
+    if (first_prev_not_move != nullptr &&
+        first_prev_not_move->IsNullCheck() &&
+        first_prev_not_move->IsEmittedAtUseSite()) {
+      return first_prev_not_move->AsNullCheck();
     }
     return nullptr;
   }
@@ -4796,16 +4775,7 @@ class HInvokeVirtual final : public HInvoke {
       case Intrinsics::kThreadCurrentThread:
       case Intrinsics::kStringBufferAppend:
       case Intrinsics::kStringBufferToString:
-      case Intrinsics::kStringBuilderAppendObject:
-      case Intrinsics::kStringBuilderAppendString:
-      case Intrinsics::kStringBuilderAppendCharSequence:
-      case Intrinsics::kStringBuilderAppendCharArray:
-      case Intrinsics::kStringBuilderAppendBoolean:
-      case Intrinsics::kStringBuilderAppendChar:
-      case Intrinsics::kStringBuilderAppendInt:
-      case Intrinsics::kStringBuilderAppendLong:
-      case Intrinsics::kStringBuilderAppendFloat:
-      case Intrinsics::kStringBuilderAppendDouble:
+      case Intrinsics::kStringBuilderAppend:
       case Intrinsics::kStringBuilderToString:
         return false;
       default:
@@ -6908,55 +6878,6 @@ class HStaticFieldSet final : public HExpression<2> {
                 "Too many packed fields.");
 
   const FieldInfo field_info_;
-};
-
-class HStringBuilderAppend final : public HVariableInputSizeInstruction {
- public:
-  HStringBuilderAppend(HIntConstant* format,
-                       uint32_t number_of_arguments,
-                       ArenaAllocator* allocator,
-                       uint32_t dex_pc)
-      : HVariableInputSizeInstruction(
-            kStringBuilderAppend,
-            DataType::Type::kReference,
-            // The runtime call may read memory from inputs. It never writes outside
-            // of the newly allocated result object (or newly allocated helper objects).
-            SideEffects::AllReads().Union(SideEffects::CanTriggerGC()),
-            dex_pc,
-            allocator,
-            number_of_arguments + /* format */ 1u,
-            kArenaAllocInvokeInputs) {
-    DCHECK_GE(number_of_arguments, 1u);  // There must be something to append.
-    SetRawInputAt(FormatIndex(), format);
-  }
-
-  void SetArgumentAt(size_t index, HInstruction* argument) {
-    DCHECK_LE(index, GetNumberOfArguments());
-    SetRawInputAt(index, argument);
-  }
-
-  // Return the number of arguments, excluding the format.
-  size_t GetNumberOfArguments() const {
-    DCHECK_GE(InputCount(), 1u);
-    return InputCount() - 1u;
-  }
-
-  size_t FormatIndex() const {
-    return GetNumberOfArguments();
-  }
-
-  HIntConstant* GetFormat() {
-    return InputAt(FormatIndex())->AsIntConstant();
-  }
-
-  bool NeedsEnvironment() const override { return true; }
-
-  bool CanThrow() const override { return true; }
-
-  DECLARE_INSTRUCTION(StringBuilderAppend);
-
- protected:
-  DEFAULT_COPY_CONSTRUCTOR(StringBuilderAppend);
 };
 
 class HUnresolvedInstanceFieldGet final : public HExpression<1> {

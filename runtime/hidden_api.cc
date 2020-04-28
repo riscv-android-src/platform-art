@@ -76,10 +76,10 @@ static inline std::ostream& operator<<(std::ostream& os, const AccessContext& va
 static Domain DetermineDomainFromLocation(const std::string& dex_location,
                                           ObjPtr<mirror::ClassLoader> class_loader) {
   // If running with APEX, check `path` against known APEX locations.
-  // These checks will be skipped on target buildbots where ANDROID_ART_ROOT
+  // These checks will be skipped on target buildbots where ANDROID_RUNTIME_ROOT
   // is set to "/system".
-  if (ArtModuleRootDistinctFromAndroidRoot()) {
-    if (LocationIsOnArtModule(dex_location.c_str()) ||
+  if (RuntimeModuleRootDistinctFromAndroidRoot()) {
+    if (LocationIsOnRuntimeModule(dex_location.c_str()) ||
         LocationIsOnConscryptModule(dex_location.c_str())) {
       return Domain::kCorePlatform;
     }
@@ -435,9 +435,14 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
   DCHECK(member != nullptr);
   Runtime* runtime = Runtime::Current();
 
-  EnforcementPolicy hiddenApiPolicy = runtime->GetHiddenApiEnforcementPolicy();
-  DCHECK(hiddenApiPolicy != EnforcementPolicy::kDisabled)
+  EnforcementPolicy policy = runtime->GetHiddenApiEnforcementPolicy();
+  DCHECK(policy != EnforcementPolicy::kDisabled)
       << "Should never enter this function when access checks are completely disabled";
+
+  const bool deny_access =
+      (policy == EnforcementPolicy::kEnabled) &&
+      IsSdkVersionSetAndMoreThan(runtime->GetTargetSdkVersion(),
+                                 api_list.GetMaxAllowedSdkVersion());
 
   MemberSignature member_signature(member);
 
@@ -448,18 +453,6 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
     // Exemptions effectively adds new members to the whitelist.
     MaybeUpdateAccessFlags(runtime, member, kAccPublicApi);
     return false;
-  }
-
-  EnforcementPolicy testApiPolicy = runtime->GetTestApiEnforcementPolicy();
-
-  bool deny_access = false;
-  if (hiddenApiPolicy == EnforcementPolicy::kEnabled) {
-    if (testApiPolicy == EnforcementPolicy::kDisabled && api_list.IsTestApi()) {
-      deny_access = false;
-    } else {
-      deny_access = IsSdkVersionSetAndMoreThan(runtime->GetTargetSdkVersion(),
-                                               api_list.GetMaxAllowedSdkVersion());
-    }
   }
 
   if (access_method != AccessMethod::kNone) {

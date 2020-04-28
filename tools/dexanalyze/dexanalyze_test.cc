@@ -22,7 +22,7 @@ namespace art {
 class DexAnalyzeTest : public CommonRuntimeTest {
  public:
   std::string GetDexAnalyzePath() {
-    return GetArtBinDir() + "/dexanalyze";
+    return GetTestAndroidRoot() + "/bin/dexanalyze";
   }
 
   void DexAnalyzeExec(const std::vector<std::string>& args, bool expect_success) {

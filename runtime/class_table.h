@@ -64,7 +64,9 @@ class ClassTable {
       return *this;
     }
 
-    bool IsNull() const REQUIRES_SHARED(Locks::mutator_lock_);
+    bool IsNull() const REQUIRES_SHARED(Locks::mutator_lock_) {
+      return Read<kWithoutReadBarrier>() == nullptr;
+    }
 
     uint32_t Hash() const {
       return MaskHash(data_.load(std::memory_order_relaxed));
@@ -82,7 +84,7 @@ class ClassTable {
         REQUIRES_SHARED(Locks::mutator_lock_);
 
     template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-    ObjPtr<mirror::Class> Read() const REQUIRES_SHARED(Locks::mutator_lock_);
+    mirror::Class* Read() const REQUIRES_SHARED(Locks::mutator_lock_);
 
     // NO_THREAD_SAFETY_ANALYSIS since the visitor may require heap bitmap lock.
     template<typename Visitor>
@@ -170,9 +172,7 @@ class ClassTable {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Update a class in the table with the new class. Returns the existing class which was replaced.
-  ObjPtr<mirror::Class> UpdateClass(const char* descriptor,
-                                    ObjPtr<mirror::Class> new_klass,
-                                    size_t hash)
+  mirror::Class* UpdateClass(const char* descriptor, mirror::Class* new_klass, size_t hash)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -200,12 +200,12 @@ class ClassTable {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Return the first class that matches the descriptor. Returns null if there are none.
-  ObjPtr<mirror::Class> Lookup(const char* descriptor, size_t hash)
+  mirror::Class* Lookup(const char* descriptor, size_t hash)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Return the first class that matches the descriptor of klass. Returns null if there are none.
-  ObjPtr<mirror::Class> LookupByDescriptor(ObjPtr<mirror::Class> klass)
+  mirror::Class* LookupByDescriptor(ObjPtr<mirror::Class> klass)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 

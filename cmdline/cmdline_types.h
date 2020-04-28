@@ -405,6 +405,39 @@ struct CmdlineType<ParseStringList<Separator>> : CmdlineTypeParser<ParseStringLi
   static const char* Name() { return "ParseStringList<Separator>"; }
 };
 
+template <>
+struct CmdlineType<std::vector<int32_t>> : CmdlineTypeParser<std::vector<int32_t>> {
+  using Result = CmdlineParseResult<std::vector<int32_t>>;
+
+  Result Parse(const std::string& args) {
+    std::vector<int32_t> list;
+    const char* pos = args.c_str();
+    errno = 0;
+
+    while (true) {
+      char* end = nullptr;
+      int64_t value = strtol(pos, &end, 10);
+      if (pos == end ||  errno == EINVAL) {
+        return Result::Failure("Failed to parse integer from " + args);
+      } else if ((errno == ERANGE) ||  // NOLINT [runtime/int] [4]
+                 value < std::numeric_limits<int32_t>::min() ||
+                 value > std::numeric_limits<int32_t>::max()) {
+        return Result::OutOfRange("Failed to parse integer from " + args + "; out of range");
+      }
+      list.push_back(static_cast<int32_t>(value));
+      if (*end == '\0') {
+        break;
+      } else if (*end != ',') {
+        return Result::Failure(std::string("Unexpected character: ") + *end);
+      }
+      pos = end + 1;
+    }
+    return Result::Success(std::move(list));
+  }
+
+  static const char* Name() { return "std::vector<int32_t>"; }
+};
+
 static gc::CollectorType ParseCollectorType(const std::string& option) {
   if (option == "MS" || option == "nonconcurrent") {
     return gc::kCollectorTypeMS;
@@ -412,6 +445,8 @@ static gc::CollectorType ParseCollectorType(const std::string& option) {
     return gc::kCollectorTypeCMS;
   } else if (option == "SS") {
     return gc::kCollectorTypeSS;
+  } else if (option == "GSS") {
+    return gc::kCollectorTypeGSS;
   } else if (option == "CC") {
     return gc::kCollectorTypeCC;
   } else {
@@ -565,8 +600,6 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.gc = true;
       } else if (verbose_options[j] == "heap") {
         log_verbosity.heap = true;
-      } else if (verbose_options[j] == "interpreter") {
-        log_verbosity.interpreter = true;
       } else if (verbose_options[j] == "jdwp") {
         log_verbosity.jdwp = true;
       } else if (verbose_options[j] == "jit") {
@@ -597,8 +630,6 @@ struct CmdlineType<LogVerbosity> : CmdlineTypeParser<LogVerbosity> {
         log_verbosity.image = true;
       } else if (verbose_options[j] == "systrace-locks") {
         log_verbosity.systrace_lock_logging = true;
-      } else if (verbose_options[j] == "plugin") {
-        log_verbosity.plugin = true;
       } else if (verbose_options[j] == "agents") {
         log_verbosity.agents = true;
       } else if (verbose_options[j] == "dex") {

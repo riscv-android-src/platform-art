@@ -85,7 +85,7 @@ void LargeObjectSpaceTest::LargeObjectTest() {
           mirror::Object* obj = pair.first;
           ASSERT_FALSE(los->IsZygoteLargeObject(self, obj));
         }
-        los->SetAllLargeObjectsAsZygoteObjects(self, /*set_mark_bit=*/ false);
+        los->SetAllLargeObjectsAsZygoteObjects(self);
         for (const auto& pair : requests) {
           mirror::Object* obj = pair.first;
           ASSERT_TRUE(los->IsZygoteLargeObject(self, obj));

@@ -16,7 +16,6 @@
 
 #include "precise_hidden_api_finder.h"
 
-#include "class_filter.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/code_item_accessors-inl.h"
 #include "dex/dex_instruction-inl.h"
@@ -33,15 +32,12 @@ namespace art {
 
 void PreciseHiddenApiFinder::RunInternal(
     const std::vector<std::unique_ptr<VeridexResolver>>& resolvers,
-    const ClassFilter& class_filter,
     const std::function<void(VeridexResolver*, const ClassAccessor::Method&)>& action) {
   for (const std::unique_ptr<VeridexResolver>& resolver : resolvers) {
     for (ClassAccessor accessor : resolver->GetDexFile().GetClasses()) {
-      if (class_filter.Matches(accessor.GetDescriptor())) {
-        for (const ClassAccessor::Method& method : accessor.GetMethods()) {
-          if (method.GetCodeItem() != nullptr) {
-            action(resolver.get(), method);
-          }
+      for (const ClassAccessor::Method& method : accessor.GetMethods()) {
+        if (method.GetCodeItem() != nullptr) {
+          action(resolver.get(), method);
         }
       }
     }
@@ -59,12 +55,9 @@ void PreciseHiddenApiFinder::AddUsesAt(const std::vector<ReflectAccessInfo>& acc
   }
 }
 
-void PreciseHiddenApiFinder::Run(const std::vector<std::unique_ptr<VeridexResolver>>& resolvers,
-                                 const ClassFilter& class_filter) {
+void PreciseHiddenApiFinder::Run(const std::vector<std::unique_ptr<VeridexResolver>>& resolvers) {
   // Collect reflection uses.
-  RunInternal(resolvers,
-              class_filter,
-              [this] (VeridexResolver* resolver, const ClassAccessor::Method& method) {
+  RunInternal(resolvers, [this] (VeridexResolver* resolver, const ClassAccessor::Method& method) {
     FlowAnalysisCollector collector(resolver, method);
     collector.Run();
     AddUsesAt(collector.GetUses(), method.GetReference());
@@ -80,7 +73,6 @@ void PreciseHiddenApiFinder::Run(const std::vector<std::unique_ptr<VeridexResolv
     std::map<MethodReference, std::vector<ReflectAccessInfo>> current_uses
         = std::move(abstract_uses_);
     RunInternal(resolvers,
-                class_filter,
                 [this, current_uses] (VeridexResolver* resolver,
                                       const ClassAccessor::Method& method) {
       FlowAnalysisSubstitutor substitutor(resolver, method, current_uses);
@@ -99,24 +91,23 @@ void PreciseHiddenApiFinder::Dump(std::ostream& os, HiddenApiStats* stats) {
       std::string cls(info.cls.ToString());
       std::string name(info.name.ToString());
       std::string full_name = cls + "->" + name;
-      named_uses[full_name].push_back(ref);
+      if (hidden_api_.IsInAnyList(full_name)) {
+        named_uses[full_name].push_back(ref);
+      }
     }
   }
 
   for (auto& it : named_uses) {
+    ++stats->reflection_count;
     const std::string& full_name = it.first;
-    if (hidden_api_.GetSignatureSource(full_name) != SignatureSource::APP &&
-        hidden_api_.ShouldReport(full_name)) {
-      stats->reflection_count++;
-      hiddenapi::ApiList api_list = hidden_api_.GetApiList(full_name);
-      stats->api_counts[api_list.GetIntValue()]++;
-      os << "#" << ++stats->count << ": Reflection " << api_list << " " << full_name << " use(s):";
-      os << std::endl;
-      for (const MethodReference& ref : it.second) {
-        os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
-      }
-      os << std::endl;
+    hiddenapi::ApiList api_list = hidden_api_.GetApiList(full_name);
+    stats->api_counts[api_list.GetIntValue()]++;
+    os << "#" << ++stats->count << ": Reflection " << api_list << " " << full_name << " use(s):";
+    os << std::endl;
+    for (const MethodReference& ref : it.second) {
+      os << kPrefix << HiddenApi::GetApiMethodName(ref) << std::endl;
     }
+    os << std::endl;
   }
 }
 

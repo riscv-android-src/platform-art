@@ -33,8 +33,13 @@ namespace art {
 
 void ArtField::SetOffset(MemberOffset num_bytes) {
   DCHECK(GetDeclaringClass()->IsLoaded() || GetDeclaringClass()->IsErroneous());
-  DCHECK_ALIGNED_PARAM(num_bytes.Uint32Value(),
-                       Primitive::ComponentSize(GetTypeAsPrimitiveType()));
+  if (kIsDebugBuild && Runtime::Current()->IsAotCompiler() &&
+      Runtime::Current()->IsCompilingBootImage()) {
+    Primitive::Type type = GetTypeAsPrimitiveType();
+    if (type == Primitive::kPrimDouble || type == Primitive::kPrimLong) {
+      DCHECK_ALIGNED(num_bytes.Uint32Value(), 8);
+    }
+  }
   // Not called within a transaction.
   offset_ = num_bytes.Uint32Value();
 }

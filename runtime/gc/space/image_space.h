@@ -39,61 +39,11 @@ class ImageSpace : public MemMapSpace {
     return kSpaceTypeImageSpace;
   }
 
-  // Load boot image spaces for specified boot class path, image location, instruction set, etc.
+  // Load boot image spaces from a primary image file for a specified instruction set.
   //
   // On successful return, the loaded spaces are added to boot_image_spaces (which must be
   // empty on entry) and `extra_reservation` is set to the requested reservation located
   // after the end of the last loaded oat file.
-  //
-  // IMAGE LOCATION
-  //
-  // The "image location" is a colon-separated list that specifies one or more
-  // components by name and may also specify search paths for extensions
-  // corresponding to the remaining boot class path (BCP) extensions.
-  //
-  // The primary boot image can be specified as one of
-  //     <path>/<base-name>
-  //     <base-name>
-  // and the path of the first BCP component is used for the second form.
-  //
-  // Named extension specifications must correspond to an expansion of the
-  // <base-name> with a BCP component (for example boot.art with the BCP
-  // component name <jar-path>/framework.jar expands to boot-framework.art).
-  // They can be similarly specified as one of
-  //     <ext-path>/<ext-name>
-  //     <ext-name>
-  // and must be listed in the order of their corresponding BCP components.
-  //
-  // Search paths for remaining extensions can be specified after named
-  // components as one of
-  //     <search-path>/*
-  //     *
-  // where the second form means that the path of a particular BCP component
-  // should be used to search for that component's boot image extension. These
-  // paths will be searched in the specifed order.
-  //
-  // The actual filename shall be derived from the specified locations using
-  // `GetSystemImageFilename()` or `GetDalvikCacheFilename()`.
-  //
-  // Example image locations:
-  //     /system/framework/boot.art
-  //         - only primary boot image with full path.
-  //     boot.art:boot-framework.art
-  //         - primary and one extension, use BCP component paths.
-  //     /apex/com.android.art/boot.art:*
-  //         - primary with exact location, search for the rest based on BCP
-  //           component paths.
-  //     boot.art:/system/framework/*
-  //         - primary based on BCP component path, search for extensions in
-  //           /system/framework.
-  //     /apex/com.android.art/boot.art:/system/framework/*:*
-  //         - primary with exact location, search for extensions first in
-  //           /system/framework, then in the corresponding BCP component path.
-  //     /apex/com.android.art/boot.art:*:/system/framework/*
-  //         - primary with exact location, search for extensions first in the
-  //           corresponding BCP component path and then in /system/framework.
-  //     /apex/com.android.art/boot.art:*:boot-framework.jar
-  //         - invalid, named components may not follow search paths.
   static bool LoadBootImage(
       const std::vector<std::string>& boot_class_path,
       const std::vector<std::string>& boot_class_path_locations,
@@ -104,7 +54,7 @@ class ImageSpace : public MemMapSpace {
       bool executable,
       bool is_zygote,
       size_t extra_reservation_size,
-      /*out*/std::vector<std::unique_ptr<ImageSpace>>* boot_image_spaces,
+      /*out*/std::vector<std::unique_ptr<space::ImageSpace>>* boot_image_spaces,
       /*out*/MemMap* extra_reservation) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Try to open an existing app image space.
@@ -147,14 +97,14 @@ class ImageSpace : public MemMapSpace {
     return image_location_;
   }
 
-  accounting::ContinuousSpaceBitmap* GetLiveBitmap() override {
-    return &live_bitmap_;
+  accounting::ContinuousSpaceBitmap* GetLiveBitmap() const override {
+    return live_bitmap_.get();
   }
 
-  accounting::ContinuousSpaceBitmap* GetMarkBitmap() override {
+  accounting::ContinuousSpaceBitmap* GetMarkBitmap() const override {
     // ImageSpaces have the same bitmap for both live and marked. This helps reduce the number of
     // special cases to test against.
-    return &live_bitmap_;
+    return live_bitmap_.get();
   }
 
   void Dump(std::ostream& os) const override;
@@ -182,44 +132,24 @@ class ImageSpace : public MemMapSpace {
                                 bool* has_data,
                                 bool *is_global_cache);
 
-  // The leading character in an image checksum part of boot class path checkums.
-  static constexpr char kImageChecksumPrefix = 'i';
-  // The leading character in a dex file checksum part of boot class path checkums.
-  static constexpr char kDexFileChecksumPrefix = 'd';
+  // Returns the checksums for the boot image and extra boot class path dex files,
+  // based on the boot class path, image location and ISA (may differ from the ISA of an
+  // initialized Runtime). The boot image and dex files do not need to be loaded in memory.
+  static std::string GetBootClassPathChecksums(ArrayRef<const std::string> boot_class_path,
+                                               const std::string& image_location,
+                                               InstructionSet image_isa,
+                                               ImageSpaceLoadingOrder order,
+                                               /*out*/std::string* error_msg);
 
-  // Returns the checksums for the boot image, extensions and extra boot class path dex files,
-  // based on the image spaces and boot class path dex files loaded in memory.
-  // The `image_spaces` must correspond to the head of the `boot_class_path`.
-  static std::string GetBootClassPathChecksums(ArrayRef<ImageSpace* const> image_spaces,
-                                               ArrayRef<const DexFile* const> boot_class_path);
-
-  // Returns whether the checksums are valid for the given boot class path,
-  // image location and ISA (may differ from the ISA of an initialized Runtime).
-  // The boot image and dex files do not need to be loaded in memory.
-  static bool VerifyBootClassPathChecksums(std::string_view oat_checksums,
-                                           std::string_view oat_boot_class_path,
-                                           const std::string& image_location,
-                                           ArrayRef<const std::string> boot_class_path_locations,
-                                           ArrayRef<const std::string> boot_class_path,
-                                           InstructionSet image_isa,
-                                           ImageSpaceLoadingOrder order,
-                                           /*out*/std::string* error_msg);
-
-  // Returns whether the oat checksums and boot class path description are valid
-  // for the given boot image spaces and boot class path. Used for boot image extensions.
-  static bool VerifyBootClassPathChecksums(
-      std::string_view oat_checksums,
-      std::string_view oat_boot_class_path,
-      ArrayRef<const std::unique_ptr<ImageSpace>> image_spaces,
-      ArrayRef<const std::string> boot_class_path_locations,
-      ArrayRef<const std::string> boot_class_path,
-      /*out*/std::string* error_msg);
+  // Returns the checksums for the boot image and extra boot class path dex files,
+  // based on the boot image and boot class path dex files loaded in memory.
+  static std::string GetBootClassPathChecksums(const std::vector<ImageSpace*>& image_spaces,
+                                               const std::vector<const DexFile*>& boot_class_path);
 
   // Expand a single image location to multi-image locations based on the dex locations.
   static std::vector<std::string> ExpandMultiImageLocations(
-      ArrayRef<const std::string> dex_locations,
-      const std::string& image_location,
-      bool boot_image_extension = false);
+      const std::vector<std::string>& dex_locations,
+      const std::string& image_location);
 
   // Returns true if the dex checksums in the given oat file match the
   // checksums of the original dex files on disk. This is intended to be used
@@ -261,12 +191,12 @@ class ImageSpace : public MemMapSpace {
 
   static Atomic<uint32_t> bitmap_index_;
 
-  accounting::ContinuousSpaceBitmap live_bitmap_;
+  std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap_;
 
   ImageSpace(const std::string& name,
              const char* image_location,
              MemMap&& mem_map,
-             accounting::ContinuousSpaceBitmap&& live_bitmap,
+             std::unique_ptr<accounting::ContinuousSpaceBitmap> live_bitmap,
              uint8_t* end);
 
   // The OatFile associated with the image during early startup to
@@ -283,7 +213,11 @@ class ImageSpace : public MemMapSpace {
   friend class Space;
 
  private:
-  class BootImageLayout;
+  // Internal overload that takes ArrayRef<> instead of vector<>.
+  static std::vector<std::string> ExpandMultiImageLocations(
+      ArrayRef<const std::string> dex_locations,
+      const std::string& image_location);
+
   class BootImageLoader;
   template <typename ReferenceVisitor>
   class ClassTableVisitor;

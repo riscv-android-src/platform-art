@@ -52,7 +52,6 @@ class LinkerPatch {
     kTypeBssEntry,
     kStringRelative,
     kStringBssEntry,
-    kCallEntrypoint,
     kBakerReadBarrierBranch,
   };
 
@@ -142,15 +141,6 @@ class LinkerPatch {
     return patch;
   }
 
-  static LinkerPatch CallEntrypointPatch(size_t literal_offset,
-                                         uint32_t entrypoint_offset) {
-    LinkerPatch patch(literal_offset,
-                      Type::kCallEntrypoint,
-                      /* target_dex_file= */ nullptr);
-    patch.entrypoint_offset_ = entrypoint_offset;
-    return patch;
-  }
-
   static LinkerPatch BakerReadBarrierBranchPatch(size_t literal_offset,
                                                  uint32_t custom_value1 = 0u,
                                                  uint32_t custom_value2 = 0u) {
@@ -226,11 +216,6 @@ class LinkerPatch {
     return pc_insn_offset_;
   }
 
-  uint32_t EntrypointOffset() const {
-    DCHECK(patch_type_ == Type::kCallEntrypoint);
-    return entrypoint_offset_;
-  }
-
   uint32_t GetBakerCustomValue1() const {
     DCHECK(patch_type_ == Type::kBakerReadBarrierBranch);
     return baker_custom_value1_;
@@ -264,7 +249,6 @@ class LinkerPatch {
     uint32_t type_idx_;           // Type index for Type patches.
     uint32_t string_idx_;         // String index for String patches.
     uint32_t intrinsic_data_;     // Data for IntrinsicObjects.
-    uint32_t entrypoint_offset_;  // Entrypoint offset in the Thread object.
     uint32_t baker_custom_value1_;
     static_assert(sizeof(method_idx_) == sizeof(cmp1_), "needed by relational operators");
     static_assert(sizeof(type_idx_) == sizeof(cmp1_), "needed by relational operators");

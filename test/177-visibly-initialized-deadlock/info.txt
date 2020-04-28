@@ -1,2 +1,0 @@
-Regression test for deadlock when trying to make class visibly initialized.
-b/138561860

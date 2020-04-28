@@ -33,7 +33,6 @@ namespace art {
 
 class ArtField;
 class ArtMethod;
-template <class T> class Handle;
 class LockWord;
 class Monitor;
 struct ObjectOffsets;
@@ -131,8 +130,7 @@ class MANAGED LOCKABLE Object {
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   size_t SizeOf() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  static ObjPtr<Object> Clone(Handle<Object> h_this, Thread* self)
-      REQUIRES_SHARED(Locks::mutator_lock_)
+  ObjPtr<Object> Clone(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
   int32_t IdentityHashCode()

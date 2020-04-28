@@ -101,6 +101,8 @@ ConcurrentCopying::ConcurrentCopying(Heap* heap,
       weak_ref_access_enabled_(true),
       copied_live_bytes_ratio_sum_(0.f),
       gc_count_(0),
+      region_space_inter_region_bitmap_(nullptr),
+      non_moving_space_inter_region_bitmap_(nullptr),
       reclaimed_bytes_ratio_sum_(0.f),
       skipped_blocks_lock_("concurrent copying bytes blocks lock", kMarkSweepMarkStackLock),
       measure_read_barrier_slow_path_(measure_read_barrier_slow_path),
@@ -292,24 +294,24 @@ void ConcurrentCopying::ActivateReadBarrierEntrypoints() {
 
 void ConcurrentCopying::CreateInterRegionRefBitmaps() {
   DCHECK(use_generational_cc_);
-  DCHECK(!region_space_inter_region_bitmap_.IsValid());
-  DCHECK(!non_moving_space_inter_region_bitmap_.IsValid());
+  DCHECK(region_space_inter_region_bitmap_ == nullptr);
+  DCHECK(non_moving_space_inter_region_bitmap_ == nullptr);
   DCHECK(region_space_ != nullptr);
   DCHECK(heap_->non_moving_space_ != nullptr);
   // Region-space
-  region_space_inter_region_bitmap_ = accounting::ContinuousSpaceBitmap::Create(
+  region_space_inter_region_bitmap_.reset(accounting::ContinuousSpaceBitmap::Create(
       "region-space inter region ref bitmap",
       reinterpret_cast<uint8_t*>(region_space_->Begin()),
-      region_space_->Limit() - region_space_->Begin());
-  CHECK(region_space_inter_region_bitmap_.IsValid())
+      region_space_->Limit() - region_space_->Begin()));
+  CHECK(region_space_inter_region_bitmap_ != nullptr)
       << "Couldn't allocate region-space inter region ref bitmap";
 
   // non-moving-space
-  non_moving_space_inter_region_bitmap_ = accounting::ContinuousSpaceBitmap::Create(
+  non_moving_space_inter_region_bitmap_.reset(accounting::ContinuousSpaceBitmap::Create(
       "non-moving-space inter region ref bitmap",
       reinterpret_cast<uint8_t*>(heap_->non_moving_space_->Begin()),
-      heap_->non_moving_space_->Limit() - heap_->non_moving_space_->Begin());
-  CHECK(non_moving_space_inter_region_bitmap_.IsValid())
+      heap_->non_moving_space_->Limit() - heap_->non_moving_space_->Begin()));
+  CHECK(non_moving_space_inter_region_bitmap_ != nullptr)
       << "Couldn't allocate non-moving-space inter region ref bitmap";
 }
 
@@ -944,27 +946,6 @@ class ConcurrentCopying::CaptureRootsForMarkingVisitor : public RootVisitor {
   Thread* const self_;
 };
 
-void ConcurrentCopying::RemoveThreadMarkStackMapping(Thread* thread,
-                                                     accounting::ObjectStack* tl_mark_stack) {
-  CHECK(tl_mark_stack != nullptr);
-  auto it = thread_mark_stack_map_.find(thread);
-  CHECK(it != thread_mark_stack_map_.end());
-  CHECK(it->second == tl_mark_stack);
-  thread_mark_stack_map_.erase(it);
-}
-
-void ConcurrentCopying::AssertNoThreadMarkStackMapping(Thread* thread) {
-  MutexLock mu(Thread::Current(), mark_stack_lock_);
-  CHECK(thread_mark_stack_map_.find(thread) == thread_mark_stack_map_.end());
-}
-
-void ConcurrentCopying::AddThreadMarkStackMapping(Thread* thread,
-                                                  accounting::ObjectStack* tl_mark_stack) {
-  CHECK(tl_mark_stack != nullptr);
-  CHECK(thread_mark_stack_map_.find(thread) == thread_mark_stack_map_.end());
-  thread_mark_stack_map_.insert({thread, tl_mark_stack});
-}
-
 class ConcurrentCopying::RevokeThreadLocalMarkStackCheckpoint : public Closure {
  public:
   RevokeThreadLocalMarkStackCheckpoint(ConcurrentCopying* concurrent_copying,
@@ -984,7 +965,6 @@ class ConcurrentCopying::RevokeThreadLocalMarkStackCheckpoint : public Closure {
       MutexLock mu(self, concurrent_copying_->mark_stack_lock_);
       concurrent_copying_->revoked_mark_stacks_.push_back(tl_mark_stack);
       thread->SetThreadLocalMarkStack(nullptr);
-      concurrent_copying_->RemoveThreadMarkStackMapping(thread, tl_mark_stack);
     }
     // Disable weak ref access.
     if (disable_weak_ref_access_) {
@@ -1158,9 +1138,9 @@ void ConcurrentCopying::AddLiveBytesAndScanRef(mirror::Object* ref) {
       // only class object reference, which is either in some immune-space, or
       // in non-moving-space.
       DCHECK(heap_->non_moving_space_->HasAddress(ref));
-      non_moving_space_inter_region_bitmap_.Set(ref);
+      non_moving_space_inter_region_bitmap_->Set(ref);
     } else {
-      region_space_inter_region_bitmap_.Set(ref);
+      region_space_inter_region_bitmap_->Set(ref);
     }
   }
 }
@@ -1479,10 +1459,10 @@ void ConcurrentCopying::CopyingPhase() {
               // We need to process un-evac references as they may be unprocessed,
               // if they skipped the marking phase due to heap mutation.
               ScanDirtyObject</*kNoUnEvac*/ false>(obj);
-              non_moving_space_inter_region_bitmap_.Clear(obj);
+              non_moving_space_inter_region_bitmap_->Clear(obj);
             } else if (region_space_->IsInUnevacFromSpace(obj)) {
               ScanDirtyObject</*kNoUnEvac*/ false>(obj);
-              region_space_inter_region_bitmap_.Clear(obj);
+              region_space_inter_region_bitmap_->Clear(obj);
             }
           },
           accounting::CardTable::kCardAged);
@@ -1494,10 +1474,10 @@ void ConcurrentCopying::CopyingPhase() {
                          ScanDirtyObject</*kNoUnEvac*/ true>(obj);
                        };
         if (space == region_space_) {
-          region_space_->ScanUnevacFromSpace(&region_space_inter_region_bitmap_, visitor);
+          region_space_->ScanUnevacFromSpace(region_space_inter_region_bitmap_.get(), visitor);
         } else {
           DCHECK(space == heap_->non_moving_space_);
-          non_moving_space_inter_region_bitmap_.VisitMarkedRange(
+          non_moving_space_inter_region_bitmap_->VisitMarkedRange(
               reinterpret_cast<uintptr_t>(space->Begin()),
               reinterpret_cast<uintptr_t>(space->End()),
               visitor);
@@ -1801,9 +1781,7 @@ void ConcurrentCopying::PushOntoMarkStack(Thread* const self, mirror::Object* to
         if (tl_mark_stack != nullptr) {
           // Store the old full stack into a vector.
           revoked_mark_stacks_.push_back(tl_mark_stack);
-          RemoveThreadMarkStackMapping(self, tl_mark_stack);
         }
-        AddThreadMarkStackMapping(self, new_tl_mark_stack);
       } else {
         tl_mark_stack->PushBack(to_ref);
       }
@@ -2023,14 +2001,13 @@ void ConcurrentCopying::RevokeThreadLocalMarkStacks(bool disable_weak_ref_access
 }
 
 void ConcurrentCopying::RevokeThreadLocalMarkStack(Thread* thread) {
+  Thread* self = Thread::Current();
+  CHECK_EQ(self, thread);
   accounting::AtomicStack<mirror::Object>* tl_mark_stack = thread->GetThreadLocalMarkStack();
   if (tl_mark_stack != nullptr) {
-    // With 2-phase CC change, we cannot assert that is_marking_ will always be true
-    // as we perform thread stack scan even before enabling the read-barrier.
-    CHECK(is_marking_ || (use_generational_cc_ && !young_gen_));
-    MutexLock mu(Thread::Current(), mark_stack_lock_);
+    CHECK(is_marking_);
+    MutexLock mu(self, mark_stack_lock_);
     revoked_mark_stacks_.push_back(tl_mark_stack);
-    RemoveThreadMarkStackMapping(thread, tl_mark_stack);
     thread->SetThreadLocalMarkStack(nullptr);
   }
 }
@@ -2080,11 +2057,6 @@ bool ConcurrentCopying::ProcessMarkStackOnce() {
     {
       MutexLock mu(thread_running_gc_, mark_stack_lock_);
       CHECK(revoked_mark_stacks_.empty());
-      CHECK(thread_mark_stack_map_.empty()) << " size:"
-                                            << thread_mark_stack_map_.size()
-                                            << " pooled_mark_stacks size:"
-                                            << pooled_mark_stacks_.size();
-      CHECK_EQ(pooled_mark_stacks_.size(), kMarkStackPoolSize);
     }
     while (true) {
       std::vector<mirror::Object*> refs;
@@ -2111,11 +2083,6 @@ bool ConcurrentCopying::ProcessMarkStackOnce() {
     {
       MutexLock mu(thread_running_gc_, mark_stack_lock_);
       CHECK(revoked_mark_stacks_.empty());
-      CHECK(thread_mark_stack_map_.empty()) << " size:"
-                                            << thread_mark_stack_map_.size()
-                                            << " pooled_mark_stacks size:"
-                                            << pooled_mark_stacks_.size();
-      CHECK_EQ(pooled_mark_stacks_.size(), kMarkStackPoolSize);
     }
     // Process the GC mark stack in the exclusive mode. No need to take the lock.
     while (!gc_mark_stack_->IsEmpty()) {
@@ -2402,11 +2369,6 @@ void ConcurrentCopying::CheckEmptyMarkStack() {
     MutexLock mu(thread_running_gc_, mark_stack_lock_);
     CHECK(gc_mark_stack_->IsEmpty());
     CHECK(revoked_mark_stacks_.empty());
-    CHECK(thread_mark_stack_map_.empty()) << " size:"
-                                          << thread_mark_stack_map_.size()
-                                          << " pooled_mark_stacks size:"
-                                          << pooled_mark_stacks_.size();
-    CHECK_EQ(pooled_mark_stacks_.size(), kMarkStackPoolSize);
   }
 }
 
@@ -2622,11 +2584,11 @@ void ConcurrentCopying::CaptureRssAtPeak() {
     // inter-region refs
     if (use_generational_cc_ && !young_gen_) {
       // region space
-      add_gc_range(region_space_inter_region_bitmap_.Begin(),
-                   region_space_inter_region_bitmap_.Size());
+      add_gc_range(region_space_inter_region_bitmap_->Begin(),
+                   region_space_inter_region_bitmap_->Size());
       // non-moving space
-      add_gc_range(non_moving_space_inter_region_bitmap_.Begin(),
-                   non_moving_space_inter_region_bitmap_.Size());
+      add_gc_range(non_moving_space_inter_region_bitmap_->Begin(),
+                   non_moving_space_inter_region_bitmap_->Size());
     }
     // Extract RSS using mincore(). Updates the cummulative RSS counter.
     ExtractRssFromMincore(&gc_ranges);
@@ -2664,20 +2626,6 @@ void ConcurrentCopying::ReclaimPhase() {
   // through list of allocated regions. This way we can avoid calling mincore on
   // the biggest memory range, thereby reducing the cost of this function.
   CaptureRssAtPeak();
-
-  // Sweep the malloc spaces before clearing the from space since the memory tool mode might
-  // access the object classes in the from space for dead objects.
-  {
-    WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
-    Sweep(/* swap_bitmaps= */ false);
-    SwapBitmaps();
-    heap_->UnBindBitmaps();
-
-    // The bitmap was cleared at the start of the GC, there is nothing we need to do here.
-    DCHECK(region_space_bitmap_ != nullptr);
-    region_space_bitmap_ = nullptr;
-  }
-
 
   {
     // Record freed objects.
@@ -2739,6 +2687,17 @@ void ConcurrentCopying::ReclaimPhase() {
 
     float reclaimed_bytes_ratio = static_cast<float>(freed_bytes) / num_bytes_allocated_before_gc_;
     reclaimed_bytes_ratio_sum_ += reclaimed_bytes_ratio;
+  }
+
+  {
+    WriterMutexLock mu(self, *Locks::heap_bitmap_lock_);
+    Sweep(/* swap_bitmaps= */ false);
+    SwapBitmaps();
+    heap_->UnBindBitmaps();
+
+    // The bitmap was cleared at the start of the GC, there is nothing we need to do here.
+    DCHECK(region_space_bitmap_ != nullptr);
+    region_space_bitmap_ = nullptr;
   }
 
   CheckEmptyMarkStack();
@@ -3668,11 +3627,6 @@ void ConcurrentCopying::FinishPhase() {
   Thread* const self = Thread::Current();
   {
     MutexLock mu(self, mark_stack_lock_);
-    CHECK(revoked_mark_stacks_.empty());
-    CHECK(thread_mark_stack_map_.empty()) << " size:"
-                                          << thread_mark_stack_map_.size()
-                                          << " pooled_mark_stacks size:"
-                                          << pooled_mark_stacks_.size();
     CHECK_EQ(pooled_mark_stacks_.size(), kMarkStackPoolSize);
   }
   // kVerifyNoMissingCardMarks relies on the region space cards not being cleared to avoid false
@@ -3682,8 +3636,8 @@ void ConcurrentCopying::FinishPhase() {
     // We do not currently use the region space cards at all, madvise them away to save ram.
     heap_->GetCardTable()->ClearCardRange(region_space_->Begin(), region_space_->Limit());
   } else if (use_generational_cc_ && !young_gen_) {
-    region_space_inter_region_bitmap_.Clear();
-    non_moving_space_inter_region_bitmap_.Clear();
+    region_space_inter_region_bitmap_->Clear();
+    non_moving_space_inter_region_bitmap_->Clear();
   }
   {
     MutexLock mu(self, skipped_blocks_lock_);

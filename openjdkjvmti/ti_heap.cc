@@ -16,60 +16,31 @@
 
 #include "ti_heap.h"
 
-#include <ios>
-
-#include "android-base/logging.h"
-#include "android-base/thread_annotations.h"
-#include "arch/context.h"
 #include "art_field-inl.h"
 #include "art_jvmti.h"
-#include "base/logging.h"
 #include "base/macros.h"
 #include "base/mutex.h"
-#include "base/utils.h"
 #include "class_linker.h"
-#include "class_root.h"
-#include "deopt_manager.h"
 #include "dex/primitive.h"
-#include "events-inl.h"
-#include "gc/collector_type.h"
-#include "gc/gc_cause.h"
 #include "gc/heap-visit-objects-inl.h"
-#include "gc/heap-inl.h"
-#include "gc/scoped_gc_critical_section.h"
+#include "gc/heap.h"
 #include "gc_root-inl.h"
-#include "handle.h"
-#include "handle_scope.h"
 #include "java_frame_root_info.h"
 #include "jni/jni_env_ext.h"
-#include "jni/jni_id_manager.h"
 #include "jni/jni_internal.h"
 #include "jvmti_weak_table-inl.h"
-#include "mirror/array-inl.h"
-#include "mirror/array.h"
 #include "mirror/class.h"
 #include "mirror/object-inl.h"
-#include "mirror/object-refvisitor-inl.h"
 #include "mirror/object_array-inl.h"
-#include "mirror/object_array-alloc-inl.h"
-#include "mirror/object_reference.h"
 #include "obj_ptr-inl.h"
-#include "object_callbacks.h"
 #include "object_tagging.h"
-#include "offsets.h"
 #include "runtime.h"
 #include "scoped_thread_state_change-inl.h"
 #include "stack.h"
 #include "thread-inl.h"
 #include "thread_list.h"
-#include "ti_logging.h"
-#include "ti_stack.h"
-#include "ti_thread.h"
-#include "well_known_classes.h"
 
 namespace openjdkjvmti {
-
-EventHandler* HeapExtensions::gEventHandler = nullptr;
 
 namespace {
 
@@ -700,6 +671,11 @@ jvmtiError HeapUtil::IterateOverInstancesOfClass(jvmtiEnv* env,
     return ERR(INVALID_CLASS);
   }
   art::Handle<art::mirror::Class> filter_klass(hs.NewHandle(klass_ptr->AsClass()));
+  if (filter_klass->IsInterface()) {
+    // nothing is an 'instance' of an interface so just return without walking anything.
+    return OK;
+  }
+
   ObjectTagTable* tag_table = ArtJvmTiEnv::AsArtJvmTiEnv(env)->object_tag_table.get();
   bool stop_reports = false;
   auto visitor = [&](art::mirror::Object* obj) REQUIRES_SHARED(art::Locks::mutator_lock_) {
@@ -1035,9 +1011,7 @@ class FollowReferencesHelper final {
           }
 
           auto& java_info = static_cast<const art::JavaFrameRootInfo&>(info);
-          size_t vreg = java_info.GetVReg();
-          ref_info->stack_local.slot = static_cast<jint>(
-              vreg <= art::JavaFrameRootInfo::kMaxVReg ? vreg : -1);
+          ref_info->stack_local.slot = static_cast<jint>(java_info.GetVReg());
           const art::StackVisitor* visitor = java_info.GetVisitor();
           ref_info->stack_local.location =
               static_cast<jlocation>(visitor->GetDexPc(/* abort_on_failure= */ false));
@@ -1404,7 +1378,6 @@ jvmtiError HeapUtil::FollowReferences(jvmtiEnv* env,
   }
   {
     art::ScopedObjectAccess soa(self);      // Now we know we have the shared lock.
-    art::jni::ScopedEnableSuspendAllJniIdQueries sjni;  // make sure we can get JNI ids.
     art::ScopedThreadSuspension sts(self, art::kWaitingForVisitObjects);
     art::ScopedSuspendAll ssa("FollowReferences");
 
@@ -1610,349 +1583,6 @@ jvmtiError HeapExtensions::IterateThroughHeapExt(jvmtiEnv* env,
                               klass,
                               callbacks,
                               user_data);
-}
-
-namespace {
-
-using ObjectPtr = art::ObjPtr<art::mirror::Object>;
-
-static void ReplaceObjectReferences(ObjectPtr old_obj_ptr, ObjectPtr new_obj_ptr)
-    REQUIRES(art::Locks::mutator_lock_,
-             art::Roles::uninterruptible_) {
-  art::Runtime::Current()->GetHeap()->VisitObjectsPaused(
-      [&](art::mirror::Object* ref) REQUIRES_SHARED(art::Locks::mutator_lock_) {
-        // Rewrite all references in the object if needed.
-        class ResizeReferenceVisitor {
-         public:
-          using CompressedObj = art::mirror::CompressedReference<art::mirror::Object>;
-          ResizeReferenceVisitor(ObjectPtr old_arr, ObjectPtr new_arr)
-              : old_obj_(old_arr), new_obj_(new_arr) {}
-
-          // Ignore class roots.
-          void VisitRootIfNonNull(CompressedObj* root) const
-              REQUIRES_SHARED(art::Locks::mutator_lock_) {
-            if (root != nullptr) {
-              VisitRoot(root);
-            }
-          }
-          void VisitRoot(CompressedObj* root) const REQUIRES_SHARED(art::Locks::mutator_lock_) {
-            if (root->AsMirrorPtr() == old_obj_) {
-              root->Assign(new_obj_);
-              art::WriteBarrier::ForEveryFieldWrite(new_obj_);
-            }
-          }
-
-          void operator()(art::ObjPtr<art::mirror::Object> obj,
-                          art::MemberOffset off,
-                          bool is_static ATTRIBUTE_UNUSED) const
-              REQUIRES_SHARED(art::Locks::mutator_lock_) {
-            if (obj->GetFieldObject<art::mirror::Object>(off) == old_obj_) {
-              VLOG(plugin) << "Updating field at offset " << off.Uint32Value() << " of type "
-                           << obj->GetClass()->PrettyClass();
-              obj->SetFieldObject</*transaction*/ false>(off, new_obj_);
-            }
-          }
-
-          // java.lang.ref.Reference visitor.
-          void operator()(art::ObjPtr<art::mirror::Class> klass ATTRIBUTE_UNUSED,
-                          art::ObjPtr<art::mirror::Reference> ref) const
-              REQUIRES_SHARED(art::Locks::mutator_lock_) {
-            operator()(ref, art::mirror::Reference::ReferentOffset(), /* is_static */ false);
-          }
-
-         private:
-          ObjectPtr old_obj_;
-          ObjectPtr new_obj_;
-        };
-
-        ResizeReferenceVisitor rrv(old_obj_ptr, new_obj_ptr);
-        if (ref->IsClass()) {
-          // Class object native roots are the ArtField and ArtMethod 'declaring_class_' fields
-          // which we don't want to be messing with as it would break ref-visitor assumptions about
-          // what a class looks like. We want to keep the default behavior in other cases (such as
-          // dex-cache) though. Unfortunately there is no way to tell from the visitor where exactly
-          // the root came from.
-          // TODO It might be nice to have the visitors told where the reference came from.
-          ref->VisitReferences</*kVisitNativeRoots*/false>(rrv, rrv);
-        } else {
-          ref->VisitReferences</*kVisitNativeRoots*/true>(rrv, rrv);
-        }
-      });
-}
-
-static void ReplaceStrongRoots(art::Thread* self, ObjectPtr old_obj_ptr, ObjectPtr new_obj_ptr)
-    REQUIRES(art::Locks::mutator_lock_, art::Roles::uninterruptible_) {
-  // replace root references expcept java frames.
-  struct ResizeRootVisitor : public art::RootVisitor {
-   public:
-    ResizeRootVisitor(ObjectPtr new_val, ObjectPtr old_val)
-        : new_val_(new_val), old_val_(old_val) {}
-
-    // TODO It's somewhat annoying to have to have this function implemented twice. It might be
-    // good/useful to implement operator= for CompressedReference to allow us to use a template to
-    // implement both of these.
-    void VisitRoots(art::mirror::Object*** roots, size_t count, const art::RootInfo& info) override
-        REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      art::mirror::Object*** end = roots + count;
-      for (art::mirror::Object** obj = *roots; roots != end; obj = *(++roots)) {
-        if (*obj == old_val_) {
-          // Java frames might have the JIT doing optimizations (for example loop-unrolling or
-          // eliding bounds checks) so we need deopt them once we're done here.
-          if (info.GetType() == art::RootType::kRootJavaFrame) {
-            const art::JavaFrameRootInfo& jfri =
-                art::down_cast<const art::JavaFrameRootInfo&>(info);
-            if (jfri.GetVReg() == art::JavaFrameRootInfo::kMethodDeclaringClass) {
-              info.Describe(VLOG_STREAM(plugin) << "Not changing declaring-class during stack"
-                                                << " walk. Found obsolete java frame id ");
-              continue;
-            } else {
-              info.Describe(VLOG_STREAM(plugin) << "Found java frame id ");
-              threads_with_roots_.insert(info.GetThreadId());
-            }
-          }
-          *obj = new_val_.Ptr();
-        }
-      }
-    }
-
-    void VisitRoots(art::mirror::CompressedReference<art::mirror::Object>** roots,
-                    size_t count,
-                    const art::RootInfo& info) override REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      art::mirror::CompressedReference<art::mirror::Object>** end = roots + count;
-      for (art::mirror::CompressedReference<art::mirror::Object>* obj = *roots; roots != end;
-           obj = *(++roots)) {
-        if (obj->AsMirrorPtr() == old_val_) {
-          // Java frames might have the JIT doing optimizations (for example loop-unrolling or
-          // eliding bounds checks) so we need deopt them once we're done here.
-          if (info.GetType() == art::RootType::kRootJavaFrame) {
-            const art::JavaFrameRootInfo& jfri =
-                art::down_cast<const art::JavaFrameRootInfo&>(info);
-            if (jfri.GetVReg() == art::JavaFrameRootInfo::kMethodDeclaringClass) {
-              info.Describe(VLOG_STREAM(plugin) << "Not changing declaring-class during stack"
-                                                << " walk. Found obsolete java frame id ");
-              continue;
-            } else {
-              info.Describe(VLOG_STREAM(plugin) << "Found java frame id ");
-              threads_with_roots_.insert(info.GetThreadId());
-            }
-          }
-          obj->Assign(new_val_);
-        }
-      }
-    }
-
-    const std::unordered_set<uint32_t>& GetThreadsWithJavaFrameRoots() const {
-      return threads_with_roots_;
-    }
-
-   private:
-    ObjectPtr new_val_;
-    ObjectPtr old_val_;
-    std::unordered_set<uint32_t> threads_with_roots_;
-  };
-  ResizeRootVisitor rrv(new_obj_ptr, old_obj_ptr);
-  art::Runtime::Current()->VisitRoots(&rrv, art::VisitRootFlags::kVisitRootFlagAllRoots);
-  // Handle java Frames. Annoyingly the JIT can embed information about the length of the array into
-  // the compiled code. By changing the length of the array we potentially invalidate these
-  // assumptions and so could cause (eg) OOB array access or other issues.
-  if (!rrv.GetThreadsWithJavaFrameRoots().empty()) {
-    art::MutexLock mu(self, *art::Locks::thread_list_lock_);
-    art::ThreadList* thread_list = art::Runtime::Current()->GetThreadList();
-    art::instrumentation::Instrumentation* instr = art::Runtime::Current()->GetInstrumentation();
-    for (uint32_t id : rrv.GetThreadsWithJavaFrameRoots()) {
-      art::Thread* t = thread_list->FindThreadByThreadId(id);
-      CHECK(t != nullptr) << "id " << id << " does not refer to a valid thread."
-                          << " Where did the roots come from?";
-      VLOG(plugin) << "Instrumenting thread stack of thread " << *t;
-      // TODO Use deopt manager. We need a version that doesn't acquire all the locks we
-      // already have.
-      // TODO We technically only need to do this if the frames are not already being interpreted.
-      // The cost for doing an extra stack walk is unlikely to be worth it though.
-      instr->InstrumentThreadStack(t);
-    }
-  }
-}
-
-static void ReplaceWeakRoots(art::Thread* self,
-                             EventHandler* event_handler,
-                             ObjectPtr old_obj_ptr,
-                             ObjectPtr new_obj_ptr)
-    REQUIRES(art::Locks::mutator_lock_, art::Roles::uninterruptible_) {
-  // Handle tags. We want to do this seprately from other weak-refs (handled below) because we need
-  // to send additional events and handle cases where the agent might have tagged the new
-  // replacement object during the VMObjectAlloc. We do this by removing all tags associated with
-  // both the obsolete and the new arrays. Then we send the ObsoleteObjectCreated event and cache
-  // the new tag values. We next update all the other weak-references (the tags have been removed)
-  // and finally update the tag table with the new values. Doing things in this way (1) keeps all
-  // code relating to updating weak-references together and (2) ensures we don't end up in strange
-  // situations where the order of weak-ref visiting affects the final tagging state. Since we have
-  // the mutator_lock_ and gc-paused throughout this whole process no threads should be able to see
-  // the interval where the objects are not tagged.
-  std::unordered_map<ArtJvmTiEnv*, jlong> obsolete_tags;
-  std::unordered_map<ArtJvmTiEnv*, jlong> non_obsolete_tags;
-  event_handler->ForEachEnv(self, [&](ArtJvmTiEnv* env) {
-    // Cannot have REQUIRES(art::Locks::mutator_lock_) since ForEachEnv doesn't require it.
-    art::Locks::mutator_lock_->AssertExclusiveHeld(self);
-    env->object_tag_table->Lock();
-    // Get the tags and clear them (so we don't need to special-case the normal weak-ref visitor)
-    jlong new_tag = 0;
-    jlong obsolete_tag = 0;
-    bool had_new_tag = env->object_tag_table->RemoveLocked(new_obj_ptr, &new_tag);
-    bool had_obsolete_tag = env->object_tag_table->RemoveLocked(old_obj_ptr, &obsolete_tag);
-    // Dispatch event.
-    if (had_obsolete_tag || had_new_tag) {
-      event_handler->DispatchEventOnEnv<ArtJvmtiEvent::kObsoleteObjectCreated>(env,
-                                                                               self,
-                                                                               &obsolete_tag,
-                                                                               &new_tag);
-      obsolete_tags[env] = obsolete_tag;
-      non_obsolete_tags[env] = new_tag;
-    }
-    // After weak-ref update we need to go back and re-add obsoletes. We wait to avoid having to
-    // deal with the visit-weaks overwriting the initial new_obj_ptr tag and generally making things
-    // difficult.
-    env->object_tag_table->Unlock();
-  });
-  // Handle weak-refs.
-  struct ReplaceWeaksVisitor : public art::IsMarkedVisitor {
-   public:
-    ReplaceWeaksVisitor(ObjectPtr old_obj, ObjectPtr new_obj)
-        : old_obj_(old_obj), new_obj_(new_obj) {}
-
-    art::mirror::Object* IsMarked(art::mirror::Object* obj)
-        REQUIRES_SHARED(art::Locks::mutator_lock_) {
-      if (obj == old_obj_) {
-        return new_obj_.Ptr();
-      } else {
-        return obj;
-      }
-    }
-
-   private:
-    ObjectPtr old_obj_;
-    ObjectPtr new_obj_;
-  };
-  ReplaceWeaksVisitor rwv(old_obj_ptr, new_obj_ptr);
-  art::Runtime::Current()->SweepSystemWeaks(&rwv);
-  // Re-add the object tags. At this point all weak-references to the old_obj_ptr are gone.
-  event_handler->ForEachEnv(self, [&](ArtJvmTiEnv* env) {
-    // Cannot have REQUIRES(art::Locks::mutator_lock_) since ForEachEnv doesn't require it.
-    art::Locks::mutator_lock_->AssertExclusiveHeld(self);
-    env->object_tag_table->Lock();
-    if (obsolete_tags.find(env) != obsolete_tags.end()) {
-      env->object_tag_table->SetLocked(old_obj_ptr, obsolete_tags[env]);
-    }
-    if (non_obsolete_tags.find(env) != non_obsolete_tags.end()) {
-      env->object_tag_table->SetLocked(new_obj_ptr, non_obsolete_tags[env]);
-    }
-    env->object_tag_table->Unlock();
-  });
-}
-
-}  // namespace
-
-void HeapExtensions::ReplaceReference(art::Thread* self,
-                                      art::ObjPtr<art::mirror::Object> old_obj_ptr,
-                                      art::ObjPtr<art::mirror::Object> new_obj_ptr) {
-  ReplaceObjectReferences(old_obj_ptr, new_obj_ptr);
-  ReplaceStrongRoots(self, old_obj_ptr, new_obj_ptr);
-  ReplaceWeakRoots(self, HeapExtensions::gEventHandler, old_obj_ptr, new_obj_ptr);
-}
-
-jvmtiError HeapExtensions::ChangeArraySize(jvmtiEnv* env, jobject arr, jsize new_size) {
-  if (ArtJvmTiEnv::AsArtJvmTiEnv(env)->capabilities.can_tag_objects != 1) {
-    return ERR(MUST_POSSESS_CAPABILITY);
-  }
-  art::Thread* self = art::Thread::Current();
-  ScopedNoUserCodeSuspension snucs(self);
-  art::ScopedObjectAccess soa(self);
-  if (arr == nullptr) {
-    JVMTI_LOG(INFO, env) << "Cannot resize a null object";
-    return ERR(NULL_POINTER);
-  }
-  art::ObjPtr<art::mirror::Class> klass(soa.Decode<art::mirror::Object>(arr)->GetClass());
-  if (!klass->IsArrayClass()) {
-    JVMTI_LOG(INFO, env) << klass->PrettyClass() << " is not an array class!";
-    return ERR(ILLEGAL_ARGUMENT);
-  }
-  if (new_size < 0) {
-    JVMTI_LOG(INFO, env) << "Cannot resize an array to a negative size";
-    return ERR(ILLEGAL_ARGUMENT);
-  }
-  // Allocate the new copy.
-  art::StackHandleScope<2> hs(self);
-  art::Handle<art::mirror::Array> old_arr(hs.NewHandle(soa.Decode<art::mirror::Array>(arr)));
-  art::MutableHandle<art::mirror::Array> new_arr(hs.NewHandle<art::mirror::Array>(nullptr));
-  if (klass->IsObjectArrayClass()) {
-    new_arr.Assign(
-        art::mirror::ObjectArray<art::mirror::Object>::Alloc(self, old_arr->GetClass(), new_size));
-  } else {
-    // NB This also copies the old array but since we aren't suspended we need to do this again to
-    // catch any concurrent modifications.
-    new_arr.Assign(art::mirror::Array::CopyOf(old_arr, self, new_size));
-  }
-  if (new_arr.IsNull()) {
-    self->AssertPendingOOMException();
-    JVMTI_LOG(INFO, env) << "Unable to allocate " << old_arr->GetClass()->PrettyClass()
-                         << " (length: " << new_size << ") due to OOME. Error was: "
-                         << self->GetException()->Dump();
-    self->ClearException();
-    return ERR(OUT_OF_MEMORY);
-  } else {
-    self->AssertNoPendingException();
-  }
-  // Suspend everything.
-  art::ScopedThreadSuspension sts(self, art::ThreadState::kSuspended);
-  art::gc::ScopedGCCriticalSection sgccs(
-      self, art::gc::GcCause::kGcCauseDebugger, art::gc::CollectorType::kCollectorTypeDebugger);
-  art::ScopedSuspendAll ssa("Resize array!");
-  // Replace internals.
-  new_arr->SetLockWord(old_arr->GetLockWord(false), false);
-  old_arr->SetLockWord(art::LockWord::Default(), false);
-  // Copy the contents now when everything is suspended.
-  int32_t size = std::min(old_arr->GetLength(), new_size);
-  switch (old_arr->GetClass()->GetComponentType()->GetPrimitiveType()) {
-    case art::Primitive::kPrimBoolean:
-      new_arr->AsBooleanArray()->Memcpy(0, old_arr->AsBooleanArray(), 0, size);
-      break;
-    case art::Primitive::kPrimByte:
-      new_arr->AsByteArray()->Memcpy(0, old_arr->AsByteArray(), 0, size);
-      break;
-    case art::Primitive::kPrimChar:
-      new_arr->AsCharArray()->Memcpy(0, old_arr->AsCharArray(), 0, size);
-      break;
-    case art::Primitive::kPrimShort:
-      new_arr->AsShortArray()->Memcpy(0, old_arr->AsShortArray(), 0, size);
-      break;
-    case art::Primitive::kPrimInt:
-      new_arr->AsIntArray()->Memcpy(0, old_arr->AsIntArray(), 0, size);
-      break;
-    case art::Primitive::kPrimLong:
-      new_arr->AsLongArray()->Memcpy(0, old_arr->AsLongArray(), 0, size);
-      break;
-    case art::Primitive::kPrimFloat:
-      new_arr->AsFloatArray()->Memcpy(0, old_arr->AsFloatArray(), 0, size);
-      break;
-    case art::Primitive::kPrimDouble:
-      new_arr->AsDoubleArray()->Memcpy(0, old_arr->AsDoubleArray(), 0, size);
-      break;
-    case art::Primitive::kPrimNot:
-      for (int32_t i = 0; i < size; i++) {
-        new_arr->AsObjectArray<art::mirror::Object>()->Set(
-            i, old_arr->AsObjectArray<art::mirror::Object>()->Get(i));
-      }
-      break;
-    case art::Primitive::kPrimVoid:
-      LOG(FATAL) << "void-array is not a legal type!";
-      UNREACHABLE();
-  }
-  // Actually replace all the pointers.
-  ReplaceReference(self, old_arr.Get(), new_arr.Get());
-  return OK;
-}
-
-void HeapExtensions::Register(EventHandler* eh) {
-  gEventHandler = eh;
 }
 
 }  // namespace openjdkjvmti

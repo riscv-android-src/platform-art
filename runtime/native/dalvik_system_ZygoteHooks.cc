@@ -134,25 +134,22 @@ static void CollectNonDebuggableClasses() REQUIRES(!Locks::mutator_lock_) {
 
 // Must match values in com.android.internal.os.Zygote.
 enum {
-  DEBUG_ENABLE_JDWP                   = 1,
-  DEBUG_ENABLE_CHECKJNI               = 1 << 1,
-  DEBUG_ENABLE_ASSERT                 = 1 << 2,
-  DEBUG_ENABLE_SAFEMODE               = 1 << 3,
-  DEBUG_ENABLE_JNI_LOGGING            = 1 << 4,
-  DEBUG_GENERATE_DEBUG_INFO           = 1 << 5,
-  DEBUG_ALWAYS_JIT                    = 1 << 6,
-  DEBUG_NATIVE_DEBUGGABLE             = 1 << 7,
-  DEBUG_JAVA_DEBUGGABLE               = 1 << 8,
-  DISABLE_VERIFIER                    = 1 << 9,
-  ONLY_USE_SYSTEM_OAT_FILES           = 1 << 10,
-  DEBUG_GENERATE_MINI_DEBUG_INFO      = 1 << 11,
-  HIDDEN_API_ENFORCEMENT_POLICY_MASK  = (1 << 12)
-                                      | (1 << 13),
-  PROFILE_SYSTEM_SERVER               = 1 << 14,
-  PROFILE_FROM_SHELL                  = 1 << 15,
-  USE_APP_IMAGE_STARTUP_CACHE         = 1 << 16,
-  DEBUG_IGNORE_APP_SIGNAL_HANDLER     = 1 << 17,
-  DISABLE_TEST_API_ENFORCEMENT_POLICY = 1 << 18,
+  DEBUG_ENABLE_JDWP                  = 1,
+  DEBUG_ENABLE_CHECKJNI              = 1 << 1,
+  DEBUG_ENABLE_ASSERT                = 1 << 2,
+  DEBUG_ENABLE_SAFEMODE              = 1 << 3,
+  DEBUG_ENABLE_JNI_LOGGING           = 1 << 4,
+  DEBUG_GENERATE_DEBUG_INFO          = 1 << 5,
+  DEBUG_ALWAYS_JIT                   = 1 << 6,
+  DEBUG_NATIVE_DEBUGGABLE            = 1 << 7,
+  DEBUG_JAVA_DEBUGGABLE              = 1 << 8,
+  DISABLE_VERIFIER                   = 1 << 9,
+  ONLY_USE_SYSTEM_OAT_FILES          = 1 << 10,
+  DEBUG_GENERATE_MINI_DEBUG_INFO     = 1 << 11,
+  HIDDEN_API_ENFORCEMENT_POLICY_MASK = (1 << 12)
+                                     | (1 << 13),
+  PROFILE_SYSTEM_SERVER              = 1 << 14,
+  USE_APP_IMAGE_STARTUP_CACHE        = 1 << 16,
 
   // bits to shift (flags & HIDDEN_API_ENFORCEMENT_POLICY_MASK) by to get a value
   // corresponding to hiddenapi::EnforcementPolicy
@@ -238,14 +235,6 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
     runtime_flags &= ~DEBUG_GENERATE_DEBUG_INFO;
   }
 
-  if ((runtime_flags & DEBUG_IGNORE_APP_SIGNAL_HANDLER) != 0) {
-    runtime->SetSignalHookDebuggable(true);
-    runtime_flags &= ~DEBUG_IGNORE_APP_SIGNAL_HANDLER;
-  }
-
-  runtime->SetProfileableFromShell((runtime_flags & PROFILE_FROM_SHELL) != 0);
-  runtime_flags &= ~PROFILE_FROM_SHELL;
-
   return runtime_flags;
 }
 
@@ -260,15 +249,15 @@ static jlong ZygoteHooks_nativePreFork(JNIEnv* env, jclass) {
 }
 
 static void ZygoteHooks_nativePostZygoteFork(JNIEnv*, jclass) {
-  Runtime::Current()->PostZygoteFork();
+  Runtime* runtime = Runtime::Current();
+  if (runtime->IsZygote()) {
+    runtime->PostZygoteFork();
+  }
 }
 
 static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
                                                    jclass klass ATTRIBUTE_UNUSED) {
-  // Set the runtime state as the first thing, in case JIT and other services
-  // start querying it.
-  Runtime::Current()->SetAsSystemServer();
-
+  Runtime::Current()->SetSystemServer(true);
   // This JIT code cache for system server is created whilst the runtime is still single threaded.
   // System server has a window where it can create executable pages for this purpose, but this is
   // turned off after this hook. Consequently, the only JIT mode supported is the dual-view JIT
@@ -291,9 +280,6 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jboolean is_zygote,
                                             jstring instruction_set) {
   DCHECK(!(is_system_server && is_zygote));
-  // Set the runtime state as the first thing, in case JIT and other services
-  // start querying it.
-  Runtime::Current()->SetAsZygoteChild(is_system_server, is_zygote);
 
   Thread* thread = reinterpret_cast<Thread*>(token);
   // Our system thread ID, etc, has changed so reset Thread state.
@@ -319,13 +305,6 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
   api_enforcement_policy = hiddenapi::EnforcementPolicyFromInt(
       (runtime_flags & HIDDEN_API_ENFORCEMENT_POLICY_MASK) >> API_ENFORCEMENT_POLICY_SHIFT);
   runtime_flags &= ~HIDDEN_API_ENFORCEMENT_POLICY_MASK;
-
-  if ((runtime_flags & DISABLE_TEST_API_ENFORCEMENT_POLICY) != 0u) {
-    runtime->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kDisabled);
-  } else {
-    runtime->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
-  }
-  runtime_flags &= ~DISABLE_TEST_API_ENFORCEMENT_POLICY;
 
   bool profile_system_server = (runtime_flags & PROFILE_SYSTEM_SERVER) == PROFILE_SYSTEM_SERVER;
   runtime_flags &= ~PROFILE_SYSTEM_SERVER;

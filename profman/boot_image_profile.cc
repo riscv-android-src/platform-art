@@ -61,9 +61,7 @@ void GenerateBootImageProfile(
         Hotness hotness = profile->GetMethodHotness(ref);
         if (hotness.IsInProfile()) {
           ++counter;
-          out_profile->AddMethod(
-              ProfileMethodInfo(ref),
-              static_cast<ProfileCompilationInfo::MethodHotness::Flag>(hotness.GetFlags()));
+          out_profile->AddMethodHotness(ref, hotness);
           inferred_classes.emplace(profile.get(), ref.GetMethodId().class_idx_);
         }
       }
@@ -73,9 +71,7 @@ void GenerateBootImageProfile(
       if (counter >= options.compiled_method_threshold) {
         Hotness hotness;
         hotness.AddFlag(Hotness::kFlagHot);
-        out_profile->AddMethod(
-             ProfileMethodInfo(ref),
-             static_cast<ProfileCompilationInfo::MethodHotness::Flag>(hotness.GetFlags()));
+        out_profile->AddMethodHotness(ref, hotness);
       }
     }
     // Walk all of the classes and add them to the profile if they meet the requirements.
@@ -117,15 +113,13 @@ void GenerateBootImageProfile(
       if (counter == 0) {
         continue;
       }
-      std::set<dex::TypeIndex> classes;
       if (counter >= options.image_class_theshold) {
         ++class_count;
-        classes.insert(ref.TypeIndex());
+        out_profile->AddClassForDex(ref);
       } else if (is_clean && counter >= options.image_class_clean_theshold) {
         ++clean_class_count;
-        classes.insert(ref.TypeIndex());
+        out_profile->AddClassForDex(ref);
       }
-      out_profile->AddClassesForDex(ref.dex_file, classes.begin(), classes.end());
     }
   }
   if (verbose) {

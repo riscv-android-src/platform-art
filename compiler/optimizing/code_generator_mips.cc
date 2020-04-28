@@ -1031,7 +1031,7 @@ CodeGeneratorMIPS::CodeGeneratorMIPS(HGraph* graph,
       type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
-      boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_intrinsic_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       clobbered_ra_(false) {
@@ -1623,26 +1623,23 @@ void CodeGeneratorMIPS::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* link
       type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
-      boot_image_other_patches_.size();
+      boot_image_intrinsic_patches_.size();
   linker_patches->reserve(size);
-  if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
+  if (GetCompilerOptions().IsBootImage()) {
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeMethodPatch>(
         boot_image_method_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeTypePatch>(
         boot_image_type_patches_, linker_patches);
     EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeStringPatch>(
         boot_image_string_patches_, linker_patches);
-  } else {
-    DCHECK(boot_image_method_patches_.empty());
-    DCHECK(boot_image_type_patches_.empty());
-    DCHECK(boot_image_string_patches_.empty());
-  }
-  if (GetCompilerOptions().IsBootImage()) {
     EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::IntrinsicReferencePatch>>(
-        boot_image_other_patches_, linker_patches);
+        boot_image_intrinsic_patches_, linker_patches);
   } else {
     EmitPcRelativeLinkerPatches<NoDexFileAdapter<linker::LinkerPatch::DataBimgRelRoPatch>>(
-        boot_image_other_patches_, linker_patches);
+        boot_image_method_patches_, linker_patches);
+    DCHECK(boot_image_type_patches_.empty());
+    DCHECK(boot_image_string_patches_.empty());
+    DCHECK(boot_image_intrinsic_patches_.empty());
   }
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::MethodBssEntryPatch>(
       method_bss_entry_patches_, linker_patches);
@@ -1657,14 +1654,14 @@ CodeGeneratorMIPS::PcRelativePatchInfo* CodeGeneratorMIPS::NewBootImageIntrinsic
     uint32_t intrinsic_data,
     const PcRelativePatchInfo* info_high) {
   return NewPcRelativePatch(
-      /* dex_file= */ nullptr, intrinsic_data, info_high, &boot_image_other_patches_);
+      /* dex_file= */ nullptr, intrinsic_data, info_high, &boot_image_intrinsic_patches_);
 }
 
 CodeGeneratorMIPS::PcRelativePatchInfo* CodeGeneratorMIPS::NewBootImageRelRoPatch(
     uint32_t boot_image_offset,
     const PcRelativePatchInfo* info_high) {
   return NewPcRelativePatch(
-      /* dex_file= */ nullptr, boot_image_offset, info_high, &boot_image_other_patches_);
+      /* dex_file= */ nullptr, boot_image_offset, info_high, &boot_image_method_patches_);
 }
 
 CodeGeneratorMIPS::PcRelativePatchInfo* CodeGeneratorMIPS::NewBootImageMethodPatch(
@@ -1956,7 +1953,7 @@ size_t CodeGeneratorMIPS::SaveFloatingPointRegister(size_t stack_index, uint32_t
   } else {
     __ StoreDToOffset(FRegister(reg_id), SP, stack_index);
   }
-  return GetSlowPathFPWidth();
+  return GetFloatingPointSpillSlotSize();
 }
 
 size_t CodeGeneratorMIPS::RestoreFloatingPointRegister(size_t stack_index, uint32_t reg_id) {
@@ -1965,7 +1962,7 @@ size_t CodeGeneratorMIPS::RestoreFloatingPointRegister(size_t stack_index, uint3
   } else {
     __ LoadDFromOffset(FRegister(reg_id), SP, stack_index);
   }
-  return GetSlowPathFPWidth();
+  return GetFloatingPointSpillSlotSize();
 }
 
 void CodeGeneratorMIPS::DumpCoreRegister(std::ostream& stream, int reg) const {
@@ -7998,7 +7995,7 @@ void CodeGeneratorMIPS::GenerateStaticOrDirectCall(
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
+      DCHECK(GetCompilerOptions().IsBootImage());
       PcRelativePatchInfo* info_high = NewBootImageMethodPatch(invoke->GetTargetMethod());
       PcRelativePatchInfo* info_low =
           NewBootImageMethodPatch(invoke->GetTargetMethod(), info_high);
@@ -8220,8 +8217,7 @@ void InstructionCodeGeneratorMIPS::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAF
       break;
     }
     case HLoadClass::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
-             codegen_->GetCompilerOptions().IsBootImageExtension());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
       DCHECK_EQ(read_barrier_option, kWithoutReadBarrier);
       CodeGeneratorMIPS::PcRelativePatchInfo* info_high =
           codegen_->NewBootImageTypePatch(cls->GetDexFile(), cls->GetTypeIndex());
@@ -8428,8 +8424,7 @@ void InstructionCodeGeneratorMIPS::VisitLoadString(HLoadString* load) NO_THREAD_
 
   switch (load_kind) {
     case HLoadString::LoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(codegen_->GetCompilerOptions().IsBootImage() ||
-             codegen_->GetCompilerOptions().IsBootImageExtension());
+      DCHECK(codegen_->GetCompilerOptions().IsBootImage());
       CodeGeneratorMIPS::PcRelativePatchInfo* info_high =
           codegen_->NewBootImageStringPatch(load->GetDexFile(), load->GetStringIndex());
       CodeGeneratorMIPS::PcRelativePatchInfo* info_low =
@@ -9532,15 +9527,6 @@ void InstructionCodeGeneratorMIPS::VisitStaticFieldSet(HStaticFieldSet* instruct
                  instruction->GetFieldInfo(),
                  instruction->GetDexPc(),
                  instruction->GetValueCanBeNull());
-}
-
-void LocationsBuilderMIPS::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
-  codegen_->CreateStringBuilderAppendLocations(instruction, Location::RegisterLocation(V0));
-}
-
-void InstructionCodeGeneratorMIPS::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
-  __ LoadConst32(A0, instruction->GetFormat()->GetValue());
-  codegen_->InvokeRuntime(kQuickStringBuilderAppend, instruction, instruction->GetDexPc());
 }
 
 void LocationsBuilderMIPS::VisitUnresolvedInstanceFieldGet(

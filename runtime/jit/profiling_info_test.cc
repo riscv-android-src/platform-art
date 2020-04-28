@@ -36,6 +36,8 @@ namespace art {
 
 using Hotness = ProfileCompilationInfo::MethodHotness;
 
+static constexpr size_t kMaxMethodIds = 65535;
+
 class ProfileCompilationInfoTest : public CommonRuntimeTest {
  public:
   void PostRuntimeCreate() override {
@@ -61,6 +63,35 @@ class ProfileCompilationInfoTest : public CommonRuntimeTest {
     return methods;
   }
 
+  bool AddMethod(const std::string& dex_location,
+                 uint32_t checksum,
+                 uint16_t method_index,
+                 ProfileCompilationInfo* info) {
+    return info->AddMethodIndex(Hotness::kFlagHot,
+                                dex_location,
+                                checksum,
+                                method_index,
+                                kMaxMethodIds);
+  }
+
+  bool AddMethod(const std::string& dex_location,
+                 uint32_t checksum,
+                 uint16_t method_index,
+                 const ProfileCompilationInfo::OfflineProfileMethodInfo& pmi,
+                 ProfileCompilationInfo* info) {
+    return info->AddMethod(
+        dex_location, checksum, method_index, kMaxMethodIds, pmi, Hotness::kFlagPostStartup);
+  }
+
+  bool AddClass(const std::string& dex_location,
+                uint32_t checksum,
+                dex::TypeIndex type_index,
+                ProfileCompilationInfo* info) {
+    DexCacheResolvedClasses classes(dex_location, dex_location, checksum, kMaxMethodIds);
+    classes.AddClass(type_index);
+    return info->AddClasses({classes});
+  }
+
   uint32_t GetFd(const ScratchFile& file) {
     return static_cast<uint32_t>(file.GetFd());
   }
@@ -68,6 +99,7 @@ class ProfileCompilationInfoTest : public CommonRuntimeTest {
   bool SaveProfilingInfo(
       const std::string& filename,
       const std::vector<ArtMethod*>& methods,
+      const std::set<DexCacheResolvedClasses>& resolved_classes,
       Hotness::Flag flags) {
     ProfileCompilationInfo info;
     std::vector<ProfileMethodInfo> profile_methods;
@@ -76,7 +108,7 @@ class ProfileCompilationInfoTest : public CommonRuntimeTest {
       profile_methods.emplace_back(
           MethodReference(method->GetDexFile(), method->GetDexMethodIndex()));
     }
-    if (!info.AddMethods(profile_methods, flags)) {
+    if (!info.AddMethods(profile_methods, flags) || !info.AddClasses(resolved_classes)) {
       return false;
     }
     if (info.GetNumberOfMethods() != profile_methods.size()) {
@@ -172,7 +204,7 @@ class ProfileCompilationInfoTest : public CommonRuntimeTest {
         dex_pc_data.AddClass(dex_profile_index, class_ref.TypeIndex());
         if (dex_profile_index >= offline_pmi.dex_references.size()) {
           // This is a new dex.
-          const std::string& dex_key = ProfileCompilationInfo::GetProfileDexFileBaseKey(
+          const std::string& dex_key = ProfileCompilationInfo::GetProfileDexFileKey(
               class_ref.dex_file->GetLocation());
           offline_pmi.dex_references.emplace_back(dex_key,
                                                   class_ref.dex_file->GetLocationChecksum(),
@@ -208,11 +240,10 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethods) {
   ASSERT_NE(class_loader, nullptr);
 
   // Save virtual methods from Main.
+  std::set<DexCacheResolvedClasses> resolved_classes;
   std::vector<ArtMethod*> main_methods = GetVirtualMethods(class_loader, "LMain;");
   ASSERT_TRUE(SaveProfilingInfo(
-      profile.GetFilename(),
-      main_methods,
-      static_cast<Hotness::Flag>(Hotness::kFlagHot | Hotness::kFlagPostStartup)));
+      profile.GetFilename(), main_methods, resolved_classes, Hotness::kFlagPostStartup));
 
   // Check that what we saved is in the profile.
   ProfileCompilationInfo info1;
@@ -230,9 +261,7 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethods) {
   // Save virtual methods from Second.
   std::vector<ArtMethod*> second_methods = GetVirtualMethods(class_loader, "LSecond;");
   ASSERT_TRUE(SaveProfilingInfo(
-    profile.GetFilename(),
-    second_methods,
-    static_cast<Hotness::Flag>(Hotness::kFlagHot | Hotness::kFlagStartup)));
+    profile.GetFilename(), second_methods, resolved_classes, Hotness::kFlagStartup));
 
   // Check that what we saved is in the profile (methods form Main and Second).
   ProfileCompilationInfo info2;
@@ -266,14 +295,12 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethodsWithInlineCaches) {
   ASSERT_NE(class_loader, nullptr);
 
   // Save virtual methods from Main.
+  std::set<DexCacheResolvedClasses> resolved_classes;
   std::vector<ArtMethod*> main_methods = GetVirtualMethods(class_loader, "LMain;");
 
   SafeMap<ArtMethod*, ProfileMethodInfo> profile_methods_map;
   ASSERT_TRUE(SaveProfilingInfoWithFakeInlineCaches(
-      profile.GetFilename(),
-      main_methods,
-      static_cast<Hotness::Flag>(Hotness::kFlagHot | Hotness::kFlagStartup),
-      &profile_methods_map));
+      profile.GetFilename(), main_methods, Hotness::kFlagStartup, &profile_methods_map));
 
   // Check that what we saved is in the profile.
   ProfileCompilationInfo info;
@@ -282,13 +309,14 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethodsWithInlineCaches) {
   {
     ScopedObjectAccess soa(self);
     for (ArtMethod* m : main_methods) {
-      MethodReference method_ref(m->GetDexFile(), m->GetDexMethodIndex());
-      Hotness h = info.GetMethodHotness(method_ref);
+      Hotness h = info.GetMethodHotness(MethodReference(m->GetDexFile(), m->GetDexMethodIndex()));
       ASSERT_TRUE(h.IsHot());
       ASSERT_TRUE(h.IsStartup());
       const ProfileMethodInfo& pmi = profile_methods_map.find(m)->second;
       std::unique_ptr<ProfileCompilationInfo::OfflineProfileMethodInfo> offline_pmi =
-          info.GetHotMethodInfo(method_ref);
+          info.GetMethod(m->GetDexFile()->GetLocation(),
+                         m->GetDexFile()->GetLocationChecksum(),
+                         m->GetDexMethodIndex());
       ASSERT_TRUE(offline_pmi != nullptr);
       ProfileCompilationInfo::OfflineProfileMethodInfo converted_pmi =
           ConvertProfileMethodInfo(pmi);

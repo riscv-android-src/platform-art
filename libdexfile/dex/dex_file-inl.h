@@ -27,7 +27,6 @@
 #include "compact_dex_file.h"
 #include "dex_instruction_iterator.h"
 #include "invoke_type.h"
-#include "signature.h"
 #include "standard_dex_file.h"
 
 namespace art {

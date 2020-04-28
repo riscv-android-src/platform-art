@@ -80,18 +80,22 @@ art_cc_defaults {
     generated_sources: ["art_dex2oat_operator_srcs"],
     shared_libs: [
         "libbase",
-
-        // For SHA-1 checksumming of build ID
-        "libcrypto",
     ],
     export_include_dirs: ["."],
+
+    // For SHA-1 checksumming of build ID
+    static: {
+        whole_static_libs: ["libcrypto"],
+    },
+    shared: {
+        shared_libs: ["libcrypto"],
+    },
 }
 
 cc_defaults {
     name: "libart-dex2oat_static_base_defaults",
     static_libs: [
         "libbase",
-        "libcrypto",
         "libz",
     ],
 }
@@ -165,10 +169,6 @@ cc_defaults {
 
 cc_library_headers {
     name: "dex2oat_headers",
-    visibility: [
-        // TODO(b/133140750): Clean this up.
-        "//frameworks/native/cmds/installd",
-    ],
     host_supported: true,
     export_include_dirs: ["include"],
 }
@@ -196,10 +196,6 @@ cc_defaults {
 
 cc_defaults {
     name: "dex2oat-pgo-defaults",
-    defaults_visibility: [
-        "//art:__subpackages__",
-        "//external/vixl",
-    ],
     pgo: {
         instrumentation: true,
         benchmarks: ["dex2oat"],
@@ -249,7 +245,6 @@ art_cc_binary {
         "libart-compiler",
         "libart-dexlayout",
         "libart",
-        "libcrypto",
         "libdexfile",
         "libartbase",
         "libartpalette",
@@ -271,7 +266,7 @@ art_cc_binary {
     target: {
         android: {
             lto: {
-                thin: true,
+                 thin: true,
             },
             static_libs: [
                 "libz",
@@ -296,7 +291,6 @@ art_cc_binary {
         "libartd-compiler",
         "libartd-dexlayout",
         "libartd",
-        "libcrypto",
         "libdexfiled",
         "libartbased",
         "libartpalette",
@@ -465,13 +459,15 @@ art_cc_test {
     },
 
     header_libs: ["dex2oat_headers"],
+    include_dirs: [
+        "external/zlib",
+    ],
     shared_libs: [
         "libartbased",
         "libartd-compiler",
         "libartd-dexlayout",
         "libartpalette",
         "libbase",
-        "libcrypto",
         "libprofiled",
         "libsigchain",
         "libziparchive",

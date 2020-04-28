@@ -29,7 +29,6 @@ namespace art {
 
 class ArtField;
 struct FieldOffsets;
-class ReflectiveValueVisitor;
 
 namespace mirror {
 
@@ -69,21 +68,14 @@ class MANAGED Field : public AccessibleObject {
     return GetField32(OFFSET_OF_OBJECT_MEMBER(Field, offset_));
   }
 
-  // Slow, try to use only for PrettyField and such. Set use-dex-cache to false to not utilize the
-  // dex-cache when finding the art-field. This is useful for cases where the dex-cache might be
-  // temporarally invalid.
-  ArtField* GetArtField(bool use_dex_cache = true) REQUIRES_SHARED(Locks::mutator_lock_);
+  // Slow, try to use only for PrettyField and such.
+  ArtField* GetArtField() REQUIRES_SHARED(Locks::mutator_lock_);
 
   template <PointerSize kPointerSize, bool kTransactionActive = false>
   static ObjPtr<mirror::Field> CreateFromArtField(Thread* self,
                                                   ArtField* field,
                                                   bool force_resolve)
       REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Roles::uninterruptible_);
-
-
-  // Used to modify the target of this Field object, if required for structural redefinition or some
-  // other purpose.
-  void VisitTarget(ReflectiveValueVisitor* v) REQUIRES(Locks::mutator_lock_);
 
  private:
   // Padding required for matching alignment with the Java peer.

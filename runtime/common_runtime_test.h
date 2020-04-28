@@ -41,22 +41,6 @@ namespace art {
 using LogSeverity = android::base::LogSeverity;
 using ScopedLogSeverity = android::base::ScopedLogSeverity;
 
-template<class MirrorType>
-static inline ObjPtr<MirrorType> MakeObjPtr(MirrorType* ptr) {
-  return ptr;
-}
-
-template<class MirrorType>
-static inline ObjPtr<MirrorType> MakeObjPtr(ObjPtr<MirrorType> ptr) {
-  return ptr;
-}
-
-// OBJ pointer helpers to avoid needing .Decode everywhere.
-#define EXPECT_OBJ_PTR_EQ(a, b) EXPECT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
-#define ASSERT_OBJ_PTR_EQ(a, b) ASSERT_EQ(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
-#define EXPECT_OBJ_PTR_NE(a, b) EXPECT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
-#define ASSERT_OBJ_PTR_NE(a, b) ASSERT_NE(MakeObjPtr(a).Ptr(), MakeObjPtr(b).Ptr())
-
 class ClassLinker;
 class CompilerCallbacks;
 class DexFile;
@@ -168,16 +152,6 @@ class CommonRuntimeTestImpl : public CommonArtTestImpl {
   // Called to finish up runtime creation and filling test fields. By default runs root
   // initializers, initialize well-known classes, and creates the heap thread pool.
   virtual void FinalizeSetup();
-
-  // Returns the directory where the pre-compiled core.art can be found.
-  static std::string GetImageDirectory();
-  static std::string GetImageLocation();
-  static std::string GetSystemImageFile();
-
-  static void EnterTransactionMode();
-  static void ExitTransactionMode();
-  static void RollbackAndExitTransactionMode() REQUIRES_SHARED(Locks::mutator_lock_);
-  static bool IsTransactionAborted();
 };
 
 template <typename TestType>
@@ -272,12 +246,6 @@ class CheckJniAbortCatcher {
 #define TEST_DISABLED_FOR_MEMORY_TOOL_WITH_HEAP_POISONING_WITHOUT_READ_BARRIERS() \
   if (kRunningOnMemoryTool && kPoisonHeapReferences && !kEmitCompilerReadBarrier) { \
     printf("WARNING: TEST DISABLED FOR MEMORY TOOL WITH HEAP POISONING WITHOUT READ BARRIERS\n"); \
-    return; \
-  }
-
-#define TEST_DISABLED_FOR_KERNELS_WITH_CACHE_SEGFAULT() \
-  if (CacheOperationsMaySegFault()) { \
-    printf("WARNING: TEST DISABLED ON KERNEL THAT SEGFAULT ON CACHE OPERATIONS\n"); \
     return; \
   }
 

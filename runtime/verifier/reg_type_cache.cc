@@ -39,12 +39,6 @@ uint16_t RegTypeCache::primitive_count_ = 0;
 const PreciseConstType* RegTypeCache::small_precise_constants_[kMaxSmallConstant -
                                                                kMinSmallConstant + 1];
 
-namespace {
-
-ClassLinker* gInitClassLinker = nullptr;
-
-}  // namespace
-
 ALWAYS_INLINE static inline bool MatchingPrecisionForClass(const RegType* entry, bool precise)
     REQUIRES_SHARED(Locks::mutator_lock_) {
   if (entry->IsPreciseReference() == precise) {
@@ -159,14 +153,15 @@ ObjPtr<mirror::Class> RegTypeCache::ResolveClass(const char* descriptor,
                                                  ObjPtr<mirror::ClassLoader> loader) {
   // Class was not found, must create new type.
   // Try resolving class
+  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   Thread* self = Thread::Current();
   StackHandleScope<1> hs(self);
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(loader));
   ObjPtr<mirror::Class> klass = nullptr;
   if (can_load_classes_) {
-    klass = class_linker_->FindClass(self, descriptor, class_loader);
+    klass = class_linker->FindClass(self, descriptor, class_loader);
   } else {
-    klass = class_linker_->LookupClass(self, descriptor, loader);
+    klass = class_linker->LookupClass(self, descriptor, loader);
     if (klass != nullptr && !klass->IsResolved()) {
       // We found the class but without it being loaded its not safe for use.
       klass = nullptr;
@@ -282,16 +277,11 @@ const RegType& RegTypeCache::FromClass(const char* descriptor,
   return *reg_type;
 }
 
-RegTypeCache::RegTypeCache(ClassLinker* class_linker,
-                           bool can_load_classes,
-                           ScopedArenaAllocator& allocator,
-                           bool can_suspend)
+RegTypeCache::RegTypeCache(bool can_load_classes, ScopedArenaAllocator& allocator, bool can_suspend)
     : entries_(allocator.Adapter(kArenaAllocVerifier)),
       klass_entries_(allocator.Adapter(kArenaAllocVerifier)),
-      allocator_(allocator),
-      class_linker_(class_linker),
-      can_load_classes_(can_load_classes) {
-  DCHECK_EQ(class_linker, gInitClassLinker);
+      can_load_classes_(can_load_classes),
+      allocator_(allocator) {
   DCHECK(can_suspend || !can_load_classes) << "Cannot load classes if suspension is disabled!";
   if (kIsDebugBuild && can_suspend) {
     Thread::Current()->AssertThreadSuspensionIsAllowable(gAborting == 0);
@@ -347,9 +337,7 @@ struct TypeHelper {
 };
 }  // namespace
 
-void RegTypeCache::CreatePrimitiveAndSmallConstantTypes(ClassLinker* class_linker) {
-  gInitClassLinker = class_linker;
-
+void RegTypeCache::CreatePrimitiveAndSmallConstantTypes() {
   // Note: this must have the same order as FillPrimitiveAndSmallConstantTypes.
 
   // It is acceptable to pass on the const char* in type to CreateInstance, as all calls below are
@@ -361,7 +349,8 @@ void RegTypeCache::CreatePrimitiveAndSmallConstantTypes(ClassLinker* class_linke
     // Try loading the class from linker.
     DCHECK(type.descriptor != nullptr);
     if (strlen(type.descriptor) > 0) {
-      klass = class_linker->FindSystemClass(Thread::Current(), type.descriptor);
+      klass = art::Runtime::Current()->GetClassLinker()->FindSystemClass(Thread::Current(),
+                                                                         type.descriptor);
       DCHECK(klass != nullptr);
     }
     const Type* entry = Type::CreateInstance(klass,

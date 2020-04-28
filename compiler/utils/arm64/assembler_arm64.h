@@ -25,7 +25,6 @@
 
 #include "base/arena_containers.h"
 #include "base/macros.h"
-#include "dwarf/register.h"
 #include "offsets.h"
 #include "utils/arm64/managed_register_arm64.h"
 #include "utils/assembler.h"
@@ -42,15 +41,6 @@ namespace art {
 class Arm64InstructionSetFeatures;
 
 namespace arm64 {
-
-static inline dwarf::Reg DWARFReg(vixl::aarch64::CPURegister reg) {
-  if (reg.IsFPRegister()) {
-    return dwarf::Reg::Arm64Fp(reg.GetCode());
-  } else {
-    DCHECK_LT(reg.GetCode(), 31u);  // X0 - X30.
-    return dwarf::Reg::Arm64Core(reg.GetCode());
-  }
-}
 
 #define MEM_OP(...)      vixl::aarch64::MemOperand(__VA_ARGS__)
 
@@ -150,12 +140,12 @@ class Arm64Assembler final : public Assembler {
     return vixl::aarch64::Register::GetWRegFromCode(code);
   }
 
-  static vixl::aarch64::VRegister reg_d(int code) {
-    return vixl::aarch64::VRegister::GetDRegFromCode(code);
+  static vixl::aarch64::FPRegister reg_d(int code) {
+    return vixl::aarch64::FPRegister::GetDRegFromCode(code);
   }
 
-  static vixl::aarch64::VRegister reg_s(int code) {
-    return vixl::aarch64::VRegister::GetSRegFromCode(code);
+  static vixl::aarch64::FPRegister reg_s(int code) {
+    return vixl::aarch64::FPRegister::GetSRegFromCode(code);
   }
 
  private:

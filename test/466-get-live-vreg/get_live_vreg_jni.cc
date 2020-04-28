@@ -40,7 +40,9 @@ class TestVisitor : public StackVisitor {
       found_method_ = true;
       CHECK_EQ(CodeItemDataAccessor(m->DexInstructionData()).RegistersSize(), 3u);
       CheckOptimizedOutRegLiveness(m, 1, kIntVReg, true, 42);
-      CheckOptimizedOutRegLiveness(m, 2, kReferenceVReg);
+
+      uint32_t value;
+      CHECK(GetVReg(m, 2, kReferenceVReg, &value));
     } else if (m_name.compare("$noinline$testIntervalHole") == 0) {
       found_method_ = true;
       uint32_t number_of_dex_registers =

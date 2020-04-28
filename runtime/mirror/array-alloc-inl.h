@@ -25,7 +25,6 @@
 #include "base/bit_utils.h"
 #include "base/casts.h"
 #include "class.h"
-#include "gc/allocator_type.h"
 #include "gc/heap-inl.h"
 #include "obj_ptr-inl.h"
 #include "runtime.h"
@@ -144,14 +143,14 @@ inline ObjPtr<Array> Array::Alloc(Thread* self,
   if (!kFillUsable) {
     SetLengthVisitor visitor(component_count);
     result = ObjPtr<Array>::DownCast(
-        heap->AllocObjectWithAllocator<kIsInstrumented>(
+        heap->AllocObjectWithAllocator<kIsInstrumented, true>(
             self, array_class, size, allocator_type, visitor));
   } else {
     SetLengthToUsableSizeVisitor visitor(component_count,
                                          DataOffset(1U << component_size_shift).SizeValue(),
                                          component_size_shift);
     result = ObjPtr<Array>::DownCast(
-        heap->AllocObjectWithAllocator<kIsInstrumented>(
+        heap->AllocObjectWithAllocator<kIsInstrumented, true>(
             self, array_class, size, allocator_type, visitor));
   }
   if (kIsDebugBuild && result != nullptr && Runtime::Current()->IsStarted()) {

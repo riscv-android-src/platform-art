@@ -1,1 +1,0 @@
-Test a loop with invariants.

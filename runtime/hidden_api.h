@@ -19,7 +19,6 @@
 
 #include "art_field.h"
 #include "art_method.h"
-#include "base/hiddenapi_domain.h"
 #include "base/hiddenapi_flags.h"
 #include "base/locks.h"
 #include "intrinsics_enum.h"
@@ -357,8 +356,6 @@ ALWAYS_INLINE inline uint32_t GetRuntimeFlags(ArtMethod* method)
       case Intrinsics::kVarHandleWeakCompareAndSetRelease:
         return 0u;
       case Intrinsics::kUnsafeGetLong:
-      case Intrinsics::kFP16ToFloat:
-      case Intrinsics::kFP16ToHalf:
         return kAccCorePlatformApi;
       default:
         // Remaining intrinsics are public API. We DCHECK that in SetIntrinsic().

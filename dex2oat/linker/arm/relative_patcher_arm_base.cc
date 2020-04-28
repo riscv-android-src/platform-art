@@ -386,12 +386,6 @@ ArmBaseRelativePatcher::ThunkKey ArmBaseRelativePatcher::GetMethodCallKey() {
   return ThunkKey(ThunkType::kMethodCall);
 }
 
-ArmBaseRelativePatcher::ThunkKey ArmBaseRelativePatcher::GetEntrypointCallKey(
-    const LinkerPatch& patch) {
-  DCHECK_EQ(patch.GetType(), LinkerPatch::Type::kCallEntrypoint);
-  return ThunkKey(ThunkType::kEntrypointCall, patch.EntrypointOffset());
-}
-
 ArmBaseRelativePatcher::ThunkKey ArmBaseRelativePatcher::GetBakerThunkKey(
     const LinkerPatch& patch) {
   DCHECK_EQ(patch.GetType(), LinkerPatch::Type::kBakerReadBarrierBranch);
@@ -405,7 +399,6 @@ void ArmBaseRelativePatcher::ProcessPatches(const CompiledMethod* compiled_metho
   for (const LinkerPatch& patch : compiled_method->GetPatches()) {
     uint32_t patch_offset = code_offset + patch.LiteralOffset();
     ThunkKey key(static_cast<ThunkType>(-1));
-    bool simple_thunk_patch = false;
     ThunkData* old_data = nullptr;
     if (patch.GetType() == LinkerPatch::Type::kCallRelative) {
       key = GetMethodCallKey();
@@ -418,14 +411,8 @@ void ArmBaseRelativePatcher::ProcessPatches(const CompiledMethod* compiled_metho
       } else {
         old_data = method_call_thunk_;
       }
-    } else if (patch.GetType() == LinkerPatch::Type::kCallEntrypoint) {
-      key = GetEntrypointCallKey(patch);
-      simple_thunk_patch = true;
     } else if (patch.GetType() == LinkerPatch::Type::kBakerReadBarrierBranch) {
       key = GetBakerThunkKey(patch);
-      simple_thunk_patch = true;
-    }
-    if (simple_thunk_patch) {
       auto lb = thunks_.lower_bound(key);
       if (lb == thunks_.end() || thunks_.key_comp()(key, lb->first)) {
         uint32_t max_next_offset = CalculateMaxNextOffset(patch_offset, key);

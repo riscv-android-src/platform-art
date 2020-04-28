@@ -27,7 +27,6 @@ namespace art {
 namespace dex {
 struct ClassDef;
 struct CodeItem;
-class DexFileVerifier;
 }  // namespace dex
 
 class ClassIteratorData;
@@ -147,7 +146,7 @@ class ClassAccessor {
     uint32_t code_off_ = 0u;
 
     friend class ClassAccessor;
-    friend class dex::DexFileVerifier;
+    friend class DexFileVerifier;
   };
 
   // A decoded version of the field of a class_data_item.
@@ -173,7 +172,7 @@ class ClassAccessor {
 
     bool is_static_ = true;
     friend class ClassAccessor;
-    friend class dex::DexFileVerifier;
+    friend class DexFileVerifier;
   };
 
   template <typename DataType>
@@ -265,7 +264,7 @@ class ClassAccessor {
     // At iterator_end_, the iterator is no longer valid.
     const uint32_t iterator_end_;
 
-    friend class dex::DexFileVerifier;
+    friend class DexFileVerifier;
   };
 
   // Not explicit specifically for range-based loops.
@@ -391,7 +390,7 @@ class ClassAccessor {
   const uint32_t num_direct_methods_ = 0u;
   const uint32_t num_virtual_methods_ = 0u;
 
-  friend class dex::DexFileVerifier;
+  friend class DexFileVerifier;
 };
 
 }  // namespace art

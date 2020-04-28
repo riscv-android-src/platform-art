@@ -57,11 +57,6 @@ class ShadowFrame {
     kForcePopFrame  = 1 << 1,
     // We have been asked to re-execute the last instruction.
     kForceRetryInst = 1 << 2,
-    // Mark that we expect the next frame to retry the last instruction (used by instrumentation and
-    // debuggers to keep track of required events)
-    kSkipMethodExitEvents = 1 << 3,
-    // Used to suppress exception events caused by other instrumentation events.
-    kSkipNextExceptionEvent = 1 << 4,
   };
 
  public:
@@ -96,6 +91,12 @@ class ShadowFrame {
     })
 
   ~ShadowFrame() {}
+
+  // TODO(iam): Clean references array up since they're always there,
+  // we don't need to do conditionals.
+  bool HasReferenceArray() const {
+    return true;
+  }
 
   uint32_t NumberOfVRegs() const {
     return number_of_vregs_;
@@ -151,6 +152,7 @@ class ShadowFrame {
   }
 
   uint32_t* GetShadowRefAddr(size_t i) {
+    DCHECK(HasReferenceArray());
     DCHECK_LT(i, NumberOfVRegs());
     return &vregs_[i + NumberOfVRegs()];
   }
@@ -187,6 +189,7 @@ class ShadowFrame {
   mirror::Object* GetVRegReference(size_t i) const REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK_LT(i, NumberOfVRegs());
     mirror::Object* ref;
+    DCHECK(HasReferenceArray());
     ref = References()[i].AsMirrorPtr();
     ReadBarrier::MaybeAssertToSpaceInvariant(ref);
     if (kVerifyFlags & kVerifyReads) {
@@ -206,7 +209,9 @@ class ShadowFrame {
     *reinterpret_cast<int32_t*>(vreg) = val;
     // This is needed for moving collectors since these can update the vreg references if they
     // happen to agree with references in the reference array.
-    References()[i].Clear();
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i].Clear();
+    }
   }
 
   void SetVRegFloat(size_t i, float val) {
@@ -215,7 +220,9 @@ class ShadowFrame {
     *reinterpret_cast<float*>(vreg) = val;
     // This is needed for moving collectors since these can update the vreg references if they
     // happen to agree with references in the reference array.
-    References()[i].Clear();
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i].Clear();
+    }
   }
 
   void SetVRegLong(size_t i, int64_t val) {
@@ -225,8 +232,10 @@ class ShadowFrame {
     *reinterpret_cast<unaligned_int64*>(vreg) = val;
     // This is needed for moving collectors since these can update the vreg references if they
     // happen to agree with references in the reference array.
-    References()[i].Clear();
-    References()[i + 1].Clear();
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i].Clear();
+      References()[i + 1].Clear();
+    }
   }
 
   void SetVRegDouble(size_t i, double val) {
@@ -236,8 +245,10 @@ class ShadowFrame {
     *reinterpret_cast<unaligned_double*>(vreg) = val;
     // This is needed for moving collectors since these can update the vreg references if they
     // happen to agree with references in the reference array.
-    References()[i].Clear();
-    References()[i + 1].Clear();
+    if (kMovingCollector && HasReferenceArray()) {
+      References()[i].Clear();
+      References()[i + 1].Clear();
+    }
   }
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
@@ -260,8 +271,14 @@ class ShadowFrame {
   mirror::Object* GetThisObject(uint16_t num_ins) const REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool Contains(StackReference<mirror::Object>* shadow_frame_entry_obj) const {
-    return ((&References()[0] <= shadow_frame_entry_obj) &&
-            (shadow_frame_entry_obj <= (&References()[NumberOfVRegs() - 1])));
+    if (HasReferenceArray()) {
+      return ((&References()[0] <= shadow_frame_entry_obj) &&
+              (shadow_frame_entry_obj <= (&References()[NumberOfVRegs() - 1])));
+    } else {
+      uint32_t* shadow_frame_entry = reinterpret_cast<uint32_t*>(shadow_frame_entry_obj);
+      return ((&vregs_[0] <= shadow_frame_entry) &&
+              (shadow_frame_entry <= (&vregs_[NumberOfVRegs() - 1])));
+    }
   }
 
   LockCountData& GetLockCountData() {
@@ -318,7 +335,7 @@ class ShadowFrame {
                                             ArtMethod* method,
                                             uint32_t dex_pc,
                                             void* memory) {
-    return new (memory) ShadowFrame(num_vregs, link, method, dex_pc);
+    return new (memory) ShadowFrame(num_vregs, link, method, dex_pc, true);
   }
 
   const uint16_t* GetDexPCPtr() {
@@ -357,22 +374,6 @@ class ShadowFrame {
     UpdateFrameFlag(enable, FrameFlags::kForceRetryInst);
   }
 
-  bool GetSkipMethodExitEvents() const {
-    return GetFrameFlag(FrameFlags::kSkipMethodExitEvents);
-  }
-
-  void SetSkipMethodExitEvents(bool enable) {
-    UpdateFrameFlag(enable, FrameFlags::kSkipMethodExitEvents);
-  }
-
-  bool GetSkipNextExceptionEvent() const {
-    return GetFrameFlag(FrameFlags::kSkipNextExceptionEvent);
-  }
-
-  void SetSkipNextExceptionEvent(bool enable) {
-    UpdateFrameFlag(enable, FrameFlags::kSkipNextExceptionEvent);
-  }
-
   void CheckConsistentVRegs() const {
     if (kIsDebugBuild) {
       // A shadow frame visible to GC requires the following rule: for a given vreg,
@@ -385,7 +386,8 @@ class ShadowFrame {
   }
 
  private:
-  ShadowFrame(uint32_t num_vregs, ShadowFrame* link, ArtMethod* method, uint32_t dex_pc)
+  ShadowFrame(uint32_t num_vregs, ShadowFrame* link, ArtMethod* method,
+              uint32_t dex_pc, bool has_reference_array)
       : link_(link),
         method_(method),
         result_register_(nullptr),
@@ -396,7 +398,13 @@ class ShadowFrame {
         cached_hotness_countdown_(0),
         hotness_countdown_(0),
         frame_flags_(0) {
-    memset(vregs_, 0, num_vregs * (sizeof(uint32_t) + sizeof(StackReference<mirror::Object>)));
+    // TODO(iam): Remove this parameter, it's an an artifact of portable removal
+    DCHECK(has_reference_array);
+    if (has_reference_array) {
+      memset(vregs_, 0, num_vregs * (sizeof(uint32_t) + sizeof(StackReference<mirror::Object>)));
+    } else {
+      memset(vregs_, 0, num_vregs * sizeof(uint32_t));
+    }
   }
 
   void UpdateFrameFlag(bool enable, FrameFlags flag) {
@@ -412,6 +420,7 @@ class ShadowFrame {
   }
 
   const StackReference<mirror::Object>* References() const {
+    DCHECK(HasReferenceArray());
     const uint32_t* vreg_end = &vregs_[NumberOfVRegs()];
     return reinterpret_cast<const StackReference<mirror::Object>*>(vreg_end);
   }

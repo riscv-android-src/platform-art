@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -41,8 +42,6 @@ public class Main {
         System.out.println("Class loader does not match boot class");
       }
       testAddMethodToProfile(file, bootMethod);
-
-      System.out.println("IsForBootImage: " + isForBootImage(file.getPath()));
     } finally {
       if (file != null) {
         file.delete();
@@ -67,8 +66,6 @@ public class Main {
   public static native void ensureProfileProcessing();
   // Checks if the profiles saver knows about the method.
   public static native boolean presentInProfile(String profile, Method method);
-  // Returns true if the profile is for the boot image.
-  public static native boolean isForBootImage(String profile);
 
   private static final String TEMP_FILE_NAME_PREFIX = "dummy";
   private static final String TEMP_FILE_NAME_SUFFIX = "-file";

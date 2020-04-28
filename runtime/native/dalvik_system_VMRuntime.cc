@@ -46,7 +46,6 @@ extern "C" void android_set_application_target_sdk_version(uint32_t version);
 #include "gc/space/image_space.h"
 #include "gc/task_processor.h"
 #include "intern_table.h"
-#include "jit/jit.h"
 #include "jni/java_vm_ext.h"
 #include "jni/jni_internal.h"
 #include "mirror/array-alloc-inl.h"
@@ -119,11 +118,11 @@ static jobject VMRuntime_newNonMovableArray(JNIEnv* env, jobject, jclass javaEle
     return nullptr;
   }
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentNonMovingAllocator();
-  ObjPtr<mirror::Array> result = mirror::Array::Alloc(soa.Self(),
-                                                      array_class,
-                                                      length,
-                                                      array_class->GetComponentSizeShift(),
-                                                      allocator);
+  ObjPtr<mirror::Array> result = mirror::Array::Alloc<true>(soa.Self(),
+                                                            array_class,
+                                                            length,
+                                                            array_class->GetComponentSizeShift(),
+                                                            allocator);
   return soa.AddLocalReference<jobject>(result);
 }
 
@@ -146,13 +145,12 @@ static jobject VMRuntime_newUnpaddedArray(JNIEnv* env, jobject, jclass javaEleme
     return nullptr;
   }
   gc::AllocatorType allocator = runtime->GetHeap()->GetCurrentAllocator();
-  ObjPtr<mirror::Array> result =
-      mirror::Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-          soa.Self(),
-          array_class,
-          length,
-          array_class->GetComponentSizeShift(),
-          allocator);
+  ObjPtr<mirror::Array> result = mirror::Array::Alloc<true, true>(
+      soa.Self(),
+      array_class,
+      length,
+      array_class->GetComponentSizeShift(),
+      allocator);
   return soa.AddLocalReference<jobject>(result);
 }
 
@@ -725,14 +723,6 @@ static jboolean VMRuntime_hasBootImageSpaces(JNIEnv* env ATTRIBUTE_UNUSED,
   return Runtime::Current()->GetHeap()->HasBootImageSpace() ? JNI_TRUE : JNI_FALSE;
 }
 
-static void VMRuntime_bootCompleted(JNIEnv* env ATTRIBUTE_UNUSED,
-                                    jclass klass ATTRIBUTE_UNUSED) {
-  jit::Jit* jit = Runtime::Current()->GetJit();
-  if (jit != nullptr) {
-    jit->BootCompleted();
-  }
-}
-
 static JNINativeMethod gMethods[] = {
   FAST_NATIVE_METHOD(VMRuntime, addressOf, "(Ljava/lang/Object;)J"),
   NATIVE_METHOD(VMRuntime, bootClassPath, "()Ljava/lang/String;"),
@@ -782,7 +772,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, setDedupeHiddenApiWarnings, "(Z)V"),
   NATIVE_METHOD(VMRuntime, setProcessPackageName, "(Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setProcessDataDirectory, "(Ljava/lang/String;)V"),
-  NATIVE_METHOD(VMRuntime, bootCompleted, "()V"),
 };
 
 void register_dalvik_system_VMRuntime(JNIEnv* env) {

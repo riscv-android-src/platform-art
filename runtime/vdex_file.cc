@@ -27,7 +27,6 @@
 #include "base/bit_utils.h"
 #include "base/leb128.h"
 #include "base/stl_util.h"
-#include "base/systrace.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker.h"
 #include "class_loader_context.h"
@@ -103,7 +102,6 @@ std::unique_ptr<VdexFile> VdexFile::OpenAtAddress(uint8_t* mmap_addr,
                                                   bool low_4gb,
                                                   bool unquicken,
                                                   std::string* error_msg) {
-  ScopedTrace trace(("VdexFile::OpenAtAddress " + vdex_filename).c_str());
   if (!OS::FileExists(vdex_filename.c_str())) {
     *error_msg = "File " + vdex_filename + " does not exist.";
     return nullptr;
@@ -331,16 +329,9 @@ ArrayRef<const uint8_t> VdexFile::GetQuickenedInfoOf(const DexFile& dex_file,
 
 static std::string ComputeBootClassPathChecksumString() {
   Runtime* const runtime = Runtime::Current();
-  // Do not include boot image extension checksums, use their dex file checksums instead. Unlike
-  // oat files, vdex files do not reference anything in image spaces, so there is no reason why
-  // loading or not loading a boot image extension would affect the validity of the vdex file.
-  // Note: Update of a boot class path module such as conscrypt invalidates the vdex file anyway.
-  ArrayRef<gc::space::ImageSpace* const> image_spaces(runtime->GetHeap()->GetBootImageSpaces());
-  size_t boot_image_components =
-      image_spaces.empty() ? 0u : image_spaces[0]->GetImageHeader().GetComponentCount();
   return gc::space::ImageSpace::GetBootClassPathChecksums(
-          image_spaces.SubArray(/*pos=*/ 0u, boot_image_components),
-          ArrayRef<const DexFile* const>(runtime->GetClassLinker()->GetBootClassPath()));
+          runtime->GetHeap()->GetBootImageSpaces(),
+          runtime->GetClassLinker()->GetBootClassPath());
 }
 
 static bool CreateDirectories(const std::string& child_path, /* out */ std::string* error_msg) {

@@ -33,12 +33,6 @@
 namespace art_api {
 namespace dex {
 
-// Returns true if libdexfile_external.so is already loaded. Otherwise tries to
-// load it and returns true if successful. Otherwise returns false and sets
-// *error_msg. If false is returned then calling any function below may abort
-// the process. Thread safe.
-bool TryLoadLibdexfileExternal(std::string* error_msg);
-
 // Loads the libdexfile_external.so library and sets up function pointers.
 // Aborts with a fatal error on any error. For internal use by the classes
 // below.
@@ -81,13 +75,12 @@ class DexString final {
   }
 
  private:
-  friend bool TryLoadLibdexfileExternal(std::string* error_msg);
+  friend void LoadLibdexfileExternal();
   friend class DexFile;
   friend bool operator==(const DexString&, const DexString&);
   explicit DexString(const ExtDexFileString* ext_string) : ext_string_(ext_string) {}
   const ExtDexFileString* ext_string_;  // Owned instance. Never nullptr.
 
-  // These are initialized by TryLoadLibdexfileExternal.
   static decltype(ExtDexFileMakeString)* g_ExtDexFileMakeString;
   static decltype(ExtDexFileGetString)* g_ExtDexFileGetString;
   static decltype(ExtDexFileFreeString)* g_ExtDexFileFreeString;
@@ -210,7 +203,7 @@ class DexFile {
   }
 
  private:
-  friend bool TryLoadLibdexfileExternal(std::string* error_msg);
+  friend void LoadLibdexfileExternal();
   explicit DexFile(ExtDexFile* ext_dex_file) : ext_dex_file_(ext_dex_file) {}
   ExtDexFile* ext_dex_file_;  // Owned instance. nullptr only in moved-from zombies.
 
@@ -219,7 +212,6 @@ class DexFile {
   static MethodInfo AbsorbMethodInfo(const ExtDexFileMethodInfo& ext_method_info);
   static void AddMethodInfoCallback(const ExtDexFileMethodInfo* ext_method_info, void* user_data);
 
-  // These are initialized by TryLoadLibdexfileExternal.
   static decltype(ExtDexFileOpenFromMemory)* g_ExtDexFileOpenFromMemory;
   static decltype(ExtDexFileOpenFromFd)* g_ExtDexFileOpenFromFd;
   static decltype(ExtDexFileGetMethodInfoForOffset)* g_ExtDexFileGetMethodInfoForOffset;

@@ -40,7 +40,7 @@ all_tests = [
 
 def subst_vars(variables, text):
     '''Substitute variables in text.'''
-    for key, value in variables.items():
+    for key, value in variables.iteritems():
         text = text.replace(str(key), str(value))
     return text
 

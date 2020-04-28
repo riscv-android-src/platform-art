@@ -109,7 +109,6 @@ TEST_F(HiddenApiTest, CheckGetActionFromRuntimeFlags) {
   runtime_->SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kJustWarn);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Whitelist()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxQ()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxP()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxO()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Blacklist()), false);
@@ -119,7 +118,6 @@ TEST_F(HiddenApiTest, CheckGetActionFromRuntimeFlags) {
       static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxO().GetMaxAllowedSdkVersion()));
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Whitelist()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxQ()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxP()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxO()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Blacklist()), true);
@@ -129,7 +127,6 @@ TEST_F(HiddenApiTest, CheckGetActionFromRuntimeFlags) {
       static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxO().GetMaxAllowedSdkVersion()) + 1);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Whitelist()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxQ()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxP()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxO()), true);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Blacklist()), true);
@@ -139,58 +136,9 @@ TEST_F(HiddenApiTest, CheckGetActionFromRuntimeFlags) {
       static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxP().GetMaxAllowedSdkVersion()) + 1);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Whitelist()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxQ()), false);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxP()), true);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxO()), true);
   ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Blacklist()), true);
-
-  runtime_->SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
-  runtime_->SetTargetSdkVersion(
-      static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxQ().GetMaxAllowedSdkVersion()) + 1);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Whitelist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxQ()), true);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxP()), true);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::GreylistMaxO()), true);
-  ASSERT_EQ(ShouldDenyAccess(hiddenapi::ApiList::Blacklist()), true);
-}
-
-TEST_F(HiddenApiTest, CheckTestApiEnforcement) {
-  ScopedObjectAccess soa(self_);
-
-  runtime_->SetHiddenApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
-  runtime_->SetTargetSdkVersion(
-      static_cast<uint32_t>(hiddenapi::ApiList::GreylistMaxQ().GetMaxAllowedSdkVersion()) + 1);
-
-  // Default case where all TestApis are treated like non-TestApi.
-  runtime_->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kEnabled);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Whitelist()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxQ()), true);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxP()), true);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxO()), true);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Blacklist()), true);
-
-  // A case where we want to allow access to TestApis.
-  runtime_->SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy::kDisabled);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Whitelist()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Greylist()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxQ()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxP()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::GreylistMaxO()), false);
-  ASSERT_EQ(
-      ShouldDenyAccess(hiddenapi::ApiList::TestApi() | hiddenapi::ApiList::Blacklist()), false);
 }
 
 TEST_F(HiddenApiTest, CheckMembersRead) {

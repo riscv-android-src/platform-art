@@ -19,8 +19,6 @@
 #include <errno.h>
 #include <sys/time.h>
 
-#include <sstream>
-
 #include "android-base/stringprintf.h"
 
 #include "base/atomic.h"
@@ -189,7 +187,6 @@ void BaseMutex::CheckSafeToWait(Thread* self) {
     CHECK(self->GetHeldMutex(level_) == this || level_ == kMonitorLock)
         << "Waiting on unacquired mutex: " << name_;
     bool bad_mutexes_held = false;
-    std::string error_msg;
     for (int i = kLockLevelCount - 1; i >= 0; --i) {
       if (i != level_) {
         BaseMutex* held_mutex = self->GetHeldMutex(static_cast<LockLevel>(i));
@@ -208,28 +205,22 @@ void BaseMutex::CheckSafeToWait(Thread* self) {
             return self->GetUserCodeSuspendCount() != 0;
           };
           if (is_suspending_for_user_code()) {
-            std::ostringstream oss;
-            oss << "Holding \"" << held_mutex->name_ << "\" "
-                << "(level " << LockLevel(i) << ") while performing wait on "
-                << "\"" << name_ << "\" (level " << level_ << ") "
-                << "with SuspendReason::kForUserCode pending suspensions";
-            error_msg = oss.str();
-            LOG(ERROR) << error_msg;
+            LOG(ERROR) << "Holding \"" << held_mutex->name_ << "\" "
+                      << "(level " << LockLevel(i) << ") while performing wait on "
+                      << "\"" << name_ << "\" (level " << level_ << ") "
+                      << "with SuspendReason::kForUserCode pending suspensions";
             bad_mutexes_held = true;
           }
         } else if (held_mutex != nullptr) {
-          std::ostringstream oss;
-          oss << "Holding \"" << held_mutex->name_ << "\" "
-              << "(level " << LockLevel(i) << ") while performing wait on "
-              << "\"" << name_ << "\" (level " << level_ << ")";
-          error_msg = oss.str();
-          LOG(ERROR) << error_msg;
+          LOG(ERROR) << "Holding \"" << held_mutex->name_ << "\" "
+                     << "(level " << LockLevel(i) << ") while performing wait on "
+                     << "\"" << name_ << "\" (level " << level_ << ")";
           bad_mutexes_held = true;
         }
       }
     }
     if (gAborting == 0) {  // Avoid recursive aborts.
-      CHECK(!bad_mutexes_held) << error_msg;
+      CHECK(!bad_mutexes_held) << this;
     }
   }
 }
@@ -551,19 +542,21 @@ void Mutex::WakeupToRespondToEmptyCheckpoint() {
 ReaderWriterMutex::ReaderWriterMutex(const char* name, LockLevel level)
     : BaseMutex(name, level)
 #if ART_USE_FUTEXES
-    , state_(0), exclusive_owner_(0), num_contenders_(0)
+    , state_(0), num_pending_readers_(0), num_pending_writers_(0)
 #endif
 {
 #if !ART_USE_FUTEXES
   CHECK_MUTEX_CALL(pthread_rwlock_init, (&rwlock_, nullptr));
 #endif
+  exclusive_owner_.store(0 /* pid */, std::memory_order_relaxed);
 }
 
 ReaderWriterMutex::~ReaderWriterMutex() {
 #if ART_USE_FUTEXES
   CHECK_EQ(state_.load(std::memory_order_relaxed), 0);
   CHECK_EQ(GetExclusiveOwnerTid(), 0);
-  CHECK_EQ(num_contenders_.load(std::memory_order_relaxed), 0);
+  CHECK_EQ(num_pending_readers_.load(std::memory_order_relaxed), 0);
+  CHECK_EQ(num_pending_writers_.load(std::memory_order_relaxed), 0);
 #else
   // We can't use CHECK_MUTEX_CALL here because on shutdown a suspended daemon thread
   // may still be using locks.
@@ -589,7 +582,7 @@ void ReaderWriterMutex::ExclusiveLock(Thread* self) {
     } else {
       // Failed to acquire, hang up.
       ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-      num_contenders_.fetch_add(1);
+      ++num_pending_writers_;
       if (UNLIKELY(should_respond_to_empty_checkpoint_request_)) {
         self->CheckEmptyCheckpointFromMutex();
       }
@@ -600,7 +593,7 @@ void ReaderWriterMutex::ExclusiveLock(Thread* self) {
           PLOG(FATAL) << "futex wait failed for " << name_;
         }
       }
-      num_contenders_.fetch_sub(1);
+      --num_pending_writers_;
     }
   } while (!done);
   DCHECK_EQ(state_.load(std::memory_order_relaxed), -1);
@@ -626,11 +619,14 @@ void ReaderWriterMutex::ExclusiveUnlock(Thread* self) {
       // We're no longer the owner.
       exclusive_owner_.store(0 /* pid */, std::memory_order_relaxed);
       // Change state from -1 to 0 and impose load/store ordering appropriate for lock release.
-      // Note, the num_contenders_ load below musn't reorder before the CompareAndSet.
+      // Note, the relaxed loads below musn't reorder before the CompareAndSet.
+      // TODO: the ordering here is non-trivial as state is split across 3 fields, fix by placing
+      // a status bit into the state on contention.
       done = state_.CompareAndSetWeakSequentiallyConsistent(-1 /* cur_state*/, 0 /* new state */);
       if (LIKELY(done)) {  // Weak CAS may fail spuriously.
         // Wake any waiters.
-        if (UNLIKELY(num_contenders_.load(std::memory_order_seq_cst) > 0)) {
+        if (UNLIKELY(num_pending_readers_.load(std::memory_order_seq_cst) > 0 ||
+                     num_pending_writers_.load(std::memory_order_seq_cst) > 0)) {
           futex(state_.Address(), FUTEX_WAKE_PRIVATE, kWakeAll, nullptr, nullptr, 0);
         }
       }
@@ -665,13 +661,13 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
         return false;  // Timed out.
       }
       ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-      num_contenders_.fetch_add(1);
+      ++num_pending_writers_;
       if (UNLIKELY(should_respond_to_empty_checkpoint_request_)) {
         self->CheckEmptyCheckpointFromMutex();
       }
       if (futex(state_.Address(), FUTEX_WAIT_PRIVATE, cur_state, &rel_ts, nullptr, 0) != 0) {
         if (errno == ETIMEDOUT) {
-          num_contenders_.fetch_sub(1);
+          --num_pending_writers_;
           return false;  // Timed out.
         } else if ((errno != EAGAIN) && (errno != EINTR)) {
           // EAGAIN and EINTR both indicate a spurious failure,
@@ -680,7 +676,7 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
           PLOG(FATAL) << "timed futex wait failed for " << name_;
         }
       }
-      num_contenders_.fetch_sub(1);
+      --num_pending_writers_;
     }
   } while (!done);
 #else
@@ -706,7 +702,7 @@ bool ReaderWriterMutex::ExclusiveLockWithTimeout(Thread* self, int64_t ms, int32
 void ReaderWriterMutex::HandleSharedLockContention(Thread* self, int32_t cur_state) {
   // Owner holds it exclusively, hang up.
   ScopedContentionRecorder scr(this, SafeGetTid(self), GetExclusiveOwnerTid());
-  num_contenders_.fetch_add(1);
+  ++num_pending_readers_;
   if (UNLIKELY(should_respond_to_empty_checkpoint_request_)) {
     self->CheckEmptyCheckpointFromMutex();
   }
@@ -715,7 +711,7 @@ void ReaderWriterMutex::HandleSharedLockContention(Thread* self, int32_t cur_sta
       PLOG(FATAL) << "futex wait failed for " << name_;
     }
   }
-  num_contenders_.fetch_sub(1);
+  --num_pending_readers_;
 }
 #endif
 
@@ -765,7 +761,8 @@ void ReaderWriterMutex::Dump(std::ostream& os) const {
       << " owner=" << GetExclusiveOwnerTid()
 #if ART_USE_FUTEXES
       << " state=" << state_.load(std::memory_order_seq_cst)
-      << " num_contenders=" << num_contenders_.load(std::memory_order_seq_cst)
+      << " num_pending_writers=" << num_pending_writers_.load(std::memory_order_seq_cst)
+      << " num_pending_readers=" << num_pending_readers_.load(std::memory_order_seq_cst)
 #endif
       << " ";
   DumpContention(os);
@@ -785,7 +782,8 @@ void ReaderWriterMutex::WakeupToRespondToEmptyCheckpoint() {
 #if ART_USE_FUTEXES
   // Wake up all the waiters so they will respond to the emtpy checkpoint.
   DCHECK(should_respond_to_empty_checkpoint_request_);
-  if (UNLIKELY(num_contenders_.load(std::memory_order_relaxed) > 0)) {
+  if (UNLIKELY(num_pending_readers_.load(std::memory_order_relaxed) > 0 ||
+               num_pending_writers_.load(std::memory_order_relaxed) > 0)) {
     futex(state_.Address(), FUTEX_WAKE_PRIVATE, kWakeAll, nullptr, nullptr, 0);
   }
 #else

@@ -17,7 +17,6 @@
 #ifndef ART_TOOLS_VERIDEX_PRECISE_HIDDEN_API_FINDER_H_
 #define ART_TOOLS_VERIDEX_PRECISE_HIDDEN_API_FINDER_H_
 
-#include "class_filter.h"
 #include "dex/method_reference.h"
 #include "flow_analysis.h"
 
@@ -41,8 +40,7 @@ class PreciseHiddenApiFinder {
 
   // Iterate over the dex files associated with the passed resolvers to report
   // hidden API uses.
-  void Run(const std::vector<std::unique_ptr<VeridexResolver>>& app_resolvers,
-           const ClassFilter& app_class_filter);
+  void Run(const std::vector<std::unique_ptr<VeridexResolver>>& app_resolvers);
 
   void Dump(std::ostream& os, HiddenApiStats* stats);
 
@@ -50,7 +48,6 @@ class PreciseHiddenApiFinder {
   // Run over all methods of all dex files, and call `action` on each.
   void RunInternal(
       const std::vector<std::unique_ptr<VeridexResolver>>& resolvers,
-      const ClassFilter& class_filter,
       const std::function<void(VeridexResolver*, const ClassAccessor::Method&)>& action);
 
   // Add uses found in method `ref`.

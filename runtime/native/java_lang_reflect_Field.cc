@@ -129,17 +129,15 @@ ALWAYS_INLINE inline static bool CheckReceiver(const ScopedFastNativeObjectAcces
   soa.Self()->AssertThreadSuspensionIsAllowable();
   ObjPtr<mirror::Class> declaring_class = (*f)->GetDeclaringClass();
   if ((*f)->IsStatic()) {
-    if (UNLIKELY(!declaring_class->IsVisiblyInitialized())) {
-      Thread* self = soa.Self();
-      StackHandleScope<2> hs(self);
+    if (UNLIKELY(!declaring_class->IsInitialized())) {
+      StackHandleScope<2> hs(soa.Self());
       HandleWrapperObjPtr<mirror::Field> h_f(hs.NewHandleWrapper(f));
       HandleWrapperObjPtr<mirror::Class> h_klass(hs.NewHandleWrapper(&declaring_class));
-      if (UNLIKELY(!Runtime::Current()->GetClassLinker()->EnsureInitialized(
-                        self, h_klass, /*can_init_fields=*/ true, /*can_init_parents=*/ true))) {
-        DCHECK(self->IsExceptionPending());
+      ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
+      if (UNLIKELY(!class_linker->EnsureInitialized(soa.Self(), h_klass, true, true))) {
+        DCHECK(soa.Self()->IsExceptionPending());
         return false;
       }
-      DCHECK(h_klass->IsInitializing());
     }
     *class_or_rcvr = declaring_class;
     return true;
@@ -258,7 +256,7 @@ ALWAYS_INLINE inline static void SetFieldValue(ObjPtr<mirror::Object> o,
                                                bool allow_references,
                                                const JValue& new_value)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  DCHECK(f->GetDeclaringClass()->IsInitializing());
+  DCHECK(f->GetDeclaringClass()->IsInitialized());
   MemberOffset offset(f->GetOffset());
   const bool is_volatile = f->IsVolatile();
   switch (field_type) {

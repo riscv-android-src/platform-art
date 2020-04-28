@@ -19,13 +19,14 @@ cc_defaults {
     defaults: ["art_defaults"],
     host_supported: true,
     srcs: [
-        "profile/profile_boot_info.cc",
         "profile/profile_compilation_info.cc",
     ],
     target: {
         android: {
             shared_libs: [
+                "libartbase",
                 "libartpalette",
+                "libdexfile",
                 "libbase",
             ],
             static_libs: [
@@ -37,7 +38,9 @@ cc_defaults {
         },
         not_windows: {
             shared_libs: [
+                "libartbase",
                 "libartpalette",
+                "libdexfile",
                 "libziparchive",
                 "libz",
                 "libbase",
@@ -45,9 +48,11 @@ cc_defaults {
             export_shared_lib_headers: ["libbase"],
         },
         windows: {
-            cflags: ["-Wno-thread-safety"],
+	    cflags: ["-Wno-thread-safety"],
             static_libs: [
+                "libartbase",
                 "libartpalette",
+                "libdexfile",
                 "libziparchive",
                 "libz",
                 "libbase",
@@ -109,29 +114,13 @@ art_cc_library {
     ],
     export_shared_lib_headers: ["libbase"],
     target: {
-        android: {
-            shared_libs: [
-                "libartbase",
-                "libdexfile",
-            ],
-        },
-        not_windows: {
-            shared_libs: [
-                "libartbase",
-                "libdexfile",
-            ],
-        },
         windows: {
-            enabled: true,
-            shared: {
-                enabled: false,
-            },
-            static_libs: [
-                "libartbase",
-                "libdexfile",
-            ],
-        },
-    },
+	    enabled: true,
+	    shared: {
+	        enabled: false,
+	    },
+	},
+    }
 }
 
 art_cc_library {
@@ -144,26 +133,6 @@ art_cc_library {
         "libbase",
         "libziparchive",
     ],
-    target: {
-        android: {
-            shared_libs: [
-                "libartbased",
-                "libdexfiled",
-            ],
-        },
-        not_windows: {
-            shared_libs: [
-                "libartbased",
-                "libdexfiled",
-            ],
-        },
-        windows: {
-            static_libs: [
-                "libartbased",
-                "libdexfiled",
-            ],
-        },
-    },
     export_shared_lib_headers: ["libbase"],
 }
 
@@ -176,7 +145,6 @@ art_cc_test {
         "art_gtest_defaults",
     ],
     srcs: [
-        "profile/profile_boot_info_test.cc",
         "profile/profile_compilation_info_test.cc",
     ],
     shared_libs: [

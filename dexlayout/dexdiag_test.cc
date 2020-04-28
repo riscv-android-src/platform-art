@@ -17,7 +17,8 @@
 #include <string>
 #include <vector>
 
-#include "base/common_art_test.h"
+#include "common_runtime_test.h"
+
 #include "base/file_utils.h"
 #include "base/os.h"
 #include "exec_utils.h"
@@ -31,22 +32,26 @@ static const char* kDexDiagHelp = "--help";
 static const char* kDexDiagVerbose = "--verbose";
 static const char* kDexDiagBinaryName = "dexdiag";
 
-class DexDiagTest : public CommonArtTest {
+class DexDiagTest : public CommonRuntimeTest {
  protected:
   void SetUp() override {
-    CommonArtTest::SetUp();
+    CommonRuntimeTest::SetUp();
   }
 
   // Path to the dexdiag(d?)[32|64] binary.
   std::string GetDexDiagFilePath() {
-    std::string path = GetArtBinDir() + '/' + kDexDiagBinaryName;
-    std::string path32 = path + "32";
+    std::string root = GetTestAndroidRoot();
+
+    root += "/bin/";
+    root += kDexDiagBinaryName;
+
+    std::string root32 = root + "32";
     // If we have both a 32-bit and a 64-bit build, the 32-bit file will have a 32 suffix.
-    if (OS::FileExists(path32.c_str()) && !Is64BitInstructionSet(kRuntimeISA)) {
-      return path32;
+    if (OS::FileExists(root32.c_str()) && !Is64BitInstructionSet(kRuntimeISA)) {
+      return root32;
     } else {
       // This is a 64-bit build or only a single build exists.
-      return path;
+      return root;
     }
   }
 

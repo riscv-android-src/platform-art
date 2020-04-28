@@ -63,10 +63,9 @@ void InstructionCodeGeneratorX86::VisitVecReplicateScalar(HVecReplicateScalar* i
   LocationSummary* locations = instruction->GetLocations();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
 
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   // Shorthand for any type of zero.
   if (IsZeroBitPattern(instruction->InputAt(0))) {
-    cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+    __ xorps(dst, dst);
     return;
   }
 
@@ -432,69 +431,41 @@ static void CreateVecBinOpLocations(ArenaAllocator* allocator, HVecBinaryOperati
   }
 }
 
-static void CreateVecTerOpLocations(ArenaAllocator* allocator, HVecOperation* instruction) {
-  LocationSummary* locations = new (allocator) LocationSummary(instruction);
-  switch (instruction->GetPackedType()) {
-    case DataType::Type::kBool:
-    case DataType::Type::kUint8:
-    case DataType::Type::kInt8:
-    case DataType::Type::kUint16:
-    case DataType::Type::kInt16:
-    case DataType::Type::kInt32:
-    case DataType::Type::kInt64:
-    case DataType::Type::kFloat32:
-    case DataType::Type::kFloat64:
-      locations->SetInAt(0, Location::RequiresFpuRegister());
-      locations->SetInAt(1, Location::RequiresFpuRegister());
-      locations->SetOut(Location::RequiresFpuRegister());
-      break;
-    default:
-      LOG(FATAL) << "Unsupported SIMD type";
-      UNREACHABLE();
-  }
-}
-
 void LocationsBuilderX86::VisitVecAdd(HVecAdd* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecAdd(HVecAdd* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kUint8:
     case DataType::Type::kInt8:
       DCHECK_EQ(16u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpaddb(dst, other_src, src) : __ paddb(dst, src);
+      __ paddb(dst, src);
       break;
     case DataType::Type::kUint16:
     case DataType::Type::kInt16:
       DCHECK_EQ(8u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpaddw(dst, other_src, src) : __ paddw(dst, src);
+      __ paddw(dst, src);
       break;
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ?  __ vpaddd(dst, other_src, src) : __ paddd(dst, src);
+      __ paddd(dst, src);
       break;
     case DataType::Type::kInt64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpaddq(dst, other_src, src) : __ paddq(dst, src);
+      __ paddq(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vaddps(dst, other_src, src) : __ addps(dst, src);
+      __ addps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vaddpd(dst, other_src, src) : __ addpd(dst, src);
+      __ addpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -562,46 +533,40 @@ void InstructionCodeGeneratorX86::VisitVecHalvingAdd(HVecHalvingAdd* instruction
 }
 
 void LocationsBuilderX86::VisitVecSub(HVecSub* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecSub(HVecSub* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kUint8:
     case DataType::Type::kInt8:
       DCHECK_EQ(16u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpsubb(dst, other_src, src) : __ psubb(dst, src);
+      __ psubb(dst, src);
       break;
     case DataType::Type::kUint16:
     case DataType::Type::kInt16:
       DCHECK_EQ(8u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpsubw(dst, other_src, src) : __ psubw(dst, src);
+      __ psubw(dst, src);
       break;
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ?  __ vpsubd(dst, other_src, src) : __ psubd(dst, src);
+      __ psubd(dst, src);
       break;
     case DataType::Type::kInt64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpsubq(dst, other_src, src) : __ psubq(dst, src);
+      __ psubq(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vsubps(dst, other_src, src) : __ subps(dst, src);
+      __ subps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vsubpd(dst, other_src, src) : __ subpd(dst, src);
+      __ subpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -642,37 +607,31 @@ void InstructionCodeGeneratorX86::VisitVecSaturationSub(HVecSaturationSub* instr
 }
 
 void LocationsBuilderX86::VisitVecMul(HVecMul* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecMul(HVecMul* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kUint16:
     case DataType::Type::kInt16:
       DCHECK_EQ(8u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpmullw(dst, other_src, src) : __ pmullw(dst, src);
+      __ pmullw(dst, src);
       break;
     case DataType::Type::kInt32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vpmulld(dst, other_src, src) : __ pmulld(dst, src);
+      __ pmulld(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vmulps(dst, other_src, src) : __ mulps(dst, src);
+      __ mulps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vmulpd(dst, other_src, src) : __ mulpd(dst, src);
+      __ mulpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -681,28 +640,22 @@ void InstructionCodeGeneratorX86::VisitVecMul(HVecMul* instruction) {
 }
 
 void LocationsBuilderX86::VisitVecDiv(HVecDiv* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecDiv(HVecDiv* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vdivps(dst, other_src, src) : __ divps(dst, src);
+      __ divps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ?  __ vdivpd(dst, other_src, src) : __ divpd(dst, src);
+      __ divpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -809,20 +762,14 @@ void InstructionCodeGeneratorX86::VisitVecMax(HVecMax* instruction) {
 }
 
 void LocationsBuilderX86::VisitVecAnd(HVecAnd* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -833,15 +780,15 @@ void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
     case DataType::Type::kInt64:
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
-      cpu_has_avx ? __ vpand(dst, other_src, src) : __ pand(dst, src);
+      __ pand(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vandps(dst, other_src, src) : __ andps(dst, src);
+      __ andps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vandpd(dst, other_src, src) : __ andpd(dst, src);
+      __ andpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -850,20 +797,14 @@ void InstructionCodeGeneratorX86::VisitVecAnd(HVecAnd* instruction) {
 }
 
 void LocationsBuilderX86::VisitVecAndNot(HVecAndNot* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -874,15 +815,15 @@ void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
     case DataType::Type::kInt64:
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
-      cpu_has_avx ? __ vpandn(dst, other_src, src) : __ pandn(dst, src);
+      __ pandn(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vandnps(dst, other_src, src) : __ andnps(dst, src);
+      __ andnps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vandnpd(dst, other_src, src) : __ andnpd(dst, src);
+      __ andnpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -891,20 +832,14 @@ void InstructionCodeGeneratorX86::VisitVecAndNot(HVecAndNot* instruction) {
 }
 
 void LocationsBuilderX86::VisitVecOr(HVecOr* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -915,15 +850,15 @@ void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
     case DataType::Type::kInt64:
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
-      cpu_has_avx ? __ vpor(dst, other_src, src) : __ por(dst, src);
+      __ por(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vorps(dst, other_src, src) : __ orps(dst, src);
+      __ orps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vorpd(dst, other_src, src) : __ orpd(dst, src);
+      __ orpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -932,20 +867,14 @@ void InstructionCodeGeneratorX86::VisitVecOr(HVecOr* instruction) {
 }
 
 void LocationsBuilderX86::VisitVecXor(HVecXor* instruction) {
-  if (CpuHasAvxFeatureFlag()) {
-    CreateVecTerOpLocations(GetGraph()->GetAllocator(), instruction);
-  } else {
-    CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
-  }
+  CreateVecBinOpLocations(GetGraph()->GetAllocator(), instruction);
 }
 
 void InstructionCodeGeneratorX86::VisitVecXor(HVecXor* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
   LocationSummary* locations = instruction->GetLocations();
-  XmmRegister other_src = locations->InAt(0).AsFpuRegister<XmmRegister>();
+  DCHECK(locations->InAt(0).Equals(locations->Out()));
   XmmRegister src = locations->InAt(1).AsFpuRegister<XmmRegister>();
   XmmRegister dst = locations->Out().AsFpuRegister<XmmRegister>();
-  DCHECK(cpu_has_avx || other_src == dst);
   switch (instruction->GetPackedType()) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -956,15 +885,15 @@ void InstructionCodeGeneratorX86::VisitVecXor(HVecXor* instruction) {
     case DataType::Type::kInt64:
       DCHECK_LE(2u, instruction->GetVectorLength());
       DCHECK_LE(instruction->GetVectorLength(), 16u);
-      cpu_has_avx ? __ vpxor(dst, other_src, src) : __ pxor(dst, src);
+      __ pxor(dst, src);
       break;
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vxorps(dst, other_src, src) : __ xorps(dst, src);
+      __ xorps(dst, src);
       break;
     case DataType::Type::kFloat64:
       DCHECK_EQ(2u, instruction->GetVectorLength());
-      cpu_has_avx ? __ vxorpd(dst, other_src, src) : __ xorpd(dst, src);
+      __ xorpd(dst, src);
       break;
     default:
       LOG(FATAL) << "Unsupported SIMD type: " << instruction->GetPackedType();
@@ -1117,8 +1046,7 @@ void InstructionCodeGeneratorX86::VisitVecSetScalars(HVecSetScalars* instruction
   DCHECK_EQ(1u, instruction->InputCount());  // only one input currently implemented
 
   // Zero out all other elements first.
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
-  cpu_has_avx ? __ vxorps(dst, dst, dst) : __ xorps(dst, dst);
+  __ xorps(dst, dst);
 
   // Shorthand for any type of zero.
   if (IsZeroBitPattern(instruction->InputAt(0))) {
@@ -1201,38 +1129,11 @@ void InstructionCodeGeneratorX86::VisitVecSADAccumulate(HVecSADAccumulate* instr
 }
 
 void LocationsBuilderX86::VisitVecDotProd(HVecDotProd* instruction) {
-  LocationSummary* locations = new (GetGraph()->GetAllocator()) LocationSummary(instruction);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetInAt(1, Location::RequiresFpuRegister());
-  locations->SetInAt(2, Location::RequiresFpuRegister());
-  locations->SetOut(Location::SameAsFirstInput());
-  locations->AddTemp(Location::RequiresFpuRegister());
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
 }
 
 void InstructionCodeGeneratorX86::VisitVecDotProd(HVecDotProd* instruction) {
-  bool cpu_has_avx = CpuHasAvxFeatureFlag();
-  LocationSummary* locations = instruction->GetLocations();
-  XmmRegister acc = locations->InAt(0).AsFpuRegister<XmmRegister>();
-  XmmRegister left = locations->InAt(1).AsFpuRegister<XmmRegister>();
-  XmmRegister right = locations->InAt(2).AsFpuRegister<XmmRegister>();
-  switch (instruction->GetPackedType()) {
-    case DataType::Type::kInt32: {
-      DCHECK_EQ(4u, instruction->GetVectorLength());
-      XmmRegister tmp = locations->GetTemp(0).AsFpuRegister<XmmRegister>();
-      if (!cpu_has_avx) {
-        __ movaps(tmp, right);
-        __ pmaddwd(tmp, left);
-        __ paddd(acc, tmp);
-      } else {
-        __ vpmaddwd(tmp, left, right);
-        __ vpaddd(acc, acc, tmp);
-      }
-      break;
-    }
-    default:
-      LOG(FATAL) << "Unsupported SIMD Type" << instruction->GetPackedType();
-      UNREACHABLE();
-  }
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
 }
 
 // Helper to set up locations for vector memory operations.

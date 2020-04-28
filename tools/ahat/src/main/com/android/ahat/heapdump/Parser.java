@@ -32,7 +32,6 @@ import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 /**
  * Provides methods for parsing heap dumps.
@@ -510,7 +509,6 @@ public class Parser {
                       obj.initialize(data);
                       break;
                     }
-                    default: throw new AssertionError("unsupported enum member");
                   }
                   break;
                 }
@@ -736,10 +734,6 @@ public class Parser {
     @Override
     public String toString() {
       return String.format("0x%08x", mId);
-    }
-
-    @Override public int hashCode() {
-      return Objects.hash(mId);
     }
 
     @Override public boolean equals(Object other) {

@@ -35,7 +35,6 @@
 
 // Parse-able keys from the command line.
 RUNTIME_OPTIONS_KEY (Unit,                Zygote)
-RUNTIME_OPTIONS_KEY (Unit,                PrimaryZygote)
 RUNTIME_OPTIONS_KEY (Unit,                Help)
 RUNTIME_OPTIONS_KEY (Unit,                ShowVersion)
 RUNTIME_OPTIONS_KEY (ParseStringList<':'>,BootClassPath)           // std::vector<std::string>
@@ -52,7 +51,6 @@ RUNTIME_OPTIONS_KEY (MemoryKiB,           HeapGrowthLimit)                // Def
 RUNTIME_OPTIONS_KEY (MemoryKiB,           HeapMinFree,                    gc::Heap::kDefaultMinFree)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           HeapMaxFree,                    gc::Heap::kDefaultMaxFree)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           NonMovingSpaceCapacity,         gc::Heap::kDefaultNonMovingSpaceCapacity)
-RUNTIME_OPTIONS_KEY (MemoryKiB,           StopForNativeAllocs,            1 * GB)
 RUNTIME_OPTIONS_KEY (double,              HeapTargetUtilization,          gc::Heap::kDefaultTargetUtilization)
 RUNTIME_OPTIONS_KEY (double,              ForegroundHeapGrowthMultiplier, gc::Heap::kDefaultHeapGrowthMultiplier)
 RUNTIME_OPTIONS_KEY (unsigned int,        ParallelGCThreads,              0u)
@@ -77,7 +75,6 @@ RUNTIME_OPTIONS_KEY (bool,                EnableHSpaceCompactForOOM,      true)
 RUNTIME_OPTIONS_KEY (bool,                UseJitCompilation,              true)
 RUNTIME_OPTIONS_KEY (bool,                DumpNativeStackOnSigQuit,       true)
 RUNTIME_OPTIONS_KEY (bool,                MadviseRandomAccess,            false)
-RUNTIME_OPTIONS_KEY (JniIdType,           OpaqueJniIds,                   JniIdType::kDefault)  // -Xopaque-jni-ids:{true, false}
 RUNTIME_OPTIONS_KEY (unsigned int,        JITCompileThreshold)
 RUNTIME_OPTIONS_KEY (unsigned int,        JITWarmupThreshold)
 RUNTIME_OPTIONS_KEY (unsigned int,        JITOsrThreshold)
@@ -144,7 +141,7 @@ RUNTIME_OPTIONS_KEY (std::vector<Plugin>,            Plugins)  // -Xplugin:<libr
 RUNTIME_OPTIONS_KEY (std::vector<std::unique_ptr<const DexFile>>*, \
                                           BootClassPathDexList)
 RUNTIME_OPTIONS_KEY (InstructionSet,      ImageInstructionSet,            kRuntimeISA)
-RUNTIME_OPTIONS_KEY (CompilerCallbacks*,  CompilerCallbacksPtr)  // TODO: make unique_ptr
+RUNTIME_OPTIONS_KEY (CompilerCallbacks*,  CompilerCallbacksPtr)  // TDOO: make unique_ptr
 RUNTIME_OPTIONS_KEY (bool (*)(),          HookIsSensitiveThread)
 RUNTIME_OPTIONS_KEY (int32_t (*)(FILE* stream, const char* format, va_list ap), \
                                           HookVfprintf,                   vfprintf)
@@ -169,6 +166,5 @@ RUNTIME_OPTIONS_KEY (gc::space::ImageSpaceLoadingOrder, \
                      gc::space::ImageSpaceLoadingOrder::kSystemFirst)
 
 RUNTIME_OPTIONS_KEY (bool,                FastClassNotFoundException,     true)
-RUNTIME_OPTIONS_KEY (bool,                VerifierMissingKThrowFatal,     true)
 
 #undef RUNTIME_OPTIONS_KEY

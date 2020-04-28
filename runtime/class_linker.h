@@ -20,15 +20,12 @@
 #include <list>
 #include <set>
 #include <string>
-#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "base/enums.h"
-#include "base/mutex.h"
-#include "base/intrusive_forward_list.h"
 #include "base/locks.h"
 #include "base/macros.h"
 #include "dex/class_accessor.h"
@@ -480,38 +477,6 @@ class ClassLinker {
                                                       LinearAlloc* allocator,
                                                       size_t length);
 
-  // Convenience AllocClass() overload that uses mirror::Class::InitializeClassVisitor
-  // for the class initialization and uses the `java_lang_Class` from class roots
-  // instead of an explicit argument.
-  ObjPtr<mirror::Class> AllocClass(Thread* self, uint32_t class_size)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Roles::uninterruptible_);
-
-  // Setup the classloader, class def index, type idx so that we can insert this class in the class
-  // table.
-  void SetupClass(const DexFile& dex_file,
-                  const dex::ClassDef& dex_class_def,
-                  Handle<mirror::Class> klass,
-                  ObjPtr<mirror::ClassLoader> class_loader)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  void LoadClass(Thread* self,
-                 const DexFile& dex_file,
-                 const dex::ClassDef& dex_class_def,
-                 Handle<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Link the class and place it into the class-table using the given descriptor. NB if the
-  // descriptor is null the class will not be placed in any class-table. This is useful implementing
-  // obsolete classes and should not be used otherwise.
-  bool LinkClass(Thread* self,
-                 const char* descriptor,
-                 Handle<mirror::Class> klass,
-                 Handle<mirror::ObjectArray<mirror::Class>> interfaces,
-                 MutableHandle<mirror::Class>* h_new_class_out)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::classlinker_classes_lock_);
-
   ObjPtr<mirror::PointerArray> AllocPointerArray(Thread* self, size_t length)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
@@ -754,8 +719,6 @@ class ClassLinker {
     return cha_.get();
   }
 
-  void MakeInitializedClassesVisiblyInitialized(Thread* self, bool wait);
-
   struct DexCacheData {
     // Construct an invalid data object.
     DexCacheData()
@@ -781,12 +744,6 @@ class ClassLinker {
     ClassTable* class_table;
   };
 
-  // Forces a class to be marked as initialized without actually running initializers. Should only
-  // be used by plugin code when creating new classes directly.
-  void ForceClassInitialized(Thread* self, Handle<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
-
  protected:
   virtual bool InitializeClass(Thread* self,
                                Handle<mirror::Class> klass,
@@ -801,23 +758,14 @@ class ClassLinker {
                                                          std::string* error_msg)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  virtual bool CanAllocClass() REQUIRES_SHARED(Locks::mutator_lock_) REQUIRES(!Locks::dex_lock_) {
-    return true;
-  }
-
  private:
   class LinkInterfaceMethodsHelper;
-  class VisiblyInitializedCallback;
 
   struct ClassLoaderData {
     jweak weak_root;  // Weak root to enable class unloading.
     ClassTable* class_table;
     LinearAlloc* allocator;
   };
-
-  void VisiblyInitializedCallbackDone(Thread* self, VisiblyInitializedCallback* callback);
-  VisiblyInitializedCallback* MarkClassInitialized(Thread* self, Handle<mirror::Class> klass)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Ensures that the supertype of 'klass' ('supertype') is verified. Returns false and throws
   // appropriate exceptions if verification failed hard. Returns true for successful verification or
@@ -848,19 +796,10 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
 
+  // For early bootstrapping by Init.
   // If we do not allow moving classes (`art::kMovingClass` is false) or if
   // parameter `kMovable` is false (or both), the class object is allocated in
   // the non-moving space.
-  template <bool kMovable = true, class PreFenceVisitor>
-  ObjPtr<mirror::Class> AllocClass(Thread* self,
-                                   ObjPtr<mirror::Class> java_lang_Class,
-                                   uint32_t class_size,
-                                   const PreFenceVisitor& pre_fence_visitor)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Roles::uninterruptible_);
-
-  // Convenience AllocClass() overload that uses mirror::Class::InitializeClassVisitor
-  // for the class initialization.
   template <bool kMovable = true>
   ObjPtr<mirror::Class> AllocClass(Thread* self,
                                    ObjPtr<mirror::Class> java_lang_Class,
@@ -868,21 +807,16 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
-  // Allocate a primitive array class and store it in appropriate class root.
-  void AllocPrimitiveArrayClass(Thread* self,
-                                ClassRoot primitive_root,
-                                ClassRoot array_root)
+  // Alloc* convenience functions to avoid needing to pass in ObjPtr<mirror::Class>
+  // values that are known to the ClassLinker such as classes corresponding to
+  // ClassRoot::kObjectArrayClass and ClassRoot::kJavaLangString etc.
+  ObjPtr<mirror::Class> AllocClass(Thread* self, uint32_t class_size)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
-  // Finish setup of an array class.
-  void FinishArrayClassSetup(ObjPtr<mirror::Class> array_class)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!Roles::uninterruptible_);
-
-  // Finish setup of a core array class (Object[], Class[], String[] and
-  // primitive arrays) and insert it into the class table.
-  void FinishCoreArrayClassSetup(ClassRoot array_root)
+  // Allocate a primitive array class.
+  ObjPtr<mirror::Class> AllocPrimitiveArrayClass(Thread* self,
+                                                 ObjPtr<mirror::Class> java_lang_Class)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
@@ -900,8 +834,7 @@ class ClassLinker {
       REQUIRES(!Locks::dex_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
-  // Create a primitive class and store it in the appropriate class root.
-  void CreatePrimitiveClass(Thread* self, Primitive::Type type, ClassRoot primitive_root)
+  ObjPtr<mirror::Class> CreatePrimitiveClass(Thread* self, Primitive::Type type)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Roles::uninterruptible_);
 
@@ -920,6 +853,20 @@ class ClassLinker {
   // sufficient to hold all static fields.
   uint32_t SizeOfClassWithoutEmbeddedTables(const DexFile& dex_file,
                                             const dex::ClassDef& dex_class_def);
+
+  // Setup the classloader, class def index, type idx so that we can insert this class in the class
+  // table.
+  void SetupClass(const DexFile& dex_file,
+                  const dex::ClassDef& dex_class_def,
+                  Handle<mirror::Class> klass,
+                  ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
+  void LoadClass(Thread* self,
+                 const DexFile& dex_file,
+                 const dex::ClassDef& dex_class_def,
+                 Handle<mirror::Class> klass)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
   void LoadField(const ClassAccessor::Field& field, Handle<mirror::Class> klass, ArtField* dst)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -998,10 +945,9 @@ class ClassLinker {
                                         ObjPtr<mirror::DexCache> dex_cache)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Implementation of ResolveType() called when the type was not found in the dex cache. May be
-  // used with ArtField*, ArtMethod* or ObjPtr<Class>.
-  template <typename RefType>
-  ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx, RefType referrer)
+  // Implementation of ResolveType() called when the type was not found in the dex cache.
+  template <typename T>
+  ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx, T referrer)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_, !Roles::uninterruptible_);
   ObjPtr<mirror::Class> DoResolveType(dex::TypeIndex type_idx,
@@ -1066,6 +1012,14 @@ class ClassLinker {
                                                      ObjPtr<mirror::Class> klass1,
                                                      ObjPtr<mirror::Class> klass2)
       REQUIRES_SHARED(Locks::mutator_lock_);
+
+  bool LinkClass(Thread* self,
+                 const char* descriptor,
+                 Handle<mirror::Class> klass,
+                 Handle<mirror::ObjectArray<mirror::Class>> interfaces,
+                 MutableHandle<mirror::Class>* h_new_class_out)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Locks::classlinker_classes_lock_);
 
   bool LinkSuperClass(Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1292,6 +1246,20 @@ class ClassLinker {
   void SetClassRoot(ClassRoot class_root, ObjPtr<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Allocate primitive array class for primitive with class root
+  // `primitive_class_root`, and associate it to class root
+  // `primitive_array_class_root`.
+  //
+  // Also check this class returned when searching system classes for
+  // `descriptor` matches the allocated class.
+  void AllocAndSetPrimitiveArrayClassRoot(Thread* self,
+                                          ObjPtr<mirror::Class> java_lang_Class,
+                                          ClassRoot primitive_array_class_root,
+                                          ClassRoot primitive_class_root,
+                                          const char* descriptor)
+      REQUIRES_SHARED(Locks::mutator_lock_)
+      REQUIRES(!Roles::uninterruptible_);
+
   // Return the quick generic JNI stub for testing.
   const void* GetRuntimeQuickGenericJniStub() const;
 
@@ -1411,13 +1379,6 @@ class ClassLinker {
 
   // Image pointer size.
   PointerSize image_pointer_size_;
-
-  // Classes to transition from ClassStatus::kInitialized to ClassStatus::kVisiblyInitialized.
-  Mutex visibly_initialized_callback_lock_;
-  std::unique_ptr<VisiblyInitializedCallback> visibly_initialized_callback_
-      GUARDED_BY(visibly_initialized_callback_lock_);
-  IntrusiveForwardList<VisiblyInitializedCallback> running_visibly_initialized_callbacks_
-      GUARDED_BY(visibly_initialized_callback_lock_);
 
   std::unique_ptr<ClassHierarchyAnalysis> cha_;
 

@@ -29,7 +29,6 @@ struct CodeItem;
 namespace jit {
 class JitCodeCache;
 class JitLogger;
-class JitMemoryRegion;
 }  // namespace jit
 namespace mirror {
 class ClassLoader;
@@ -42,6 +41,7 @@ class CompiledMethodStorage;
 class CompilerOptions;
 class DexFile;
 template<class T> class Handle;
+class OatWriter;
 class Thread;
 
 class Compiler {
@@ -73,7 +73,6 @@ class Compiler {
 
   virtual bool JitCompile(Thread* self ATTRIBUTE_UNUSED,
                           jit::JitCodeCache* code_cache ATTRIBUTE_UNUSED,
-                          jit::JitMemoryRegion* region ATTRIBUTE_UNUSED,
                           ArtMethod* method ATTRIBUTE_UNUSED,
                           bool baseline ATTRIBUTE_UNUSED,
                           bool osr ATTRIBUTE_UNUSED,

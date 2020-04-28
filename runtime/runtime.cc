@@ -84,10 +84,8 @@
 #include "gc/space/image_space.h"
 #include "gc/space/space-inl.h"
 #include "gc/system_weak.h"
-#include "gc/task_processor.h"
 #include "handle_scope-inl.h"
 #include "hidden_api.h"
-#include "hidden_api_jni.h"
 #include "image-inl.h"
 #include "instrumentation.h"
 #include "intern_table-inl.h"
@@ -96,8 +94,7 @@
 #include "jit/jit_code_cache.h"
 #include "jit/profile_saver.h"
 #include "jni/java_vm_ext.h"
-#include "jni/jni_id_manager.h"
-#include "jni_id_type.h"
+#include "jni/jni_internal.h"
 #include "linear_alloc.h"
 #include "memory_representation.h"
 #include "mirror/array.h"
@@ -146,7 +143,6 @@
 #include "native_bridge_art_interface.h"
 #include "native_stack_dump.h"
 #include "nativehelper/scoped_local_ref.h"
-#include "oat.h"
 #include "oat_file.h"
 #include "oat_file_manager.h"
 #include "object_callbacks.h"
@@ -154,7 +150,6 @@
 #include "quick/quick_method_frame_info.h"
 #include "reflection.h"
 #include "runtime_callbacks.h"
-#include "runtime_common.h"
 #include "runtime_intrinsics.h"
 #include "runtime_options.h"
 #include "scoped_thread_state_change-inl.h"
@@ -234,7 +229,6 @@ Runtime::Runtime()
       instruction_set_(InstructionSet::kNone),
       compiler_callbacks_(nullptr),
       is_zygote_(false),
-      is_primary_zygote_(false),
       is_system_server_(false),
       must_relocate_(false),
       is_concurrent_gc_enabled_(true),
@@ -289,7 +283,6 @@ Runtime::Runtime()
       safe_mode_(false),
       hidden_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       core_platform_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
-      test_api_policy_(hiddenapi::EnforcementPolicy::kDisabled),
       dedupe_hidden_api_warnings_(true),
       hidden_api_access_event_log_rate_(0),
       dump_native_stack_on_sig_quit_(true),
@@ -297,8 +290,7 @@ Runtime::Runtime()
       // Initially assume we perceive jank in case the process state is never updated.
       process_state_(kProcessStateJankPerceptible),
       zygote_no_threads_(false),
-      verifier_logging_threshold_ms_(100),
-      verifier_missing_kthrow_fatal_(false) {
+      verifier_logging_threshold_ms_(100) {
   static_assert(Runtime::kCalleeSaveSize ==
                     static_cast<uint32_t>(CalleeSaveType::kLastCalleeSaveType), "Unexpected size");
   CheckConstants();
@@ -384,10 +376,6 @@ Runtime::~Runtime() {
     // The saver will try to dump the profiles before being sopped and that
     // requires holding the mutator lock.
     jit_->StopProfileSaver();
-    // Delete thread pool before the thread list since we don't want to wait forever on the
-    // JIT compiler threads. Also this should be run before marking the runtime
-    // as shutting down as some tasks may require mutator access.
-    jit_->DeleteThreadPool();
   }
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->WaitForWorkersToBeCreated();
@@ -429,6 +417,13 @@ Runtime::~Runtime() {
   // Make sure to let the GC complete if it is running.
   heap_->WaitForGcToComplete(gc::kGcCauseBackground, self);
   heap_->DeleteThreadPool();
+  if (jit_ != nullptr) {
+    ScopedTrace trace2("Delete jit");
+    VLOG(jit) << "Deleting jit thread pool";
+    // Delete thread pool before the thread list since we don't want to wait forever on the
+    // JIT compiler threads.
+    jit_->DeleteThreadPool();
+  }
   if (oat_file_manager_ != nullptr) {
     oat_file_manager_->DeleteThreadPool();
   }
@@ -498,7 +493,7 @@ Runtime::~Runtime() {
   // elements of WellKnownClasses to be null, see b/65500943.
   WellKnownClasses::Clear();
 
-  hiddenapi::JniShutdownNativeCallerCheck();
+  JniShutdownNativeCallerCheck();
 }
 
 struct AbortState {
@@ -524,6 +519,7 @@ struct AbortState {
 
     if (self == nullptr) {
       os << "(Aborting thread was not attached to runtime!)\n";
+      DumpKernelStack(os, GetTid(), "  kernel: ", false);
       DumpNativeStack(os, GetTid(), nullptr, "  native: ", nullptr);
     } else {
       os << "Aborting thread:\n";
@@ -613,16 +609,6 @@ void Runtime::Abort(const char* msg) {
 #endif
   }
 
-  // May be coming from an unattached thread.
-  if (Thread::Current() == nullptr) {
-    Runtime* current = Runtime::Current();
-    if (current != nullptr && current->IsStarted() && !current->IsShuttingDown(nullptr)) {
-      // We do not flag this to the unexpected-signal handler so that that may dump the stack.
-      abort();
-      UNREACHABLE();
-    }
-  }
-
   {
     // Ensure that we don't have multiple threads trying to abort at once,
     // which would result in significantly worse diagnostics.
@@ -652,8 +638,6 @@ void Runtime::Abort(const char* msg) {
     LOG(FATAL_WITHOUT_ABORT) << msg;
   }
 
-  FlagRuntimeAbort();
-
   // Call the abort hook if we have one.
   if (Runtime::Current() != nullptr && Runtime::Current()->abort_ != nullptr) {
     LOG(FATAL_WITHOUT_ABORT) << "Calling abort hook...";
@@ -677,8 +661,6 @@ void Runtime::PostZygoteFork() {
   if (GetJit() != nullptr) {
     GetJit()->PostZygoteFork();
   }
-  // Reset all stats.
-  ResetStats(0xFFFFFFFF);
 }
 
 void Runtime::CallExitHook(jint status) {
@@ -774,7 +756,7 @@ static jobject CreateSystemClassLoader(Runtime* runtime) {
 
   JValue result = InvokeWithJValues(soa,
                                     nullptr,
-                                    getSystemClassLoader,
+                                    jni::EncodeArtMethod(getSystemClassLoader),
                                     nullptr);
   JNIEnv* env = soa.Self()->GetJniEnv();
   ScopedLocalRef<jobject> system_class_loader(env, soa.AddLocalReference<jobject>(result.GetL()));
@@ -802,10 +784,8 @@ std::string Runtime::GetCompilerExecutable() const {
   if (!compiler_executable_.empty()) {
     return compiler_executable_;
   }
-  std::string compiler_executable = GetArtBinDir() + "/dex2oat";
-  if (kIsDebugBuild) {
-    compiler_executable += 'd';
-  }
+  std::string compiler_executable(GetAndroidRoot());
+  compiler_executable += (kIsDebugBuild ? "/bin/dex2oatd" : "/bin/dex2oat");
   return compiler_executable;
 }
 
@@ -980,7 +960,7 @@ void Runtime::InitNonZygoteOrPostFork(
     NativeBridgeAction action,
     const char* isa,
     bool profile_system_server) {
-  DCHECK(!IsZygote());
+  is_zygote_ = false;
 
   if (is_native_bridge_loaded_) {
     switch (action) {
@@ -988,6 +968,7 @@ void Runtime::InitNonZygoteOrPostFork(
         UnloadNativeBridge();
         is_native_bridge_loaded_ = false;
         break;
+
       case NativeBridgeAction::kInitialize:
         InitializeNativeBridge(env, isa);
         break;
@@ -1004,9 +985,7 @@ void Runtime::InitNonZygoteOrPostFork(
 
   // Create the thread pools.
   heap_->CreateThreadPool();
-  // Avoid creating the runtime thread pool for system server since it will not be used and would
-  // waste memory.
-  if (!is_system_server) {
+  {
     ScopedTrace timing("CreateThreadPool");
     constexpr size_t kStackSize = 64 * KB;
     constexpr size_t kMaxRuntimeWorkers = 4u;
@@ -1029,14 +1008,6 @@ void Runtime::InitNonZygoteOrPostFork(
   // this to come last.
   ScopedObjectAccess soa(Thread::Current());
   GetRuntimeCallbacks()->StartDebugger();
-
-  if (Dbg::IsJdwpAllowed() || IsProfileableFromShell() || IsJavaDebuggable()) {
-    std::string err;
-    ScopedThreadSuspension sts(Thread::Current(), ThreadState::kNative);
-    if (!EnsurePerfettoPlugin(&err)) {
-      LOG(WARNING) << "Failed to load perfetto_hprof: " << err;
-    }
-  }
 }
 
 void Runtime::StartSignalCatcher() {
@@ -1106,7 +1077,7 @@ static size_t OpenBootDexFiles(ArrayRef<const std::string> dex_filenames,
   return failure_count;
 }
 
-void Runtime::SetSentinel(ObjPtr<mirror::Object> sentinel) {
+void Runtime::SetSentinel(mirror::Object* sentinel) {
   CHECK(sentinel_.Read() == nullptr);
   CHECK(sentinel != nullptr);
   CHECK(!heap_->IsMovableObject(sentinel));
@@ -1130,7 +1101,7 @@ static inline void CreatePreAllocatedException(Thread* self,
   CHECK(klass != nullptr);
   gc::AllocatorType allocator_type = runtime->GetHeap()->GetCurrentAllocator();
   ObjPtr<mirror::Throwable> exception_object = ObjPtr<mirror::Throwable>::DownCast(
-      klass->Alloc(self, allocator_type));
+      klass->Alloc</* kIsInstrumented= */ true>(self, allocator_type));
   CHECK(exception_object != nullptr);
   *exception = GcRoot<mirror::Throwable>(exception_object);
   // Initialize the "detailMessage" field.
@@ -1159,8 +1130,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   }
 
   MemMap::Init();
-
-  verifier_missing_kthrow_fatal_ = runtime_options.GetOrDefault(Opt::VerifierMissingKThrowFatal);
 
   // Try to reserve a dedicated fault page. This is allocated for clobbered registers and sentinels.
   // If we cannot reserve it, log a warning.
@@ -1192,8 +1161,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   QuasiAtomic::Startup();
 
   oat_file_manager_ = new OatFileManager;
-
-  jni_id_manager_.reset(new jni::JniIdManager);
 
   Thread::SetSensitiveThreadHook(runtime_options.GetOrDefault(Opt::HookIsSensitiveThread));
   Monitor::Init(runtime_options.GetOrDefault(Opt::LockProfThreshold),
@@ -1249,7 +1216,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   compiler_callbacks_ = runtime_options.GetOrDefault(Opt::CompilerCallbacksPtr);
   must_relocate_ = runtime_options.GetOrDefault(Opt::Relocate);
   is_zygote_ = runtime_options.Exists(Opt::Zygote);
-  is_primary_zygote_ = runtime_options.Exists(Opt::PrimaryZygote);
   is_explicit_gc_disabled_ = runtime_options.Exists(Opt::DisableExplicitGC);
   image_dex2oat_enabled_ = runtime_options.GetOrDefault(Opt::ImageDex2Oat);
   dump_native_stack_on_sig_quit_ = runtime_options.GetOrDefault(Opt::DumpNativeStackOnSigQuit);
@@ -1316,8 +1282,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   is_low_memory_mode_ = runtime_options.Exists(Opt::LowMemoryMode);
   madvise_random_access_ = runtime_options.GetOrDefault(Opt::MadviseRandomAccess);
 
-  jni_ids_indirection_ = runtime_options.GetOrDefault(Opt::OpaqueJniIds);
-
   plugins_ = runtime_options.ReleaseOrDefault(Opt::Plugins);
   agent_specs_ = runtime_options.ReleaseOrDefault(Opt::AgentPath);
   // TODO Add back in -agentlib
@@ -1347,7 +1311,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::HeapMaxFree),
                        runtime_options.GetOrDefault(Opt::HeapTargetUtilization),
                        foreground_heap_growth_multiplier,
-                       runtime_options.GetOrDefault(Opt::StopForNativeAllocs),
                        runtime_options.GetOrDefault(Opt::MemoryMaximumSize),
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),
@@ -1432,6 +1395,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
     }
   }
   callbacks_->AddThreadLifecycleCallback(Dbg::GetThreadLifecycleCallback());
+  callbacks_->AddClassLoadCallback(Dbg::GetClassLoadCallback());
 
   jit_options_.reset(jit::JitOptions::CreateFromRuntimeArguments(runtime_options));
   if (IsAotCompiler()) {
@@ -1580,9 +1544,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       }
       class_linker_->AddExtraBootDexFiles(self, std::move(extra_boot_class_path));
     }
-    if (IsJavaDebuggable() || jit_options_->GetProfileSaverOptions().GetProfileBootClassPath()) {
-      // Deoptimize the boot image if debuggable  as the code may have been compiled non-debuggable.
-      // Also deoptimize if we are profiling the boot class path.
+    if (IsJavaDebuggable()) {
+      // Now that we have loaded the boot image, deoptimize its methods if we are running
+      // debuggable, as the code may have been compiled non-debuggable.
       ScopedThreadSuspension sts(self, ThreadState::kNative);
       ScopedSuspendAll ssa(__FUNCTION__);
       DeoptimizeBootImage();
@@ -1613,7 +1577,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   CHECK(class_linker_ != nullptr);
 
-  verifier::ClassVerifier::Init(class_linker_);
+  verifier::ClassVerifier::Init();
 
   if (runtime_options.Exists(Opt::MethodTrace)) {
     trace_config_.reset(new TraceConfig());
@@ -1630,23 +1594,20 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   if (GetHeap()->HasBootImageSpace()) {
     const ImageHeader& image_header = GetHeap()->GetBootImageSpaces()[0]->GetImageHeader();
-    ObjPtr<mirror::ObjectArray<mirror::Object>> boot_image_live_objects =
-        ObjPtr<mirror::ObjectArray<mirror::Object>>::DownCast(
-            image_header.GetImageRoot(ImageHeader::kBootImageLiveObjects));
     pre_allocated_OutOfMemoryError_when_throwing_exception_ = GcRoot<mirror::Throwable>(
-        boot_image_live_objects->Get(ImageHeader::kOomeWhenThrowingException)->AsThrowable());
+        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingException)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_throwing_exception_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_OutOfMemoryError_when_throwing_oome_ = GcRoot<mirror::Throwable>(
-        boot_image_live_objects->Get(ImageHeader::kOomeWhenThrowingOome)->AsThrowable());
+        image_header.GetImageRoot(ImageHeader::kOomeWhenThrowingOome)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_throwing_oome_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_OutOfMemoryError_when_handling_stack_overflow_ = GcRoot<mirror::Throwable>(
-        boot_image_live_objects->Get(ImageHeader::kOomeWhenHandlingStackOverflow)->AsThrowable());
+        image_header.GetImageRoot(ImageHeader::kOomeWhenHandlingStackOverflow)->AsThrowable());
     DCHECK(pre_allocated_OutOfMemoryError_when_handling_stack_overflow_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/OutOfMemoryError;"));
     pre_allocated_NoClassDefFoundError_ = GcRoot<mirror::Throwable>(
-        boot_image_live_objects->Get(ImageHeader::kNoClassDefFoundError)->AsThrowable());
+        image_header.GetImageRoot(ImageHeader::kNoClassDefFoundError)->AsThrowable());
     DCHECK(pre_allocated_NoClassDefFoundError_.Read()->GetClass()
                ->DescriptorEquals("Ljava/lang/NoClassDefFoundError;"));
   } else {
@@ -1775,30 +1736,18 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   return true;
 }
 
-bool Runtime::EnsurePluginLoaded(const char* plugin_name, std::string* error_msg) {
+static bool EnsureJvmtiPlugin(Runtime* runtime,
+                              std::vector<Plugin>* plugins,
+                              std::string* error_msg) {
+  constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
+
   // Is the plugin already loaded?
-  for (const Plugin& p : plugins_) {
+  for (const Plugin& p : *plugins) {
     if (p.GetLibrary() == plugin_name) {
       return true;
     }
   }
-  Plugin new_plugin = Plugin::Create(plugin_name);
 
-  if (!new_plugin.Load(error_msg)) {
-    return false;
-  }
-  plugins_.push_back(std::move(new_plugin));
-  return true;
-}
-
-bool Runtime::EnsurePerfettoPlugin(std::string* error_msg) {
-  constexpr const char* plugin_name = kIsDebugBuild ?
-    "libperfetto_hprofd.so" : "libperfetto_hprof.so";
-  return EnsurePluginLoaded(plugin_name, error_msg);
-}
-
-static bool EnsureJvmtiPlugin(Runtime* runtime,
-                              std::string* error_msg) {
   // TODO Rename Dbg::IsJdwpAllowed is IsDebuggingAllowed.
   DCHECK(Dbg::IsJdwpAllowed() || !runtime->IsJavaDebuggable())
       << "Being debuggable requires that jdwp (i.e. debugging) is allowed.";
@@ -1809,8 +1758,14 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
     return false;
   }
 
-  constexpr const char* plugin_name = kIsDebugBuild ? "libopenjdkjvmtid.so" : "libopenjdkjvmti.so";
-  return runtime->EnsurePluginLoaded(plugin_name, error_msg);
+  Plugin new_plugin = Plugin::Create(plugin_name);
+
+  if (!new_plugin.Load(error_msg)) {
+    return false;
+  }
+
+  plugins->push_back(std::move(new_plugin));
+  return true;
 }
 
 // Attach a new agent and add it to the list of runtime agents
@@ -1821,7 +1776,7 @@ static bool EnsureJvmtiPlugin(Runtime* runtime,
 //
 void Runtime::AttachAgent(JNIEnv* env, const std::string& agent_arg, jobject class_loader) {
   std::string error_msg;
-  if (!EnsureJvmtiPlugin(this, &error_msg)) {
+  if (!EnsureJvmtiPlugin(this, &plugins_, &error_msg)) {
     LOG(WARNING) << "Could not load plugin: " << error_msg;
     ScopedObjectAccess soa(Thread::Current());
     ThrowIOException("%s", error_msg.c_str());
@@ -1858,20 +1813,9 @@ void Runtime::InitNativeMethods() {
   // methods to be loaded first.
   WellKnownClasses::Init(env);
 
-  // Then set up libjavacore / libopenjdk / libicu_jni ,which are just
-  // a regular JNI libraries with a regular JNI_OnLoad. Most JNI libraries can
-  // just use System.loadLibrary, but libcore can't because it's the library
-  // that implements System.loadLibrary!
-
-  // libicu_jni has to be initialized before libopenjdk{d} due to runtime dependency from
-  // libopenjdk{d} to Icu4cMetadata native methods in libicu_jni. See http://b/143888405
-  {
-    std::string error_msg;
-    if (!java_vm_->LoadNativeLibrary(
-          env, "libicu_jni.so", nullptr, WellKnownClasses::java_lang_Object, &error_msg)) {
-      LOG(FATAL) << "LoadNativeLibrary failed for \"libicu_jni.so\": " << error_msg;
-    }
-  }
+  // Then set up libjavacore / libopenjdk, which are just a regular JNI libraries with
+  // a regular JNI_OnLoad. Most JNI libraries can just use System.loadLibrary, but
+  // libcore can't because it's the library that implements System.loadLibrary!
   {
     std::string error_msg;
     if (!java_vm_->LoadNativeLibrary(
@@ -1895,7 +1839,7 @@ void Runtime::InitNativeMethods() {
 
   // Having loaded native libraries for Managed Core library, enable field and
   // method resolution checks via JNI from native code.
-  hiddenapi::JniInitializeNativeCallerCheck();
+  JniInitializeNativeCallerCheck();
 
   VLOG(startup) << "Runtime::InitNativeMethods exiting";
 }
@@ -2042,7 +1986,7 @@ void Runtime::ResetStats(int kinds) {
   Thread::Current()->GetStats()->Clear(kinds >> 16);
 }
 
-uint64_t Runtime::GetStat(int kind) {
+int32_t Runtime::GetStat(int kind) {
   RuntimeStats* stats;
   if (kind < (1<<16)) {
     stats = GetStats();
@@ -2064,7 +2008,8 @@ uint64_t Runtime::GetStat(int kind) {
   case KIND_CLASS_INIT_COUNT:
     return stats->class_init_count;
   case KIND_CLASS_INIT_TIME:
-    return stats->class_init_time_ns;
+    // Convert ns to us, reduce to 32 bits.
+    return static_cast<int>(stats->class_init_time_ns / 1000);
   case KIND_EXT_ALLOCATED_OBJECTS:
   case KIND_EXT_ALLOCATED_BYTES:
   case KIND_EXT_FREED_OBJECTS:
@@ -2210,13 +2155,6 @@ void Runtime::VisitRoots(RootVisitor* visitor, VisitRootFlags flags) {
   VisitConcurrentRoots(visitor, flags);
 }
 
-void Runtime::VisitReflectiveTargets(ReflectiveValueVisitor *visitor) {
-  thread_list_->VisitReflectiveTargets(visitor);
-  heap_->VisitReflectiveTargets(visitor);
-  jni_id_manager_->VisitReflectiveTargets(visitor);
-  callbacks_->VisitReflectiveTargets(visitor);
-}
-
 void Runtime::VisitImageRoots(RootVisitor* visitor) {
   for (auto* space : GetHeap()->GetContinuousSpaces()) {
     if (space->IsImageSpace()) {
@@ -2235,8 +2173,7 @@ void Runtime::VisitImageRoots(RootVisitor* visitor) {
   }
 }
 
-static ArtMethod* CreateRuntimeMethod(ClassLinker* class_linker, LinearAlloc* linear_alloc)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+static ArtMethod* CreateRuntimeMethod(ClassLinker* class_linker, LinearAlloc* linear_alloc) {
   const PointerSize image_pointer_size = class_linker->GetImagePointerSize();
   const size_t method_alignment = ArtMethod::Alignment(image_pointer_size);
   const size_t method_size = ArtMethod::Size(image_pointer_size);
@@ -2395,7 +2332,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
     return;
   }
   if (!OS::FileExists(profile_output_filename.c_str(), /*check_file_type=*/ false)) {
-    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exist.";
+    LOG(WARNING) << "JIT profile information will not be recorded: profile file does not exits.";
     return;
   }
   if (code_paths.empty()) {
@@ -2411,14 +2348,14 @@ bool Runtime::IsActiveTransaction() const {
   return !preinitialization_transactions_.empty() && !GetTransaction()->IsRollingBack();
 }
 
+void Runtime::EnterTransactionMode() {
+  DCHECK(IsAotCompiler());
+  DCHECK(!IsActiveTransaction());
+  preinitialization_transactions_.push_back(std::make_unique<Transaction>());
+}
+
 void Runtime::EnterTransactionMode(bool strict, mirror::Class* root) {
   DCHECK(IsAotCompiler());
-  if (preinitialization_transactions_.empty()) {  // Top-level transaction?
-    // Make initialized classes visibly initialized now. If that happened during the transaction
-    // and then the transaction was aborted, we would roll back the status update but not the
-    // ClassLinker's bookkeeping structures, so these classes would never be visibly initialized.
-    GetClassLinker()->MakeInitializedClassesVisiblyInitialized(Thread::Current(), /*wait=*/ true);
-  }
   preinitialization_transactions_.push_back(std::make_unique<Transaction>(strict, root));
 }
 
@@ -2880,58 +2817,6 @@ void Runtime::WaitForThreadPoolWorkersToStart() {
   }
 }
 
-void Runtime::ResetStartupCompleted() {
-  startup_completed_.store(false, std::memory_order_seq_cst);
-}
-
-class Runtime::NotifyStartupCompletedTask : public gc::HeapTask {
- public:
-  NotifyStartupCompletedTask() : gc::HeapTask(/*target_run_time=*/ NanoTime()) {}
-
-  void Run(Thread* self) override {
-    VLOG(startup) << "NotifyStartupCompletedTask running";
-    Runtime* const runtime = Runtime::Current();
-    {
-      ScopedTrace trace("Releasing app image spaces metadata");
-      ScopedObjectAccess soa(Thread::Current());
-      for (gc::space::ContinuousSpace* space : runtime->GetHeap()->GetContinuousSpaces()) {
-        if (space->IsImageSpace()) {
-          gc::space::ImageSpace* image_space = space->AsImageSpace();
-          if (image_space->GetImageHeader().IsAppImage()) {
-            image_space->DisablePreResolvedStrings();
-          }
-        }
-      }
-      // Request empty checkpoints to make sure no threads are accessing the image space metadata
-      // section when we madvise it. Use GC exclusion to prevent deadlocks that may happen if
-      // multiple threads are attempting to run empty checkpoints at the same time.
-      {
-        // Avoid using ScopedGCCriticalSection since that does not allow thread suspension. This is
-        // not allowed to prevent allocations, but it's still safe to suspend temporarily for the
-        // checkpoint.
-        gc::ScopedInterruptibleGCCriticalSection sigcs(self,
-                                                       gc::kGcCauseRunEmptyCheckpoint,
-                                                       gc::kCollectorTypeCriticalSection);
-        runtime->GetThreadList()->RunEmptyCheckpoint();
-      }
-      for (gc::space::ContinuousSpace* space : runtime->GetHeap()->GetContinuousSpaces()) {
-        if (space->IsImageSpace()) {
-          gc::space::ImageSpace* image_space = space->AsImageSpace();
-          if (image_space->GetImageHeader().IsAppImage()) {
-            image_space->ReleaseMetadata();
-          }
-        }
-      }
-    }
-
-    {
-      // Delete the thread pool used for app image loading since startup is assumed to be completed.
-      ScopedTrace trace2("Delete thread pool");
-      runtime->DeleteThreadPool();
-    }
-  }
-};
-
 void Runtime::NotifyStartupCompleted() {
   bool expected = false;
   if (!startup_completed_.compare_exchange_strong(expected, true, std::memory_order_seq_cst)) {
@@ -2939,38 +2824,66 @@ void Runtime::NotifyStartupCompleted() {
     // once externally. For this reason there are no asserts.
     return;
   }
+  VLOG(startup) << "Startup completed notified";
 
-  VLOG(startup) << "Adding NotifyStartupCompleted task";
-  // Use the heap task processor since we want to be exclusive with the GC and we don't want to
-  // block the caller if the GC is running.
-  if (!GetHeap()->AddHeapTask(new NotifyStartupCompletedTask)) {
-    VLOG(startup) << "Failed to add NotifyStartupCompletedTask";
+  {
+    ScopedTrace trace("Releasing app image spaces metadata");
+    ScopedObjectAccess soa(Thread::Current());
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->DisablePreResolvedStrings();
+        }
+      }
+    }
+    // Request empty checkpoint to make sure no threads are accessing the section when we madvise
+    // it. Avoid using RunEmptyCheckpoint since only one concurrent caller is supported. We could
+    // add a GC critical section here but that may cause significant jank if the GC is running.
+    {
+      class EmptyClosure : public Closure {
+       public:
+        explicit EmptyClosure(Barrier* barrier) : barrier_(barrier) {}
+        void Run(Thread* thread ATTRIBUTE_UNUSED) override {
+          barrier_->Pass(Thread::Current());
+        }
+
+       private:
+        Barrier* const barrier_;
+      };
+      Barrier barrier(0);
+      EmptyClosure closure(&barrier);
+      size_t threads_running_checkpoint = GetThreadList()->RunCheckpoint(&closure);
+      // Now that we have run our checkpoint, move to a suspended state and wait
+      // for other threads to run the checkpoint.
+      Thread* self = Thread::Current();
+      ScopedThreadSuspension sts(self, kSuspended);
+      if (threads_running_checkpoint != 0) {
+        barrier.Increment(self, threads_running_checkpoint);
+      }
+    }
+    for (gc::space::ContinuousSpace* space : GetHeap()->GetContinuousSpaces()) {
+      if (space->IsImageSpace()) {
+        gc::space::ImageSpace* image_space = space->AsImageSpace();
+        if (image_space->GetImageHeader().IsAppImage()) {
+          image_space->ReleaseMetadata();
+        }
+      }
+    }
   }
 
   // Notify the profiler saver that startup is now completed.
   ProfileSaver::NotifyStartupCompleted();
+
+  {
+    // Delete the thread pool used for app image loading startup is completed.
+    ScopedTrace trace2("Delete thread pool");
+    DeleteThreadPool();
+  }
 }
 
 bool Runtime::GetStartupCompleted() const {
   return startup_completed_.load(std::memory_order_seq_cst);
-}
-
-void Runtime::SetSignalHookDebuggable(bool value) {
-  SkipAddSignalHandler(value);
-}
-
-void Runtime::SetJniIdType(JniIdType t) {
-  CHECK(CanSetJniIdType()) << "Not allowed to change id type!";
-  if (t == GetJniIdType()) {
-    return;
-  }
-  jni_ids_indirection_ = t;
-  JNIEnvExt::ResetFunctionTable();
-  WellKnownClasses::HandleJniIdTypeChange(Thread::Current()->GetJniEnv());
-}
-
-bool Runtime::GetOatFilesExecutable() const {
-  return !IsAotCompiler() && !(IsSystemServer() && jit_options_->GetSaveProfilingInfo());
 }
 
 }  // namespace art

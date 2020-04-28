@@ -35,14 +35,10 @@ class Class;
 
 struct WellKnownClasses {
  public:
-  // Run before native methods are registered.
-  static void Init(JNIEnv* env);
-  // Run after native methods are registered.
-  static void LateInit(JNIEnv* env);
+  static void Init(JNIEnv* env);  // Run before native methods are registered.
+  static void LateInit(JNIEnv* env);  // Run after native methods are registered.
 
   static void Clear();
-
-  static void HandleJniIdTypeChange(JNIEnv* env);
 
   static void InitStringInit(ObjPtr<mirror::Class> string_class,
                              ObjPtr<mirror::Class> string_builder_class)
@@ -52,10 +48,6 @@ struct WellKnownClasses {
 
   static ObjPtr<mirror::Class> ToClass(jclass global_jclass) REQUIRES_SHARED(Locks::mutator_lock_);
 
- private:
-  static void InitFieldsAndMethodsOnly(JNIEnv* env);
-
- public:
   static jclass dalvik_annotation_optimization_CriticalNative;
   static jclass dalvik_annotation_optimization_FastNative;
   static jclass dalvik_system_BaseDexClassLoader;
@@ -78,7 +70,6 @@ struct WellKnownClasses {
   static jclass java_lang_NoClassDefFoundError;
   static jclass java_lang_Object;
   static jclass java_lang_OutOfMemoryError;
-  static jclass java_lang_reflect_InvocationTargetException;
   static jclass java_lang_reflect_Parameter;
   static jclass java_lang_reflect_Parameter__array;
   static jclass java_lang_reflect_Proxy;
@@ -119,7 +110,6 @@ struct WellKnownClasses {
   static jmethodID java_lang_Long_valueOf;
   static jmethodID java_lang_ref_FinalizerReference_add;
   static jmethodID java_lang_ref_ReferenceQueue_add;
-  static jmethodID java_lang_reflect_InvocationTargetException_init;
   static jmethodID java_lang_reflect_Parameter_init;
   static jmethodID java_lang_reflect_Proxy_init;
   static jmethodID java_lang_reflect_Proxy_invoke;

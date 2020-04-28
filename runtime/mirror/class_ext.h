@@ -48,33 +48,6 @@ class MANAGED ClassExt : public Object {
 
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
            ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> EnsureInstanceJFieldIDsArrayPresent(size_t count)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> GetInstanceJFieldIDs() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> EnsureStaticJFieldIDsArrayPresent(size_t count)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> GetStaticJFieldIDs() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> EnsureJMethodIDsArrayPresent(size_t count)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> GetJMethodIDs() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
   ObjPtr<PointerArray> GetObsoleteMethods() REQUIRES_SHARED(Locks::mutator_lock_);
 
   ObjPtr<Object> GetOriginalDexFile() REQUIRES_SHARED(Locks::mutator_lock_);
@@ -99,60 +72,22 @@ class MANAGED ClassExt : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Extend the obsolete arrays by the given amount.
-  static bool ExtendObsoleteArrays(Handle<ClassExt> h_this, Thread* self, uint32_t increase)
+  bool ExtendObsoleteArrays(Thread* self, uint32_t increase)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
   inline void VisitNativeRoots(Visitor& visitor, PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, class Visitor>
-  inline void VisitMethods(Visitor visitor, PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   static ObjPtr<ClassExt> Alloc(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // TODO Save the obsolete class, if we have one.
-  // TODO We need this so jit-cleanup can work. the obsolete class might get cleaned up early
-  // otherwise. We should remove the need for this.
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<Class> GetObsoleteClass() REQUIRES_SHARED(Locks::mutator_lock_);
-  void SetObsoleteClass(ObjPtr<Class> classes) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, typename Visitor>
-  inline void VisitJFieldIDs(Visitor v) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  template<ReadBarrierOption kReadBarrierOption = kWithReadBarrier, typename Visitor>
-  inline void VisitJMethodIDs(Visitor v) REQUIRES_SHARED(Locks::mutator_lock_);
-
  private:
-  template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags,
-           ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
-  ObjPtr<PointerArray> EnsureJniIdsArrayPresent(MemberOffset off, size_t count)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
   // Field order required by test "ValidateFieldOrderOfJavaCppUnionClasses".
-  // An array containing the jfieldIDs assigned to each field in the corresponding position in the
-  // classes ifields_ array or '0' if no id has been assigned to that field yet.
-  HeapReference<PointerArray> instance_jfield_ids_;
-
-  // An array containing the jmethodIDs assigned to each method in the corresponding position in
-  // the classes methods_ array or '0' if no id has been assigned to that method yet.
-  HeapReference<PointerArray> jmethod_ids_;
-
-  // If set this is the Class object that was being used before a structural redefinition occurred.
-  HeapReference<Class> obsolete_class_;
-
   HeapReference<ObjectArray<DexCache>> obsolete_dex_caches_;
 
   HeapReference<PointerArray> obsolete_methods_;
 
   HeapReference<Object> original_dex_file_;
-
-  // An array containing the jfieldIDs assigned to each field in the corresponding position in the
-  // classes sfields_ array or '0' if no id has been assigned to that field yet.
-  HeapReference<PointerArray> static_jfield_ids_;
 
   // The saved verification error of this class.
   HeapReference<Object> verify_error_;

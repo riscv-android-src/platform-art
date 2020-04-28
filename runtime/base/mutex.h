@@ -336,9 +336,8 @@ class SHARED_LOCKABLE ReaderWriterMutex : public BaseMutex {
 
   // Assert the current thread doesn't hold this ReaderWriterMutex either in shared or exclusive
   // mode.
-  ALWAYS_INLINE void AssertNotHeld(const Thread* self) ASSERT_CAPABILITY(!this) {
+  ALWAYS_INLINE void AssertNotHeld(const Thread* self) ASSERT_SHARED_CAPABILITY(!this) {
     if (kDebugLocking && (gAborting == 0)) {
-      CHECK(!IsExclusiveHeld(self)) << *this;
       CHECK(!IsSharedHeld(self)) << *this;
     }
   }
@@ -360,15 +359,14 @@ class SHARED_LOCKABLE ReaderWriterMutex : public BaseMutex {
   // Out-of-inline path for handling contention for a SharedLock.
   void HandleSharedLockContention(Thread* self, int32_t cur_state);
 
-  // -1 implies held exclusive, >= 0: shared held by state_ many owners.
+  // -1 implies held exclusive, +ve shared held by state_ many owners.
   AtomicInteger state_;
   // Exclusive owner. Modification guarded by this mutex.
   Atomic<pid_t> exclusive_owner_;
-  // Number of contenders waiting for either a reader share or exclusive access.  We only maintain
-  // the sum, since we would otherwise need to read both in all unlock operations.
-  // We keep this separate from the state, since futexes are limited to 32 bits, and obvious
-  // approaches to combining with state_ risk overflow.
-  AtomicInteger num_contenders_;
+  // Number of contenders waiting for a reader share.
+  AtomicInteger num_pending_readers_;
+  // Number of contenders waiting to be the writer.
+  AtomicInteger num_pending_writers_;
 #else
   pthread_rwlock_t rwlock_;
   Atomic<pid_t> exclusive_owner_;  // Writes guarded by rwlock_. Asynchronous reads are OK.

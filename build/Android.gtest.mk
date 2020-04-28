@@ -124,34 +124,34 @@ endif
 
 ifdef ART_TEST_HOST_GTEST_Main_DEX
 $(ART_TEST_HOST_GTEST_EmptyUncompressed_DEX):
-	touch $@_classes.dex
-	zip -j -qD -X -0 $@ $@_classes.dex
-	rm $@_classes.dex
+	touch $(dir $@)classes.dex
+	zip -j -qD -X -0 $@ $(dir $@)classes.dex
+	rm $(dir $@)classes.dex
 endif
 
 ifdef ART_TEST_TARGET_GTEST_Main_DEX
 $(ART_TEST_TARGET_GTEST_EmptyUncompressed_DEX):
-	touch $@_classes.dex
-	zip -j -qD -X -0 $@ $@_classes.dex
-	rm $@_classes.dex
+	touch $(dir $@)classes.dex
+	zip -j -qD -X -0 $@ $(dir $@)classes.dex
+	rm $(dir $@)classes.dex
 endif
 
 ifdef ART_TEST_HOST_GTEST_Main_DEX
 $(ART_TEST_HOST_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
-	touch $@_classes.dex
-	zip -j -0 $@_temp.zip $@_classes.dex
-	$(ZIPALIGN) -f 4 $@_temp.zip $@
-	rm $@_classes.dex
-	rm $@_temp.zip
+	touch $(dir $@)classes.dex
+	zip -j -0 $(dir $@)temp.zip $(dir $@)classes.dex
+	$(ZIPALIGN) -f -v 4 $(dir $@)temp.zip $@
+	rm $(dir $@)classes.dex
+	rm $(dir $@)temp.zip
 endif
 
 ifdef ART_TEST_TARGET_GTEST_Main_DEX
 $(ART_TEST_TARGET_GTEST_EmptyUncompressedAligned_DEX): $(ZIPALIGN)
-	touch $@_classes.dex
-	zip -j -0 $@_temp.zip $@_classes.dex
-	$(ZIPALIGN) -f 4 $@_temp.zip $@
-	rm $@_classes.dex
-	rm $@_temp.zip
+	touch $(dir $@)classes.dex
+	zip -j -0 $(dir $@)temp.zip $(dir $@)classes.dex
+	$(ZIPALIGN) -f -v 4 $(dir $@)temp.zip $@
+	rm $(dir $@)classes.dex
+	rm $(dir $@)temp.zip
 endif
 
 ifdef ART_TEST_HOST_GTEST_MultiDex_DEX
@@ -232,7 +232,6 @@ ART_GTEST_proxy_test_DEX_DEPS := Interfaces
 ART_GTEST_reflection_test_DEX_DEPS := Main NonStaticLeafMethods StaticLeafMethods
 ART_GTEST_profile_assistant_test_DEX_DEPS := ProfileTestMultiDex
 ART_GTEST_profile_compilation_info_test_DEX_DEPS := ManyMethods ProfileTestMultiDex
-ART_GTEST_profile_boot_info_test_DEX_DEPS := ManyMethods ProfileTestMultiDex MultiDex
 ART_GTEST_profiling_info_test_DEX_DEPS := ProfileTestMultiDex
 ART_GTEST_runtime_callbacks_test_DEX_DEPS := XandY
 ART_GTEST_stub_test_DEX_DEPS := AllFields
@@ -244,7 +243,6 @@ ART_GTEST_verifier_deps_test_DEX_DEPS := VerifierDeps VerifierDepsMulti MultiDex
 ART_GTEST_dex_to_dex_decompiler_test_DEX_DEPS := VerifierDeps DexToDexDecompiler
 ART_GTEST_oatdump_app_test_DEX_DEPS := ProfileTestMultiDex
 ART_GTEST_oatdump_test_DEX_DEPS := ProfileTestMultiDex
-ART_GTEST_reg_type_test_DEX_DEPS := Interfaces
 
 # The elf writer test has dependencies on core.oat.
 ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
@@ -253,10 +251,6 @@ ART_GTEST_elf_writer_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGE
 # The two_runtimes_test test has dependencies on core.oat.
 ART_GTEST_two_runtimes_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 ART_GTEST_two_runtimes_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
-
-# The transaction test has dependencies on core.oat.
-ART_GTEST_transaction_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
-ART_GTEST_transaction_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
 
 ART_GTEST_dex2oat_environment_tests_HOST_DEPS := \
   $(HOST_CORE_IMAGE_optimizing_64) \
@@ -286,7 +280,7 @@ ART_GTEST_dexoptanalyzer_test_HOST_DEPS := \
   $(HOST_OUT_EXECUTABLES)/dexoptanalyzerd
 ART_GTEST_dexoptanalyzer_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dexoptanalyzerd.
+  $(TARGET_OUT_EXECUTABLES)/dexoptanalyzerd
 
 ART_GTEST_image_space_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
@@ -298,32 +292,32 @@ ART_GTEST_dex2oat_test_HOST_DEPS := \
   $(HOST_OUT_EXECUTABLES)/dex2oatd
 ART_GTEST_dex2oat_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dex2oatd.
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 
 ART_GTEST_dex2oat_image_test_HOST_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
   $(HOST_OUT_EXECUTABLES)/dex2oatd
 ART_GTEST_dex2oat_image_test_TARGET_DEPS := \
   $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dex2oatd.
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 
 # TODO: document why this is needed.
 ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 
 # The dexdiag test requires the dexdiag utility.
 ART_GTEST_dexdiag_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/dexdiag
-ART_GTEST_dexdiag_test_TARGET_DEPS := $(TESTING_ART_APEX)  # For dexdiag.
+ART_GTEST_dexdiag_test_TARGET_DEPS := $(TARGET_OUT_EXECUTABLES)/dexdiag
 
 # The dexdump test requires an image and the dexdump utility.
 # TODO: rename into dexdump when migration completes
 ART_GTEST_dexdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexdump
+  $(HOST_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_dexdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TARGET_OUT_EXECUTABLES)/dexdump
+  $(TARGET_OUT_EXECUTABLES)/dexdump2
 
 # The dexanalyze test requires an image and the dexanalyze utility.
 ART_GTEST_dexanalyze_test_HOST_DEPS := \
@@ -341,12 +335,12 @@ ART_GTEST_dexlayout_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/dexlayoutd \
-  $(HOST_OUT_EXECUTABLES)/dexdump
+  $(HOST_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_dexlayout_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
   $(TARGET_OUT_EXECUTABLES)/dexlayoutd \
-  $(TARGET_OUT_EXECUTABLES)/dexdump
+  $(TARGET_OUT_EXECUTABLES)/dexdump2
 
 # The dexlist test requires an image and the dexlist utility.
 ART_GTEST_dexlist_test_HOST_DEPS := \
@@ -356,7 +350,7 @@ ART_GTEST_dexlist_test_HOST_DEPS := \
 ART_GTEST_dexlist_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TESTING_ART_APEX)   # For dexlist.
+  $(TARGET_OUT_EXECUTABLES)/dexlist
 
 # The imgdiag test has dependencies on core.oat since it needs to load it during the test.
 # For the host, also add the installed tool (in the base size, that should suffice). For the
@@ -382,21 +376,23 @@ ART_GTEST_oatdump_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_32) \
   $(HOST_OUT_EXECUTABLES)/oatdumpd \
   $(HOST_OUT_EXECUTABLES)/oatdumpds \
-  $(HOST_OUT_EXECUTABLES)/dexdump \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd \
-  $(HOST_OUT_EXECUTABLES)/dex2oatds
+  $(HOST_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_oatdump_test_TARGET_DEPS := \
   $(TARGET_CORE_IMAGE_DEFAULT_64) \
   $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TESTING_ART_APEX)    # For oatdumpd, dexdump, dex2oatd.
+  $(TARGET_OUT_EXECUTABLES)/oatdumpd \
+  $(TARGET_OUT_EXECUTABLES)/dexdump2
 ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
 ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
-ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
-ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
+ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS) \
+  $(HOST_OUT_EXECUTABLES)/dex2oatd \
+  $(HOST_OUT_EXECUTABLES)/dex2oatds
+ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS) \
+  $(TARGET_OUT_EXECUTABLES)/dex2oatd
 
 # Profile assistant tests requires profman utility.
 ART_GTEST_profile_assistant_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/profmand
-ART_GTEST_profile_assistant_test_TARGET_DEPS := $(TESTING_ART_APEX)  # For profmand.
+ART_GTEST_profile_assistant_test_TARGET_DEPS := $(TARGET_OUT_EXECUTABLES)/profmand
 
 ART_GTEST_hiddenapi_test_HOST_DEPS := \
   $(HOST_CORE_IMAGE_DEFAULT_64) \
@@ -463,14 +459,9 @@ ifneq ($(ART_TEST_ANDROID_ROOT),)
   ART_GTEST_TARGET_ANDROID_ROOT := $(ART_TEST_ANDROID_ROOT)
 endif
 
-ART_GTEST_TARGET_ANDROID_I18N_ROOT := '/apex/com.android.i18n'
-ifneq ($(ART_TEST_ANDROID_I18N_ROOT),)
-  ART_GTEST_TARGET_ANDROID_I18N_ROOT := $(ART_TEST_ANDROID_I18N_ROOT)
-endif
-
-ART_GTEST_TARGET_ANDROID_ART_ROOT := '/apex/com.android.art'
-ifneq ($(ART_TEST_ANDROID_ART_ROOT),)
-  ART_GTEST_TARGET_ANDROID_ART_ROOT := $(ART_TEST_ANDROID_ART_ROOT)
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := '/apex/com.android.runtime'
+ifneq ($(ART_TEST_ANDROID_RUNTIME_ROOT),)
+  ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT := $(ART_TEST_ANDROID_RUNTIME_ROOT)
 endif
 
 ART_GTEST_TARGET_ANDROID_TZDATA_ROOT := '/apex/com.android.tzdata'
@@ -480,7 +471,7 @@ endif
 
 # Define a make rule for a target device gtest.
 # $(1): gtest name - the name of the test we're building such as leb128_test.
-# $(2): path to the test binary
+# $(2): path relative to $OUT to the test binary
 # $(3): 2ND_ or undefined - used to differentiate between the primary and secondary architecture.
 # $(4): LD_LIBRARY_PATH or undefined - used in case libartd.so is not in /system/lib/
 define define-art-gtest-rule-target
@@ -495,7 +486,7 @@ define define-art-gtest-rule-target
   endif
 
   gtest_rule := test-art-target-gtest-$(1)$$($(3)ART_PHONY_TEST_TARGET_SUFFIX)
-  gtest_exe := $(2)
+  gtest_exe := $(OUT_DIR)/$(2)
   gtest_target_exe := $$(patsubst $(PRODUCT_OUT)/%,/%,$$(gtest_exe))
 
   # Add the test dependencies to test-art-target-sync, which will be a prerequisite for the test
@@ -504,7 +495,6 @@ define define-art-gtest-rule-target
     $$(ART_GTEST_$(1)_TARGET_DEPS) \
     $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_TARGET_GTEST_$(file)_DEX)) \
     $$(gtest_exe) \
-    $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libicu_jni.so \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libjavacore.so \
     $$($(3)TARGET_OUT_SHARED_LIBRARIES)/libopenjdkd.so \
     $$(foreach jar,$$(TARGET_TEST_CORE_JARS),$$(TARGET_OUT_JAVA_LIBRARIES)/$$(jar).jar)
@@ -528,8 +518,7 @@ $$(gtest_rule): test-art-target-sync
 	$(hide) $$(call ART_TEST_SKIP,$$@) && \
 	  ($(ADB) shell "$$(PRIVATE_MAYBE_CHROOT_COMMAND) env $(GCOV_ENV) LD_LIBRARY_PATH=$(4) \
 	       ANDROID_ROOT=$(ART_GTEST_TARGET_ANDROID_ROOT) \
-	       ANDROID_I18N_ROOT=$(ART_GTEST_TARGET_ANDROID_I18N_ROOT) \
-	       ANDROID_ART_ROOT=$(ART_GTEST_TARGET_ANDROID_ART_ROOT) \
+	       ANDROID_RUNTIME_ROOT=$(ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT) \
 	       ANDROID_TZDATA_ROOT=$(ART_GTEST_TARGET_ANDROID_TZDATA_ROOT) \
 	       $$(PRIVATE_TARGET_EXE) \
 	     && touch $$(PRIVATE_GTEST_WITNESS)" \
@@ -560,16 +549,15 @@ define define-art-gtest-rule-host
   gtest_rule := test-art-host-gtest-$$(gtest_suffix)
   gtest_output := $(call intermediates-dir-for,PACKAGING,art-host-gtest,HOST)/$$(gtest_suffix).xml
   $$(call dist-for-goals,$$(gtest_rule),$$(gtest_output):gtest/$$(gtest_suffix))
-  gtest_exe := $(2)
+  gtest_exe := $(OUT_DIR)/$(2)
   # Dependencies for all host gtests.
   gtest_deps := $$(HOST_CORE_DEX_LOCATIONS) \
-    $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libicu_jni$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libjavacore$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libopenjdkd$$(ART_HOST_SHLIB_EXTENSION) \
     $$(gtest_exe) \
     $$(ART_GTEST_$(1)_HOST_DEPS) \
     $(foreach file,$(ART_GTEST_$(1)_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX)) \
-    $(HOST_OUT_EXECUTABLES)/signal_dumper
+    $(HOST_OUT_EXECUTABLES)/timeout_dumper
 
   ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
 
@@ -583,7 +571,7 @@ $$(gtest_output): NAME := $$(gtest_rule)
 ifeq (,$(SANITIZE_HOST))
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
 	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && \
-		timeout --foreground -k 120s 2400s $(HOST_OUT_EXECUTABLES)/signal_dumper -s 15 \
+		timeout --foreground -k 120s -s SIGRTMIN+2 2400s $(HOST_OUT_EXECUTABLES)/timeout_dumper \
 			$$< --gtest_output=xml:$$@ && \
 		$$(call ART_TEST_PASSED,$$(NAME))) || $$(call ART_TEST_FAILED,$$(NAME))
 else
@@ -596,8 +584,8 @@ else
 # under ASAN.
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
 	$(hide) ($$(call ART_TEST_SKIP,$$(NAME)) && set -o pipefail && \
-		ASAN_OPTIONS=detect_leaks=1 timeout --foreground -k 120s 3600s \
-			$(HOST_OUT_EXECUTABLES)/signal_dumper -s 15 \
+		ASAN_OPTIONS=detect_leaks=1 timeout --foreground -k 120s -s SIGRTMIN+2 3600s \
+			$(HOST_OUT_EXECUTABLES)/timeout_dumper \
 				$$< --gtest_output=xml:$$@ 2>&1 | tee $$<.tmp.out >&2 && \
 		{ $$(call ART_TEST_PASSED,$$(NAME)) ; rm $$<.tmp.out ; }) || \
 		( grep -q AddressSanitizer $$<.tmp.out && export ANDROID_BUILD_TOP=`pwd` && \
@@ -782,8 +770,7 @@ ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
 ART_GTEST_TARGET_ANDROID_ROOT :=
-ART_GTEST_TARGET_ANDROID_I18N_ROOT :=
-ART_GTEST_TARGET_ANDROID_ART_ROOT :=
+ART_GTEST_TARGET_ANDROID_RUNTIME_ROOT :=
 ART_GTEST_TARGET_ANDROID_TZDATA_ROOT :=
 ART_GTEST_class_linker_test_DEX_DEPS :=
 ART_GTEST_class_table_test_DEX_DEPS :=

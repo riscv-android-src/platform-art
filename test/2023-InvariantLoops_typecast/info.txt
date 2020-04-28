@@ -1,2 +1,0 @@
-Test a loop with invariants, which should be hoisted.
-In this case type casts are not sunk/hoisted.

@@ -24,9 +24,5 @@ extern "C" bool JNICALL Java_Main_hasStartupCompleted(JNIEnv*, jclass) {
   return Runtime::Current()->GetStartupCompleted();
 }
 
-extern "C" void JNICALL Java_Main_resetStartupCompleted(JNIEnv*, jclass) {
-  Runtime::Current()->ResetStartupCompleted();
-}
-
 }  // namespace
 }  // namespace art

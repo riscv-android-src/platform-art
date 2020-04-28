@@ -60,7 +60,7 @@ function boot_classpath_arg {
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml conscrypt"
 
 DEPS="core-tests jsr166-tests mockito-target"
 
@@ -83,31 +83,19 @@ fi
 use_jit=true
 
 # Packages that currently work correctly with the expectation files.
-working_packages=("libcore.android.system"
-                  "libcore.build"
-                  "libcore.dalvik.system"
-                  "libcore.java.awt"
+working_packages=("libcore.dalvik.system"
                   "libcore.java.lang"
                   "libcore.java.math"
                   "libcore.java.text"
                   "libcore.java.util"
                   "libcore.javax.crypto"
-                  "libcore.javax.net"
                   "libcore.javax.security"
                   "libcore.javax.sql"
                   "libcore.javax.xml"
-                  "libcore.libcore.internal"
                   "libcore.libcore.io"
                   "libcore.libcore.net"
                   "libcore.libcore.reflect"
                   "libcore.libcore.util"
-                  "libcore.libcore.timezone"
-                  "libcore.sun.invoke"
-                  "libcore.sun.net"
-                  "libcore.sun.misc"
-                  "libcore.sun.security"
-                  "libcore.sun.util"
-                  "libcore.xml"
                   "org.apache.harmony.annotation"
                   "org.apache.harmony.crypto"
                   "org.apache.harmony.luni"
@@ -130,9 +118,6 @@ working_packages=("libcore.android.system"
 vogar_args=$@
 gcstress=false
 debug=false
-
-# Run tests that use the getrandom() syscall? (Requires Linux 3.17+).
-getrandom=true
 
 # Don't use device mode by default.
 device_mode=false
@@ -167,11 +152,6 @@ while true; do
   elif [[ "$1" == "-Xgc:gcstress" ]]; then
     gcstress=true
     shift
-  elif [[ "$1" == "--no-getrandom" ]]; then
-    # Remove the option from Vogar arguments.
-    vogar_args=${vogar_args/$1}
-    getrandom=false
-    shift
   elif [[ "$1" == "" ]]; then
     break
   else
@@ -198,8 +178,6 @@ fi
 # the default timeout.
 if $gcstress && $debug && $device_mode; then
   vogar_args="$vogar_args --timeout 1440"
-elif $gcstress && $device_mode; then
-  vogar_args="$vogar_args --timeout 900"
 else
   vogar_args="$vogar_args --timeout 480"
 fi
@@ -224,12 +202,15 @@ else
   working_packages+=("libcore.libcore.icu")
 fi
 
-if $getrandom; then :; else
-  # Ignore failures in tests that use the getrandom() syscall (which requires
-  # Linux 3.17+). This is needed on fugu (Nexus Player) devices, where the
-  # kernel is Linux 3.10.
-  expectations="$expectations --expectations art/tools/libcore_no_getrandom_failures.txt"
-fi
+# Disable network-related libcore tests that are failing on the following
+# devices running Android O, as a workaround for b/74725685:
+# - FA7BN1A04406 (walleye device testing configuration aosp-poison/volantis-armv7-poison-debug)
+# - FA7BN1A04412 (walleye device testing configuration aosp-poison/volantis-armv8-poison-ndebug)
+# - FA7BN1A04433 (walleye device testing configuration aosp-poison/volantis-armv8-poison-debug)
+case "$ANDROID_SERIAL" in
+  (FA7BN1A04406|FA7BN1A04412|FA7BN1A04433)
+    expectations="$expectations --expectations art/tools/libcore_network_failures.txt";;
+esac
 
 # Run the tests using vogar.
 echo "Running tests for the following test packages:"

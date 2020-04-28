@@ -111,7 +111,7 @@ TEST_F(ObjectTest, Clone) {
   StackHandleScope<2> hs(soa.Self());
   Handle<ObjectArray<Object>> a1(hs.NewHandle(AllocObjectArray<Object>(soa.Self(), 256)));
   size_t s1 = a1->SizeOf();
-  ObjPtr<Object> clone = Object::Clone(a1, soa.Self());
+  ObjPtr<Object> clone = a1->Clone(soa.Self());
   EXPECT_EQ(s1, clone->SizeOf());
   EXPECT_TRUE(clone->GetClass() == a1->GetClass());
 }
@@ -158,17 +158,17 @@ TEST_F(ObjectTest, AllocArray) {
   MutableHandle<Class> c = hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[I"));
   gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
   MutableHandle<Array> a = hs.NewHandle(
-      Array::Alloc(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
+      Array::Alloc<true>(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_EQ(1, a->GetLength());
 
   c.Assign(class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/Object;"));
-  a.Assign(Array::Alloc(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
+  a.Assign(Array::Alloc<true>(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_EQ(1, a->GetLength());
 
   c.Assign(class_linker_->FindSystemClass(soa.Self(), "[[Ljava/lang/Object;"));
-  a.Assign(Array::Alloc(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
+  a.Assign(Array::Alloc<true>(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_EQ(1, a->GetLength());
 }
@@ -179,26 +179,25 @@ TEST_F(ObjectTest, AllocArray_FillUsable) {
   MutableHandle<Class> c = hs.NewHandle(class_linker_->FindSystemClass(soa.Self(), "[B"));
   gc::AllocatorType allocator_type = Runtime::Current()->GetHeap()->GetCurrentAllocator();
   MutableHandle<Array> a = hs.NewHandle(
-      Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-          soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
+      Array::Alloc<true, true>(soa.Self(), c.Get(), 1, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_LE(1, a->GetLength());
 
   c.Assign(class_linker_->FindSystemClass(soa.Self(), "[I"));
-  a.Assign(Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-      soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
+  a.Assign(
+      Array::Alloc<true, true>(soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_LE(2, a->GetLength());
 
   c.Assign(class_linker_->FindSystemClass(soa.Self(), "[Ljava/lang/Object;"));
-  a.Assign(Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-      soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
+  a.Assign(
+      Array::Alloc<true, true>(soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_LE(2, a->GetLength());
 
   c.Assign(class_linker_->FindSystemClass(soa.Self(), "[[Ljava/lang/Object;"));
-  a.Assign(Array::Alloc</*kIsInstrumented=*/ true, /*kFillUsable=*/ true>(
-      soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
+  a.Assign(
+      Array::Alloc<true, true>(soa.Self(), c.Get(), 2, c->GetComponentSizeShift(), allocator_type));
   EXPECT_TRUE(c.Get() == a->GetClass());
   EXPECT_LE(2, a->GetLength());
 }

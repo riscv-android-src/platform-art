@@ -21,7 +21,7 @@
 
 #include <android-base/logging.h>
 
-#include "dex_instruction.h"
+#include "dex_instruction_iterator.h"
 
 namespace art {
 
@@ -32,7 +32,6 @@ struct TryItem;
 
 class ArtMethod;
 class DexFile;
-class DexInstructionIterator;
 template <typename Iter>
 class IterationRange;
 

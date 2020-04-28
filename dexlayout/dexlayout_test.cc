@@ -21,9 +21,9 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "base/common_art_test.h"
 #include "base/unix_file/fd_file.h"
 #include "base/utils.h"
+#include "common_runtime_test.h"
 #include "dex/art_dex_file_loader.h"
 #include "dex/base64_test_util.h"
 #include "dex/class_accessor-inl.h"
@@ -250,17 +250,18 @@ static void WriteFileBase64(const char* base64, const char* location) {
   }
 }
 
-class DexLayoutTest : public CommonArtTest {
+class DexLayoutTest : public CommonRuntimeTest {
  protected:
   std::string GetDexLayoutPath() {
-    return GetArtBinDir() + "/dexlayoutd";
+    return GetTestAndroidRoot() + "/bin/dexlayoutd";
   }
 
   // Runs FullPlainOutput test.
   bool FullPlainOutputExec(std::string* error_msg) {
+    // TODO: dexdump2 -> dexdump ?
     ScratchFile dexdump_output;
     const std::string& dexdump_filename = dexdump_output.GetFilename();
-    std::string dexdump = GetArtBinDir() + "/dexdump";
+    std::string dexdump = GetTestAndroidRoot() + "/bin/dexdump2";
     EXPECT_TRUE(OS::FileExists(dexdump.c_str())) << dexdump << " should be a valid file path";
 
     ScratchFile dexlayout_output;
@@ -325,7 +326,8 @@ class DexLayoutTest : public CommonArtTest {
 
   // Create a profile with some subset of methods and classes.
   void CreateProfile(const std::string& input_dex,
-                     const std::string& out_profile) {
+                     const std::string& out_profile,
+                     const std::string& dex_location) {
     std::vector<std::unique_ptr<const DexFile>> dex_files;
     std::string error_msg;
     const ArtDexFileLoader dex_file_loader;
@@ -342,6 +344,7 @@ class DexLayoutTest : public CommonArtTest {
     size_t profile_methods = 0;
     size_t profile_classes = 0;
     ProfileCompilationInfo pfi;
+    std::set<DexCacheResolvedClasses> classes;
     for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
       for (uint32_t i = 0; i < dex_file->NumMethodIds(); i += 2) {
         uint8_t flags = 0u;
@@ -353,21 +356,26 @@ class DexLayoutTest : public CommonArtTest {
           flags |= ProfileCompilationInfo::MethodHotness::kFlagStartup;
           ++profile_methods;
         }
-        pfi.AddMethod(ProfileMethodInfo(MethodReference(dex_file.get(), /*index=*/ i)),
-                      static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags));
+        pfi.AddMethodIndex(static_cast<ProfileCompilationInfo::MethodHotness::Flag>(flags),
+                           dex_location,
+                           dex_file->GetLocationChecksum(),
+                           /*method_idx=*/i,
+                           dex_file->NumMethodIds());
       }
+      DexCacheResolvedClasses cur_classes(dex_location,
+                                          dex_location,
+                                          dex_file->GetLocationChecksum(),
+                                          dex_file->NumMethodIds());
       // Add every even class too.
-      std::set<dex::TypeIndex> classes;
       for (uint32_t i = 0; i < dex_file->NumClassDefs(); i += 1) {
         if ((i & 2) == 0) {
-          classes.insert(dex::TypeIndex(dex_file->GetClassDef(i).class_idx_));
+          cur_classes.AddClass(dex_file->GetClassDef(i).class_idx_);
           ++profile_classes;
         }
       }
-      if (!classes.empty()) {
-        pfi.AddClassesForDex(dex_file.get(), classes.begin(), classes.end());
-      }
+      classes.insert(cur_classes);
     }
+    pfi.AddClasses(classes);
     // Write to provided file.
     std::unique_ptr<File> file(OS::CreateEmptyFile(out_profile.c_str()));
     ASSERT_TRUE(file != nullptr);
@@ -390,7 +398,7 @@ class DexLayoutTest : public CommonArtTest {
     std::string dex_file = tmp_dir + "classes.dex";
     WriteFileBase64(kDexFileLayoutInputDex, dex_file.c_str());
     std::string profile_file = tmp_dir + "primary.prof";
-    CreateProfile(dex_file, profile_file);
+    CreateProfile(dex_file, profile_file, dex_file);
     // WriteFileBase64(kDexFileLayoutInputProfile, profile_file.c_str());
     std::string output_dex = tmp_dir + "classes.dex.new";
 
@@ -432,7 +440,7 @@ class DexLayoutTest : public CommonArtTest {
     }
 
     std::string profile_file = tmp_dir + "primary.prof";
-    CreateProfile(dex_file, profile_file);
+    CreateProfile(dex_file, profile_file, dex_file);
     std::string output_dex = tmp_dir + "classes.dex.new";
     std::string second_output_dex = tmp_dir + "classes.dex.new.new";
 
@@ -445,13 +453,8 @@ class DexLayoutTest : public CommonArtTest {
 
     // Recreate the profile with the new dex location. This is required so that the profile dex
     // location matches.
-    // For convenience we just copy the previous dex file to the new location so we can re-use it
-    // for profile generation.
+    CreateProfile(dex_file, profile_file, output_dex);
 
-    // Don't check the output. The exec cmd wrongfully coplains that the cp cmd fails.
-    std::vector<std::string> cp_args = {"/usr/bin/cp", dex_file, output_dex};
-    art::Exec(cp_args, error_msg);
-    CreateProfile(output_dex, profile_file);
     // -v makes sure that the layout did not corrupt the dex file.
     // -i since the checksum won't match from the first layout.
     std::vector<std::string> second_dexlayout_args =
@@ -518,7 +521,7 @@ class DexLayoutTest : public CommonArtTest {
       EXPECT_EQ(dex_file->GetFile()->Flush(), 0);
     }
     if (profile_file != nullptr) {
-      CreateProfile(dex_file->GetFilename(), profile_file->GetFilename());
+      CreateProfile(dex_file->GetFilename(), profile_file->GetFilename(), dex_file->GetFilename());
     }
 
     std::string error_msg;

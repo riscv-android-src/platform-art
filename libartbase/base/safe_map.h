@@ -70,22 +70,18 @@ class SafeMap {
   void swap(Self& other) { map_.swap(other.map_); }
   void clear() { map_.clear(); }
   iterator erase(iterator it) { return map_.erase(it); }
-  template<typename Kv> size_type erase(const Kv& k) { return map_.erase(k); }
+  size_type erase(const K& k) { return map_.erase(k); }
 
-  template<typename Kv> iterator find(const Kv& k) { return map_.find(k); }
-  template<typename Kv> const_iterator find(const Kv& k) const { return map_.find(k); }
+  iterator find(const K& k) { return map_.find(k); }
+  const_iterator find(const K& k) const { return map_.find(k); }
 
-  template<typename Kv> iterator lower_bound(const Kv& k) { return map_.lower_bound(k); }
-  template<typename Kv> const_iterator lower_bound(const Kv& k) const {
-    return map_.lower_bound(k);
-  }
+  iterator lower_bound(const K& k) { return map_.lower_bound(k); }
+  const_iterator lower_bound(const K& k) const { return map_.lower_bound(k); }
 
-  template<typename Kv> iterator upper_bound(const Kv& k) { return map_.upper_bound(k); }
-  template<typename Kv> const_iterator upper_bound(const Kv& k) const {
-    return map_.upper_bound(k);
-  }
+  iterator upper_bound(const K& k) { return map_.upper_bound(k); }
+  const_iterator upper_bound(const K& k) const { return map_.upper_bound(k); }
 
-  template<typename Kv> size_type count(const Kv& k) const { return map_.count(k); }
+  size_type count(const K& k) const { return map_.count(k); }
 
   // Note that unlike std::map's operator[], this doesn't return a reference to the value.
   V Get(const K& k) const {

@@ -40,6 +40,15 @@ cc_defaults {
         "libnativehelper_header_only",
         "dt_fd_forward_export",
     ],
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
+    symlink_preferred_arch: true,
     required: [
         "libjdwp",
         "libdt_fd_forward",
@@ -53,32 +62,6 @@ art_cc_library {
         "libart",
         "libartbase",
     ],
-}
-
-// We export a library to do the server-side socket handling that gets loaded
-// by adbd from the art apex, so that we can update the socket handling
-// independently from the adbd apex.
-cc_library {
-    name: "libadbconnection_server",
-    srcs: ["adbconnection_server.cc"],
-
-    export_include_dirs: ["include"],
-
-    stl: "libc++_static",
-    shared_libs: ["liblog"],
-    whole_static_libs: ["libbase"],
-
-    defaults: ["art_defaults"],
-    visibility: [
-        "//system/core/adb",
-    ],
-    stubs: {
-        symbol_file: "libadbconnection_server.map.txt",
-        versions: ["1"],
-    },
-
-    host_supported: true,
-    recovery_available: true,
 }
 
 art_cc_library {
