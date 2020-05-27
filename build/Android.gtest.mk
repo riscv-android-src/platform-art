@@ -14,6 +14,9 @@
 # limitations under the License.
 #
 
+# Build rules are excluded from Mac, since we can not run ART tests there in the first place.
+ifneq ($(HOST_OS),darwin)
+
 # The path for which all the dex files are relative, not actually the current directory.
 LOCAL_PATH := art/test
 
@@ -254,6 +257,12 @@ ART_GTEST_oatdump_app_test_DEX_DEPS := ProfileTestMultiDex
 ART_GTEST_oatdump_test_DEX_DEPS := ProfileTestMultiDex
 ART_GTEST_reg_type_test_DEX_DEPS := Interfaces
 
+# Deprecated core.art dependencies.
+HOST_CORE_IMAGE_DEFAULT_32 :=
+HOST_CORE_IMAGE_DEFAULT_64 :=
+TARGET_CORE_IMAGE_DEFAULT_32 :=
+TARGET_CORE_IMAGE_DEFAULT_64 :=
+
 # The elf writer test has dependencies on core.oat.
 ART_GTEST_elf_writer_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 ART_GTEST_elf_writer_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
@@ -265,156 +274,6 @@ ART_GTEST_two_runtimes_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TAR
 # The transaction test has dependencies on core.oat.
 ART_GTEST_transaction_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
 ART_GTEST_transaction_test_TARGET_DEPS := $(TARGET_CORE_IMAGE_DEFAULT_64) $(TARGET_CORE_IMAGE_DEFAULT_32)
-
-ART_GTEST_dex2oat_environment_tests_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_optimizing_64) \
-  $(HOST_CORE_IMAGE_optimizing_32) \
-  $(HOST_CORE_IMAGE_interpreter_64) \
-  $(HOST_CORE_IMAGE_interpreter_32)
-ART_GTEST_dex2oat_environment_tests_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_optimizing_64) \
-  $(TARGET_CORE_IMAGE_optimizing_32) \
-  $(TARGET_CORE_IMAGE_interpreter_64) \
-  $(TARGET_CORE_IMAGE_interpreter_32)
-
-ART_GTEST_oat_file_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd
-ART_GTEST_oat_file_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  dex2oatd.com.android.art.debug
-
-ART_GTEST_oat_file_assistant_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
-ART_GTEST_oat_file_assistant_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
-
-ART_GTEST_dexoptanalyzer_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dexoptanalyzerd
-ART_GTEST_dexoptanalyzer_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dexoptanalyzerd.
-
-ART_GTEST_image_space_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS)
-ART_GTEST_image_space_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS)
-
-ART_GTEST_dex2oat_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd
-ART_GTEST_dex2oat_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dex2oatd.
-
-ART_GTEST_dex2oat_image_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_HOST_DEPS) \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd
-ART_GTEST_dex2oat_image_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_environment_tests_TARGET_DEPS) \
-  $(TESTING_ART_APEX)  # For dex2oatd.
-
-ART_GTEST_module_exclusion_test_HOST_DEPS := \
-  $(ART_GTEST_dex2oat_image_test_HOST_DEPS)
-ART_GTEST_module_exclusion_test_TARGET_DEPS := \
-  $(ART_GTEST_dex2oat_image_test_TARGET_DEPS)
-
-# TODO: document why this is needed.
-ART_GTEST_proxy_test_HOST_DEPS := $(HOST_CORE_IMAGE_DEFAULT_64) $(HOST_CORE_IMAGE_DEFAULT_32)
-
-# The dexdiag test requires the dexdiag utility.
-ART_GTEST_dexdiag_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/dexdiag
-ART_GTEST_dexdiag_test_TARGET_DEPS := $(TESTING_ART_APEX)  # For dexdiag.
-
-# The dexdump test requires an image and the dexdump utility.
-# TODO: rename into dexdump when migration completes
-ART_GTEST_dexdump_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexdump
-ART_GTEST_dexdump_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexdump.com.android.art.debug
-
-# The dexanalyze test requires an image and the dexanalyze utility.
-ART_GTEST_dexanalyze_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexanalyze
-ART_GTEST_dexanalyze_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexanalyze.com.android.art.debug
-
-# The dexlayout test requires an image and the dexlayout utility.
-# TODO: rename into dexdump when migration completes
-ART_GTEST_dexlayout_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexlayoutd \
-  $(HOST_OUT_EXECUTABLES)/dexdump
-ART_GTEST_dexlayout_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  dexlayoutd.com.android.art.debug \
-  dexdump.com.android.art.debug
-
-# The dexlist test requires an image and the dexlist utility.
-ART_GTEST_dexlist_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/dexlist
-ART_GTEST_dexlist_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TESTING_ART_APEX)   # For dexlist.
-
-# The imgdiag test has dependencies on core.oat since it needs to load it during the test.
-# For the host, also add the installed tool (in the base size, that should suffice). For the
-# target, just the module is fine, the sync will happen late enough.
-ART_GTEST_imgdiag_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/imgdiagd
-ART_GTEST_imgdiag_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  imgdiagd.com.android.art.debug
-
-# Dex analyze test requires dexanalyze.
-ART_GTEST_dexanalyze_test_HOST_DEPS := \
-  $(HOST_OUT_EXECUTABLES)/dexanalyze
-ART_GTEST_dexanalyze_test_TARGET_DEPS := \
-  dexanalyze.com.android.art.debug
-
-# Oatdump test requires an image and oatfile to dump.
-ART_GTEST_oatdump_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/oatdumpd \
-  $(HOST_OUT_EXECUTABLES)/oatdumpds \
-  $(HOST_OUT_EXECUTABLES)/dexdump \
-  $(HOST_OUT_EXECUTABLES)/dex2oatd \
-  $(HOST_OUT_EXECUTABLES)/dex2oatds
-ART_GTEST_oatdump_test_TARGET_DEPS := \
-  $(TARGET_CORE_IMAGE_DEFAULT_64) \
-  $(TARGET_CORE_IMAGE_DEFAULT_32) \
-  $(TESTING_ART_APEX)    # For oatdumpd, dexdump, dex2oatd.
-ART_GTEST_oatdump_image_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
-ART_GTEST_oatdump_image_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
-ART_GTEST_oatdump_app_test_HOST_DEPS := $(ART_GTEST_oatdump_test_HOST_DEPS)
-ART_GTEST_oatdump_app_test_TARGET_DEPS := $(ART_GTEST_oatdump_test_TARGET_DEPS)
-
-# Profile assistant tests requires profman utility.
-ART_GTEST_profile_assistant_test_HOST_DEPS := $(HOST_OUT_EXECUTABLES)/profmand
-ART_GTEST_profile_assistant_test_TARGET_DEPS := $(TESTING_ART_APEX)  # For profmand.
-
-ART_GTEST_hiddenapi_test_HOST_DEPS := \
-  $(HOST_CORE_IMAGE_DEFAULT_64) \
-  $(HOST_CORE_IMAGE_DEFAULT_32) \
-  $(HOST_OUT_EXECUTABLES)/hiddenapid
 
 # The path for which all the source files are relative, not actually the current directory.
 LOCAL_PATH := art
@@ -501,6 +360,7 @@ define define-art-gtest-rule-host
   gtest_exe := $(2)
   # Dependencies for all host gtests.
   gtest_deps := $$(ART_HOST_DEX_DEPENDENCIES) \
+    $$(ART_TEST_HOST_GTEST_DEPENDENCIES) \
     $$(HOST_BOOT_IMAGE_JARS) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libicu_jni$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libjavacore$$(ART_HOST_SHLIB_EXTENSION) \
@@ -532,14 +392,14 @@ define define-art-gtest-rule-host
     gtest_deps += $$($(3)HOST_BOOT_IMAGE)
   endif
 
-  ART_TEST_HOST_GTEST_DEPENDENCIES += $$(gtest_deps)
-
 .PHONY: $$(gtest_rule)
 $$(gtest_rule): $$(gtest_output)
 
 # Re-run the tests, even if nothing changed. Until the build system has a dedicated "no cache"
 # option, claim to write a file that is never produced.
 $$(gtest_output): .KATI_IMPLICIT_OUTPUTS := $$(gtest_output)-nocache
+# Limit concurrent runs. Each test itself is already highly parallel (and thus memory hungry).
+$$(gtest_output): .KATI_NINJA_POOL := highmem_pool
 $$(gtest_output): NAME := $$(gtest_rule)
 ifeq (,$(SANITIZE_HOST))
 $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
@@ -578,6 +438,27 @@ endif
   gtest_rule :=
   gtest_suffix :=
 endef  # define-art-gtest-rule-host
+
+# Global list of all dependencies. All tests depend on all tools.
+# Removal of test_per_src broke the naming convention for dependencies,
+# so the fine-grained dependencies no longer work for now.
+# TODO: Move all dependency tracking to the blueprint file.
+ART_GTEST_ALL_DEX_DEPS := \
+  EmptyUncompressed \
+  EmptyUncompressedAligned \
+  LinkageTest \
+  MainStripped \
+  MainUncompressedAligned \
+  MultiDexUncompressedAligned \
+  VerifierDeps \
+  VerifierDepsMulti  \
+  VerifySoftFailDuringClinit \
+  $(foreach dir,$(GTEST_DEX_DIRECTORIES),$(dir))
+ART_TEST_HOST_GTEST_DEPENDENCIES += \
+  $(foreach file,$(ART_GTEST_ALL_DEX_DEPS),$(ART_TEST_HOST_GTEST_$(file)_DEX))
+ART_TEST_TARGET_GTEST_DEPENDENCIES += \
+  $(TESTING_ART_APEX) \
+  $(foreach file,$(ART_GTEST_ALL_DEX_DEPS),$(ART_TEST_TARGET_GTEST_$(file)_DEX))
 
 # Add the additional dependencies for the specified test
 # $(1): test name
@@ -628,9 +509,9 @@ endef  # define-art-gtest-host-both
 ifeq ($(ART_BUILD_TARGET),true)
   $(foreach name,$(ART_TARGET_GTEST_NAMES), $(eval $(call add-art-gtest-dependencies,$(name),)))
   ART_TEST_TARGET_GTEST_DEPENDENCIES += \
-    libicu_jni.com.android.art.debug \
-    libjavacore.com.android.art.debug \
-    libopenjdkd.com.android.art.debug \
+    libicu_jni.com.android.i18n \
+    libjavacore.com.android.art.testing \
+    libopenjdkd.com.android.art.testing \
     com.android.art.testing \
     com.android.conscrypt
 endif
@@ -773,3 +654,5 @@ ART_TEST_HOST_GTEST_VerifySoftFailDuringClinit_DEX :=
 ART_TEST_TARGET_GTEST_VerifySoftFailDuringClinit_DEX :=
 GTEST_DEX_DIRECTORIES :=
 LOCAL_PATH :=
+
+endif # ifneq ($(HOST_OS),darwin)

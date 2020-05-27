@@ -896,6 +896,9 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
                                       /* use_fd= */ true));
       EXPECT_GT(vdex_file1->GetLength(), 0u);
     }
+    // Get the dex file checksums.
+    std::vector<uint32_t> checksums1;
+    GetDexFileChecksums(dex_location, odex_location, &checksums1);
     // Unquicken by running the verify compiler filter on the vdex file.
     {
       std::string input_vdex = StringPrintf("--input-vdex-fd=%d", vdex_file1->Fd());
@@ -909,6 +912,13 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
     }
     ASSERT_EQ(vdex_file1->FlushCloseOrErase(), 0) << "Could not flush and close vdex file";
     CheckResult(dex_location, odex_location);
+    // Verify that the checksums did not change.
+    std::vector<uint32_t> checksums2;
+    GetDexFileChecksums(dex_location, odex_location, &checksums2);
+    ASSERT_EQ(checksums1.size(), checksums2.size());
+    for (size_t i = 0; i != checksums1.size(); ++i) {
+      EXPECT_EQ(checksums1[i], checksums2[i]) << i;
+    }
     ASSERT_TRUE(success_);
   }
 
@@ -937,7 +947,6 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
                                       /* use_fd= */ true));
       EXPECT_GT(vdex_file1->GetLength(), 0u);
     }
-
     // Unquicken by running the verify compiler filter on the vdex file.
     {
       std::string input_vdex = StringPrintf("--input-vdex-fd=%d", vdex_file1->Fd());
@@ -977,6 +986,24 @@ class Dex2oatUnquickenTest : public Dex2oatTest {
           }
         }
       }
+    }
+  }
+
+  void GetDexFileChecksums(const std::string& dex_location,
+                           const std::string& odex_location,
+                           /*out*/std::vector<uint32_t>* checksums) {
+    std::string error_msg;
+    std::unique_ptr<OatFile> odex_file(OatFile::Open(/*zip_fd=*/ -1,
+                                                     odex_location.c_str(),
+                                                     odex_location.c_str(),
+                                                     /*executable=*/ false,
+                                                     /*low_4gb=*/ false,
+                                                     dex_location,
+                                                     &error_msg));
+    ASSERT_TRUE(odex_file.get() != nullptr) << error_msg;
+    ASSERT_GE(odex_file->GetOatDexFiles().size(), 1u);
+    for (const OatDexFile* oat_dex_file : odex_file->GetOatDexFiles()) {
+      checksums->push_back(oat_dex_file->GetDexFileLocationChecksum());
     }
   }
 };
@@ -1281,7 +1308,6 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
   const std::string unload_vdex_name = out_dir + "/unload.vdex";
   const std::string no_unload_oat_name = out_dir + "/nounload.oat";
   const std::string no_unload_vdex_name = out_dir + "/nounload.vdex";
-  const std::string app_image_name = out_dir + "/unload.art";
   std::string error_msg;
   const std::vector<gc::space::ImageSpace*>& spaces = runtime->GetHeap()->GetBootImageSpaces();
   ASSERT_GT(spaces.size(), 0u);
@@ -1309,7 +1335,7 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
       base_oat_name,
       CompilerFilter::Filter::kQuicken,
       &error_msg,
-      {"--force-determinism", "--avoid-storing-invocation", "--app-image-file=" + app_image_name});
+      {"--force-determinism", "--avoid-storing-invocation", "--compile-individually"});
   ASSERT_EQ(res2, 0);
   Copy(base_oat_name, no_unload_oat_name);
   Copy(base_vdex_name, no_unload_vdex_name);
@@ -1326,10 +1352,6 @@ TEST_F(Dex2oatDeterminism, UnloadCompile) {
       << unload_oat_name << " " << no_unload_oat_name;
   EXPECT_EQ(unload_vdex->Compare(no_unload_vdex.get()), 0)
       << unload_vdex_name << " " << no_unload_vdex_name;
-  // App image file.
-  std::unique_ptr<File> app_image_file(OS::OpenFileForReading(app_image_name.c_str()));
-  ASSERT_TRUE(app_image_file != nullptr);
-  EXPECT_GT(app_image_file->GetLength(), 0u);
 }
 
 // Test that dexlayout section info is correctly written to the oat file for profile based

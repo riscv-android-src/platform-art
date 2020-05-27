@@ -652,6 +652,12 @@
         "env_vars": {"SANITIZE_HOST": "address"}
     },
     {
+        "tests": "175-alloc-big-bignums",
+        "description": "ASAN runs out of memory due to huge allocations.",
+        "variant": "target",
+        "env_vars": {"SANITIZE_TARGET": "hwaddress"}
+    },
+    {
         "tests": "202-thread-oome",
         "description": "ASAN aborts when large thread stacks are requested.",
         "variant": "host",
@@ -686,36 +692,6 @@
         "variant": "interp-ac & target",
         "env_vars": {"SANITIZE_TARGET": "address"},
         "bug": "b/31098551"
-    },
-    {
-        "tests": [
-            "059-finalizer-throw",
-            "074-gc-thrash",
-            "911-get-stack-trace",
-            "913-heaps",
-            "980-redefine-object"
-        ],
-        "description": [
-            "Interpreter with access checks stack frames are too large and result in",
-            "StackOverFlow errors being thrown."
-        ],
-        "variant": "interp-ac & host",
-        "env_vars": {"SANITIZE_HOST": "address"}
-    },
-    {
-        "tests": [
-            "059-finalizer-throw",
-            "074-gc-thrash",
-            "911-get-stack-trace",
-            "913-heaps",
-            "980-redefine-object"
-        ],
-        "description": [
-            "Interpreter with access checks stack frames are too large and result in",
-            "StackOverFlow errors being thrown."
-        ],
-        "variant": "interp-ac & target",
-        "env_vars": {"SANITIZE_TARGET": "address"}
     },
     {
         "tests": "071-dexfile-map-clean",
@@ -965,7 +941,6 @@
           "565-checker-doublenegbitwise",
           "565-checker-irreducible-loop",
           "566-polymorphic-inlining",
-          "567-checker-compare",
           "569-checker-pattern-replacement",
           "570-checker-osr",
           "571-irreducible-loop",
@@ -1009,7 +984,6 @@
           "628-vdex",
           "629-vdex-speed",
           "630-safecast-array",
-          "631-checker-fp-abs",
           "633-checker-rtp-getclass",
           "634-vdex-duplicate",
           "636-wrong-static-access",
@@ -1222,6 +1196,9 @@
                   "2005-pause-all-redefine-multithreaded",
                   "2006-virtual-structural-finalizing",
                   "2007-virtual-structural-finalizable",
+                  "2009-structural-local-ref",
+                  "2011-stack-walk-concurrent-instrument",
+                  "2012-structural-redefinition-failures-jni-id",
                   "2033-shutdown-mechanics"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
@@ -1386,14 +1363,7 @@
                   "960-default-smali",
                   "966-default-conflict",
                   "990-field-trace",
-                  "1953-pop-frame",
-                  "1954-pop-frame-jit",
-                  "1955-pop-frame-jit-called",
-                  "1956-pop-frame-jit-calling",
-                  "2009-structural-local-ref",
-                  "2011-stack-walk-concurrent-instrument",
-                  "2012-structural-redefinition-failures-jni-id",
-                  "2029-spaces-in-SimpleName"],
+                  "2034-spaces-in-SimpleName"],
         "variant": "jvm",
         "bug": "b/154802847",
         "description": ["Failing on RI. Needs further investigating."]

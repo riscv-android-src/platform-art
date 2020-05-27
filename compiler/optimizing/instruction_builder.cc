@@ -52,11 +52,9 @@ HInstructionBuilder::HInstructionBuilder(HGraph* graph,
                                          CodeGenerator* code_generator,
                                          ArrayRef<const uint8_t> interpreter_metadata,
                                          OptimizingCompilerStats* compiler_stats,
-                                         VariableSizedHandleScope* handles,
                                          ScopedArenaAllocator* local_allocator)
     : allocator_(graph->GetAllocator()),
       graph_(graph),
-      handles_(handles),
       dex_file_(dex_file),
       code_item_accessor_(accessor),
       return_type_(return_type),
@@ -382,13 +380,14 @@ bool HInstructionBuilder::Build() {
         AppendInstruction(new (allocator_) HNativeDebugInfo(dex_pc));
       }
 
-      DCHECK(!Thread::Current()->IsExceptionPending())
+      // Note: There may be no Thread for gtests.
+      DCHECK(Thread::Current() == nullptr || !Thread::Current()->IsExceptionPending())
           << dex_file_->PrettyMethod(dex_compilation_unit_->GetDexMethodIndex())
           << " " << pair.Inst().Name() << "@" << dex_pc;
       if (!ProcessDexInstruction(pair.Inst(), dex_pc, quicken_index)) {
         return false;
       }
-      DCHECK(!Thread::Current()->IsExceptionPending())
+      DCHECK(Thread::Current() == nullptr || !Thread::Current()->IsExceptionPending())
           << dex_file_->PrettyMethod(dex_compilation_unit_->GetDexMethodIndex())
           << " " << pair.Inst().Name() << "@" << dex_pc;
 
@@ -1353,18 +1352,18 @@ bool HInstructionBuilder::IsInitialized(ObjPtr<mirror::Class> cls) const {
 
   // Check if the class will be initialized at runtime.
   if (cls->IsInitialized()) {
-    Runtime* runtime = Runtime::Current();
-    if (runtime->IsAotCompiler()) {
+    const CompilerOptions& compiler_options = code_generator_->GetCompilerOptions();
+    if (compiler_options.IsAotCompiler()) {
       // Assume loaded only if klass is in the boot image. App classes cannot be assumed
       // loaded because we don't even know what class loader will be used to load them.
-      if (IsInBootImage(cls, code_generator_->GetCompilerOptions())) {
+      if (IsInBootImage(cls, compiler_options)) {
         return true;
       }
     } else {
-      DCHECK(runtime->UseJitCompilation());
+      DCHECK(compiler_options.IsJitCompiler());
       if (Runtime::Current()->GetJit()->CanAssumeInitialized(
               cls,
-              graph_->IsCompilingForSharedJitCode())) {
+              compiler_options.IsJitCompilerForSharedCode())) {
         // For JIT, the class cannot revert to an uninitialized state.
         return true;
       }
@@ -1436,7 +1435,7 @@ HClinitCheck* HInstructionBuilder::ProcessClinitCheckForInvoke(
   if (IsInitialized(klass)) {
     *clinit_check_requirement = HInvokeStaticOrDirect::ClinitCheckRequirement::kNone;
   } else {
-    Handle<mirror::Class> h_klass = handles_->NewHandle(klass);
+    Handle<mirror::Class> h_klass = graph_->GetHandleCache()->NewHandle(klass);
     HLoadClass* cls = BuildLoadClass(h_klass->GetDexTypeIndex(),
                                      h_klass->GetDexFile(),
                                      h_klass,
@@ -1957,7 +1956,8 @@ void HInstructionBuilder::BuildStaticFieldAccess(const Instruction& instruction,
 
   DataType::Type field_type = GetFieldAccessType(*dex_file_, field_index);
 
-  Handle<mirror::Class> klass = handles_->NewHandle(resolved_field->GetDeclaringClass());
+  Handle<mirror::Class> klass =
+      graph_->GetHandleCache()->NewHandle(resolved_field->GetDeclaringClass());
   HLoadClass* constant = BuildLoadClass(klass->GetDexTypeIndex(),
                                         klass->GetDexFile(),
                                         klass,
@@ -2207,7 +2207,7 @@ void HInstructionBuilder::BuildLoadString(dex::StringIndex string_index, uint32_
   HSharpening::ProcessLoadString(load_string,
                                  code_generator_,
                                  *dex_compilation_unit_,
-                                 handles_);
+                                 graph_->GetHandleCache()->GetHandles());
   AppendInstruction(load_string);
 }
 
@@ -2235,7 +2235,7 @@ HLoadClass* HInstructionBuilder::BuildLoadClass(dex::TypeIndex type_index,
     }
   }
 
-  // Note: `klass` must be from `handles_`.
+  // Note: `klass` must be from `graph_->GetHandleCache()`.
   bool is_referrers_class =
       (klass != nullptr) && (outer_compilation_unit_->GetCompilingClass().Get() == klass.Get());
   HLoadClass* load_class = new (allocator_) HLoadClass(
@@ -2273,7 +2273,7 @@ Handle<mirror::Class> HInstructionBuilder::ResolveClass(ScopedObjectAccess& soa,
   DCHECK_EQ(klass == nullptr, soa.Self()->IsExceptionPending());
   soa.Self()->ClearException();  // Clean up the exception left by type resolution if any.
 
-  Handle<mirror::Class> h_klass = handles_->NewHandle(klass);
+  Handle<mirror::Class> h_klass = graph_->GetHandleCache()->NewHandle(klass);
   class_cache_.Put(type_index, h_klass);
   return h_klass;
 }

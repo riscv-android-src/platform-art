@@ -521,6 +521,9 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("");
   UsageError("  --max-image-block-size=<size>: Maximum solid block size for compressed images.");
   UsageError("");
+  UsageError("  --compile-individually: Compiles dex files individually, unloading classes in");
+  UsageError("      between compiling each file.");
+  UsageError("");
   std::cerr << "See log for usage error information\n";
   exit(EXIT_FAILURE);
 }
@@ -774,6 +777,15 @@ class ThreadLocalHashOverride {
   Handle<mirror::Object> old_field_value_;
 };
 
+class OatKeyValueStore : public SafeMap<std::string, std::string> {
+ public:
+  using SafeMap::Put;
+
+  iterator Put(const std::string& k, bool v) {
+    return SafeMap::Put(k, v ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+  }
+};
+
 class Dex2Oat final {
  public:
   explicit Dex2Oat(TimingLogger* timings) :
@@ -815,7 +827,8 @@ class Dex2Oat final {
       timings_(timings),
       force_determinism_(false),
       check_linkage_conditions_(false),
-      crash_on_linkage_violation_(false)
+      crash_on_linkage_violation_(false),
+      compile_individually_(false)
       {}
 
   ~Dex2Oat() {
@@ -891,6 +904,7 @@ class Dex2Oat final {
   }
 
   void ProcessOptions(ParserOptions* parser_options) {
+    compiler_options_->compiler_type_ = CompilerOptions::CompilerType::kAotCompiler;
     compiler_options_->compile_pic_ = true;  // All AOT compilation is PIC.
 
     if (android_root_.empty()) {
@@ -1111,7 +1125,7 @@ class Dex2Oat final {
     }
 
     // Fill some values into the key-value store for the oat header.
-    key_value_store_.reset(new SafeMap<std::string, std::string>());
+    key_value_store_.reset(new OatKeyValueStore());
 
     // Automatically force determinism for the boot image and boot image extensions in a host build.
     if (!kIsTargetBuild && (IsBootImage() || IsBootImageExtension())) {
@@ -1200,16 +1214,13 @@ class Dex2Oat final {
       }
       key_value_store_->Put(OatHeader::kDex2OatCmdLineKey, oss.str());
     }
-    key_value_store_->Put(
-        OatHeader::kDebuggableKey,
-        compiler_options_->debuggable_ ? OatHeader::kTrueValue : OatHeader::kFalseValue);
-    key_value_store_->Put(
-        OatHeader::kNativeDebuggableKey,
-        compiler_options_->GetNativeDebuggable() ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+    key_value_store_->Put(OatHeader::kDebuggableKey, compiler_options_->debuggable_);
+    key_value_store_->Put(OatHeader::kNativeDebuggableKey,
+                          compiler_options_->GetNativeDebuggable());
     key_value_store_->Put(OatHeader::kCompilerFilter,
-        CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
-    key_value_store_->Put(OatHeader::kConcurrentCopying,
-                          kUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
+                          CompilerFilter::NameOfFilter(compiler_options_->GetCompilerFilter()));
+    key_value_store_->Put(OatHeader::kConcurrentCopying, kUseReadBarrier);
+    key_value_store_->Put(OatHeader::kRequiresImage, compiler_options_->IsGeneratingImage());
     if (invocation_file_.get() != -1) {
       std::ostringstream oss;
       for (int i = 0; i < argc; ++i) {
@@ -1370,6 +1381,7 @@ class Dex2Oat final {
     if (args.Exists(M::ForceDeterminism)) {
       force_determinism_ = true;
     }
+    AssignTrueIfExists(args, M::CompileIndividually, &compile_individually_);
 
     if (args.Exists(M::Base)) {
       ParseBase(*args.Get(M::Base));
@@ -1559,18 +1571,17 @@ class Dex2Oat final {
     // Note: we're only invalidating the magic data in the file, as dex2oat needs the rest of
     // the information to remain valid.
     if (update_input_vdex_) {
-      std::unique_ptr<BufferedOutputStream> vdex_out =
-          std::make_unique<BufferedOutputStream>(
-              std::make_unique<FileOutputStream>(vdex_files_.back().get()));
-      if (!vdex_out->WriteFully(&VdexFile::VerifierDepsHeader::kVdexInvalidMagic,
-                                arraysize(VdexFile::VerifierDepsHeader::kVdexInvalidMagic))) {
-        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_out->GetLocation();
+      File* vdex_file = vdex_files_.back().get();
+      if (!vdex_file->PwriteFully(&VdexFile::VerifierDepsHeader::kVdexInvalidMagic,
+                                  arraysize(VdexFile::VerifierDepsHeader::kVdexInvalidMagic),
+                                  /*offset=*/ 0u)) {
+        PLOG(ERROR) << "Failed to invalidate vdex header. File: " << vdex_file->GetPath();
         return false;
       }
 
-      if (!vdex_out->Flush()) {
+      if (vdex_file->Flush() != 0) {
         PLOG(ERROR) << "Failed to flush stream after invalidating header of vdex file."
-                    << " File: " << vdex_out->GetLocation();
+                    << " File: " << vdex_file->GetPath();
         return false;
       }
     }
@@ -2009,17 +2020,17 @@ class Dex2Oat final {
   }
 
   bool ShouldCompileDexFilesIndividually() const {
-    // Compile individually if we are:
-    // 1. not building an image,
-    // 2. not verifying a vdex file,
-    // 3. using multidex,
+    // Compile individually if we are specifically asked to, or
+    // 1. not building an image, and
+    // 2. not verifying a vdex file, and
+    // 3. using multidex, and
     // 4. not doing any AOT compilation.
     // This means extract, no-vdex verify, and quicken, will use the individual compilation
     // mode (to reduce RAM used by the compiler).
-    return !IsImage() &&
-        !update_input_vdex_ &&
-        compiler_options_->dex_files_for_oat_file_.size() > 1 &&
-        !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter());
+    return compile_individually_ ||
+           (!IsImage() && !update_input_vdex_ &&
+            compiler_options_->dex_files_for_oat_file_.size() > 1 &&
+            !CompilerFilter::IsAotCompilationEnabled(compiler_options_->GetCompilerFilter()));
   }
 
   uint32_t GetCombinedChecksums() const {
@@ -2297,23 +2308,8 @@ class Dex2Oat final {
       verifier::VerifierDeps* verifier_deps = callbacks_->GetVerifierDeps();
       for (size_t i = 0, size = oat_files_.size(); i != size; ++i) {
         File* vdex_file = vdex_files_[i].get();
-        std::unique_ptr<BufferedOutputStream> vdex_out =
-            std::make_unique<BufferedOutputStream>(
-                std::make_unique<FileOutputStream>(vdex_file));
-
-        if (!oat_writers_[i]->WriteVerifierDeps(vdex_out.get(), verifier_deps)) {
-          LOG(ERROR) << "Failed to write verifier dependencies into VDEX " << vdex_file->GetPath();
-          return false;
-        }
-
-        if (!oat_writers_[i]->WriteQuickeningInfo(vdex_out.get())) {
-          LOG(ERROR) << "Failed to write quickening info into VDEX " << vdex_file->GetPath();
-          return false;
-        }
-
-        // VDEX finalized, seek back to the beginning and write checksums and the header.
-        if (!oat_writers_[i]->WriteChecksumsAndVdexHeader(vdex_out.get())) {
-          LOG(ERROR) << "Failed to write vdex header into VDEX " << vdex_file->GetPath();
+        if (!oat_writers_[i]->FinishVdexFile(vdex_file, verifier_deps)) {
+          LOG(ERROR) << "Failed to finish VDEX file " << vdex_file->GetPath();
           return false;
         }
       }
@@ -2999,7 +2995,7 @@ class Dex2Oat final {
   std::unique_ptr<CompilerOptions> compiler_options_;
   Compiler::Kind compiler_kind_;
 
-  std::unique_ptr<SafeMap<std::string, std::string> > key_value_store_;
+  std::unique_ptr<OatKeyValueStore> key_value_store_;
 
   std::unique_ptr<VerificationResults> verification_results_;
 
@@ -3107,6 +3103,9 @@ class Dex2Oat final {
 
   // The reason for invoking the compiler.
   std::string compilation_reason_;
+
+  // Whether to force individual compilation.
+  bool compile_individually_;
 
   DISALLOW_IMPLICIT_CONSTRUCTORS(Dex2Oat);
 };

@@ -42,7 +42,7 @@
 #include "base/systrace.h"
 #include "base/time_utils.h"
 #include "base/utils.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "common_throws.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
@@ -1395,7 +1395,12 @@ void Heap::ThrowOutOfMemoryError(Thread* self, size_t byte_count, AllocatorType 
                allocator_type == kAllocatorTypeRegionTLAB) {
       space = region_space_;
     }
-    if (space != nullptr) {
+
+    // There is no fragmentation info to log for large-object space.
+    if (allocator_type != kAllocatorTypeLOS) {
+      CHECK(space != nullptr) << "allocator_type:" << allocator_type
+                              << " byte_count:" << byte_count
+                              << " total_bytes_free:" << total_bytes_free;
       space->LogFragmentationAllocFailure(oss, byte_count);
     }
   }
@@ -4161,12 +4166,12 @@ void Heap::RemoveGcPauseListener() {
 }
 
 mirror::Object* Heap::AllocWithNewTLAB(Thread* self,
+                                       AllocatorType allocator_type,
                                        size_t alloc_size,
                                        bool grow,
                                        size_t* bytes_allocated,
                                        size_t* usable_size,
                                        size_t* bytes_tl_bulk_allocated) {
-  const AllocatorType allocator_type = GetCurrentAllocator();
   if (kUsePartialTlabs && alloc_size <= self->TlabRemainingCapacity()) {
     DCHECK_GT(alloc_size, self->TlabSize());
     // There is enough space if we grow the TLAB. Lets do that. This increases the

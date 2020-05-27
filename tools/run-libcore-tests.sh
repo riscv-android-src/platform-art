@@ -52,7 +52,7 @@ function boot_classpath_arg {
   do
     printf -- ":${dir}/${var}.jar";
   done
-  printf -- ":/apex/com.android.conscrypt/javalib/conscrypt.jar";
+  printf -- ":/apex/com.android.i18n/javalib/core-icu4j.jar:/apex/com.android.conscrypt/javalib/conscrypt.jar";
 }
 
 function usage {
@@ -147,7 +147,7 @@ setpaths # include platform prebuilt java, javac, etc in $PATH.
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
 # because that's what we use for compiling the core.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-BOOT_CLASSPATH_JARS="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml"
+BOOT_CLASSPATH_JARS="core-oj core-libart okhttp bouncycastle apache-xml"
 
 DEPS="core-tests jsr166-tests mockito-target"
 
@@ -184,7 +184,7 @@ while [ -n "$1" ]; do
   case "$1" in
     --mode=device)
       vogar_args="$vogar_args --mode=device"
-      vogar_args="$vogar_args --vm-arg -Ximage:/data/art-test/core.art"
+      vogar_args="$vogar_args --vm-arg -Ximage:/apex/com.android.art/javalib/boot.art"
       vogar_args="$vogar_args $(boot_classpath_arg /apex/com.android.art/javalib $BOOT_CLASSPATH_JARS)"
       execution_mode="device"
       ;;

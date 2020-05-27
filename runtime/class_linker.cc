@@ -57,7 +57,7 @@
 #include "cha.h"
 #include "class_linker-inl.h"
 #include "class_loader_utils.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "class_table-inl.h"
 #include "compiler_callbacks.h"
 #include "debug_print.h"
@@ -1133,8 +1133,10 @@ void ClassLinker::RunRootClinits(Thread* self) {
     if (!c->IsArrayClass() && !c->IsPrimitive()) {
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> h_class(hs.NewHandle(c));
-      EnsureInitialized(self, h_class, true, true);
-      self->AssertNoPendingException();
+      if (!EnsureInitialized(self, h_class, true, true)) {
+        LOG(FATAL) << "Exception when initializing " << h_class->PrettyClass()
+            << ": " << self->GetException()->Dump();
+      }
     } else {
       DCHECK(c->IsInitialized());
     }
@@ -6430,6 +6432,15 @@ bool ClassLinker::LinkVirtualMethods(
       ArtMethod* m = klass->GetVirtualMethodDuringLinking(i, image_pointer_size_);
       m->SetMethodIndex(i);
       if (!m->IsAbstract()) {
+        // If the dex file does not support default methods, throw ClassFormatError.
+        // This check is necessary to protect from odd cases, such as native default
+        // methods, that the dex file verifier permits for old dex file versions. b/157170505
+        if (!m->GetDexFile()->SupportsDefaultMethods()) {
+          ThrowClassFormatError(klass.Get(),
+                                "Dex file does not support default method '%s'",
+                                m->PrettyMethod().c_str());
+          return false;
+        }
         m->SetAccessFlags(m->GetAccessFlags() | kAccDefault);
         has_defaults = true;
       }
@@ -8779,8 +8790,13 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
       // We normaly should not end up here. However the verifier currently doesn't guarantee
       // the invariant of having the klass in the class table. b/73760543
       klass = ResolveType(method_id.class_idx_, dex_cache, class_loader);
-      DCHECK(!Thread::Current()->IsExceptionPending())
-          << Thread::Current()->GetException()->Dump();
+      if (klass == nullptr) {
+        // This can only happen if the current thread is not allowed to load
+        // classes.
+        DCHECK(!Thread::Current()->CanLoadClasses());
+        DCHECK(Thread::Current()->IsExceptionPending());
+        return nullptr;
+      }
     }
   } else {
     // The method was not in the DexCache, resolve the declaring class.
