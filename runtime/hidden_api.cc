@@ -22,7 +22,6 @@
 #include "art_method-inl.h"
 #include "base/dumpable.h"
 #include "base/file_utils.h"
-#include "class_root.h"
 #include "dex/class_accessor-inl.h"
 #include "dex/dex_file_loader.h"
 #include "mirror/class_ext.h"
@@ -47,6 +46,14 @@ static constexpr uint64_t kHideMaxtargetsdkQHiddenApis = 149994052;
 // as it affects whether or not we warn for light grey APIs that have been added to the exemptions
 // list.
 static constexpr bool kLogAllAccesses = false;
+
+// Exemptions for logcat warning. Following signatures do not produce a warning as app developers
+// should not be alerted on the usage of these greylised APIs. See b/154851649.
+static const std::vector<std::string> kWarningExemptions = {
+    "Ljava/nio/Buffer;",
+    "Llibcore/io/Memory;",
+    "Lsun/misc/Unsafe;",
+};
 
 static inline std::ostream& operator<<(std::ostream& os, AccessMethod value) {
   switch (value) {
@@ -86,7 +93,8 @@ static Domain DetermineDomainFromLocation(const std::string& dex_location,
   // is set to "/system".
   if (ArtModuleRootDistinctFromAndroidRoot()) {
     if (LocationIsOnArtModule(dex_location.c_str()) ||
-        LocationIsOnConscryptModule(dex_location.c_str())) {
+        LocationIsOnConscryptModule(dex_location.c_str()) ||
+        LocationIsOnI18nModule(dex_location.c_str())) {
       return Domain::kCorePlatform;
     }
 
@@ -99,9 +107,16 @@ static Domain DetermineDomainFromLocation(const std::string& dex_location,
     return Domain::kPlatform;
   }
 
+  if (LocationIsOnSystemExtFramework(dex_location.c_str())) {
+    return Domain::kPlatform;
+  }
+
   if (class_loader.IsNull()) {
-    LOG(WARNING) << "DexFile " << dex_location
-        << " is in boot class path but is not in a known location";
+    if (kIsTargetBuild && !kIsTargetLinux) {
+      // This is unexpected only when running on Android.
+      LOG(WARNING) << "DexFile " << dex_location
+          << " is in boot class path but is not in a known location";
+    }
     return Domain::kPlatform;
   }
 
@@ -208,7 +223,7 @@ bool MemberSignature::DoesPrefixMatch(const std::string& prefix) const {
   return pos == prefix.length();
 }
 
-bool MemberSignature::IsExempted(const std::vector<std::string>& exemptions) {
+bool MemberSignature::DoesPrefixMatchAny(const std::vector<std::string>& exemptions) {
   for (const std::string& exemption : exemptions) {
     if (DoesPrefixMatch(exemption)) {
       return true;
@@ -469,7 +484,7 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
   MemberSignature member_signature(member);
 
   // Check for an exemption first. Exempted APIs are treated as white list.
-  if (member_signature.IsExempted(runtime->GetHiddenApiExemptions())) {
+  if (member_signature.DoesPrefixMatchAny(runtime->GetHiddenApiExemptions())) {
     // Avoid re-examining the exemption list next time.
     // Note this results in no warning for the member, which seems like what one would expect.
     // Exemptions effectively adds new members to the whitelist.
@@ -499,14 +514,17 @@ bool ShouldDenyAccessToMemberImpl(T* member, ApiList api_list, AccessMethod acce
   }
 
   if (access_method != AccessMethod::kNone) {
-    // Print a log message with information about this class member access.
-    // We do this if we're about to deny access, or the app is debuggable.
-    if (kLogAllAccesses || deny_access || runtime->IsJavaDebuggable()) {
-      member_signature.WarnAboutAccess(access_method, api_list, deny_access);
-    }
+    // Warn if non-greylisted signature is being accessed or it is not exempted.
+    if (deny_access || !member_signature.DoesPrefixMatchAny(kWarningExemptions)) {
+      // Print a log message with information about this class member access.
+      // We do this if we're about to deny access, or the app is debuggable.
+      if (kLogAllAccesses || deny_access || runtime->IsJavaDebuggable()) {
+        member_signature.WarnAboutAccess(access_method, api_list, deny_access);
+      }
 
-    // If there is a StrictMode listener, notify it about this violation.
-    member_signature.NotifyHiddenApiListener(access_method);
+      // If there is a StrictMode listener, notify it about this violation.
+      member_signature.NotifyHiddenApiListener(access_method);
+    }
 
     // If event log sampling is enabled, report this violation.
     if (kIsTargetBuild && !kIsTargetLinux) {

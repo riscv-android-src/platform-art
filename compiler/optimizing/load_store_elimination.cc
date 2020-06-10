@@ -668,7 +668,7 @@ class LSEVisitor : public HGraphDelegateVisitor {
         // Keep the store inside irreducible loops.
       }
     }
-    if (possibly_redundant) {
+    if (possibly_redundant && !instruction->CanThrow()) {
       possibly_removed_stores_.push_back(instruction);
     }
 
@@ -930,7 +930,10 @@ bool LoadStoreElimination::Run() {
     // Skip this optimization.
     return false;
   }
-  const HeapLocationCollector& heap_location_collector = lsa_.GetHeapLocationCollector();
+  ScopedArenaAllocator allocator(graph_->GetArenaStack());
+  LoadStoreAnalysis lsa(graph_, &allocator);
+  lsa.Run();
+  const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   if (heap_location_collector.GetNumberOfHeapLocations() == 0) {
     // No HeapLocation information from LSA, skip this optimization.
     return false;

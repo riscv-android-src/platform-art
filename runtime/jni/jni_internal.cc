@@ -31,7 +31,7 @@
 #include "base/safe_map.h"
 #include "base/stl_util.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "dex/dex_file-inl.h"
 #include "dex/utf.h"
 #include "fault_handler.h"
@@ -47,7 +47,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "mirror/dex_cache-inl.h"
-#include "mirror/field-inl.h"
+#include "mirror/field.h"
 #include "mirror/method.h"
 #include "mirror/object-inl.h"
 #include "mirror/object_array-alloc-inl.h"
@@ -531,11 +531,10 @@ class JNI {
     ArtMethod* m = jni::DecodeArtMethod(mid);
     ObjPtr<mirror::Executable> method;
     DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
-    DCHECK(!Runtime::Current()->IsActiveTransaction());
     if (m->IsConstructor()) {
-      method = mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), m);
+      method = mirror::Constructor::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), m);
     } else {
-      method = mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), m);
+      method = mirror::Method::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), m);
     }
     return soa.AddLocalReference<jobject>(method);
   }
@@ -545,7 +544,7 @@ class JNI {
     ScopedObjectAccess soa(env);
     ArtField* f = jni::DecodeArtField(fid);
     return soa.AddLocalReference<jobject>(
-        mirror::Field::CreateFromArtField<kRuntimePointerSize>(soa.Self(), f, true));
+        mirror::Field::CreateFromArtField(soa.Self(), f, true));
   }
 
   static jclass GetObjectClass(JNIEnv* env, jobject java_object) {

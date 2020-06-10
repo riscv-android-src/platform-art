@@ -55,24 +55,14 @@ art_cc_defaults {
         },
     },
 
-    target: {
-        android: {
-            static_libs: [
-                "libz",
-            ],
-        },
-        host: {
-            shared_libs: [
-                "libz",
-            ],
-        },
-    },
     generated_sources: ["art_dex2oat_operator_srcs"],
     shared_libs: [
         "libbase",
 
         // For SHA-1 checksumming of build ID
         "libcrypto",
+
+        "libz",
     ],
     export_include_dirs: ["."],
 }
@@ -168,6 +158,12 @@ cc_library_headers {
     ],
     host_supported: true,
     export_include_dirs: ["include"],
+
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.art.release",
+        "com.android.art.debug",
+    ],
 }
 
 cc_defaults {
@@ -181,8 +177,7 @@ cc_defaults {
 
     target: {
         android: {
-            // Use the 32-bit version of dex2oat on devices.
-            compile_multilib: "prefer32",
+            compile_multilib: "both",
         },
     },
     header_libs: [
@@ -245,10 +240,20 @@ art_cc_binary {
         "libartpalette",
         "libbase",
         "libsigchain",
+        "libz",
     ],
     static_libs: [
         "libart-dex2oat",
     ],
+
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
 
     pgo: {
         // Additional cflags just for dex2oat during PGO instrumentation
@@ -263,14 +268,8 @@ art_cc_binary {
             lto: {
                 thin: true,
             },
-            static_libs: [
-                "libz",
-            ],
         },
         host: {
-            shared_libs: [
-                "libz",
-            ],
             // Override the prefer32 added by art_cc_binary when
             // HOST_PREFER_32_BIT is in use. Necessary because the logic in
             // Soong for setting ctx.Config().BuildOSTarget (used in
@@ -279,6 +278,7 @@ art_cc_binary {
             // it'd get overridden by the load hook even when it uses
             // PrependProperties.
             compile_multilib: "64",
+            symlink_preferred_arch: true,
         },
     },
     apex_available: [
@@ -307,21 +307,13 @@ art_cc_binary {
         "libartpalette",
         "libbase",
         "libsigchain",
+        "libz",
     ],
     static_libs: [
         "libartd-dex2oat",
     ],
     target: {
-        android: {
-            static_libs: [
-                "libz",
-            ],
-            compile_multilib: "prefer32",
-        },
         host: {
-            shared_libs: [
-                "libz",
-            ],
             // Override the prefer32 added by art_cc_binary when
             // HOST_PREFER_32_BIT is in use. Necessary because the logic in
             // Soong for setting ctx.Config().BuildOSTarget (used in
@@ -330,11 +322,21 @@ art_cc_binary {
             // it'd get overridden by the load hook even when it uses
             // PrependProperties.
             compile_multilib: "64",
+            symlink_preferred_arch: true,
         },
     },
     apex_available: [
         "com.android.art.debug",
     ],
+
+    multilib: {
+        lib32: {
+            suffix: "32",
+        },
+        lib64: {
+            suffix: "64",
+        },
+    },
 }
 
 cc_defaults {
@@ -421,6 +423,31 @@ art_cc_test {
     defaults: [
         "art_gtest_defaults",
     ],
+    data: [
+        ":art-gtest-jars-AbstractMethod",
+        ":art-gtest-jars-DefaultMethods",
+        ":art-gtest-jars-DexToDexDecompiler",
+        ":art-gtest-jars-ImageLayoutA",
+        ":art-gtest-jars-ImageLayoutB",
+        ":art-gtest-jars-LinkageTest",
+        ":art-gtest-jars-Main",
+        ":art-gtest-jars-MainEmptyUncompressed",
+        ":art-gtest-jars-MainEmptyUncompressedAligned",
+        ":art-gtest-jars-MainStripped",
+        ":art-gtest-jars-MainUncompressedAligned",
+        ":art-gtest-jars-ManyMethods",
+        ":art-gtest-jars-MultiDex",
+        ":art-gtest-jars-MultiDexModifiedSecondary",
+        ":art-gtest-jars-MyClassNatives",
+        ":art-gtest-jars-Nested",
+        ":art-gtest-jars-ProfileTestMultiDex",
+        ":art-gtest-jars-StaticLeafMethods",
+        ":art-gtest-jars-Statics",
+        ":art-gtest-jars-StringLiterals",
+        ":art-gtest-jars-VerifierDeps",
+        ":art-gtest-jars-VerifierDepsMulti",
+        ":art-gtest-jars-VerifySoftFailDuringClinit",
+    ],
     srcs: [
         "dex2oat_test.cc",
         "dex2oat_image_test.cc",
@@ -434,6 +461,7 @@ art_cc_test {
         "linker/oat_writer_test.cc",
         "verifier_deps_test.cc",
     ],
+    required: ["dex2oatd"],
 
     codegen: {
         arm: {

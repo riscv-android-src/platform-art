@@ -57,7 +57,7 @@
 #include "cha.h"
 #include "class_linker-inl.h"
 #include "class_loader_utils.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "class_table-inl.h"
 #include "compiler_callbacks.h"
 #include "debug_print.h"
@@ -1133,8 +1133,10 @@ void ClassLinker::RunRootClinits(Thread* self) {
     if (!c->IsArrayClass() && !c->IsPrimitive()) {
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> h_class(hs.NewHandle(c));
-      EnsureInitialized(self, h_class, true, true);
-      self->AssertNoPendingException();
+      if (!EnsureInitialized(self, h_class, true, true)) {
+        LOG(FATAL) << "Exception when initializing " << h_class->PrettyClass()
+            << ": " << self->GetException()->Dump();
+      }
     } else {
       DCHECK(c->IsInitialized());
     }
@@ -4572,7 +4574,9 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
     VerifyClass(self, supertype);
   }
 
-  if (supertype->IsVerified() || supertype->ShouldVerifyAtRuntime()) {
+  if (supertype->IsVerified()
+      || supertype->ShouldVerifyAtRuntime()
+      || supertype->IsVerifiedNeedsAccessChecks()) {
     // The supertype is either verified, or we soft failed at AOT time.
     DCHECK(supertype->IsVerified() || Runtime::Current()->IsAotCompiler());
     return true;
@@ -4612,8 +4616,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
 
     // Is somebody verifying this now?
     ClassStatus old_status = klass->GetStatus();
-    while (old_status == ClassStatus::kVerifying ||
-        old_status == ClassStatus::kVerifyingAtRuntime) {
+    while (old_status == ClassStatus::kVerifying) {
       lock.WaitIgnoringInterrupts();
       // WaitIgnoringInterrupts can still receive an interrupt and return early, in this
       // case we may see the same status again. b/62912904. This is why the check is
@@ -4638,20 +4641,25 @@ verifier::FailureKind ClassLinker::VerifyClass(
       return verifier::FailureKind::kNoFailure;
     }
 
+    if (klass->IsVerifiedNeedsAccessChecks()) {
+      if (!Runtime::Current()->IsAotCompiler()) {
+        // Mark the class as having a verification attempt to avoid re-running
+        // the verifier and avoid calling EnsureSkipAccessChecksMethods.
+        klass->SetVerificationAttempted();
+        mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
+      }
+      return verifier::FailureKind::kAccessChecksFailure;
+    }
+
     // For AOT, don't attempt to re-verify if we have already found we should
     // verify at runtime.
-    if (Runtime::Current()->IsAotCompiler() && klass->ShouldVerifyAtRuntime()) {
+    if (klass->ShouldVerifyAtRuntime()) {
+      CHECK(Runtime::Current()->IsAotCompiler());
       return verifier::FailureKind::kSoftFailure;
     }
 
-    if (klass->GetStatus() == ClassStatus::kResolved) {
-      mirror::Class::SetStatus(klass, ClassStatus::kVerifying, self);
-    } else {
-      CHECK_EQ(klass->GetStatus(), ClassStatus::kRetryVerificationAtRuntime)
-          << klass->PrettyClass();
-      CHECK(!Runtime::Current()->IsAotCompiler());
-      mirror::Class::SetStatus(klass, ClassStatus::kVerifyingAtRuntime, self);
-    }
+    DCHECK_EQ(klass->GetStatus(), ClassStatus::kResolved);
+    mirror::Class::SetStatus(klass, ClassStatus::kVerifying, self);
 
     // Skip verification if disabled.
     if (!Runtime::Current()->IsVerificationEnabled()) {
@@ -4724,7 +4732,8 @@ verifier::FailureKind ClassLinker::VerifyClass(
                      << klass->PrettyDescriptor()
                      << " in " << klass->GetDexCache()->GetLocation()->ToModifiedUtf8()
                      << ": "
-                     << preverified;
+                     << preverified
+                     << "( " << oat_file_class_status << ")";
 
   // If the oat file says the class had an error, re-run the verifier. That way we will get a
   // precise error message. To ensure a rerun, test:
@@ -4753,21 +4762,29 @@ verifier::FailureKind ClassLinker::VerifyClass(
     if (verifier_failure == verifier::FailureKind::kNoFailure) {
       // Even though there were no verifier failures we need to respect whether the super-class and
       // super-default-interfaces were verified or requiring runtime reverification.
-      if (supertype == nullptr || supertype->IsVerified()) {
+      if (supertype == nullptr
+          || supertype->IsVerified()
+          || supertype->IsVerifiedNeedsAccessChecks()) {
         mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
       } else {
+        CHECK(Runtime::Current()->IsAotCompiler());
         CHECK_EQ(supertype->GetStatus(), ClassStatus::kRetryVerificationAtRuntime);
         mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
         // Pretend a soft failure occurred so that we don't consider the class verified below.
         verifier_failure = verifier::FailureKind::kSoftFailure;
       }
     } else {
-      CHECK_EQ(verifier_failure, verifier::FailureKind::kSoftFailure);
+      CHECK(verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kAccessChecksFailure);
       // Soft failures at compile time should be retried at runtime. Soft
       // failures at runtime will be handled by slow paths in the generated
       // code. Set status accordingly.
       if (Runtime::Current()->IsAotCompiler()) {
-        mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+        if (verifier_failure == verifier::FailureKind::kSoftFailure) {
+          mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+        } else {
+          mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
+        }
       } else {
         mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
         // As this is a fake verified status, make sure the methods are _not_ marked
@@ -4784,18 +4801,18 @@ verifier::FailureKind ClassLinker::VerifyClass(
     mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
   }
   if (preverified || verifier_failure == verifier::FailureKind::kNoFailure) {
-    // Class is verified so we don't need to do any access check on its methods.
-    // Let the interpreter know it by setting the kAccSkipAccessChecks flag onto each
-    // method.
-    // Note: we're going here during compilation and at runtime. When we set the
-    // kAccSkipAccessChecks flag when compiling image classes, the flag is recorded
-    // in the image and is set when loading the image.
-
-    if (UNLIKELY(Runtime::Current()->IsVerificationSoftFail())) {
+    if (oat_file_class_status == ClassStatus::kVerifiedNeedsAccessChecks ||
+        UNLIKELY(Runtime::Current()->IsVerificationSoftFail())) {
       // Never skip access checks if the verification soft fail is forced.
       // Mark the class as having a verification attempt to avoid re-running the verifier.
       klass->SetVerificationAttempted();
     } else {
+      // Class is verified so we don't need to do any access check on its methods.
+      // Let the interpreter know it by setting the kAccSkipAccessChecks flag onto each
+      // method.
+      // Note: we're going here during compilation and at runtime. When we set the
+      // kAccSkipAccessChecks flag when compiling image classes, the flag is recorded
+      // in the image and is set when loading the image.
       EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
     }
   }
@@ -4848,31 +4865,20 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
   if (oat_file_class_status >= ClassStatus::kVerified) {
     return true;
   }
+  if (oat_file_class_status >= ClassStatus::kVerifiedNeedsAccessChecks) {
+    // We return that the clas has already been verified, and the caller should
+    // check the class status to ensure we run with access checks.
+    return true;
+  }
   // If we only verified a subset of the classes at compile time, we can end up with classes that
   // were resolved by the verifier.
   if (oat_file_class_status == ClassStatus::kResolved) {
     return false;
   }
-  if (oat_file_class_status == ClassStatus::kRetryVerificationAtRuntime) {
-    // Compile time verification failed with a soft error. Compile time verification can fail
-    // because we have incomplete type information. Consider the following:
-    // class ... {
-    //   Foo x;
-    //   .... () {
-    //     if (...) {
-    //       v1 gets assigned a type of resolved class Foo
-    //     } else {
-    //       v1 gets assigned a type of unresolved class Bar
-    //     }
-    //     iput x = v1
-    // } }
-    // when we merge v1 following the if-the-else it results in Conflict
-    // (see verifier::RegType::Merge) as we can't know the type of Bar and we could possibly be
-    // allowing an unsafe assignment to the field x in the iput (javac may have compiled this as
-    // it knew Bar was a sub-class of Foo, but for us this may have been moved into a separate apk
-    // at compile time).
-    return false;
-  }
+  // We never expect a .oat file to have kRetryVerificationAtRuntime statuses.
+  CHECK_NE(oat_file_class_status, ClassStatus::kRetryVerificationAtRuntime)
+      << klass->PrettyClass() << " " << dex_file.GetLocation();
+
   if (mirror::Class::IsErroneous(oat_file_class_status)) {
     // Compile time verification failed with a hard error. This is caused by invalid instructions
     // in the class. These errors are unrecoverable.
@@ -5340,7 +5346,7 @@ bool ClassLinker::InitializeClass(Thread* self,
           VlogClassInitializationFailure(klass);
         } else {
           CHECK(Runtime::Current()->IsAotCompiler());
-          CHECK_EQ(klass->GetStatus(), ClassStatus::kRetryVerificationAtRuntime);
+          CHECK(klass->ShouldVerifyAtRuntime() || klass->IsVerifiedNeedsAccessChecks());
           self->AssertNoPendingException();
           self->SetException(Runtime::Current()->GetPreAllocatedNoClassDefFoundError());
         }
@@ -6430,6 +6436,19 @@ bool ClassLinker::LinkVirtualMethods(
       ArtMethod* m = klass->GetVirtualMethodDuringLinking(i, image_pointer_size_);
       m->SetMethodIndex(i);
       if (!m->IsAbstract()) {
+        // If the dex file does not support default methods, throw ClassFormatError.
+        // This check is necessary to protect from odd cases, such as native default
+        // methods, that the dex file verifier permits for old dex file versions. b/157170505
+        // FIXME: This should be `if (!m->GetDexFile()->SupportsDefaultMethods())` but we're
+        // currently running CTS tests for default methods with dex file version 035 which
+        // does not support default methods. So, we limit this to native methods. b/157718952
+        if (m->IsNative()) {
+          DCHECK(!m->GetDexFile()->SupportsDefaultMethods());
+          ThrowClassFormatError(klass.Get(),
+                                "Dex file does not support default method '%s'",
+                                m->PrettyMethod().c_str());
+          return false;
+        }
         m->SetAccessFlags(m->GetAccessFlags() | kAccDefault);
         has_defaults = true;
       }
@@ -8779,6 +8798,13 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
       // We normaly should not end up here. However the verifier currently doesn't guarantee
       // the invariant of having the klass in the class table. b/73760543
       klass = ResolveType(method_id.class_idx_, dex_cache, class_loader);
+      if (klass == nullptr) {
+        // This can only happen if the current thread is not allowed to load
+        // classes.
+        DCHECK(!Thread::Current()->CanLoadClasses());
+        DCHECK(Thread::Current()->IsExceptionPending());
+        return nullptr;
+      }
     }
   } else {
     // The method was not in the DexCache, resolve the declaring class.

@@ -652,6 +652,12 @@
         "env_vars": {"SANITIZE_HOST": "address"}
     },
     {
+        "tests": "175-alloc-big-bignums",
+        "description": "ASAN runs out of memory due to huge allocations.",
+        "variant": "target",
+        "env_vars": {"SANITIZE_TARGET": "hwaddress"}
+    },
+    {
         "tests": "202-thread-oome",
         "description": "ASAN aborts when large thread stacks are requested.",
         "variant": "host",
@@ -686,36 +692,6 @@
         "variant": "interp-ac & target",
         "env_vars": {"SANITIZE_TARGET": "address"},
         "bug": "b/31098551"
-    },
-    {
-        "tests": [
-            "059-finalizer-throw",
-            "074-gc-thrash",
-            "911-get-stack-trace",
-            "913-heaps",
-            "980-redefine-object"
-        ],
-        "description": [
-            "Interpreter with access checks stack frames are too large and result in",
-            "StackOverFlow errors being thrown."
-        ],
-        "variant": "interp-ac & host",
-        "env_vars": {"SANITIZE_HOST": "address"}
-    },
-    {
-        "tests": [
-            "059-finalizer-throw",
-            "074-gc-thrash",
-            "911-get-stack-trace",
-            "913-heaps",
-            "980-redefine-object"
-        ],
-        "description": [
-            "Interpreter with access checks stack frames are too large and result in",
-            "StackOverFlow errors being thrown."
-        ],
-        "variant": "interp-ac & target",
-        "env_vars": {"SANITIZE_TARGET": "address"}
     },
     {
         "tests": "071-dexfile-map-clean",
@@ -908,14 +884,12 @@
           "432-optimizing-cmp",
           "434-invoke-direct",
           "435-new-instance",
-          "441-checker-inliner",
           "442-checker-constant-folding",
           "448-multiple-returns",
           "449-checker-bce",
           "452-multiple-returns2",
           "453-not-byte",
           "454-get-vreg",
-          "455-checker-gvn",
           "457-regs",
           "458-checker-instruct-simplification",
           "459-dead-phi",
@@ -927,7 +901,6 @@
           "471-uninitialized-locals",
           "472-unreachable-if-regression",
           "475-regression-inliner-ids",
-          "480-checker-dead-blocks",
           "496-checker-inlining-class-loader",
           "498-type-propagation",
           "501-null-constant-dce",
@@ -945,7 +918,6 @@
           "520-equivalent-phi",
           "529-checker-unresolved",
           "530-checker-lse",
-          "530-checker-lse-ctor-fences",
           "530-checker-lse3",
           "530-checker-regression-reftyp-final",
           "536-checker-intrinsic-optimization",
@@ -965,7 +937,6 @@
           "565-checker-doublenegbitwise",
           "565-checker-irreducible-loop",
           "566-polymorphic-inlining",
-          "567-checker-compare",
           "569-checker-pattern-replacement",
           "570-checker-osr",
           "571-irreducible-loop",
@@ -1009,7 +980,6 @@
           "628-vdex",
           "629-vdex-speed",
           "630-safecast-array",
-          "631-checker-fp-abs",
           "633-checker-rtp-getclass",
           "634-vdex-duplicate",
           "636-wrong-static-access",
@@ -1166,13 +1136,15 @@
         "bug": "b/147207934"
     },
     {
-        "tests": ["530-checker-peel-unroll",
+        "tests": ["178-app-image-native-method",
+                  "530-checker-peel-unroll",
                   "616-cha-unloading",
                   "674-hiddenapi",
                   "677-fsi2",
                   "678-quickening",
                   "679-locks",
                   "688-shared-library",
+                  "689-zygote-jit-deopt",
                   "690-hiddenapi-same-name-methods",
                   "691-hiddenapi-proxy",
                   "692-vdex-inmem-loader",
@@ -1219,8 +1191,12 @@
                   "2004-double-virtual-structural-abstract",
                   "2005-pause-all-redefine-multithreaded",
                   "2006-virtual-structural-finalizing",
-                  "2007-virtual-structural-finalizable"
-                ],
+                  "2007-virtual-structural-finalizable",
+                  "2009-structural-local-ref",
+                  "2011-stack-walk-concurrent-instrument",
+                  "2012-structural-redefinition-failures-jni-id",
+                  "2033-shutdown-mechanics",
+                  "2035-structural-native-method"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1371,5 +1347,22 @@
         "variant": "gcstress & debuggable & debug & host",
         "bug": "b/149708943",
         "description": ["Timeouts."]
+    },
+    {
+        "tests": ["003-omnibus-opcodes",
+                  "051-thread",
+                  "427-bounds",
+                  "570-checker-osr-locals",
+                  "597-app-images-same-classloader",
+                  "724-invoke-super-npe",
+                  "725-imt-conflict-object",
+                  "952-invoke-custom",
+                  "960-default-smali",
+                  "966-default-conflict",
+                  "990-field-trace",
+                  "2034-spaces-in-SimpleName"],
+        "variant": "jvm",
+        "bug": "b/154802847",
+        "description": ["Failing on RI. Needs further investigating."]
     }
 ]

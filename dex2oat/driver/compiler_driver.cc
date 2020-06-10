@@ -63,6 +63,7 @@
 #include "gc/space/space.h"
 #include "handle_scope-inl.h"
 #include "intrinsics_enum.h"
+#include "intrinsics_list.h"
 #include "jni/jni_internal.h"
 #include "linker/linker_patch.h"
 #include "mirror/class-inl.h"
@@ -300,7 +301,9 @@ std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateJniDlsymLookup
 
 std::unique_ptr<const std::vector<uint8_t>>
 CompilerDriver::CreateJniDlsymLookupCriticalTrampoline() const {
-  CREATE_TRAMPOLINE(JNI, kJniAbi, pDlsymLookupCritical)
+  // @CriticalNative calls do not have the `JNIEnv*` parameter, so this trampoline uses the
+  // architecture-dependent access to `Thread*` using the managed code ABI, i.e. `kQuickAbi`.
+  CREATE_TRAMPOLINE(JNI, kQuickAbi, pDlsymLookupCritical)
 }
 
 std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateQuickGenericJniTrampoline()
@@ -331,12 +334,6 @@ void CompilerDriver::CompileAll(jobject class_loader,
 
   CheckThreadPools();
 
-  if (GetCompilerOptions().IsBootImage()) {
-    // All intrinsics must be in the primary boot image, so we don't need to setup
-    // the intrinsics for any other compilation, as those compilations will pick up
-    // a boot image that have the ArtMethod already set with the intrinsics flag.
-    InitializeIntrinsics();
-  }
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
@@ -834,7 +831,10 @@ static void EnsureVerifiedOrVerifyAtRuntime(jobject jclass_loader,
       if (cls == nullptr) {
         soa.Self()->ClearException();
       } else if (&cls->GetDexFile() == dex_file) {
-        DCHECK(cls->IsErroneous() || cls->IsVerified() || cls->ShouldVerifyAtRuntime())
+        DCHECK(cls->IsErroneous() ||
+               cls->IsVerified() ||
+               cls->ShouldVerifyAtRuntime() ||
+               cls->IsVerifiedNeedsAccessChecks())
             << cls->PrettyClass()
             << " " << cls->GetStatus();
       }
@@ -976,8 +976,7 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
     return true;
   }
 
-  void FindExceptionTypesToResolve(
-      std::set<std::pair<dex::TypeIndex, const DexFile*>>* exceptions_to_resolve)
+  void FindExceptionTypesToResolve(std::set<TypeReference>* exceptions_to_resolve)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
     for (ObjPtr<mirror::Class> klass : classes_) {
@@ -990,7 +989,7 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
  private:
   void FindExceptionTypesToResolveForMethod(
       ArtMethod* method,
-      std::set<std::pair<dex::TypeIndex, const DexFile*>>* exceptions_to_resolve)
+      std::set<TypeReference>* exceptions_to_resolve)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     if (method->GetCodeItem() == nullptr) {
       return;  // native or abstract method
@@ -1013,8 +1012,8 @@ class ResolveCatchBlockExceptionsClassVisitor : public ClassVisitor {
             dex::TypeIndex(DecodeUnsignedLeb128(&encoded_catch_handler_list));
         // Add to set of types to resolve if not already in the dex cache resolved types
         if (!method->IsResolvedTypeIdx(encoded_catch_handler_handlers_type_idx)) {
-          exceptions_to_resolve->emplace(encoded_catch_handler_handlers_type_idx,
-                                         method->GetDexFile());
+          exceptions_to_resolve->emplace(method->GetDexFile(),
+                                         encoded_catch_handler_handlers_type_idx);
         }
         // ignore address associated with catch handler
         DecodeUnsignedLeb128(&encoded_catch_handler_list);
@@ -1070,6 +1069,15 @@ class RecordImageClassesVisitor : public ClassVisitor {
   HashSet<std::string>* const image_classes_;
 };
 
+// Add classes which contain intrinsics methods to the list of image classes.
+static void AddClassesContainingIntrinsics(/* out */ HashSet<std::string>* image_classes) {
+#define ADD_INTRINSIC_OWNER_CLASS(_, __, ___, ____, _____, ClassName, ______, _______) \
+  image_classes->insert(ClassName);
+
+  INTRINSICS_LIST(ADD_INTRINSIC_OWNER_CLASS)
+#undef ADD_INTRINSIC_OWNER_CLASS
+}
+
 // Make a list of descriptors for classes to include in the image
 void CompilerDriver::LoadImageClasses(TimingLogger* timings,
                                       /*inout*/ HashSet<std::string>* image_classes) {
@@ -1078,13 +1086,32 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
     return;
   }
 
-  // Make sure the File[] class is in the primary boot image. b/150319075
+  // A hard-coded list of array classes that should be in the primary boot image profile. The impact
+  // of each class can be approximately measured by comparing oatdump output with and without it:
+  // `m dump-oat-boot && grep -cE 'Class.*VisiblyInitialized' boot.host-<arch>.oatdump.txt`.
+  //   - b/150319075: File[]
+  //   - b/156098788: int[][], int[][][], short[][], byte[][][]
+  //
   // TODO: Implement support for array classes in profiles and remove this workaround. b/148067697
   if (GetCompilerOptions().IsBootImage()) {
     image_classes->insert("[Ljava/io/File;");
+    image_classes->insert("[[I");
+    image_classes->insert("[[[I");
+    image_classes->insert("[[S");
+    image_classes->insert("[[[B");
   }
 
   TimingLogger::ScopedTiming t("LoadImageClasses", timings);
+
+  if (GetCompilerOptions().IsBootImage()) {
+    AddClassesContainingIntrinsics(image_classes);
+
+    // All intrinsics must be in the primary boot image, so we don't need to setup
+    // the intrinsics for any other compilation, as those compilations will pick up
+    // a boot image that have the ArtMethod already set with the intrinsics flag.
+    InitializeIntrinsics();
+  }
+
   // Make a first pass to load all classes explicitly listed in the file
   Thread* self = Thread::Current();
   ScopedObjectAccess soa(self);
@@ -1107,10 +1134,12 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
   // Resolve exception classes referenced by the loaded classes. The catch logic assumes
   // exceptions are resolved by the verifier when there is a catch block in an interested method.
   // Do this here so that exception classes appear to have been specified image classes.
-  std::set<std::pair<dex::TypeIndex, const DexFile*>> unresolved_exception_types;
-  StackHandleScope<1> hs(self);
+  std::set<TypeReference> unresolved_exception_types;
+  StackHandleScope<2u> hs(self);
   Handle<mirror::Class> java_lang_Throwable(
       hs.NewHandle(class_linker->FindSystemClass(self, "Ljava/lang/Throwable;")));
+  MutableHandle<mirror::DexCache> dex_cache = hs.NewHandle(java_lang_Throwable->GetDexCache());
+  DCHECK(dex_cache != nullptr);
   do {
     unresolved_exception_types.clear();
     {
@@ -1121,24 +1150,25 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
       class_linker->VisitClasses(&visitor);
       visitor.FindExceptionTypesToResolve(&unresolved_exception_types);
     }
-    for (const auto& exception_type : unresolved_exception_types) {
-      dex::TypeIndex exception_type_idx = exception_type.first;
-      const DexFile* dex_file = exception_type.second;
-      StackHandleScope<1> hs2(self);
-      Handle<mirror::DexCache> dex_cache(hs2.NewHandle(class_linker->RegisterDexFile(*dex_file,
-                                                                                     nullptr)));
-      ObjPtr<mirror::Class> klass =
-          (dex_cache != nullptr)
-              ? class_linker->ResolveType(exception_type_idx,
-                                          dex_cache,
-                                          ScopedNullHandle<mirror::ClassLoader>())
-              : nullptr;
+    for (auto it = unresolved_exception_types.begin(); it != unresolved_exception_types.end(); ) {
+      dex::TypeIndex exception_type_idx = it->TypeIndex();
+      const DexFile* dex_file = it->dex_file;
+      if (dex_cache->GetDexFile() != dex_file) {
+        dex_cache.Assign(class_linker->RegisterDexFile(*dex_file, /*class_loader=*/ nullptr));
+        DCHECK(dex_cache != nullptr);
+      }
+      ObjPtr<mirror::Class> klass = class_linker->ResolveType(
+          exception_type_idx, dex_cache, ScopedNullHandle<mirror::ClassLoader>());
       if (klass == nullptr) {
         const dex::TypeId& type_id = dex_file->GetTypeId(exception_type_idx);
         const char* descriptor = dex_file->GetTypeDescriptor(type_id);
-        LOG(FATAL) << "Failed to resolve class " << descriptor;
+        VLOG(compiler) << "Failed to resolve exception class " << descriptor;
+        self->ClearException();
+        it = unresolved_exception_types.erase(it);
+      } else {
+        DCHECK(java_lang_Throwable->IsAssignableFrom(klass));
+        ++it;
       }
-      DCHECK(java_lang_Throwable->IsAssignableFrom(klass));
     }
     // Resolving exceptions may load classes that reference more exceptions, iterate until no
     // more are found
@@ -1987,7 +2017,8 @@ class VerifyClassVisitor : public CompilationVisitor {
         // Force a soft failure for the VerifierDeps. This is a sanity measure, as
         // the vdex file already records that the class hasn't been resolved. It avoids
         // trying to do future verification optimizations when processing the vdex file.
-        DCHECK(failure_kind == verifier::FailureKind::kNoFailure) << failure_kind;
+        DCHECK(failure_kind == verifier::FailureKind::kNoFailure ||
+               failure_kind == verifier::FailureKind::kAccessChecksFailure) << failure_kind;
         failure_kind = verifier::FailureKind::kSoftFailure;
       }
     } else if (&klass->GetDexFile() != &dex_file) {
@@ -2016,7 +2047,10 @@ class VerifyClassVisitor : public CompilationVisitor {
         manager_->GetCompiler()->AddSoftVerifierFailure();
       }
 
-      CHECK(klass->ShouldVerifyAtRuntime() || klass->IsVerified() || klass->IsErroneous())
+      CHECK(klass->ShouldVerifyAtRuntime() ||
+            klass->IsVerifiedNeedsAccessChecks() ||
+            klass->IsVerified() ||
+            klass->IsErroneous())
           << klass->PrettyDescriptor() << ": state=" << klass->GetStatus();
 
       // Class has a meaningful status for the compiler now, record it.
@@ -2046,6 +2080,8 @@ class VerifyClassVisitor : public CompilationVisitor {
         }
         if (klass->IsVerified()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kNoFailure);
+        } else if (klass->IsVerifiedNeedsAccessChecks()) {
+          DCHECK_EQ(failure_kind, verifier::FailureKind::kAccessChecksFailure);
         } else if (klass->ShouldVerifyAtRuntime()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kSoftFailure);
         } else {
@@ -2848,6 +2884,7 @@ void CompilerDriver::RecordClassStatus(const ClassReference& ref, ClassStatus st
     case ClassStatus::kNotReady:
     case ClassStatus::kResolved:
     case ClassStatus::kRetryVerificationAtRuntime:
+    case ClassStatus::kVerifiedNeedsAccessChecks:
     case ClassStatus::kVerified:
     case ClassStatus::kSuperclassValidated:
     case ClassStatus::kVisiblyInitialized:

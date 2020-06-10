@@ -32,7 +32,7 @@
 #include "class_ext-inl.h"
 #include "class_linker-inl.h"
 #include "class_loader.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "dex/descriptors_names.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_annotations.h"
@@ -218,9 +218,7 @@ static void CheckSetStatus(Thread* self, T thiz, ClassStatus new_status, ClassSt
   }
 }
 
-void Class::SetStatusLocked(ClassStatus new_status) {
-  ClassStatus old_status = GetStatus();
-  CheckSetStatus(Thread::Current(), this, new_status, old_status);
+void Class::SetStatusInternal(ClassStatus new_status) {
   if (kBitstringSubtypeCheckEnabled) {
     // FIXME: This looks broken with respect to aborted transactions.
     SubtypeCheck<ObjPtr<mirror::Class>>::WriteStatus(this, new_status);
@@ -228,9 +226,18 @@ void Class::SetStatusLocked(ClassStatus new_status) {
     // The ClassStatus is always in the 4 most-significant bits of status_.
     static_assert(sizeof(status_) == sizeof(uint32_t), "Size of status_ not equal to uint32");
     uint32_t new_status_value = static_cast<uint32_t>(new_status) << (32 - kClassStatusBitSize);
-    DCHECK(!Runtime::Current()->IsActiveTransaction());
-    SetField32Volatile<false>(StatusOffset(), new_status_value);
+    if (Runtime::Current()->IsActiveTransaction()) {
+      SetField32Volatile<true>(StatusOffset(), new_status_value);
+    } else {
+      SetField32Volatile<false>(StatusOffset(), new_status_value);
+    }
   }
+}
+
+void Class::SetStatusLocked(ClassStatus new_status) {
+  ClassStatus old_status = GetStatus();
+  CheckSetStatus(Thread::Current(), this, new_status, old_status);
+  SetStatusInternal(new_status);
 }
 
 void Class::SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self) {
@@ -263,20 +270,7 @@ void Class::SetStatus(Handle<Class> h_this, ClassStatus new_status, Thread* self
     self->AssertPendingException();
   }
 
-  if (kBitstringSubtypeCheckEnabled) {
-    // FIXME: This looks broken with respect to aborted transactions.
-    ObjPtr<mirror::Class> h_this_ptr = h_this.Get();
-    SubtypeCheck<ObjPtr<mirror::Class>>::WriteStatus(h_this_ptr, new_status);
-  } else {
-    // The ClassStatus is always in the 4 most-significant bits of status_.
-    static_assert(sizeof(status_) == sizeof(uint32_t), "Size of status_ not equal to uint32");
-    uint32_t new_status_value = static_cast<uint32_t>(new_status) << (32 - kClassStatusBitSize);
-    if (Runtime::Current()->IsActiveTransaction()) {
-      h_this->SetField32Volatile<true>(StatusOffset(), new_status_value);
-    } else {
-      h_this->SetField32Volatile<false>(StatusOffset(), new_status_value);
-    }
-  }
+  h_this->SetStatusInternal(new_status);
 
   // Setting the object size alloc fast path needs to be after the status write so that if the
   // alloc path sees a valid object size, we would know that it's initialized as long as it has a
@@ -1453,7 +1447,7 @@ static bool IsMethodPreferredOver(ArtMethod* orig_method,
   return false;
 }
 
-template <PointerSize kPointerSize, bool kTransactionActive>
+template <PointerSize kPointerSize>
 ObjPtr<Method> Class::GetDeclaredMethodInternal(
     Thread* self,
     ObjPtr<Class> klass,
@@ -1494,7 +1488,7 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
     bool m_hidden = hiddenapi::ShouldDenyAccessToMember(&m, fn_get_access_context, access_method);
     if (!m_hidden && !m.IsSynthetic()) {
       // Non-hidden, virtual, non-synthetic. Best possible result, exit early.
-      return Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, &m);
+      return Method::CreateFromArtMethod<kPointerSize>(self, &m);
     } else if (IsMethodPreferredOver(result, result_hidden, &m, m_hidden)) {
       // Remember as potential result.
       result = &m;
@@ -1533,7 +1527,7 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
         // Non-hidden, direct, non-synthetic. Any virtual result could only have been
         // hidden, therefore this is the best possible match. Exit now.
         DCHECK((result == nullptr) || result_hidden);
-        return Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, &m);
+        return Method::CreateFromArtMethod<kPointerSize>(self, &m);
       } else if (IsMethodPreferredOver(result, result_hidden, &m, m_hidden)) {
         // Remember as potential result.
         result = &m;
@@ -1543,40 +1537,26 @@ ObjPtr<Method> Class::GetDeclaredMethodInternal(
   }
 
   return result != nullptr
-      ? Method::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, result)
+      ? Method::CreateFromArtMethod<kPointerSize>(self, result)
       : nullptr;
 }
 
 template
-ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k32, false>(
+ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k32>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
     ObjPtr<ObjectArray<Class>> args,
     const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 template
-ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k32, true>(
-    Thread* self,
-    ObjPtr<Class> klass,
-    ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args,
-    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
-template
-ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k64, false>(
-    Thread* self,
-    ObjPtr<Class> klass,
-    ObjPtr<String> name,
-    ObjPtr<ObjectArray<Class>> args,
-    const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
-template
-ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k64, true>(
+ObjPtr<Method> Class::GetDeclaredMethodInternal<PointerSize::k64>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<String> name,
     ObjPtr<ObjectArray<Class>> args,
     const std::function<hiddenapi::AccessContext()>& fn_get_access_context);
 
-template <PointerSize kPointerSize, bool kTransactionActive>
+template <PointerSize kPointerSize>
 ObjPtr<Constructor> Class::GetDeclaredConstructorInternal(
     Thread* self,
     ObjPtr<Class> klass,
@@ -1584,29 +1564,19 @@ ObjPtr<Constructor> Class::GetDeclaredConstructorInternal(
   StackHandleScope<1> hs(self);
   ArtMethod* result = klass->GetDeclaredConstructor(self, hs.NewHandle(args), kPointerSize);
   return result != nullptr
-      ? Constructor::CreateFromArtMethod<kPointerSize, kTransactionActive>(self, result)
+      ? Constructor::CreateFromArtMethod<kPointerSize>(self, result)
       : nullptr;
 }
 
 // Constructor::CreateFromArtMethod<kTransactionActive>(self, result)
 
 template
-ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k32, false>(
+ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k32>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<ObjectArray<Class>> args);
 template
-ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k32, true>(
-    Thread* self,
-    ObjPtr<Class> klass,
-    ObjPtr<ObjectArray<Class>> args);
-template
-ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k64, false>(
-    Thread* self,
-    ObjPtr<Class> klass,
-    ObjPtr<ObjectArray<Class>> args);
-template
-ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k64, true>(
+ObjPtr<Constructor> Class::GetDeclaredConstructorInternal<PointerSize::k64>(
     Thread* self,
     ObjPtr<Class> klass,
     ObjPtr<ObjectArray<Class>> args);

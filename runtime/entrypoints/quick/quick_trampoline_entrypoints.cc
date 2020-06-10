@@ -19,7 +19,7 @@
 #include "base/enums.h"
 #include "callee_save_frame.h"
 #include "common_throws.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "debug_print.h"
 #include "debugger.h"
 #include "dex/dex_file-inl.h"
@@ -845,7 +845,7 @@ extern "C" uint64_t artQuickProxyInvokeHandler(
   DCHECK_EQ(Runtime::Current()->GetClassLinker()->GetImagePointerSize(), kRuntimePointerSize);
   DCHECK(!Runtime::Current()->IsActiveTransaction());
   ObjPtr<mirror::Method> interface_reflect_method =
-      mirror::Method::CreateFromArtMethod<kRuntimePointerSize, false>(soa.Self(), interface_method);
+      mirror::Method::CreateFromArtMethod<kRuntimePointerSize>(soa.Self(), interface_method);
   if (interface_reflect_method == nullptr) {
     soa.Self()->AssertPendingOOMException();
     return 0;
@@ -1374,35 +1374,29 @@ extern "C" const void* artQuickResolutionTrampoline(
                                << invoke_type << " " << orig_called->GetVtableIndex();
     }
 
+    // Static invokes need class initialization check but instance invokes can proceed even if
+    // the class is erroneous, i.e. in the edge case of escaping instances of erroneous classes.
+    bool success = true;
     ObjPtr<mirror::Class> called_class = called->GetDeclaringClass();
     if (NeedsClinitCheckBeforeCall(called) && !called_class->IsVisiblyInitialized()) {
       // Ensure that the called method's class is initialized.
       StackHandleScope<1> hs(soa.Self());
       HandleWrapperObjPtr<mirror::Class> h_called_class(hs.NewHandleWrapper(&called_class));
-      linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
+      success = linker->EnsureInitialized(soa.Self(), h_called_class, true, true);
     }
-    bool force_interpreter = self->IsForceInterpreter() && !called->IsNative();
-    if (called_class->IsInitialized() || called_class->IsInitializing()) {
-      if (UNLIKELY(force_interpreter)) {
-        // If we are single-stepping or the called method is deoptimized (by a
-        // breakpoint, for example), then we have to execute the called method
-        // with the interpreter.
+    if (success) {
+      code = called->GetEntryPointFromQuickCompiledCode();
+      if (linker->IsQuickResolutionStub(code)) {
+        DCHECK_EQ(invoke_type, kStatic);
+        // Go to JIT or oat and grab code.
+        code = linker->GetQuickOatCodeFor(called);
+      }
+      if (linker->ShouldUseInterpreterEntrypoint(called, code)) {
         code = GetQuickToInterpreterBridge();
-      } else {
-        code = called->GetEntryPointFromQuickCompiledCode();
-        if (linker->IsQuickResolutionStub(code)) {
-          DCHECK_EQ(invoke_type, kStatic);
-          // Go to JIT or oat and grab code.
-          code = linker->GetQuickOatCodeFor(called);
-          if (called_class->IsInitialized()) {
-            // Only update the entrypoint once the class is initialized. Other
-            // threads still need to go through the resolution stub.
-            Runtime::Current()->GetInstrumentation()->UpdateMethodsCode(called, code);
-          }
-        }
       }
     } else {
       DCHECK(called_class->IsErroneous());
+      DCHECK(self->IsExceptionPending());
     }
   }
   CHECK_EQ(code == nullptr, self->IsExceptionPending());

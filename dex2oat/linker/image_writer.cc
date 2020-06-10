@@ -35,7 +35,7 @@
 #include "base/stl_util.h"
 #include "base/unix_file/fd_file.h"
 #include "class_linker-inl.h"
-#include "class_root.h"
+#include "class_root-inl.h"
 #include "compiled_method.h"
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_types.h"
@@ -3167,6 +3167,11 @@ void ImageWriter::FixupClass(mirror::Class* orig, mirror::Class* copy) {
 
   // Remove the clinitThreadId. This is required for image determinism.
   copy->SetClinitThreadId(static_cast<pid_t>(0));
+  // We never emit kRetryVerificationAtRuntime, instead we mark the class as
+  // resolved and the class will therefore be re-verified at runtime.
+  if (orig->ShouldVerifyAtRuntime()) {
+    copy->SetStatusInternal(ClassStatus::kResolved);
+  }
 }
 
 void ImageWriter::FixupObject(Object* orig, Object* copy) {

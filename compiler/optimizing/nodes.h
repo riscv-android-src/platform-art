@@ -32,6 +32,7 @@
 #include "base/stl_util.h"
 #include "base/transform_array_ref.h"
 #include "art_method.h"
+#include "class_root.h"
 #include "data_type.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file.h"
@@ -272,13 +273,6 @@ class ReferenceTypeInfo : ValueObject {
     return GetTypeHandle()->IsAssignableFrom(rti.GetTypeHandle().Get());
   }
 
-  bool IsStrictSupertypeOf(ReferenceTypeInfo rti) const REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsValid());
-    DCHECK(rti.IsValid());
-    return GetTypeHandle().Get() != rti.GetTypeHandle().Get() &&
-        GetTypeHandle()->IsAssignableFrom(rti.GetTypeHandle().Get());
-  }
-
   // Returns true if the type information provide the same amount of details.
   // Note that it does not mean that the instructions have the same actual type
   // (because the type can be the result of a merge).
@@ -309,11 +303,75 @@ class ReferenceTypeInfo : ValueObject {
 
 std::ostream& operator<<(std::ostream& os, const ReferenceTypeInfo& rhs);
 
+class HandleCache {
+ public:
+  explicit HandleCache(VariableSizedHandleScope* handles) : handles_(handles) { }
+
+  VariableSizedHandleScope* GetHandles() { return handles_; }
+
+  template <typename T>
+  MutableHandle<T> NewHandle(T* object) REQUIRES_SHARED(Locks::mutator_lock_) {
+    return handles_->NewHandle(object);
+  }
+
+  template <typename T>
+  MutableHandle<T> NewHandle(ObjPtr<T> object) REQUIRES_SHARED(Locks::mutator_lock_) {
+    return handles_->NewHandle(object);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetObjectClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangObject, &object_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetClassClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangClass, &class_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetMethodHandleClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangInvokeMethodHandleImpl, &method_handle_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetMethodTypeClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangInvokeMethodType, &method_type_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetStringClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangString, &string_class_handle_);
+  }
+
+  ReferenceTypeInfo::TypeHandle GetThrowableClassHandle() {
+    return GetRootHandle(ClassRoot::kJavaLangThrowable, &throwable_class_handle_);
+  }
+
+
+ private:
+  inline ReferenceTypeInfo::TypeHandle GetRootHandle(ClassRoot class_root,
+                                                     ReferenceTypeInfo::TypeHandle* cache) {
+    if (UNLIKELY(!ReferenceTypeInfo::IsValidHandle(*cache))) {
+      *cache = CreateRootHandle(handles_, class_root);
+    }
+    return *cache;
+  }
+
+  static ReferenceTypeInfo::TypeHandle CreateRootHandle(VariableSizedHandleScope* handles,
+                                                        ClassRoot class_root);
+
+  VariableSizedHandleScope* handles_;
+
+  ReferenceTypeInfo::TypeHandle object_class_handle_;
+  ReferenceTypeInfo::TypeHandle class_class_handle_;
+  ReferenceTypeInfo::TypeHandle method_handle_class_handle_;
+  ReferenceTypeInfo::TypeHandle method_type_class_handle_;
+  ReferenceTypeInfo::TypeHandle string_class_handle_;
+  ReferenceTypeInfo::TypeHandle throwable_class_handle_;
+};
+
 // Control-flow graph of a method. Contains a list of basic blocks.
 class HGraph : public ArenaObject<kArenaAllocGraph> {
  public:
   HGraph(ArenaAllocator* allocator,
          ArenaStack* arena_stack,
+         VariableSizedHandleScope* handles,
          const DexFile& dex_file,
          uint32_t method_idx,
          InstructionSet instruction_set,
@@ -321,11 +379,11 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
          bool dead_reference_safe = false,
          bool debuggable = false,
          bool osr = false,
-         bool is_shared_jit_code = false,
          bool baseline = false,
          int start_instruction_id = 0)
       : allocator_(allocator),
         arena_stack_(arena_stack),
+        handle_cache_(handles),
         blocks_(allocator->Adapter(kArenaAllocBlockList)),
         reverse_post_order_(allocator->Adapter(kArenaAllocReversePostOrder)),
         linear_order_(allocator->Adapter(kArenaAllocLinearOrder)),
@@ -357,19 +415,17 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
         cached_double_constants_(std::less<int64_t>(), allocator->Adapter(kArenaAllocConstantsMap)),
         cached_current_method_(nullptr),
         art_method_(nullptr),
-        inexact_object_rti_(ReferenceTypeInfo::CreateInvalid()),
         osr_(osr),
         baseline_(baseline),
-        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)),
-        is_shared_jit_code_(is_shared_jit_code) {
+        cha_single_implementation_list_(allocator->Adapter(kArenaAllocCHA)) {
     blocks_.reserve(kDefaultNumberOfBlocks);
   }
 
-  // Acquires and stores RTI of inexact Object to be used when creating HNullConstant.
-  void InitializeInexactObjectRTI(VariableSizedHandleScope* handles);
-
   ArenaAllocator* GetAllocator() const { return allocator_; }
   ArenaStack* GetArenaStack() const { return arena_stack_; }
+
+  HandleCache* GetHandleCache() { return &handle_cache_; }
+
   const ArenaVector<HBasicBlock*>& GetBlocks() const { return blocks_; }
 
   bool IsInSsaForm() const { return in_ssa_form_; }
@@ -593,10 +649,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   bool IsCompilingBaseline() const { return baseline_; }
 
-  bool IsCompilingForSharedJitCode() const {
-    return is_shared_jit_code_;
-  }
-
   ArenaSet<ArtMethod*>& GetCHASingleImplementationList() {
     return cha_single_implementation_list_;
   }
@@ -632,7 +684,9 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // before cursor.
   HInstruction* InsertOppositeCondition(HInstruction* cond, HInstruction* cursor);
 
-  ReferenceTypeInfo GetInexactObjectRti() const { return inexact_object_rti_; }
+  ReferenceTypeInfo GetInexactObjectRti() {
+    return ReferenceTypeInfo::Create(handle_cache_.GetObjectClassHandle(), /* is_exact= */ false);
+  }
 
   uint32_t GetNumberOfCHAGuards() { return number_of_cha_guards_; }
   void SetNumberOfCHAGuards(uint32_t num) { number_of_cha_guards_ = num; }
@@ -674,6 +728,8 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   ArenaAllocator* const allocator_;
   ArenaStack* const arena_stack_;
+
+  HandleCache handle_cache_;
 
   // List of blocks in insertion order.
   ArenaVector<HBasicBlock*> blocks_;
@@ -781,10 +837,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
   // (such as when the superclass could not be found).
   ArtMethod* art_method_;
 
-  // Keep the RTI of inexact Object to avoid having to pass stack handle
-  // collection pointer to passes which may create NullConstant.
-  ReferenceTypeInfo inexact_object_rti_;
-
   // Whether we are compiling this graph for on stack replacement: this will
   // make all loops seen as irreducible and emit special stack maps to mark
   // compiled code entries which the interpreter can directly jump to.
@@ -796,10 +848,6 @@ class HGraph : public ArenaObject<kArenaAllocGraph> {
 
   // List of methods that are assumed to have single implementation.
   ArenaSet<ArtMethod*> cha_single_implementation_list_;
-
-  // Whether we are JIT compiling in the shared region area, putting
-  // restrictions on, for example, how literals are being generated.
-  bool is_shared_jit_code_;
 
   friend class SsaBuilder;           // For caching constants.
   friend class SsaLivenessAnalysis;  // For the linear order.
@@ -1387,7 +1435,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   DISALLOW_COPY_AND_ASSIGN(HLoopInformationOutwardIterator);
 };
 
-#define FOR_EACH_CONCRETE_INSTRUCTION_COMMON(M)                         \
+#define FOR_EACH_CONCRETE_INSTRUCTION_SCALAR_COMMON(M)                  \
   M(Above, Condition)                                                   \
   M(AboveOrEqual, Condition)                                            \
   M(Abs, UnaryOperation)                                                \
@@ -1477,7 +1525,9 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(TryBoundary, Instruction)                                           \
   M(TypeConversion, Instruction)                                        \
   M(UShr, BinaryOperation)                                              \
-  M(Xor, BinaryOperation)                                               \
+  M(Xor, BinaryOperation)
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_VECTOR_COMMON(M)                  \
   M(VecReplicateScalar, VecUnaryOperation)                              \
   M(VecExtractScalar, VecUnaryOperation)                                \
   M(VecReduce, VecUnaryOperation)                                       \
@@ -1507,6 +1557,13 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(VecDotProd, VecOperation)                                           \
   M(VecLoad, VecMemoryOperation)                                        \
   M(VecStore, VecMemoryOperation)                                       \
+  M(VecPredSetAll, VecPredSetOperation)                                 \
+  M(VecPredWhile, VecPredSetOperation)                                  \
+  M(VecPredCondition, VecOperation)                                     \
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_COMMON(M)                         \
+  FOR_EACH_CONCRETE_INSTRUCTION_SCALAR_COMMON(M)                        \
+  FOR_EACH_CONCRETE_INSTRUCTION_VECTOR_COMMON(M)
 
 /*
  * Instructions, shared across several (not all) architectures.
@@ -1563,7 +1620,8 @@ class HLoopInformationOutwardIterator : public ValueObject {
   M(VecOperation, Instruction)                                          \
   M(VecUnaryOperation, VecOperation)                                    \
   M(VecBinaryOperation, VecOperation)                                   \
-  M(VecMemoryOperation, VecOperation)
+  M(VecMemoryOperation, VecOperation)                                   \
+  M(VecPredSetOperation, VecOperation)
 
 #define FOR_EACH_INSTRUCTION(M)                                         \
   FOR_EACH_CONCRETE_INSTRUCTION(M)                                      \
@@ -4149,8 +4207,6 @@ class HCompare final : public HBinaryOperation {
                          SideEffectsForArchRuntimeCalls(comparison_type),
                          dex_pc) {
     SetPackedField<ComparisonBiasField>(bias);
-    DCHECK_EQ(comparison_type, DataType::Kind(first->GetType()));
-    DCHECK_EQ(comparison_type, DataType::Kind(second->GetType()));
   }
 
   template <typename T>
@@ -5542,8 +5598,6 @@ class HRor final : public HBinaryOperation {
  public:
   HRor(DataType::Type result_type, HInstruction* value, HInstruction* distance)
       : HBinaryOperation(kRor, result_type, value, distance) {
-    DCHECK_EQ(result_type, DataType::Kind(value->GetType()));
-    DCHECK_EQ(DataType::Type::kInt32, DataType::Kind(distance->GetType()));
   }
 
   template <typename T>

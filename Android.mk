@@ -23,7 +23,6 @@ art_path := $(LOCAL_PATH)
 #
 
 include $(art_path)/build/Android.common_path.mk
-include $(art_path)/build/Android.oat.mk
 
 .PHONY: clean-oat
 clean-oat: clean-oat-host clean-oat-target
@@ -321,7 +320,6 @@ endif
 
 LOCAL_MODULE := com.android.art
 LOCAL_REQUIRED_MODULES := $(TARGET_ART_APEX)
-LOCAL_REQUIRED_MODULES += art_apex_boot_integrity
 
 # Clear locally used variable.
 art_target_include_debug_build :=
@@ -497,117 +495,65 @@ PRIVATE_ART_APEX_DEPENDENCY_FILES := \
   bin/dalvikvm32 \
   bin/dalvikvm64 \
   bin/dalvikvm \
-  bin/dex2oat \
-  bin/dex2oatd \
+  bin/dex2oat32 \
+  bin/dex2oat64 \
   bin/dexdump \
 
 PRIVATE_ART_APEX_DEPENDENCY_LIBS := \
-  lib/libadbconnectiond.so \
   lib/libadbconnection.so \
-  lib/libandroidicu.so \
   lib/libandroidio.so \
-  lib/libartbased.so \
   lib/libartbase.so \
   lib/libart-compiler.so \
-  lib/libartd-compiler.so \
-  lib/libartd-dexlayout.so \
-  lib/libartd-disassembler.so \
   lib/libart-dexlayout.so \
   lib/libart-disassembler.so \
-  lib/libartd.so \
   lib/libartpalette.so \
   lib/libart.so \
-  lib/libbacktrace.so \
-  lib/libbase.so \
-  lib/libcrypto.so \
-  lib/libdexfiled_external.so \
-  lib/libdexfiled.so \
   lib/libdexfile_external.so \
   lib/libdexfile.so \
-  lib/libdexfile_support.so \
   lib/libdt_fd_forward.so \
   lib/libdt_socket.so \
   lib/libexpat.so \
-  lib/libicui18n.so \
-  lib/libicu_jni.so \
-  lib/libicuuc.so \
   lib/libjavacore.so \
   lib/libjdwp.so \
-  lib/liblzma.so \
   lib/libmeminfo.so \
   lib/libnativebridge.so \
   lib/libnativehelper.so \
   lib/libnativeloader.so \
   lib/libnpt.so \
-  lib/libopenjdkd.so \
-  lib/libopenjdkjvmd.so \
   lib/libopenjdkjvm.so \
-  lib/libopenjdkjvmtid.so \
   lib/libopenjdkjvmti.so \
   lib/libopenjdk.so \
   lib/libpac.so \
   lib/libprocinfo.so \
-  lib/libprofiled.so \
   lib/libprofile.so \
-  lib/libsigchain.so \
-  lib/libunwindstack.so \
-  lib/libvixld.so \
   lib/libvixl.so \
-  lib/libziparchive.so \
-  lib/libz.so \
-  lib64/libadbconnectiond.so \
   lib64/libadbconnection.so \
-  lib64/libandroidicu.so \
   lib64/libandroidio.so \
-  lib64/libartbased.so \
   lib64/libartbase.so \
   lib64/libart-compiler.so \
-  lib64/libartd-compiler.so \
-  lib64/libartd-dexlayout.so \
-  lib64/libartd-disassembler.so \
   lib64/libart-dexlayout.so \
   lib64/libart-disassembler.so \
-  lib64/libartd.so \
   lib64/libartpalette.so \
   lib64/libart.so \
-  lib64/libbacktrace.so \
-  lib64/libbase.so \
-  lib64/libcrypto.so \
-  lib64/libdexfiled_external.so \
-  lib64/libdexfiled.so \
   lib64/libdexfile_external.so \
   lib64/libdexfile.so \
-  lib64/libdexfile_support.so \
   lib64/libdt_fd_forward.so \
   lib64/libdt_socket.so \
   lib64/libexpat.so \
-  lib64/libicui18n.so \
-  lib64/libicu_jni.so \
-  lib64/libicuuc.so \
   lib64/libjavacore.so \
   lib64/libjdwp.so \
-  lib64/liblzma.so \
   lib64/libmeminfo.so \
   lib64/libnativebridge.so \
   lib64/libnativehelper.so \
   lib64/libnativeloader.so \
   lib64/libnpt.so \
-  lib64/libopenjdkd.so \
-  lib64/libopenjdkjvmd.so \
   lib64/libopenjdkjvm.so \
-  lib64/libopenjdkjvmtid.so \
   lib64/libopenjdkjvmti.so \
   lib64/libopenjdk.so \
   lib64/libpac.so \
   lib64/libprocinfo.so \
-  lib64/libprofiled.so \
   lib64/libprofile.so \
-  lib64/libsigchain.so \
-  lib64/libunwindstack.so \
-  lib64/libvixld.so \
   lib64/libvixl.so \
-  lib64/libziparchive.so \
-  lib64/libz.so \
 
 PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS := \
   lib/libcrypto.so \
@@ -616,6 +562,45 @@ PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS := \
   lib64/libcrypto.so \
   lib64/libjavacrypto.so \
   lib64/libssl.so \
+
+PRIVATE_I18N_APEX_DEPENDENCY_LIBS := \
+  lib/libandroidicu.so \
+  lib/libicui18n.so \
+  lib/libicu_jni.so \
+  lib/libicuuc.so \
+  lib64/libandroidicu.so \
+  lib64/libicui18n.so \
+  lib64/libicu_jni.so \
+  lib64/libicuuc.so \
+
+# Extracts files from an APEX into a location. The APEX can be either a .apex
+# file in $(TARGET_OUT)/apex, or a directory in the same location. Files are
+# extracted to $(TARGET_OUT) with the same relative paths as under the APEX
+# root.
+# $(1): APEX base name
+# $(2): List of files to extract, with paths relative to the APEX root
+#
+# "cp -d" below doesn't work on Darwin, but this is only used for Golem builds
+# and won't run on mac anyway.
+define extract-from-apex
+  apex_root=$(TARGET_OUT)/apex && \
+  apex_file=$$apex_root/$(1).apex && \
+  apex_dir=$$apex_root/$(1) && \
+  if [ -f $$apex_file ]; then \
+    rm -rf $$apex_dir && \
+    mkdir -p $$apex_dir && \
+    debugfs=$(HOST_OUT)/bin/debugfs_static && \
+    $(HOST_OUT)/bin/deapexer --debugfs_path $$debugfs extract $$apex_file $$apex_dir; \
+  fi && \
+  for f in $(2); do \
+    sf=$$apex_dir/$$f && \
+    df=$(TARGET_OUT)/$$f && \
+    if [ -f $$sf -o -h $$sf ]; then \
+      mkdir -p $$(dirname $$df) && \
+      cp -fd $$sf $$df; \
+    fi || exit 1; \
+  done
+endef
 
 # Generate copies of Bionic bootstrap artifacts and ART APEX
 # libraries in the `system` (TARGET_OUT) directory. This is dangerous
@@ -628,15 +613,7 @@ PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS := \
 # - Bionic bootstrap libraries, copied from
 #   `$(TARGET_OUT)/lib(64)/bootstrap` (the `/system/lib(64)/bootstrap`
 #   directory to be sync'd to the target);
-# - Programs and libraries from the ART APEX; if the product
-#   to build uses flattened APEXes, these libraries are copied from
-#   `$(TARGET_OUT)/apex/com.android.art.debug` (the flattened
-#   (Debug) ART APEX directory to be sync'd to the target);
-#   otherwise, they are copied from
-#   `$(TARGET_OUT)/../apex/com.android.art.debug` (the local
-#   directory under the build tree containing the (Debug) ART APEX
-#   artifacts, which is not sync'd to the target).
-# - Libraries from the Conscrypt APEX may be loaded during golem runs.
+# - Programs and libraries from various APEXes.
 #
 # This target is only used by Golem now.
 #
@@ -647,36 +624,25 @@ PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS := \
 # TODO(b/129332183): Remove this when Golem has full support for the
 # ART APEX.
 .PHONY: standalone-apex-files
-standalone-apex-files: libc.bootstrap \
+standalone-apex-files: deapexer \
+                       libc.bootstrap \
                        libdl.bootstrap \
                        libdl_android.bootstrap \
                        libm.bootstrap \
                        linker \
-                       $(DEBUG_ART_APEX) \
-                       $(CONSCRYPT_APEX)
+                       $(RELEASE_ART_APEX) \
+                       $(CONSCRYPT_APEX) \
+                       $(I18N_APEX)
 	for f in $(PRIVATE_BIONIC_FILES); do \
 	  tf=$(TARGET_OUT)/$$f; \
 	  if [ -f $$tf ]; then cp -f $$tf $$(echo $$tf | sed 's,bootstrap/,,'); fi; \
 	done
-	if [ "x$(TARGET_FLATTEN_APEX)" = xtrue ]; then \
-          apex_orig_dir=$(TARGET_OUT)/apex; \
-	else \
-          apex_orig_dir=""; \
-	fi; \
-	art_apex_orig_dir=$$apex_orig_dir/$(DEBUG_ART_APEX); \
-	for f in $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES); do \
-	  tf="$$art_apex_orig_dir/$$f"; \
-	  df="$(TARGET_OUT)/$$f"; \
-	  if [ -f $$tf ]; then \
-            if [ -h $$df ]; then rm $$df; fi; \
-            cp -fd $$tf $$df; \
-          fi; \
-	done; \
-	conscrypt_apex_orig_dir=$$apex_orig_dir/$(CONSCRYPT_APEX); \
-	for f in $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS); do \
-	  tf="$$conscrypt_apex_orig_dir/$$f"; \
-	  if [ -f $$tf ]; then cp -f $$tf $(TARGET_OUT)/$$f; fi; \
-	done; \
+	$(call extract-from-apex,$(RELEASE_ART_APEX),\
+	  $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES))
+	$(call extract-from-apex,$(CONSCRYPT_APEX),\
+	  $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS))
+	$(call extract-from-apex,$(I18N_APEX),\
+	  $(PRIVATE_I18N_APEX_DEPENDENCY_LIBS))
 
 ########################################################################
 # Phony target for only building what go/lem requires for pushing ART on /data.
@@ -718,14 +684,11 @@ standalone-apex-files: libc.bootstrap \
 # ART APEX (and TZ Data APEX).
 
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
-build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
+build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX) \
                         $(TARGET_OUT_EXECUTABLES)/art \
+                        $(TARGET_OUT_EXECUTABLES)/dex2oat_wrapper \
                         $(TARGET_OUT)/etc/public.libraries.txt \
-                        $(ART_TARGET_DEX_DEPENDENCIES) \
-                        $(ART_DEBUG_TARGET_SHARED_LIBRARY_DEPENDENCIES) \
                         $(ART_TARGET_SHARED_LIBRARY_BENCHMARK) \
-                        $(TARGET_CORE_IMG_OUT_BASE).art \
-                        $(TARGET_CORE_IMG_OUT_BASE)-interpreter.art \
                         libartpalette-system \
                         libc.bootstrap libdl.bootstrap libdl_android.bootstrap libm.bootstrap \
                         icu-data-art-test-i18n \
@@ -738,6 +701,8 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
 	sed -i '/libdexfiled.so/d' $(TARGET_OUT)/etc/public.libraries.txt
 	sed -i '/libprofiled.so/d' $(TARGET_OUT)/etc/public.libraries.txt
 	sed -i '/libartbased.so/d' $(TARGET_OUT)/etc/public.libraries.txt
+	# The 'art' script will look for a 'com.android.art' directory.
+	ln -sf com.android.art.release $(TARGET_OUT)/apex/com.android.art
 
 ########################################################################
 # Phony target for building what go/lem requires on host.
@@ -745,12 +710,14 @@ build-art-target-golem: dex2oat dalvikvm linker libstdc++ \
 # Also include libartbenchmark, we always include it when running golem.
 ART_HOST_SHARED_LIBRARY_BENCHMARK := $(ART_HOST_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-host-golem: build-art-host \
-                      $(ART_HOST_SHARED_LIBRARY_BENCHMARK)
+                      $(ART_HOST_SHARED_LIBRARY_BENCHMARK) \
+                      $(HOST_OUT_EXECUTABLES)/dex2oat_wrapper
 
 ########################################################################
 # Phony target for building what go/lem requires for syncing /system to target.
 .PHONY: build-art-unbundled-golem
-build-art-unbundled-golem: art-runtime linker oatdump $(ART_APEX_JARS) conscrypt crash_dump
+art_apex_jars := $(foreach pair,$(ART_APEX_JARS), $(call word-colon,2,$(pair)))
+build-art-unbundled-golem: art-runtime linker oatdump $(art_apex_jars) conscrypt crash_dump
 
 ########################################################################
 # Rules for building all dependencies for tests.

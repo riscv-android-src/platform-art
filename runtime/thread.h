@@ -638,7 +638,6 @@ class Thread {
 
   // Create the internal representation of a stack trace, that is more time
   // and space efficient to compute than the StackTraceElement[].
-  template<bool kTransactionActive>
   jobject CreateInternalStackTrace(const ScopedObjectAccessAlreadyRunnable& soa) const
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1143,7 +1142,7 @@ class Thread {
     return tls32_.use_mterp.load();
   }
 
-  void ResetQuickAllocEntryPointsForThread(bool is_marking);
+  void ResetQuickAllocEntryPointsForThread();
 
   // Returns the remaining space in the TLAB.
   size_t TlabSize() const {

@@ -44,6 +44,17 @@
 
 namespace art {
 
+std::unique_ptr<CompilerOptions> CommonCompilerTest::CreateCompilerOptions(
+    InstructionSet instruction_set, const std::string& variant) {
+  std::unique_ptr<CompilerOptions> compiler_options = std::make_unique<CompilerOptions>();
+  compiler_options->instruction_set_ = instruction_set;
+  std::string error_msg;
+  compiler_options->instruction_set_features_ =
+      InstructionSetFeatures::FromVariant(instruction_set, variant, &error_msg);
+  CHECK(compiler_options->instruction_set_features_ != nullptr) << error_msg;
+  return compiler_options;
+}
+
 CommonCompilerTest::CommonCompilerTest() {}
 CommonCompilerTest::~CommonCompilerTest() {}
 
@@ -96,7 +107,9 @@ void CommonCompilerTest::MakeExecutable(const void* code_start, size_t code_leng
   uintptr_t base = RoundDown(data, kPageSize);
   uintptr_t limit = RoundUp(data + code_length, kPageSize);
   uintptr_t len = limit - base;
-  int result = mprotect(reinterpret_cast<void*>(base), len, PROT_READ | PROT_WRITE | PROT_EXEC);
+  // Remove hwasan tag.  This is done in kernel in newer versions.  This supports older kernels.
+  void* base_ptr = HWASanUntag(reinterpret_cast<void*>(base));
+  int result = mprotect(base_ptr, len, PROT_READ | PROT_WRITE | PROT_EXEC);
   CHECK_EQ(result, 0);
 
   CHECK(FlushCpuCaches(reinterpret_cast<void*>(base), reinterpret_cast<void*>(base + len)));

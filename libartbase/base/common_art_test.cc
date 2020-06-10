@@ -16,14 +16,15 @@
 
 #include "common_art_test.h"
 
+#include <cstdio>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <ftw.h>
+#include <libgen.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <cstdio>
-#include <filesystem>
 #include "android-base/file.h"
 #include "android-base/logging.h"
 #include "nativehelper/scoped_local_ref.h"
@@ -256,9 +257,21 @@ void CommonArtTestImpl::SetUpAndroidDataDir(std::string& android_data) {
 void CommonArtTestImpl::SetUp() {
   SetUpAndroidRootEnvVars();
   SetUpAndroidDataDir(android_data_);
+
+  // Re-use the data temporary directory for /system_ext tests
+  android_system_ext_.append(android_data_.c_str());
+  android_system_ext_.append("/system_ext");
+  int mkdir_result = mkdir(android_system_ext_.c_str(), 0700);
+  ASSERT_EQ(mkdir_result, 0);
+  setenv("ANDROID_SYSTEM_EXT", android_system_ext_.c_str(), 1);
+
+  std::string system_ext_framework = android_system_ext_ + "/framework";
+  mkdir_result = mkdir(system_ext_framework.c_str(), 0700);
+  ASSERT_EQ(mkdir_result, 0);
+
   dalvik_cache_.append(android_data_.c_str());
   dalvik_cache_.append("/dalvik-cache");
-  int mkdir_result = mkdir(dalvik_cache_.c_str(), 0700);
+  mkdir_result = mkdir(dalvik_cache_.c_str(), 0700);
   ASSERT_EQ(mkdir_result, 0);
 
   static bool gSlowDebugTestFlag = false;
@@ -394,31 +407,35 @@ void CommonArtTestImpl::TearDown() {
   ClearDirectory(dalvik_cache_.c_str());
   int rmdir_cache_result = rmdir(dalvik_cache_.c_str());
   ASSERT_EQ(0, rmdir_cache_result);
+  ClearDirectory(android_system_ext_.c_str(), true);
+  rmdir_cache_result = rmdir(android_system_ext_.c_str());
+  ASSERT_EQ(0, rmdir_cache_result);
   TearDownAndroidDataDir(android_data_, true);
   dalvik_cache_.clear();
+  android_system_ext_.clear();
 }
 
 static std::string GetDexFileName(const std::string& jar_prefix, bool host) {
   std::string prefix(host ? GetAndroidRoot() : "");
-  const char* apexPath = (jar_prefix == "conscrypt")
-    ? kAndroidConscryptApexDefaultPath
-    : kAndroidArtApexDefaultPath;
+  const char* apexPath = (jar_prefix == "conscrypt") ? kAndroidConscryptApexDefaultPath
+    : (jar_prefix == "core-icu4j" ? kAndroidI18nApexDefaultPath
+    : kAndroidArtApexDefaultPath);
   return StringPrintf("%s%s/javalib/%s.jar", prefix.c_str(), apexPath, jar_prefix.c_str());
 }
 
 std::vector<std::string> CommonArtTestImpl::GetLibCoreModuleNames() const {
   // Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-  // because that's what we use for compiling the core.art image.
+  // because that's what we use for compiling the boot.art image.
   // It may contain additional modules from TEST_CORE_JARS.
   return {
       // CORE_IMG_JARS modules.
       "core-oj",
       "core-libart",
-      "core-icu4j",
       "okhttp",
       "bouncycastle",
       "apache-xml",
       // Additional modules.
+      "core-icu4j",
       "conscrypt",
   };
 }
@@ -446,7 +463,8 @@ std::vector<std::string> CommonArtTestImpl::GetLibCoreDexLocations(
     std::string prefix = GetAndroidBuildTop();
     for (std::string& location : result) {
       CHECK_GT(location.size(), prefix.size());
-      CHECK_EQ(location.compare(0u, prefix.size(), prefix), 0);
+      CHECK_EQ(location.compare(0u, prefix.size(), prefix), 0)
+          << " prefix=" << prefix << " location=" << location;
       location.erase(0u, prefix.size());
     }
   }
@@ -476,16 +494,14 @@ std::string CommonArtTestImpl::GetClassPathOption(const char* option,
 
 std::string CommonArtTestImpl::GetTestDexFileName(const char* name) const {
   CHECK(name != nullptr);
-  std::string filename;
-  if (IsHost()) {
-    filename += GetAndroidRoot() + "/framework/";
-  } else {
-    filename += ART_TARGET_NATIVETEST_DIR_STRING;
-  }
-  filename += "art-gtest-";
-  filename += name;
-  filename += ".jar";
-  return filename;
+  // The needed jar files for gtest are located next to the gtest binary itself.
+  std::string cmdline;
+  bool result = android::base::ReadFileToString("/proc/self/cmdline", &cmdline);
+  CHECK(result);
+  UniqueCPtr<char[]> executable_path(realpath(cmdline.c_str(), nullptr));
+  CHECK(executable_path != nullptr);
+  std::string executable_dir = dirname(executable_path.get());
+  return executable_dir + "/art-gtest-jars-" + name + ".jar";
 }
 
 std::vector<std::unique_ptr<const DexFile>> CommonArtTestImpl::OpenDexFiles(const char* filename) {

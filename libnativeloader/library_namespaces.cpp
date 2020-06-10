@@ -13,6 +13,9 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+
+#if defined(ART_TARGET_ANDROID)
+
 #include "library_namespaces.h"
 
 #include <dirent.h>
@@ -48,6 +51,7 @@ constexpr const char* kVendorNamespaceName = "sphal";
 constexpr const char* kVndkNamespaceName = "vndk";
 constexpr const char* kVndkProductNamespaceName = "vndk_product";
 constexpr const char* kArtNamespaceName = "com_android_art";
+constexpr const char* kI18nNamespaceName = "com_android_i18n";
 constexpr const char* kNeuralNetworksNamespaceName = "com_android_neuralnetworks";
 constexpr const char* kStatsdNamespaceName = "com_android_os_statsd";
 
@@ -269,6 +273,15 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     }
   }
 
+  auto i18n_ns = NativeLoaderNamespace::GetExportedNamespace(kI18nNamespaceName, is_bridged);
+  // i18n APEX does not exist on host, and under certain build conditions.
+  if (i18n_ns.ok()) {
+    linked = app_ns->Link(*i18n_ns, i18n_public_libraries());
+    if (!linked.ok()) {
+      return linked.error();
+    }
+  }
+
   // Give access to NNAPI libraries (apex-updated LLNDK library).
   auto nnapi_ns =
       NativeLoaderNamespace::GetExportedNamespace(kNeuralNetworksNamespaceName, is_bridged);
@@ -392,3 +405,5 @@ base::Result<std::string> FindApexNamespaceName(const std::string& location) {
 }
 
 }  // namespace android::nativeloader
+
+#endif  // defined(ART_TARGET_ANDROID)

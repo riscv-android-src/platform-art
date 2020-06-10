@@ -30,8 +30,8 @@ WITH_AGENT=()
 DEBUGGER_AGENT=""
 WRAP_DEBUGGER_AGENT="n"
 DEV_MODE="n"
-DEX2OAT_NDEBUG_BINARY="dex2oat"
-DEX2OAT_DEBUG_BINARY="dex2oatd"
+DEX2OAT_NDEBUG_BINARY="dex2oat32"
+DEX2OAT_DEBUG_BINARY="dex2oatd32"
 EXPERIMENTAL=""
 FALSE_BIN="false"
 FLAGS=""
@@ -113,7 +113,7 @@ COMPILER_FLAGS="${COMPILER_FLAGS} --runtime-arg -XX:SlowDebug=true"
 
 # Let the compiler and runtime know that we are running tests.
 COMPILE_FLAGS="${COMPILE_FLAGS} --compile-art-test"
-FLAGS="${FLAGS} -Xcompiler-option --compile-art-test"
+ANDROID_FLAGS="${ANDROID_FLAGS} -Xcompiler-option --compile-art-test"
 
 while true; do
     if [ "x$1" = "x--quiet" ]; then
@@ -266,6 +266,11 @@ while true; do
         ANDROID_ART_ROOT="${ANDROID_HOST_OUT}/com.android.art"
         ANDROID_I18N_ROOT="${ANDROID_HOST_OUT}/com.android.i18n"
         ANDROID_TZDATA_ROOT="${ANDROID_HOST_OUT}/com.android.tzdata"
+        # On host, we default to using the symlink, as the PREFER_32BIT
+        # configuration is the only configuration building a 32bit version of
+        # dex2oat.
+        DEX2OAT_DEBUG_BINARY="dex2oatd"
+        DEX2OAT_NDEBUG_BINARY="dex2oat"
         shift
     elif [ "x$1" = "x--bionic" ]; then
         BIONIC="y"
@@ -427,6 +432,8 @@ while true; do
         TEST_DIRECTORY="nativetest64"
         ARCHITECTURES_PATTERN="${ARCHITECTURES_64}"
         GET_DEVICE_ISA_BITNESS_FLAG="--64"
+        DEX2OAT_NDEBUG_BINARY="dex2oat64"
+        DEX2OAT_DEBUG_BINARY="dex2oatd64"
         shift
     elif [ "x$1" = "x--experimental" ]; then
         if [ "$#" -lt 2 ]; then
@@ -501,7 +508,7 @@ fi
 CHROOT_DEX_LOCATION="$CHROOT$DEX_LOCATION"
 
 # If running on device, determine the ISA of the device.
-if [ "$HOST" = "n" ]; then
+if [ "$HOST" = "n" -a "$USE_JVM" = "n" ]; then
   ISA=$("$ANDROID_BUILD_TOP/art/test/utils/get-device-isa" "$GET_DEVICE_ISA_BITNESS_FLAG")
 fi
 
@@ -702,39 +709,37 @@ if [ "$USE_JVM" = "y" ]; then
 fi
 
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-# because that's what we use for compiling the core.art image.
+# because that's what we use for compiling the boot.art image.
 # It may contain additional modules from TEST_CORE_JARS.
-bpath_modules="core-oj core-libart core-icu4j okhttp bouncycastle apache-xml conscrypt"
+bpath_modules="core-oj core-libart okhttp bouncycastle apache-xml core-icu4j conscrypt"
 bpath=""
 bpath_locations=""
 bpath_separator=""
+bpath_prefix=""
+bpath_location_prefix=""
 if [ "${HOST}" = "y" ]; then
-    framework="${ANDROID_HOST_OUT}/framework"
-    if [ "${ANDROID_HOST_OUT:0:${#ANDROID_BUILD_TOP}+1}" = "${ANDROID_BUILD_TOP}/" ]; then
-      framework_location="${ANDROID_HOST_OUT:${#ANDROID_BUILD_TOP}+1}/framework"
-    else
-      echo "error: ANDROID_BUILD_TOP/ is not a prefix of ANDROID_HOST_OUT"
-      echo "ANDROID_BUILD_TOP=${ANDROID_BUILD_TOP}"
-      echo "ANDROID_HOST_OUT=${ANDROID_HOST_OUT}"
-      exit
-    fi
-    bpath_suffix="-hostdex"
-    for bpath_module in ${bpath_modules}; do
-      bpath+="${bpath_separator}${framework}/${bpath_module}${bpath_suffix}.jar"
-      bpath_locations+="${bpath_separator}${framework_location}/${bpath_module}${bpath_suffix}.jar"
-      bpath_separator=":"
-    done
-else
-    for bpath_module in ${bpath_modules}; do
-      apex_module="com.android.art"
-      if [ "${bpath_module}" = "conscrypt" ]; then
-        apex_module="com.android.conscrypt"
-      fi
-      bpath+="${bpath_separator}/apex/${apex_module}/javalib/${bpath_module}.jar"
-      bpath_locations+="${bpath_separator}/apex/${apex_module}/javalib/${bpath_module}.jar"
-      bpath_separator=":"
-    done
+  bpath_prefix="${ANDROID_HOST_OUT}"
+  if [ "${ANDROID_HOST_OUT:0:${#ANDROID_BUILD_TOP}+1}" = "${ANDROID_BUILD_TOP}/" ]; then
+    bpath_location_prefix="${ANDROID_HOST_OUT:${#ANDROID_BUILD_TOP}+1}"
+  else
+    echo "error: ANDROID_BUILD_TOP/ is not a prefix of ANDROID_HOST_OUT"
+    echo "ANDROID_BUILD_TOP=${ANDROID_BUILD_TOP}"
+    echo "ANDROID_HOST_OUT=${ANDROID_HOST_OUT}"
+    exit
+  fi
 fi
+for bpath_module in ${bpath_modules}; do
+  apex_module="com.android.art"
+  case "$bpath_module" in
+    (conscrypt)  apex_module="com.android.conscrypt";;
+    (core-icu4j) apex_module="com.android.i18n";;
+    (*)          apex_module="com.android.art";;
+  esac
+  bpath_jar="/apex/${apex_module}/javalib/${bpath_module}.jar"
+  bpath+="${bpath_separator}${bpath_prefix}${bpath_jar}"
+  bpath_locations+="${bpath_separator}${bpath_location_prefix}${bpath_jar}"
+  bpath_separator=":"
+done
 # Pass down the bootclasspath
 FLAGS="${FLAGS} -Xbootclasspath:${bpath}"
 FLAGS="${FLAGS} -Xbootclasspath-locations:${bpath_locations}"
@@ -751,7 +756,7 @@ if [ "$HAVE_IMAGE" = "n" ]; then
     if [ "${RELOCATE}" = "y" ] ; then
       DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
     else
-      DALVIKVM_BOOT_OPT="-Ximage:/system/non-existent/core.art"
+      DALVIKVM_BOOT_OPT="-Ximage:/system/non-existent/boot.art"
     fi
 else
     DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
@@ -1163,7 +1168,7 @@ if [ "$HOST" = "n" ]; then
     # Needed to access libarttest(d).so and JVMTI agent libraries.
     LD_LIBRARY_PATH="/data/$TEST_DIRECTORY/art/$ISA:$LD_LIBRARY_PATH"
     # Needed to access the boot (core) image files.
-    LD_LIBRARY_PATH="/data/art-test/$ISA:$LD_LIBRARY_PATH"
+    LD_LIBRARY_PATH="/apex/com.android.art/javalib/$ISA:$LD_LIBRARY_PATH"
     # Needed to access the test's Odex files.
     LD_LIBRARY_PATH="$DEX_LOCATION/oat/$ISA:$LD_LIBRARY_PATH"
     # Needed to access the test's native libraries (see e.g. 674-hiddenapi,
