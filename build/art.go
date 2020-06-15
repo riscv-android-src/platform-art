@@ -25,7 +25,7 @@ import (
 	"github.com/google/blueprint/proptools"
 )
 
-var supportedArches = []string{"arm", "arm64", "mips", "mips64", "x86", "x86_64"}
+var supportedArches = []string{"arm", "arm64", "mips", "mips64", "riscv64", "x86", "x86_64"}
 
 func globalFlags(ctx android.BaseContext) ([]string, []string) {
 	var cflags []string
@@ -33,6 +33,9 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 
 	opt := envDefault(ctx, "ART_NDEBUG_OPT_FLAG", "-O3")
 	cflags = append(cflags, opt)
+	cflags = append(cflags, "-g")
+	cflags = append(cflags, "-fno-omit-frame-pointer")
+
 
 	tlab := false
 
@@ -89,6 +92,7 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
 			"-DART_STACK_OVERFLOW_GAP_mips=16384",
 			"-DART_STACK_OVERFLOW_GAP_mips64=16384",
+			"-DART_STACK_OVERFLOW_GAP_riscv64=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86_64=20480")
 	} else {
@@ -97,6 +101,7 @@ func globalFlags(ctx android.BaseContext) ([]string, []string) {
 			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
 			"-DART_STACK_OVERFLOW_GAP_mips=16384",
 			"-DART_STACK_OVERFLOW_GAP_mips64=16384",
+			"-DART_STACK_OVERFLOW_GAP_riscv64=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86=8192",
 			"-DART_STACK_OVERFLOW_GAP_x86_64=8192")
 	}

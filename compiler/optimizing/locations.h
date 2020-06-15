@@ -485,7 +485,7 @@ class RegisterSet : public ValueObject {
   uint32_t floating_point_registers_;
 };
 
-static constexpr bool kIntrinsified = true;
+static constexpr bool kIntrinsified = true;  // [workaround] disable Intrinsic
 
 /**
  * The code generator computes LocationSummary for each instruction so that

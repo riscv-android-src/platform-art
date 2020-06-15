@@ -289,7 +289,7 @@ NO_RETURN static void Usage(const char* fmt, ...) {
   UsageError("      Example: --android-root=out/host/linux-x86");
   UsageError("      Default: $ANDROID_ROOT");
   UsageError("");
-  UsageError("  --instruction-set=(arm|arm64|mips|mips64|x86|x86_64): compile for a particular");
+  UsageError("  --instruction-set=(arm|arm64|mips|mips64|x86|x86_64|riscv64): compile for a particular");
   UsageError("      instruction set.");
   UsageError("      Example: --instruction-set=x86");
   UsageError("      Default: arm");
@@ -943,6 +943,7 @@ class Dex2Oat final {
       case InstructionSet::kX86_64:
       case InstructionSet::kMips:
       case InstructionSet::kMips64:
+      case InstructionSet::kRiscv64:
         compiler_options_->implicit_null_checks_ = true;
         compiler_options_->implicit_so_checks_ = true;
         break;
@@ -952,13 +953,15 @@ class Dex2Oat final {
         break;
     }
 
+#if 0   // [workaround] disable watch dog because it run slowly on emulator
     // Done with usage checks, enable watchdog if requested
     if (parser_options->watch_dog_enabled) {
       int64_t timeout = parser_options->watch_dog_timeout_in_ms > 0
                             ? parser_options->watch_dog_timeout_in_ms
                             : WatchDog::kDefaultWatchdogTimeoutInMS;
-      watchdog_.reset(new WatchDog(timeout));
+      watchdog_.reset(new WatchDog(timeout*5));
     }
+#endif
 
     // Fill some values into the key-value store for the oat header.
     key_value_store_.reset(new SafeMap<std::string, std::string>());

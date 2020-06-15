@@ -124,6 +124,7 @@ run_test_option = []
 stop_testrunner = False
 dex2oat_jobs = -1   # -1 corresponds to default threads for dex2oat
 run_all_configs = False
+dump_cfg = False
 
 # Dict containing extra arguments
 extra_arguments = { "host" : [], "target" : [] }
@@ -447,6 +448,10 @@ def run_tests(tests):
         options_test += ' --relocate'
       elif relocate == 'no-relocate':
         options_test += ' --no-relocate'
+
+      global dump_cfg # [workaround] use --dump-cfg to dump cfg file
+      if dump_cfg:
+        options_test += ' --optimizing -Xcompiler-option --dump-cfg=/data/graph.cfg'
 
       if trace == 'trace':
         options_test += ' --trace'
@@ -934,6 +939,7 @@ def parse_option():
   global run_all_configs
   global with_agent
   global zipapex_loc
+  global dump_cfg
 
   parser = argparse.ArgumentParser(description="Runs all or a subset of the ART test suite.")
   parser.add_argument('-t', '--test', action='append', dest='tests', help='name(s) of the test(s)')
@@ -978,6 +984,7 @@ def parse_option():
                             help='Location for runtime zipapex.')
   global_group.add_argument('-a', '--all', action='store_true', dest='run_all',
                             help="Run all the possible configurations for the input test set")
+  global_group.add_argument('--dump-cfg', action='store_true', dest='dump_cfg')
   for variant_type, variant_set in VARIANT_TYPE_DICT.items():
     var_group = parser.add_argument_group(
         '{}-type Options'.format(variant_type),
@@ -1027,6 +1034,8 @@ def parse_option():
     dex2oat_jobs = options['dex2oat_jobs']
   if options['run_all']:
     run_all_configs = True
+  if options['dump_cfg']:
+    dump_cfg = True
 
   return tests
 
