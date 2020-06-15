@@ -50,6 +50,11 @@ art_cc_defaults {
                 "linker/arm64/relative_patcher_arm64.cc",
             ],
         },
+        riscv64: {
+            srcs: [
+                "linker/riscv64/relative_patcher_riscv64.cc",
+            ],
+        },
         x86: {
             srcs: [
                 "linker/x86/relative_patcher_x86.cc",
@@ -242,6 +247,11 @@ cc_defaults {
                 profile_file: "art/dex2oat_arm_arm64.profdata",
             },
         },
+        android_riscv64: {
+            pgo: {
+                profile_file: "art/dex2oat_arm_riscv64.profdata",
+            },
+        },
         android_x86_64: {
             pgo: {
                 profile_file: "art/dex2oat_x86_x86_64.profdata",
@@ -296,7 +306,7 @@ art_cc_binary {
                 "libart-dex2oat",
             ],
             lto: {
-                thin: true,
+                thin: false,
             },
         },
         host: {
@@ -510,6 +520,13 @@ art_cc_defaults {
                 "linker/arm64/relative_patcher_arm64_test.cc",
             ],
         },
+		/*
+        riscv64: {
+            srcs: [
+                "linker/riscv64/relative_patcher_riscv64_test.cc",
+            ],
+        },
+		*/
         x86: {
             srcs: [
                 "linker/x86/relative_patcher_x86_test.cc",

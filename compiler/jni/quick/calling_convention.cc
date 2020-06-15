@@ -37,6 +37,10 @@
 #include "jni/quick/x86_64/calling_convention_x86_64.h"
 #endif
 
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#include "jni/quick/riscv64/calling_convention_riscv64.h"
+#endif
+
 namespace art {
 
 // Managed runtime calling convention
@@ -71,6 +75,12 @@ std::unique_ptr<ManagedRuntimeCallingConvention> ManagedRuntimeCallingConvention
     case InstructionSet::kX86_64:
       return std::unique_ptr<ManagedRuntimeCallingConvention>(
           new (allocator) x86_64::X86_64ManagedRuntimeCallingConvention(
+              is_static, is_synchronized, shorty));
+#endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64:
+      return std::unique_ptr<ManagedRuntimeCallingConvention>(
+          new (allocator) riscv64::Riscv64ManagedRuntimeCallingConvention(
               is_static, is_synchronized, shorty));
 #endif
     default:
@@ -161,6 +171,12 @@ std::unique_ptr<JniCallingConvention> JniCallingConvention::Create(ArenaAllocato
     case InstructionSet::kX86_64:
       return std::unique_ptr<JniCallingConvention>(
           new (allocator) x86_64::X86_64JniCallingConvention(
+              is_static, is_synchronized, is_critical_native, shorty));
+#endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64:
+      return std::unique_ptr<JniCallingConvention>(
+          new (allocator) riscv64::Riscv64JniCallingConvention(
               is_static, is_synchronized, is_critical_native, shorty));
 #endif
     default:

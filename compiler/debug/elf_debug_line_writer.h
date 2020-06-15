@@ -70,6 +70,7 @@ class ElfDebugLineWriter {
         dwarf_isa = 1;  // DW_ISA_ARM_thumb.
         break;
       case InstructionSet::kArm64:
+      case InstructionSet::kRiscv64:
         code_factor_bits_ = 2;  // 32-bit instructions
         break;
       case InstructionSet::kNone:

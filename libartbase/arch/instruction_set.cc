@@ -29,6 +29,7 @@ void InstructionSetAbort(InstructionSet isa) {
     case InstructionSet::kArm64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64:
+    case InstructionSet::kRiscv64:
     case InstructionSet::kNone:
       LOG(FATAL) << "Unsupported instruction set " << isa;
       UNREACHABLE();
@@ -48,6 +49,8 @@ const char* GetInstructionSetString(InstructionSet isa) {
       return "x86";
     case InstructionSet::kX86_64:
       return "x86_64";
+    case InstructionSet::kRiscv64:
+      return "riscv64";
     case InstructionSet::kNone:
       return "none";
   }
@@ -66,6 +69,8 @@ InstructionSet GetInstructionSetFromString(const char* isa_str) {
     return InstructionSet::kX86;
   } else if (strcmp("x86_64", isa_str) == 0) {
     return InstructionSet::kX86_64;
+  } else if (strcmp("riscv64", isa_str) == 0) {
+    return InstructionSet::kRiscv64;
   }
 
   return InstructionSet::kNone;
@@ -83,6 +88,8 @@ size_t GetInstructionSetAlignment(InstructionSet isa) {
       // Fall-through.
     case InstructionSet::kX86_64:
       return kX86Alignment;
+    case InstructionSet::kRiscv64:
+      return kRiscv64Alignment;
     case InstructionSet::kNone:
       LOG(FATAL) << "ISA kNone does not have alignment.";
       UNREACHABLE();

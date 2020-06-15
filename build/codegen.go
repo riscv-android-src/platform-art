@@ -205,7 +205,7 @@ type codegenArchProperties struct {
 
 type codegenProperties struct {
 	Codegen struct {
-		Arm, Arm64, X86, X86_64 codegenArchProperties
+		Arm, Arm64, Riscv64, X86, X86_64 codegenArchProperties
 	}
 }
 

@@ -461,6 +461,7 @@ static bool IsInstructionSetSupported(InstructionSet instruction_set) {
   return instruction_set == InstructionSet::kArm
       || instruction_set == InstructionSet::kArm64
       || instruction_set == InstructionSet::kThumb2
+      || instruction_set == InstructionSet::kRiscv64
       || instruction_set == InstructionSet::kX86
       || instruction_set == InstructionSet::kX86_64;
 }
@@ -539,6 +540,20 @@ bool OptimizingCompiler::RunArchOptimizations(HGraph* graph,
                               dex_compilation_unit,
                               pass_observer,
                               arm64_optimizations);
+    }
+#endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64: {
+      OptimizationDef riscv64_optimizations[] = {
+        OptDef(OptimizationPass::kSideEffectsAnalysis),
+        OptDef(OptimizationPass::kGlobalValueNumbering, "GVN$after_arch")
+      };
+      return RunOptimizations(graph,
+                              codegen,
+                              dex_compilation_unit,
+                              pass_observer,
+                              handles,
+                              riscv64_optimizations);
     }
 #endif
 #ifdef ART_ENABLE_CODEGEN_x86

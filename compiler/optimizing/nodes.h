@@ -1609,7 +1609,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
 /*
  * Instructions, shared across several (not all) architectures.
  */
-#if !defined(ART_ENABLE_CODEGEN_arm) && !defined(ART_ENABLE_CODEGEN_arm64)
+#if !defined(ART_ENABLE_CODEGEN_arm) && !defined(ART_ENABLE_CODEGEN_arm64) && !defined(ART_ENABLE_CODEGEN_riscv64)
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)
 #else
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                         \
@@ -1622,6 +1622,8 @@ class HLoopInformationOutwardIterator : public ValueObject {
 #define FOR_EACH_CONCRETE_INSTRUCTION_ARM(M)
 
 #define FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)
 
 #ifndef ART_ENABLE_CODEGEN_x86
 #define FOR_EACH_CONCRETE_INSTRUCTION_X86(M)
@@ -1648,6 +1650,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)                                \
+  FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)                              \
   FOR_EACH_CONCRETE_INSTRUCTION_X86(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_64(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)
@@ -8314,7 +8317,7 @@ class HIntermediateAddress final : public HExpression<2> {
 
 #include "nodes_vector.h"
 
-#if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64)
+#if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64) || defined(ART_ENABLE_CODEGEN_riscv64)
 #include "nodes_shared.h"
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)
@@ -8343,7 +8346,7 @@ class HGraphVisitor : public ValueObject {
 
   HGraph* GetGraph() const { return graph_; }
 
-  // Visit functions for instruction classes.
+  // Visit functions for instruction classes. WWD
 #define DECLARE_VISIT_INSTRUCTION(name, super)                                        \
   virtual void Visit##name(H##name* instr) { VisitInstruction(instr); }
 
@@ -8366,7 +8369,7 @@ class HGraphDelegateVisitor : public HGraphVisitor {
       : HGraphVisitor(graph, stats) {}
   virtual ~HGraphDelegateVisitor() {}
 
-  // Visit functions that delegate to to super class.
+  // Visit functions that delegate to to super class.  WWD
 #define DECLARE_VISIT_INSTRUCTION(name, super)                                        \
   void Visit##name(H##name* instr) override { Visit##super(instr); }
 
@@ -8528,7 +8531,7 @@ inline bool IsZeroBitPattern(HInstruction* instruction) {
     return results[static_cast<size_t>(GetKind())];                            \
   }
 
-  FOR_EACH_ABSTRACT_INSTRUCTION(INSTRUCTION_TYPE_CHECK)
+FOR_EACH_ABSTRACT_INSTRUCTION(INSTRUCTION_TYPE_CHECK)
 #undef INSTRUCTION_TYPE_CHECK
 #undef INSTRUCTION_TYPE_CHECK_RESULT
 
@@ -8540,7 +8543,7 @@ inline bool IsZeroBitPattern(HInstruction* instruction) {
     return Is##type() ? static_cast<H##type*>(this) : nullptr;                 \
   }
 
-  FOR_EACH_INSTRUCTION(INSTRUCTION_TYPE_CAST)
+FOR_EACH_INSTRUCTION(INSTRUCTION_TYPE_CAST)
 #undef INSTRUCTION_TYPE_CAST
 
 

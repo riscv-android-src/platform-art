@@ -37,6 +37,10 @@ namespace x86_64 {
 class X86_64Assembler;
 class NearLabel;
 }  // namespace x86_64
+namespace riscv64 {
+class Riscv64Assembler;
+class Riscv64Label;
+}  // namespace riscv64
 
 class ExternalLabel {
  public:
@@ -111,6 +115,7 @@ class Label {
   friend class x86::NearLabel;
   friend class x86_64::X86_64Assembler;
   friend class x86_64::NearLabel;
+  friend class riscv64::Riscv64Assembler;
 
   DISALLOW_COPY_AND_ASSIGN(Label);
 };

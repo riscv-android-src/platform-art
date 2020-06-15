@@ -43,7 +43,7 @@ BITNESS_AUTO = 'auto'
 BITNESS_ALL = [BITNESS_32, BITNESS_64, BITNESS_MULTILIB, BITNESS_AUTO]
 
 # Architectures supported by APEX packages.
-ARCHS = ["arm", "arm64", "x86", "x86_64"]
+ARCHS = ["arm", "arm64", "riscv64", "x86", "x86_64"]
 
 # Directory containing ART tests within an ART APEX (if the package includes
 # any). ART test executables are installed in `bin/art/<arch>`. Segregating

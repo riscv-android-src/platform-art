@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011 The Android Open Source Project
+ * Copyright (C) 2014 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,8 +14,23 @@
  * limitations under the License.
  */
 
-public class Main {
-  public static void main(String[] args) {
-    System.out.println("Hello, world!");
-  }
+#include "thread.h"
+
+#include <android-base/logging.h>
+
+#include "asm_support_riscv64.h"
+#include "base/enums.h"
+
+namespace art {
+
+void Thread::InitCpu() {
+  CHECK_EQ(THREAD_FLAGS_OFFSET, ThreadFlagsOffset<PointerSize::k64>().Int32Value());
+  CHECK_EQ(THREAD_CARD_TABLE_OFFSET, CardTableOffset<PointerSize::k64>().Int32Value());
+  CHECK_EQ(THREAD_EXCEPTION_OFFSET, ExceptionOffset<PointerSize::k64>().Int32Value());
 }
+
+void Thread::CleanupCpu() {
+  // Do nothing.
+}
+
+}  // namespace art

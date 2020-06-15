@@ -422,6 +422,11 @@ art_apex_test_host {
             enabled: false,
         },
     },
+    arch : {
+        riscv64: {
+            enabled: false,
+        }
+    }
 }
 
 python_binary_host {

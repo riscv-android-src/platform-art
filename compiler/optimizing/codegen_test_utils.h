@@ -20,6 +20,8 @@
 #include "arch/arm/registers_arm.h"
 #include "arch/instruction_set.h"
 #include "arch/x86/registers_x86.h"
+#include "register_allocator.h"
+#include "code_generator.h"
 #include "code_simulator.h"
 #include "code_simulator_container.h"
 #include "common_compiler_test.h"
@@ -41,6 +43,10 @@
 
 #ifdef ART_ENABLE_CODEGEN_x86_64
 #include "code_generator_x86_64.h"
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#include "code_generator_riscv64.h"
 #endif
 
 namespace art {
@@ -341,6 +347,12 @@ inline CodeGenerator* create_codegen_x86(HGraph* graph, const CompilerOptions& c
 #ifdef ART_ENABLE_CODEGEN_x86_64
 inline CodeGenerator* create_codegen_x86_64(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) x86_64::CodeGeneratorX86_64(graph, compiler_options);
+}
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_riscv64
+CodeGenerator* create_codegen_riscv64(HGraph* graph, const CompilerOptions& compiler_options) {
+  return new (graph->GetAllocator()) riscv64::CodeGeneratorRISCV64(graph, compiler_options);
 }
 #endif
 

@@ -49,7 +49,7 @@ static constexpr bool kCauseSegfault = false;
 char* go_away_compiler_cfi = nullptr;
 
 static void CauseSegfault() {
-#if defined(__arm__) || defined(__i386__) || defined(__x86_64__) || defined(__aarch64__)
+#if defined(__arm__) || defined(__i386__) || defined(__x86_64__) || defined(__aarch64__) || defined(__riscv)
   // On supported architectures we cause a real SEGV.
   *go_away_compiler_cfi = 'a';
 #else

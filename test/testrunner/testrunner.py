@@ -145,6 +145,7 @@ zipapex_loc = None
 run_test_option = []
 dex2oat_jobs = -1   # -1 corresponds to default threads for dex2oat
 run_all_configs = False
+dump_cfg = False
 
 # Dict containing extra arguments
 extra_arguments = { "host" : [], "target" : [] }
@@ -532,6 +533,10 @@ def run_tests(tests):
         options_test += ' --relocate'
       elif relocate == 'no-relocate':
         options_test += ' --no-relocate'
+
+      global dump_cfg # [workaround] use --dump-cfg to dump cfg file
+      if dump_cfg:
+        options_test += ' --optimizing -Xcompiler-option --dump-cfg=/data/graph.cfg'
 
       if trace == 'trace':
         options_test += ' --trace'
@@ -1201,6 +1206,8 @@ def parse_option():
     dex2oat_jobs = options['dex2oat_jobs']
   if options['run_all']:
     run_all_configs = True
+  if options['dump_cfg']:
+    dump_cfg = True
 
   return tests
 

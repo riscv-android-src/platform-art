@@ -161,7 +161,7 @@ TEST_F(ThreadLifecycleCallbackRuntimeCallbacksTest, ThreadLifecycleCallbackJava)
   // The metrics reporting thread will sometimes be slow to start. Synchronously requesting a
   // metrics report forces us to wait until the thread has started.
   runtime_->RequestMetricsReport(/*synchronous=*/true);
-
+  sleep(5);  // [workaround] wait runtime ready
   cb_.state = CallbackState::kBase;  // Ignore main thread attach.
 
   {

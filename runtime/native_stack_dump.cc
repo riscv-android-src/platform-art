@@ -332,6 +332,8 @@ void DumpNativeStack(std::ostream& os,
   }
   std::unique_ptr<Backtrace> backtrace(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, tid, map));
   backtrace->SetSkipFrames(skip_frames);
+  /*
+  // WWD
   if (!backtrace->Unwind(0, reinterpret_cast<ucontext*>(ucontext_ptr))) {
     os << prefix << "(backtrace::Unwind failed for thread " << tid
        << ": " <<  backtrace->GetErrorString(backtrace->GetError()) << ")" << std::endl;
@@ -340,6 +342,7 @@ void DumpNativeStack(std::ostream& os,
     os << prefix << "(no native stack frames for thread " << tid << ")" << std::endl;
     return;
   }
+  */
 
   // Check whether we have and should use addr2line.
   bool use_addr2line;

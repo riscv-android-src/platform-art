@@ -46,6 +46,44 @@ void CheckMterpAsmConstants() {
       LOG(FATAL) << "ERROR: unexpected asm interp size " << interp_size
                  << "(did an instruction handler exceed " << width << " bytes?)";
   }
+#if defined(__riscv)
+  int instruction_configs[256] = {
+    // 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b, c, d, e, f
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x00
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x10
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x20
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x30
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x40
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x50
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x60
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x70
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x80
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x90
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0xa0
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0xb0
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0xc0
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0xd0
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0xe0
+     1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1   // 0xf0
+  };
+  std::ifstream f("/data/ins.cfg", std::ios::in);
+
+  if (!f.is_open()) return;
+
+  char buf[256];
+  size_t op_idx = 0;
+  int* insptr = instruction_configs;
+
+  f.getline(buf, sizeof(buf));  // ignore first line
+  while (f.getline(buf, sizeof(buf)) && op_idx < 256) {
+    sscanf(buf, "%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d#",
+        &insptr[op_idx+0], &insptr[op_idx+1], &insptr[op_idx+2], &insptr[op_idx+3],
+        &insptr[op_idx+4], &insptr[op_idx+5], &insptr[op_idx+6], &insptr[op_idx+7],
+        &insptr[op_idx+8], &insptr[op_idx+9], &insptr[op_idx+10], &insptr[op_idx+11],
+        &insptr[op_idx+12], &insptr[op_idx+13], &insptr[op_idx+14], &insptr[op_idx+15]);
+    op_idx += 16;
+  }
+#endif
 }
 
 void InitMterpTls(Thread* self) {
@@ -146,6 +184,21 @@ extern "C" ssize_t MterpDoPackedSwitch(const uint16_t* switchData, int32_t testV
 bool CanUseMterp()
     REQUIRES_SHARED(Locks::mutator_lock_) {
   const Runtime* const runtime = Runtime::Current();
+  #if defined(__riscv)
+  // zhengxing: hacking for running mterp without jit support.
+  return
+      runtime->IsStarted() &&
+      !Dbg::IsDebuggerActive() &&
+      !runtime->GetInstrumentation()->IsActive() &&
+      // mterp only knows how to deal with the normal exits. It cannot handle any of the
+      // non-standard force-returns.
+      !runtime->AreNonStandardExitsEnabled() &&
+      // An async exception has been thrown. We need to go to the switch interpreter. MTerp doesn't
+      // know how to deal with these so we could end up never dealing with it if we are in an
+      // infinite loop.
+      !runtime->AreAsyncExceptionsThrown() &&
+      (runtime->GetJit() == nullptr || !runtime->GetJit()->JitAtFirstUse());
+  #else
   return
       !runtime->IsAotCompiler() &&
       !runtime->GetInstrumentation()->IsActive() &&
@@ -157,6 +210,7 @@ bool CanUseMterp()
       // infinite loop.
       !runtime->AreAsyncExceptionsThrown() &&
       (runtime->GetJit() == nullptr || !runtime->GetJit()->JitAtFirstUse());
+  #endif
 }
 
 #define MTERP_INVOKE(Name)                                                                         \
