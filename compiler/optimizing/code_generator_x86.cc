@@ -16,6 +16,7 @@
 
 #include "code_generator_x86.h"
 
+#include "arch/x86/jni_frame_x86.h"
 #include "art_method-inl.h"
 #include "class_table.h"
 #include "code_generator_utils.h"
@@ -1079,6 +1080,7 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
       reg = kMethodRegisterArgument;
     } else {
       __ pushl(EAX);
+      __ cfi().AdjustCFAOffset(4);
       __ movl(EAX, Address(ESP, kX86WordSize));
     }
     NearLabel overflow;
@@ -1090,6 +1092,7 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
     __ Bind(&overflow);
     if (!is_frame_entry) {
       __ popl(EAX);
+      __ cfi().AdjustCFAOffset(-4);
     }
   }
 
@@ -1102,8 +1105,7 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
       if (HasEmptyFrame()) {
         CHECK(is_frame_entry);
         // Alignment
-        __ subl(ESP, Immediate(8));
-        __ cfi().AdjustCFAOffset(8);
+        IncreaseFrame(8);
         // We need a temporary. The stub also expects the method at bottom of stack.
         __ pushl(EAX);
         __ cfi().AdjustCFAOffset(4);
@@ -1118,8 +1120,7 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
         // code easier to reason about.
         __ popl(EAX);
         __ cfi().AdjustCFAOffset(-4);
-        __ addl(ESP, Immediate(8));
-        __ cfi().AdjustCFAOffset(-8);
+        DecreaseFrame(8);
       } else {
         if (!RequiresCurrentMethod()) {
           CHECK(is_frame_entry);
@@ -1166,8 +1167,7 @@ void CodeGeneratorX86::GenerateFrameEntry() {
     }
 
     int adjust = GetFrameSize() - FrameEntrySpillSize();
-    __ subl(ESP, Immediate(adjust));
-    __ cfi().AdjustCFAOffset(adjust);
+    IncreaseFrame(adjust);
     // Save the current method if we need it. Note that we do not
     // do this in HCurrentMethod, as the instruction might have been removed
     // in the SSA graph.
@@ -1188,8 +1188,7 @@ void CodeGeneratorX86::GenerateFrameExit() {
   __ cfi().RememberState();
   if (!HasEmptyFrame()) {
     int adjust = GetFrameSize() - FrameEntrySpillSize();
-    __ addl(ESP, Immediate(adjust));
-    __ cfi().AdjustCFAOffset(-adjust);
+    DecreaseFrame(adjust);
 
     for (size_t i = 0; i < arraysize(kCoreCalleeSaves); ++i) {
       Register reg = kCoreCalleeSaves[i];
@@ -1300,6 +1299,34 @@ Location InvokeDexCallingConventionVisitorX86::GetNextLocation(DataType::Type ty
   return Location::NoLocation();
 }
 
+Location CriticalNativeCallingConventionVisitorX86::GetNextLocation(DataType::Type type) {
+  DCHECK_NE(type, DataType::Type::kReference);
+
+  Location location;
+  if (DataType::Is64BitType(type)) {
+    location = Location::DoubleStackSlot(stack_offset_);
+    stack_offset_ += 2 * kFramePointerSize;
+  } else {
+    location = Location::StackSlot(stack_offset_);
+    stack_offset_ += kFramePointerSize;
+  }
+  if (for_register_allocation_) {
+    location = Location::Any();
+  }
+  return location;
+}
+
+Location CriticalNativeCallingConventionVisitorX86::GetReturnLocation(DataType::Type type) const {
+  // We perform conversion to the managed ABI return register after the call if needed.
+  InvokeDexCallingConventionVisitorX86 dex_calling_convention;
+  return dex_calling_convention.GetReturnLocation(type);
+}
+
+Location CriticalNativeCallingConventionVisitorX86::GetMethodLocation() const {
+  // Pass the method in the hidden argument EAX.
+  return Location::RegisterLocation(EAX);
+}
+
 void CodeGeneratorX86::Move32(Location destination, Location source) {
   if (source.Equals(destination)) {
     return;
@@ -1372,13 +1399,14 @@ void CodeGeneratorX86::Move64(Location destination, Location source) {
       __ movsd(destination.AsFpuRegister<XmmRegister>(), Address(ESP, source.GetStackIndex()));
     } else if (source.IsRegisterPair()) {
       size_t elem_size = DataType::Size(DataType::Type::kInt32);
-      // Create stack space for 2 elements.
-      __ subl(ESP, Immediate(2 * elem_size));
-      __ movl(Address(ESP, 0), source.AsRegisterPairLow<Register>());
-      __ movl(Address(ESP, elem_size), source.AsRegisterPairHigh<Register>());
+      // Push the 2 source registers to the stack.
+      __ pushl(source.AsRegisterPairHigh<Register>());
+      __ cfi().AdjustCFAOffset(elem_size);
+      __ pushl(source.AsRegisterPairLow<Register>());
+      __ cfi().AdjustCFAOffset(elem_size);
       __ movsd(destination.AsFpuRegister<XmmRegister>(), Address(ESP, 0));
       // And remove the temporary stack space we allocated.
-      __ addl(ESP, Immediate(2 * elem_size));
+      DecreaseFrame(2 * elem_size);
     } else {
       LOG(FATAL) << "Unimplemented";
     }
@@ -1939,6 +1967,16 @@ void InstructionCodeGeneratorX86::VisitNativeDebugInfo(HNativeDebugInfo*) {
   // MaybeRecordNativeDebugInfo is already called implicitly in CodeGenerator::Compile.
 }
 
+void CodeGeneratorX86::IncreaseFrame(size_t adjustment) {
+  __ subl(ESP, Immediate(adjustment));
+  __ cfi().AdjustCFAOffset(adjustment);
+}
+
+void CodeGeneratorX86::DecreaseFrame(size_t adjustment) {
+  __ addl(ESP, Immediate(adjustment));
+  __ cfi().AdjustCFAOffset(-adjustment);
+}
+
 void CodeGeneratorX86::GenerateNop() {
   __ nop();
 }
@@ -2286,9 +2324,15 @@ void LocationsBuilderX86::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* invok
     return;
   }
 
-  HandleInvoke(invoke);
+  if (invoke->GetCodePtrLocation() == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+    CriticalNativeCallingConventionVisitorX86 calling_convention_visitor(
+        /*for_register_allocation=*/ true);
+    CodeGenerator::CreateCommonInvokeLocationSummary(invoke, &calling_convention_visitor);
+  } else {
+    HandleInvoke(invoke);
+  }
 
-  // For PC-relative dex cache the invoke has an extra input, the PC-relative address base.
+  // For PC-relative load kinds the invoke has an extra input, the PC-relative address base.
   if (invoke->HasPcRelativeMethodLoadKind()) {
     invoke->GetLocations()->SetInAt(invoke->GetSpecialInputIndex(), Location::RequiresRegister());
   }
@@ -2988,7 +3032,7 @@ void InstructionCodeGeneratorX86::VisitTypeConversion(HTypeConversion* conversio
           // TODO: enhance register allocator to ask for stack temporaries.
           if (!in.IsDoubleStackSlot() || !out.IsStackSlot()) {
             adjustment = DataType::Size(DataType::Type::kInt64);
-            __ subl(ESP, Immediate(adjustment));
+            codegen_->IncreaseFrame(adjustment);
           }
 
           // Load the value to the FP stack, using temporaries if needed.
@@ -3004,7 +3048,7 @@ void InstructionCodeGeneratorX86::VisitTypeConversion(HTypeConversion* conversio
 
           // Remove the temporary stack space we allocated.
           if (adjustment != 0) {
-            __ addl(ESP, Immediate(adjustment));
+            codegen_->DecreaseFrame(adjustment);
           }
           break;
         }
@@ -3038,7 +3082,7 @@ void InstructionCodeGeneratorX86::VisitTypeConversion(HTypeConversion* conversio
           // TODO: enhance register allocator to ask for stack temporaries.
           if (!in.IsDoubleStackSlot() || !out.IsDoubleStackSlot()) {
             adjustment = DataType::Size(DataType::Type::kInt64);
-            __ subl(ESP, Immediate(adjustment));
+            codegen_->IncreaseFrame(adjustment);
           }
 
           // Load the value to the FP stack, using temporaries if needed.
@@ -3054,7 +3098,7 @@ void InstructionCodeGeneratorX86::VisitTypeConversion(HTypeConversion* conversio
 
           // Remove the temporary stack space we allocated.
           if (adjustment != 0) {
-            __ addl(ESP, Immediate(adjustment));
+            codegen_->DecreaseFrame(adjustment);
           }
           break;
         }
@@ -3550,7 +3594,7 @@ void InstructionCodeGeneratorX86::GenerateRemFP(HRem *rem) {
 
   // Create stack space for 2 elements.
   // TODO: enhance register allocator to ask for stack temporaries.
-  __ subl(ESP, Immediate(2 * elem_size));
+  codegen_->IncreaseFrame(2 * elem_size);
 
   // Load the values to the FP stack in reverse order, using temporaries if needed.
   const bool is_wide = !is_float;
@@ -3590,7 +3634,7 @@ void InstructionCodeGeneratorX86::GenerateRemFP(HRem *rem) {
   }
 
   // And remove the temporary stack space we allocated.
-  __ addl(ESP, Immediate(2 * elem_size));
+  codegen_->DecreaseFrame(2 * elem_size);
 }
 
 
@@ -4934,7 +4978,6 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorX86::GetSupportedInvokeStaticOr
 
 Register CodeGeneratorX86::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke,
                                                                  Register temp) {
-  DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
   Location location = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
   if (!invoke->GetLocations()->Intrinsified()) {
     return location.AsRegister<Register>();
@@ -4970,7 +5013,7 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
+      callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
@@ -5009,15 +5052,65 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
       __ call(GetFrameEntryLabel());
+      RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       break;
+    case HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative: {
+      size_t out_frame_size =
+          PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorX86,
+                                    kNativeStackAlignment,
+                                    GetCriticalNativeDirectCallFrameSize>(invoke);
+      // (callee_method + offset_of_jni_entry_point)()
+      __ call(Address(callee_method.AsRegister<Register>(),
+                      ArtMethod::EntryPointFromJniOffset(kX86PointerSize).Int32Value()));
+      RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+      if (out_frame_size == 0u && DataType::IsFloatingPointType(invoke->GetType())) {
+        // Create space for conversion.
+        out_frame_size = 8u;
+        IncreaseFrame(out_frame_size);
+      }
+      // Zero-/sign-extend or move the result when needed due to native and managed ABI mismatch.
+      switch (invoke->GetType()) {
+        case DataType::Type::kBool:
+          __ movzxb(EAX, AL);
+          break;
+        case DataType::Type::kInt8:
+          __ movsxb(EAX, AL);
+          break;
+        case DataType::Type::kUint16:
+          __ movzxw(EAX, EAX);
+          break;
+        case DataType::Type::kInt16:
+          __ movsxw(EAX, EAX);
+          break;
+        case DataType::Type::kFloat32:
+          __ fstps(Address(ESP, 0));
+          __ movss(XMM0, Address(ESP, 0));
+          break;
+        case DataType::Type::kFloat64:
+          __ fstpl(Address(ESP, 0));
+          __ movsd(XMM0, Address(ESP, 0));
+          break;
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
+        case DataType::Type::kVoid:
+          break;
+        default:
+          DCHECK(false) << invoke->GetType();
+          break;
+      }
+      if (out_frame_size != 0u) {
+        DecreaseFrame(out_frame_size);
+      }
+      break;
+    }
     case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
       // (callee_method + offset_of_quick_compiled_code)()
       __ call(Address(callee_method.AsRegister<Register>(),
                       ArtMethod::EntryPointFromQuickCompiledCodeOffset(
                           kX86PointerSize).Int32Value()));
+      RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       break;
   }
-  RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
 
   DCHECK(!IsLeafMethod());
 }
@@ -5072,7 +5165,6 @@ void CodeGeneratorX86::RecordBootImageRelRoPatch(HX86ComputeBaseMethodAddress* m
 }
 
 void CodeGeneratorX86::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke) {
-  DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
   HX86ComputeBaseMethodAddress* method_address =
       invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
   boot_image_method_patches_.emplace_back(
@@ -5081,7 +5173,6 @@ void CodeGeneratorX86::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke)
 }
 
 void CodeGeneratorX86::RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke) {
-  DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
   HX86ComputeBaseMethodAddress* method_address =
       invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
   // Add the patch entry and bind its label at the end of the instruction.
@@ -5126,7 +5217,6 @@ void CodeGeneratorX86::LoadBootImageAddress(Register reg,
                                             uint32_t boot_image_reference,
                                             HInvokeStaticOrDirect* invoke) {
   if (GetCompilerOptions().IsBootImage()) {
-    DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
     DCHECK(method_address != nullptr);
@@ -5135,7 +5225,6 @@ void CodeGeneratorX86::LoadBootImageAddress(Register reg,
     __ leal(reg, Address(method_address_reg, CodeGeneratorX86::kDummy32BitOffset));
     RecordBootImageIntrinsicPatch(method_address, boot_image_reference);
   } else if (GetCompilerOptions().GetCompilePic()) {
-    DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
     DCHECK(method_address != nullptr);
@@ -5160,7 +5249,6 @@ void CodeGeneratorX86::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invok
   if (GetCompilerOptions().IsBootImage()) {
     DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
-    DCHECK_EQ(invoke->InputCount(), invoke->GetNumberOfArguments() + 1u);
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
     DCHECK(method_address != nullptr);
@@ -6365,24 +6453,43 @@ void ParallelMoveResolverX86::EmitMove(size_t index) {
       __ movl(Address(ESP, destination.GetStackIndex()), source.AsRegister<Register>());
     }
   } else if (source.IsRegisterPair()) {
+    if (destination.IsRegisterPair()) {
+      __ movl(destination.AsRegisterPairLow<Register>(), source.AsRegisterPairLow<Register>());
+      DCHECK_NE(destination.AsRegisterPairLow<Register>(), source.AsRegisterPairHigh<Register>());
+      __ movl(destination.AsRegisterPairHigh<Register>(), source.AsRegisterPairHigh<Register>());
+    } else if (destination.IsFpuRegister()) {
       size_t elem_size = DataType::Size(DataType::Type::kInt32);
-      // Create stack space for 2 elements.
-      __ subl(ESP, Immediate(2 * elem_size));
-      __ movl(Address(ESP, 0), source.AsRegisterPairLow<Register>());
-      __ movl(Address(ESP, elem_size), source.AsRegisterPairHigh<Register>());
+      // Push the 2 source registers to the stack.
+      __ pushl(source.AsRegisterPairHigh<Register>());
+      __ cfi().AdjustCFAOffset(elem_size);
+      __ pushl(source.AsRegisterPairLow<Register>());
+      __ cfi().AdjustCFAOffset(elem_size);
+      // Load the destination register.
       __ movsd(destination.AsFpuRegister<XmmRegister>(), Address(ESP, 0));
       // And remove the temporary stack space we allocated.
-      __ addl(ESP, Immediate(2 * elem_size));
+      codegen_->DecreaseFrame(2 * elem_size);
+    } else {
+      DCHECK(destination.IsDoubleStackSlot());
+      __ movl(Address(ESP, destination.GetStackIndex()), source.AsRegisterPairLow<Register>());
+      __ movl(Address(ESP, destination.GetHighStackIndex(kX86WordSize)),
+              source.AsRegisterPairHigh<Register>());
+    }
   } else if (source.IsFpuRegister()) {
     if (destination.IsRegister()) {
       __ movd(destination.AsRegister<Register>(), source.AsFpuRegister<XmmRegister>());
     } else if (destination.IsFpuRegister()) {
       __ movaps(destination.AsFpuRegister<XmmRegister>(), source.AsFpuRegister<XmmRegister>());
     } else if (destination.IsRegisterPair()) {
-      XmmRegister src_reg = source.AsFpuRegister<XmmRegister>();
-      __ movd(destination.AsRegisterPairLow<Register>(), src_reg);
-      __ psrlq(src_reg, Immediate(32));
-      __ movd(destination.AsRegisterPairHigh<Register>(), src_reg);
+      size_t elem_size = DataType::Size(DataType::Type::kInt32);
+      // Create stack space for 2 elements.
+      codegen_->IncreaseFrame(2 * elem_size);
+      // Store the source register.
+      __ movsd(Address(ESP, 0), source.AsFpuRegister<XmmRegister>());
+      // And pop the values into destination registers.
+      __ popl(destination.AsRegisterPairLow<Register>());
+      __ cfi().AdjustCFAOffset(-elem_size);
+      __ popl(destination.AsRegisterPairHigh<Register>());
+      __ cfi().AdjustCFAOffset(-elem_size);
     } else if (destination.IsStackSlot()) {
       __ movss(Address(ESP, destination.GetStackIndex()), source.AsFpuRegister<XmmRegister>());
     } else if (destination.IsDoubleStackSlot()) {
@@ -6480,9 +6587,11 @@ void ParallelMoveResolverX86::EmitMove(size_t index) {
           __ xorpd(dest, dest);
         } else {
           __ pushl(high);
+          __ cfi().AdjustCFAOffset(4);
           __ pushl(low);
+          __ cfi().AdjustCFAOffset(4);
           __ movsd(dest, Address(ESP, 0));
-          __ addl(ESP, Immediate(8));
+          codegen_->DecreaseFrame(8);
         }
       } else {
         DCHECK(destination.IsDoubleStackSlot()) << destination;
@@ -6519,11 +6628,11 @@ void ParallelMoveResolverX86::Exchange32(XmmRegister reg, int mem) {
 
 void ParallelMoveResolverX86::Exchange128(XmmRegister reg, int mem) {
   size_t extra_slot = 4 * kX86WordSize;
-  __ subl(ESP, Immediate(extra_slot));
+  codegen_->IncreaseFrame(extra_slot);
   __ movups(Address(ESP, 0), XmmRegister(reg));
   ExchangeMemory(0, mem + extra_slot, 4);
   __ movups(XmmRegister(reg), Address(ESP, 0));
-  __ addl(ESP, Immediate(extra_slot));
+  codegen_->DecreaseFrame(extra_slot);
 }
 
 void ParallelMoveResolverX86::ExchangeMemory(int mem1, int mem2, int number_of_words) {

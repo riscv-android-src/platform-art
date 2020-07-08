@@ -165,10 +165,10 @@ JitCompiler::~JitCompiler() {
 }
 
 bool JitCompiler::CompileMethod(
-    Thread* self, JitMemoryRegion* region, ArtMethod* method, bool baseline, bool osr) {
+    Thread* self, JitMemoryRegion* region, ArtMethod* method, CompilationKind compilation_kind) {
   SCOPED_TRACE << "JIT compiling "
                << method->PrettyMethod()
-               << " (baseline=" << baseline << ", osr=" << osr << ")";
+               << " (kind=" << compilation_kind << ")";
 
   DCHECK(!method->IsProxyMethod());
   DCHECK(method->GetDeclaringClass()->IsResolved());
@@ -181,11 +181,16 @@ bool JitCompiler::CompileMethod(
   // Do the compilation.
   bool success = false;
   {
-    TimingLogger::ScopedTiming t2("Compiling", &logger);
+    TimingLogger::ScopedTiming t2(compilation_kind == CompilationKind::kOsr
+                                      ? "Compiling OSR"
+                                      : compilation_kind == CompilationKind::kOptimized
+                                          ? "Compiling optimized"
+                                          : "Compiling baseline",
+                                  &logger);
     JitCodeCache* const code_cache = runtime->GetJit()->GetCodeCache();
     uint64_t start_ns = NanoTime();
     success = compiler_->JitCompile(
-        self, code_cache, region, method, baseline, osr, jit_logger_.get());
+        self, code_cache, region, method, compilation_kind, jit_logger_.get());
     uint64_t duration_ns = NanoTime() - start_ns;
     VLOG(jit) << "Compilation of "
               << method->PrettyMethod()

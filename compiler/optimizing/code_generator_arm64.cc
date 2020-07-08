@@ -18,6 +18,7 @@
 
 #include "arch/arm64/asm_support_arm64.h"
 #include "arch/arm64/instruction_set_features_arm64.h"
+#include "arch/arm64/jni_frame_arm64.h"
 #include "art_method-inl.h"
 #include "base/bit_utils.h"
 #include "base/bit_utils_iterator.h"
@@ -870,6 +871,49 @@ Location InvokeDexCallingConventionVisitorARM64::GetMethodLocation() const {
   return LocationFrom(kArtMethodRegister);
 }
 
+Location CriticalNativeCallingConventionVisitorARM64::GetNextLocation(DataType::Type type) {
+  DCHECK_NE(type, DataType::Type::kReference);
+
+  Location location = Location::NoLocation();
+  if (DataType::IsFloatingPointType(type)) {
+    if (fpr_index_ < kParameterFPRegistersLength) {
+      location = LocationFrom(kParameterFPRegisters[fpr_index_]);
+      ++fpr_index_;
+    }
+  } else {
+    // Native ABI uses the same registers as managed, except that the method register x0
+    // is a normal argument.
+    if (gpr_index_ < 1u + kParameterCoreRegistersLength) {
+      location = LocationFrom(gpr_index_ == 0u ? x0 : kParameterCoreRegisters[gpr_index_ - 1u]);
+      ++gpr_index_;
+    }
+  }
+  if (location.IsInvalid()) {
+    if (DataType::Is64BitType(type)) {
+      location = Location::DoubleStackSlot(stack_offset_);
+    } else {
+      location = Location::StackSlot(stack_offset_);
+    }
+    stack_offset_ += kFramePointerSize;
+
+    if (for_register_allocation_) {
+      location = Location::Any();
+    }
+  }
+  return location;
+}
+
+Location CriticalNativeCallingConventionVisitorARM64::GetReturnLocation(DataType::Type type) const {
+  // We perform conversion to the managed ABI return register after the call if needed.
+  InvokeDexCallingConventionVisitorARM64 dex_calling_convention;
+  return dex_calling_convention.GetReturnLocation(type);
+}
+
+Location CriticalNativeCallingConventionVisitorARM64::GetMethodLocation() const {
+  // Pass the method in the hidden argument x15.
+  return Location::RegisterLocation(x15.GetCode());
+}
+
 CodeGeneratorARM64::CodeGeneratorARM64(HGraph* graph,
                                        const CompilerOptions& compiler_options,
                                        OptimizingCompilerStats* stats)
@@ -1113,9 +1157,9 @@ void CodeGeneratorARM64::MaybeIncrementHotness(bool is_frame_entry) {
       __ B(ne, &done);
       if (is_frame_entry) {
         if (HasEmptyFrame()) {
-          // The entyrpoint expects the method at the bottom of the stack. We
+          // The entrypoint expects the method at the bottom of the stack. We
           // claim stack space necessary for alignment.
-          __ Claim(kStackAlignment);
+          IncreaseFrame(kStackAlignment);
           __ Stp(kArtMethodRegister, lr, MemOperand(sp, 0));
         } else if (!RequiresCurrentMethod()) {
           __ Str(kArtMethodRegister, MemOperand(sp, 0));
@@ -1132,7 +1176,7 @@ void CodeGeneratorARM64::MaybeIncrementHotness(bool is_frame_entry) {
       if (HasEmptyFrame()) {
         CHECK(is_frame_entry);
         __ Ldr(lr, MemOperand(sp, 8));
-        __ Drop(kStackAlignment);
+        DecreaseFrame(kStackAlignment);
       }
       __ Bind(&done);
     }
@@ -3016,22 +3060,50 @@ void InstructionCodeGeneratorARM64::GenerateIntDivForPower2Denom(HDiv* instructi
   Register out = OutputRegister(instruction);
   Register dividend = InputRegisterAt(instruction, 0);
 
-  if (abs_imm == 2) {
-    int bits = DataType::Size(instruction->GetResultType()) * kBitsPerByte;
-    __ Add(out, dividend, Operand(dividend, LSR, bits - 1));
+  Register final_dividend;
+  if (HasNonNegativeResultOrMinInt(instruction->GetLeft())) {
+    // No need to adjust the result for non-negative dividends or the INT32_MIN/INT64_MIN dividends.
+    // NOTE: The generated code for HDiv correctly works for the INT32_MIN/INT64_MIN dividends:
+    //   imm == 2
+    //     add out, dividend(0x80000000), dividend(0x80000000), lsr #31 => out = 0x80000001
+    //     asr out, out(0x80000001), #1 => out = 0xc0000000
+    //     This is the same as 'asr out, 0x80000000, #1'
+    //
+    //   imm > 2
+    //     add temp, dividend(0x80000000), imm - 1 => temp = 0b10..01..1, where the number
+    //         of the rightmost 1s is ctz_imm.
+    //     cmp dividend(0x80000000), 0 => N = 1, V = 0 (lt is true)
+    //     csel out, temp(0b10..01..1), dividend(0x80000000), lt => out = 0b10..01..1
+    //     asr out, out(0b10..01..1), #ctz_imm => out = 0b1..10..0, where the number of the
+    //         leftmost 1s is ctz_imm + 1.
+    //     This is the same as 'asr out, dividend(0x80000000), #ctz_imm'.
+    //
+    //   imm == INT32_MIN
+    //     add tmp, dividend(0x80000000), #0x7fffffff => tmp = -1
+    //     cmp dividend(0x80000000), 0 => N = 1, V = 0 (lt is true)
+    //     csel out, temp(-1), dividend(0x80000000), lt => out = -1
+    //     neg out, out(-1), asr #31 => out = 1
+    //     This is the same as 'neg out, dividend(0x80000000), asr #31'.
+    final_dividend = dividend;
   } else {
-    UseScratchRegisterScope temps(GetVIXLAssembler());
-    Register temp = temps.AcquireSameSizeAs(out);
-    __ Add(temp, dividend, abs_imm - 1);
-    __ Cmp(dividend, 0);
-    __ Csel(out, temp, dividend, lt);
+    if (abs_imm == 2) {
+      int bits = DataType::Size(instruction->GetResultType()) * kBitsPerByte;
+      __ Add(out, dividend, Operand(dividend, LSR, bits - 1));
+    } else {
+      UseScratchRegisterScope temps(GetVIXLAssembler());
+      Register temp = temps.AcquireSameSizeAs(out);
+      __ Add(temp, dividend, abs_imm - 1);
+      __ Cmp(dividend, 0);
+      __ Csel(out, temp, dividend, lt);
+    }
+    final_dividend = out;
   }
 
   int ctz_imm = CTZ(abs_imm);
   if (imm > 0) {
-    __ Asr(out, out, ctz_imm);
+    __ Asr(out, final_dividend, ctz_imm);
   } else {
-    __ Neg(out, Operand(out, ASR, ctz_imm));
+    __ Neg(out, Operand(final_dividend, ASR, ctz_imm));
   }
 }
 
@@ -3067,7 +3139,6 @@ void InstructionCodeGeneratorARM64::GenerateResultRemWithAnyConstant(
     Register quotient,
     int64_t divisor,
     UseScratchRegisterScope* temps_scope) {
-  // TODO: Strength reduction for msub.
   Register temp_imm = temps_scope->AcquireSameSizeAs(out);
   __ Mov(temp_imm, divisor);
   __ Msub(out, quotient, temp_imm, dividend);
@@ -3171,13 +3242,23 @@ void InstructionCodeGeneratorARM64::GenerateInt32DivRemWithAnyConstant(
 
   // Extract the result from the high 32 bits and apply the final right shift.
   DCHECK_LT(shift, 32);
-  __ Asr(temp.X(), temp.X(), 32 + shift);
-
-  if (instruction->IsRem()) {
-    GenerateIncrementNegativeByOne(temp, temp, use_cond_inc);
-    GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
+  if (imm > 0 && IsGEZero(instruction->GetLeft())) {
+    // No need to adjust the result for a non-negative dividend and a positive divisor.
+    if (instruction->IsDiv()) {
+      __ Lsr(out.X(), temp.X(), 32 + shift);
+    } else {
+      __ Lsr(temp.X(), temp.X(), 32 + shift);
+      GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
+    }
   } else {
-    GenerateIncrementNegativeByOne(out, temp, use_cond_inc);
+    __ Asr(temp.X(), temp.X(), 32 + shift);
+
+    if (instruction->IsRem()) {
+      GenerateIncrementNegativeByOne(temp, temp, use_cond_inc);
+      GenerateResultRemWithAnyConstant(out, dividend, temp, imm, &temps);
+    } else {
+      GenerateIncrementNegativeByOne(out, temp, use_cond_inc);
+    }
   }
 }
 
@@ -3609,6 +3690,16 @@ void LocationsBuilderARM64::VisitNativeDebugInfo(HNativeDebugInfo* info) {
 
 void InstructionCodeGeneratorARM64::VisitNativeDebugInfo(HNativeDebugInfo*) {
   // MaybeRecordNativeDebugInfo is already called implicitly in CodeGenerator::Compile.
+}
+
+void CodeGeneratorARM64::IncreaseFrame(size_t adjustment) {
+  __ Claim(adjustment);
+  GetAssembler()->cfi().AdjustCFAOffset(adjustment);
+}
+
+void CodeGeneratorARM64::DecreaseFrame(size_t adjustment) {
+  __ Drop(adjustment);
+  GetAssembler()->cfi().AdjustCFAOffset(-adjustment);
 }
 
 void CodeGeneratorARM64::GenerateNop() {
@@ -4296,7 +4387,13 @@ void LocationsBuilderARM64::VisitInvokeStaticOrDirect(HInvokeStaticOrDirect* inv
     return;
   }
 
-  HandleInvoke(invoke);
+  if (invoke->GetCodePtrLocation() == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+    CriticalNativeCallingConventionVisitorARM64 calling_convention_visitor(
+        /*for_register_allocation=*/ true);
+    CodeGenerator::CreateCommonInvokeLocationSummary(invoke, &calling_convention_visitor);
+  } else {
+    HandleInvoke(invoke);
+  }
 }
 
 static bool TryGenerateIntrinsicCode(HInvoke* invoke, CodeGeneratorARM64* codegen) {
@@ -4328,7 +4425,7 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
       break;
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
-      callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
+      callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
       break;
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
@@ -4374,6 +4471,19 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     }
   }
 
+  auto call_code_pointer_member = [&](MemberOffset offset) {
+    // LR = callee_method->member;
+    __ Ldr(lr, MemOperand(XRegisterFrom(callee_method), offset.Int32Value()));
+    {
+      // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
+      ExactAssemblyScope eas(GetVIXLAssembler(),
+                             kInstructionSize,
+                             CodeBufferCheckScope::kExactSize);
+      // lr()
+      __ blr(lr);
+      RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+    }
+  };
   switch (invoke->GetCodePtrLocation()) {
     case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
       {
@@ -4385,20 +4495,43 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
         RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       }
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
-      // LR = callee_method->entry_point_from_quick_compiled_code_;
-      __ Ldr(lr, MemOperand(
-          XRegisterFrom(callee_method),
-          ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize).Int32Value()));
-      {
-        // Use a scope to help guarantee that `RecordPcInfo()` records the correct pc.
-        ExactAssemblyScope eas(GetVIXLAssembler(),
-                               kInstructionSize,
-                               CodeBufferCheckScope::kExactSize);
-        // lr()
-        __ blr(lr);
-        RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+    case HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative: {
+      size_t out_frame_size =
+          PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorARM64,
+                                    kAapcs64StackAlignment,
+                                    GetCriticalNativeDirectCallFrameSize>(invoke);
+      call_code_pointer_member(ArtMethod::EntryPointFromJniOffset(kArm64PointerSize));
+      // Zero-/sign-extend the result when needed due to native and managed ABI mismatch.
+      switch (invoke->GetType()) {
+        case DataType::Type::kBool:
+          __ Ubfx(w0, w0, 0, 8);
+          break;
+        case DataType::Type::kInt8:
+          __ Sbfx(w0, w0, 0, 8);
+          break;
+        case DataType::Type::kUint16:
+          __ Ubfx(w0, w0, 0, 16);
+          break;
+        case DataType::Type::kInt16:
+          __ Sbfx(w0, w0, 0, 16);
+          break;
+        case DataType::Type::kInt32:
+        case DataType::Type::kInt64:
+        case DataType::Type::kFloat32:
+        case DataType::Type::kFloat64:
+        case DataType::Type::kVoid:
+          break;
+        default:
+          DCHECK(false) << invoke->GetType();
+          break;
       }
+      if (out_frame_size != 0u) {
+        DecreaseFrame(out_frame_size);
+      }
+      break;
+    }
+    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
+      call_code_pointer_member(ArtMethod::EntryPointFromQuickCompiledCodeOffset(kArm64PointerSize));
       break;
   }
 
@@ -4449,6 +4582,25 @@ void CodeGeneratorARM64::GenerateVirtualCall(
     // lr();
     __ blr(lr);
     RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
+  }
+}
+
+void CodeGeneratorARM64::MoveFromReturnRegister(Location trg, DataType::Type type) {
+  if (!trg.IsValid()) {
+    DCHECK(type == DataType::Type::kVoid);
+    return;
+  }
+
+  DCHECK_NE(type, DataType::Type::kVoid);
+
+  if (DataType::IsIntegralType(type) || type == DataType::Type::kReference) {
+    Register trg_reg = RegisterFrom(trg, type);
+    Register res_reg = RegisterFrom(ARM64ReturnLocation(type), type);
+    __ Mov(trg_reg, res_reg, kDiscardForSameWReg);
+  } else {
+    VRegister trg_reg = FPRegisterFrom(trg, type);
+    VRegister res_reg = FPRegisterFrom(ARM64ReturnLocation(type), type);
+    __ Fmov(trg_reg, res_reg);
   }
 }
 
@@ -4801,14 +4953,9 @@ void InstructionCodeGeneratorARM64::VisitInvokeStaticOrDirect(HInvokeStaticOrDir
     return;
   }
 
-  {
-    // Ensure that between the BLR (emitted by GenerateStaticOrDirectCall) and RecordPcInfo there
-    // are no pools emitted.
-    EmissionCheckScope guard(GetVIXLAssembler(), kInvokeCodeMarginSizeInBytes);
-    LocationSummary* locations = invoke->GetLocations();
-    codegen_->GenerateStaticOrDirectCall(
-        invoke, locations->HasTemps() ? locations->GetTemp(0) : Location::NoLocation());
-  }
+  LocationSummary* locations = invoke->GetLocations();
+  codegen_->GenerateStaticOrDirectCall(
+      invoke, locations->HasTemps() ? locations->GetTemp(0) : Location::NoLocation());
 
   codegen_->MaybeGenerateMarkingRegisterCheck(/* code= */ __LINE__);
 }
@@ -5478,18 +5625,27 @@ void InstructionCodeGeneratorARM64::GenerateIntRemForPower2Denom(HRem *instructi
   Register out = OutputRegister(instruction);
   Register dividend = InputRegisterAt(instruction, 0);
 
-  if (abs_imm == 2) {
-    __ Cmp(dividend, 0);
-    __ And(out, dividend, 1);
-    __ Csneg(out, out, out, ge);
-  } else {
-    UseScratchRegisterScope temps(GetVIXLAssembler());
-    Register temp = temps.AcquireSameSizeAs(out);
-
-    __ Negs(temp, dividend);
+  if (HasNonNegativeResultOrMinInt(instruction->GetLeft())) {
+    // No need to adjust the result for non-negative dividends or the INT32_MIN/INT64_MIN dividends.
+    // NOTE: The generated code for HRem correctly works for the INT32_MIN/INT64_MIN dividends.
+    // INT*_MIN % imm must be 0 for any imm of power 2. 'and' works only with bits
+    // 0..30 (Int32 case)/0..62 (Int64 case) of a dividend. For INT32_MIN/INT64_MIN they are zeros.
+    // So 'and' always produces zero.
     __ And(out, dividend, abs_imm - 1);
-    __ And(temp, temp, abs_imm - 1);
-    __ Csneg(out, out, temp, mi);
+  } else {
+    if (abs_imm == 2) {
+      __ Cmp(dividend, 0);
+      __ And(out, dividend, 1);
+      __ Csneg(out, out, out, ge);
+    } else {
+      UseScratchRegisterScope temps(GetVIXLAssembler());
+      Register temp = temps.AcquireSameSizeAs(out);
+
+      __ Negs(temp, dividend);
+      __ And(out, dividend, abs_imm - 1);
+      __ And(temp, temp, abs_imm - 1);
+      __ Csneg(out, out, temp, mi);
+    }
   }
 }
 

@@ -129,6 +129,7 @@ verbose = False
 dry_run = False
 ignore_skips = False
 build = False
+dist = False
 gdb = False
 gdb_arg = ''
 csv_result = None
@@ -508,14 +509,6 @@ def run_tests(tests):
 
       if address_size == '64':
         options_test += ' --64'
-
-        if env.DEX2OAT_HOST_INSTRUCTION_SET_FEATURES:
-          options_test += ' --instruction-set-features' + env.DEX2OAT_HOST_INSTRUCTION_SET_FEATURES
-
-      elif address_size == '32':
-        if env.HOST_2ND_ARCH_PREFIX_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES:
-          options_test += ' --instruction-set-features ' + \
-                          env.HOST_2ND_ARCH_PREFIX_DEX2OAT_HOST_INSTRUCTION_SET_FEATURES
 
       # TODO(http://36039166): This is a temporary solution to
       # fix build breakages.
@@ -999,24 +992,6 @@ def parse_test_name(test_name):
   return {parsed[12]}
 
 
-def setup_env_for_build_target(build_target, parser, options):
-  """Setup environment for the build target
-
-  The method setup environment for the master-art-host targets.
-  """
-  os.environ.update(build_target['env'])
-  os.environ['SOONG_ALLOW_MISSING_DEPENDENCIES'] = 'true'
-  print_text('%s\n' % (str(os.environ)))
-
-  target_options = vars(parser.parse_args(build_target['flags']))
-  target_options['host'] = True
-  target_options['verbose'] = True
-  target_options['build'] = True
-  target_options['n_thread'] = options['n_thread']
-  target_options['dry_run'] = options['dry_run']
-
-  return target_options
-
 def get_default_threads(target):
   if target == 'target':
     adb_command = 'adb shell cat /sys/devices/system/cpu/present'
@@ -1040,6 +1015,7 @@ def parse_option():
   global ignore_skips
   global n_thread
   global build
+  global dist
   global gdb
   global gdb_arg
   global runtime_option
@@ -1072,7 +1048,11 @@ def parse_option():
                             action='store_true', dest='build',
                             help="""Build dependencies under all circumstances. By default we will
                             not build dependencies unless ART_TEST_RUN_TEST_BUILD=true.""")
-  global_group.add_argument('--build-target', dest='build_target', help='master-art-host targets')
+  global_group.add_argument('--dist',
+                            action='store_true', dest='dist',
+                            help="""If dependencies are to be built, pass `dist` to the build
+                            command line. You may want to also set the DIST_DIR environment
+                            variable when using this flag.""")
   global_group.set_defaults(build = env.ART_TEST_RUN_TEST_BUILD)
   global_group.add_argument('--gdb', action='store_true', dest='gdb')
   global_group.add_argument('--gdb-arg', dest='gdb_arg')
@@ -1118,10 +1098,6 @@ def parse_option():
       for variant in variant_set:
         options[variant] = True
 
-  if options['build_target']:
-    options = setup_env_for_build_target(target_config[options['build_target']],
-                                         parser, options)
-
   tests = None
   env.EXTRA_DISABLED_TESTS.update(set(options['skips']))
   if options['tests']:
@@ -1143,6 +1119,7 @@ def parse_option():
     dry_run = True
     verbose = True
   build = options['build']
+  dist = options['dist']
   if options['gdb']:
     n_thread = 1
     gdb = True
@@ -1176,7 +1153,10 @@ def main():
       build_targets += 'test-art-host-run-test-dependencies '
     build_command = env.ANDROID_BUILD_TOP + '/build/soong/soong_ui.bash --make-mode'
     build_command += ' DX='
+    if dist:
+      build_command += ' dist'
     build_command += ' ' + build_targets
+    print_text('Build command: %s\n' % build_command)
     if subprocess.call(build_command.split()):
       # Debugging for b/62653020
       if env.DIST_DIR:

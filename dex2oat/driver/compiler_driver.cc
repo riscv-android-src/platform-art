@@ -63,6 +63,7 @@
 #include "gc/space/space.h"
 #include "handle_scope-inl.h"
 #include "intrinsics_enum.h"
+#include "intrinsics_list.h"
 #include "jni/jni_internal.h"
 #include "linker/linker_patch.h"
 #include "mirror/class-inl.h"
@@ -300,7 +301,9 @@ std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateJniDlsymLookup
 
 std::unique_ptr<const std::vector<uint8_t>>
 CompilerDriver::CreateJniDlsymLookupCriticalTrampoline() const {
-  CREATE_TRAMPOLINE(JNI, kJniAbi, pDlsymLookupCritical)
+  // @CriticalNative calls do not have the `JNIEnv*` parameter, so this trampoline uses the
+  // architecture-dependent access to `Thread*` using the managed code ABI, i.e. `kQuickAbi`.
+  CREATE_TRAMPOLINE(JNI, kQuickAbi, pDlsymLookupCritical)
 }
 
 std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateQuickGenericJniTrampoline()
@@ -331,12 +334,6 @@ void CompilerDriver::CompileAll(jobject class_loader,
 
   CheckThreadPools();
 
-  if (GetCompilerOptions().IsBootImage()) {
-    // All intrinsics must be in the primary boot image, so we don't need to setup
-    // the intrinsics for any other compilation, as those compilations will pick up
-    // a boot image that have the ArtMethod already set with the intrinsics flag.
-    InitializeIntrinsics();
-  }
   // Compile:
   // 1) Compile all classes and methods enabled for compilation. May fall back to dex-to-dex
   //    compilation.
@@ -834,7 +831,10 @@ static void EnsureVerifiedOrVerifyAtRuntime(jobject jclass_loader,
       if (cls == nullptr) {
         soa.Self()->ClearException();
       } else if (&cls->GetDexFile() == dex_file) {
-        DCHECK(cls->IsErroneous() || cls->IsVerified() || cls->ShouldVerifyAtRuntime())
+        DCHECK(cls->IsErroneous() ||
+               cls->IsVerified() ||
+               cls->ShouldVerifyAtRuntime() ||
+               cls->IsVerifiedNeedsAccessChecks())
             << cls->PrettyClass()
             << " " << cls->GetStatus();
       }
@@ -1069,6 +1069,15 @@ class RecordImageClassesVisitor : public ClassVisitor {
   HashSet<std::string>* const image_classes_;
 };
 
+// Add classes which contain intrinsics methods to the list of image classes.
+static void AddClassesContainingIntrinsics(/* out */ HashSet<std::string>* image_classes) {
+#define ADD_INTRINSIC_OWNER_CLASS(_, __, ___, ____, _____, ClassName, ______, _______) \
+  image_classes->insert(ClassName);
+
+  INTRINSICS_LIST(ADD_INTRINSIC_OWNER_CLASS)
+#undef ADD_INTRINSIC_OWNER_CLASS
+}
+
 // Make a list of descriptors for classes to include in the image
 void CompilerDriver::LoadImageClasses(TimingLogger* timings,
                                       /*inout*/ HashSet<std::string>* image_classes) {
@@ -1093,6 +1102,16 @@ void CompilerDriver::LoadImageClasses(TimingLogger* timings,
   }
 
   TimingLogger::ScopedTiming t("LoadImageClasses", timings);
+
+  if (GetCompilerOptions().IsBootImage()) {
+    AddClassesContainingIntrinsics(image_classes);
+
+    // All intrinsics must be in the primary boot image, so we don't need to setup
+    // the intrinsics for any other compilation, as those compilations will pick up
+    // a boot image that have the ArtMethod already set with the intrinsics flag.
+    InitializeIntrinsics();
+  }
+
   // Make a first pass to load all classes explicitly listed in the file
   Thread* self = Thread::Current();
   ScopedObjectAccess soa(self);
@@ -1998,7 +2017,8 @@ class VerifyClassVisitor : public CompilationVisitor {
         // Force a soft failure for the VerifierDeps. This is a sanity measure, as
         // the vdex file already records that the class hasn't been resolved. It avoids
         // trying to do future verification optimizations when processing the vdex file.
-        DCHECK(failure_kind == verifier::FailureKind::kNoFailure) << failure_kind;
+        DCHECK(failure_kind == verifier::FailureKind::kNoFailure ||
+               failure_kind == verifier::FailureKind::kAccessChecksFailure) << failure_kind;
         failure_kind = verifier::FailureKind::kSoftFailure;
       }
     } else if (&klass->GetDexFile() != &dex_file) {
@@ -2027,7 +2047,10 @@ class VerifyClassVisitor : public CompilationVisitor {
         manager_->GetCompiler()->AddSoftVerifierFailure();
       }
 
-      CHECK(klass->ShouldVerifyAtRuntime() || klass->IsVerified() || klass->IsErroneous())
+      CHECK(klass->ShouldVerifyAtRuntime() ||
+            klass->IsVerifiedNeedsAccessChecks() ||
+            klass->IsVerified() ||
+            klass->IsErroneous())
           << klass->PrettyDescriptor() << ": state=" << klass->GetStatus();
 
       // Class has a meaningful status for the compiler now, record it.
@@ -2057,6 +2080,8 @@ class VerifyClassVisitor : public CompilationVisitor {
         }
         if (klass->IsVerified()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kNoFailure);
+        } else if (klass->IsVerifiedNeedsAccessChecks()) {
+          DCHECK_EQ(failure_kind, verifier::FailureKind::kAccessChecksFailure);
         } else if (klass->ShouldVerifyAtRuntime()) {
           DCHECK_EQ(failure_kind, verifier::FailureKind::kSoftFailure);
         } else {
@@ -2859,6 +2884,7 @@ void CompilerDriver::RecordClassStatus(const ClassReference& ref, ClassStatus st
     case ClassStatus::kNotReady:
     case ClassStatus::kResolved:
     case ClassStatus::kRetryVerificationAtRuntime:
+    case ClassStatus::kVerifiedNeedsAccessChecks:
     case ClassStatus::kVerified:
     case ClassStatus::kSuperclassValidated:
     case ClassStatus::kVisiblyInitialized:

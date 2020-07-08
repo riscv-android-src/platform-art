@@ -16,14 +16,15 @@
 
 #include "common_art_test.h"
 
+#include <cstdio>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <filesystem>
 #include <ftw.h>
+#include <libgen.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <cstdio>
-#include <filesystem>
 #include "android-base/file.h"
 #include "android-base/logging.h"
 #include "nativehelper/scoped_local_ref.h"
@@ -140,53 +141,40 @@ void ScratchFile::Unlink() {
 
 void CommonArtTestImpl::SetUpAndroidRootEnvVars() {
   if (IsHost()) {
-    // Make sure that ANDROID_BUILD_TOP is set. If not, set it from CWD.
-    const char* android_build_top_from_env = getenv("ANDROID_BUILD_TOP");
-    if (android_build_top_from_env == nullptr) {
-      // Not set by build server, so default to current directory.
-      char* cwd = getcwd(nullptr, 0);
-      setenv("ANDROID_BUILD_TOP", cwd, 1);
-      free(cwd);
-      android_build_top_from_env = getenv("ANDROID_BUILD_TOP");
-    }
-
-    const char* android_host_out_from_env = getenv("ANDROID_HOST_OUT");
-    if (android_host_out_from_env == nullptr) {
-      // Not set by build server, so default to the usual value of
-      // ANDROID_HOST_OUT.
-      std::string android_host_out;
-#if defined(__linux__)
-      // Fallback
-      android_host_out = std::string(android_build_top_from_env) + "/out/host/linux-x86";
-      // Look at how we were invoked
-      std::string argv;
-      if (android::base::ReadFileToString("/proc/self/cmdline", &argv)) {
-        // /proc/self/cmdline is the programs 'argv' with elements delimited by '\0'.
-        std::string cmdpath(argv.substr(0, argv.find('\0')));
-        std::filesystem::path path(cmdpath);
-        // If the path is relative then prepend the android_build_top_from_env to it
-        if (path.is_relative()) {
-          path = std::filesystem::path(android_build_top_from_env).append(cmdpath);
-          DCHECK(path.is_absolute()) << path;
-        }
-        // Walk up until we find the linux-x86 directory or we hit the root directory.
-        while (path.has_parent_path() && path.parent_path() != path &&
-               path.filename() != std::filesystem::path("linux-x86")) {
-          path = path.parent_path();
-        }
-        // If we found a linux-x86 directory path is now android_host_out
+    // Look at how we were invoked to extract reasonable default paths.
+    std::string argv;
+    if (android::base::ReadFileToString("/proc/self/cmdline", &argv)) {
+      // /proc/self/cmdline is the programs 'argv' with elements delimited by '\0'.
+      std::filesystem::path path(argv.substr(0, argv.find('\0')));
+      path = std::filesystem::absolute(path);
+      // Walk up until we find the one of the well-known directories.
+      for (; path.parent_path() != path; path = path.parent_path()) {
+        // We are running tests from out/host/linux-x86 on developer machine.
         if (path.filename() == std::filesystem::path("linux-x86")) {
-          android_host_out = path.string();
+          char* cwd = getcwd(nullptr, 0);
+          setenv("ANDROID_BUILD_TOP", cwd, /*overwrite=*/ 0);  // No-op if already set.
+          free(cwd);
+          setenv("ANDROID_HOST_OUT", path.c_str(), /*overwrite=*/ 0);  // No-op if already set.
+          break;
+        }
+        // We are running tests from testcases (extracted from zip) on tradefed.
+        if (path.filename() == std::filesystem::path("testcases")) {
+          path.append("art_common");
+          bool ok = chdir(path.c_str()) == 0;
+          CHECK(ok);
+          setenv("ANDROID_BUILD_TOP", path.c_str(), /*overwrite=*/ 0);  // No-op if already set.
+          path.append("out/host/linux-x86");
+          setenv("ANDROID_HOST_OUT", path.c_str(), /*overwrite=*/ 0);  // No-op if already set.
+          break;
         }
       }
-#elif defined(__APPLE__)
-      android_host_out = std::string(android_build_top_from_env) + "/out/host/darwin-x86";
-#else
-#error unsupported OS
-#endif
-      setenv("ANDROID_HOST_OUT", android_host_out.c_str(), 1);
-      android_host_out_from_env = getenv("ANDROID_HOST_OUT");
     }
+    const char* android_build_top_from_env = getenv("ANDROID_BUILD_TOP");
+    DCHECK(android_build_top_from_env != nullptr);
+    DCHECK(std::filesystem::exists(android_build_top_from_env)) << android_build_top_from_env;
+    const char* android_host_out_from_env = getenv("ANDROID_HOST_OUT");
+    DCHECK(android_host_out_from_env != nullptr);
+    DCHECK(std::filesystem::exists(android_host_out_from_env)) << android_host_out_from_env;
 
     // Environment variable ANDROID_ROOT is set on the device, but not
     // necessarily on the host.
@@ -424,7 +412,7 @@ static std::string GetDexFileName(const std::string& jar_prefix, bool host) {
 
 std::vector<std::string> CommonArtTestImpl::GetLibCoreModuleNames() const {
   // Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-  // because that's what we use for compiling the core.art image.
+  // because that's what we use for compiling the boot.art image.
   // It may contain additional modules from TEST_CORE_JARS.
   return {
       // CORE_IMG_JARS modules.
@@ -493,16 +481,14 @@ std::string CommonArtTestImpl::GetClassPathOption(const char* option,
 
 std::string CommonArtTestImpl::GetTestDexFileName(const char* name) const {
   CHECK(name != nullptr);
-  std::string filename;
-  if (IsHost()) {
-    filename += GetAndroidRoot() + "/framework/";
-  } else {
-    filename += ART_TARGET_NATIVETEST_DIR_STRING;
-  }
-  filename += "art-gtest-";
-  filename += name;
-  filename += ".jar";
-  return filename;
+  // The needed jar files for gtest are located next to the gtest binary itself.
+  std::string cmdline;
+  bool result = android::base::ReadFileToString("/proc/self/cmdline", &cmdline);
+  CHECK(result);
+  UniqueCPtr<char[]> executable_path(realpath(cmdline.c_str(), nullptr));
+  CHECK(executable_path != nullptr);
+  std::string executable_dir = dirname(executable_path.get());
+  return executable_dir + "/art-gtest-jars-" + name + ".jar";
 }
 
 std::vector<std::unique_ptr<const DexFile>> CommonArtTestImpl::OpenDexFiles(const char* filename) {

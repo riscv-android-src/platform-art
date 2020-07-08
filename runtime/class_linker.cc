@@ -88,6 +88,7 @@
 #include "imtable-inl.h"
 #include "intern_table-inl.h"
 #include "interpreter/interpreter.h"
+#include "interpreter/mterp/nterp.h"
 #include "jit/debugger_interface.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -322,7 +323,7 @@ class ClassLinker::VisiblyInitializedCallback final
           vm->DeleteWeakGlobalRef(self, classes_[i]);
           if (klass != nullptr) {
             mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-            class_linker_->FixupStaticTrampolines(klass.Get());
+            class_linker_->FixupStaticTrampolines(self, klass.Get());
           }
         }
         num_classes_ = 0u;
@@ -422,14 +423,14 @@ ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
     // Thanks to the x86 memory model, we do not need any memory fences and
     // we can immediately mark the class as visibly initialized.
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-    FixupStaticTrampolines(klass.Get());
+    FixupStaticTrampolines(self, klass.Get());
     return nullptr;
   }
   if (Runtime::Current()->IsActiveTransaction()) {
     // Transactions are single-threaded, so we can mark the class as visibly intialized.
     // (Otherwise we'd need to track the callback's entry in the transaction for rollback.)
     mirror::Class::SetStatus(klass, ClassStatus::kVisiblyInitialized, self);
-    FixupStaticTrampolines(klass.Get());
+    FixupStaticTrampolines(self, klass.Get());
     return nullptr;
   }
   mirror::Class::SetStatus(klass, ClassStatus::kInitialized, self);
@@ -446,6 +447,65 @@ ClassLinker::VisiblyInitializedCallback* ClassLinker::MarkClassInitialized(
     return callback;
   } else {
     return nullptr;
+  }
+}
+
+const void* ClassLinker::RegisterNative(
+    Thread* self, ArtMethod* method, const void* native_method) {
+  CHECK(method->IsNative()) << method->PrettyMethod();
+  CHECK(native_method != nullptr) << method->PrettyMethod();
+  void* new_native_method = nullptr;
+  Runtime* runtime = Runtime::Current();
+  runtime->GetRuntimeCallbacks()->RegisterNativeMethod(method,
+                                                       native_method,
+                                                       /*out*/&new_native_method);
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    // Remove old registered method if any.
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      critical_native_code_with_clinit_check_.erase(it);
+    }
+    // To ensure correct memory visibility, we need the class to be visibly
+    // initialized before we can set the JNI entrypoint.
+    if (method->GetDeclaringClass()->IsVisiblyInitialized()) {
+      method->SetEntryPointFromJni(new_native_method);
+    } else {
+      critical_native_code_with_clinit_check_.emplace(method, new_native_method);
+    }
+  } else {
+    method->SetEntryPointFromJni(new_native_method);
+  }
+  return new_native_method;
+}
+
+void ClassLinker::UnregisterNative(Thread* self, ArtMethod* method) {
+  CHECK(method->IsNative()) << method->PrettyMethod();
+  // Restore stub to lookup native pointer via dlsym.
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      critical_native_code_with_clinit_check_.erase(it);
+    }
+    method->SetEntryPointFromJni(GetJniDlsymLookupCriticalStub());
+  } else {
+    method->SetEntryPointFromJni(GetJniDlsymLookupStub());
+  }
+}
+
+const void* ClassLinker::GetRegisteredNative(Thread* self, ArtMethod* method) {
+  if (method->IsCriticalNative()) {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto it = critical_native_code_with_clinit_check_.find(method);
+    if (it != critical_native_code_with_clinit_check_.end()) {
+      return it->second;
+    }
+    const void* native_code = method->GetEntryPointFromJni();
+    return IsJniDlsymLookupCriticalStub(native_code) ? nullptr : native_code;
+  } else {
+    const void* native_code = method->GetEntryPointFromJni();
+    return IsJniDlsymLookupStub(native_code) ? nullptr : native_code;
   }
 }
 
@@ -638,6 +698,8 @@ ClassLinker::ClassLinker(InternTable* intern_table, bool fast_class_not_found_ex
       image_pointer_size_(kRuntimePointerSize),
       visibly_initialized_callback_lock_("visibly initialized callback lock"),
       visibly_initialized_callback_(nullptr),
+      critical_native_code_with_clinit_check_lock_("critical native code with clinit check lock"),
+      critical_native_code_with_clinit_check_(),
       cha_(Runtime::Current()->IsAotCompiler() ? nullptr : new ClassHierarchyAnalysis()) {
   // For CHA disabled during Aot, see b/34193647.
 
@@ -2498,6 +2560,17 @@ void ClassLinker::DeleteClassLoader(Thread* self, const ClassLoaderData& data, b
     CHAOnDeleteUpdateClassVisitor visitor(data.allocator);
     data.class_table->Visit<CHAOnDeleteUpdateClassVisitor, kWithoutReadBarrier>(visitor);
   }
+  {
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto end = critical_native_code_with_clinit_check_.end();
+    for (auto it = critical_native_code_with_clinit_check_.begin(); it != end; ) {
+      if (data.allocator->ContainsUnsafe(it->first)) {
+        it = critical_native_code_with_clinit_check_.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
 
   delete data.allocator;
   delete data.class_table;
@@ -3531,14 +3604,30 @@ bool ClassLinker::ShouldUseInterpreterEntrypoint(ArtMethod* method, const void* 
   return false;
 }
 
-void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
+void ClassLinker::FixupStaticTrampolines(Thread* self, ObjPtr<mirror::Class> klass) {
   ScopedAssertNoThreadSuspension sants(__FUNCTION__);
   DCHECK(klass->IsVisiblyInitialized()) << klass->PrettyDescriptor();
-  if (klass->NumDirectMethods() == 0) {
+  size_t num_direct_methods = klass->NumDirectMethods();
+  if (num_direct_methods == 0) {
     return;  // No direct methods => no static methods.
   }
   if (UNLIKELY(klass->IsProxyClass())) {
     return;
+  }
+  PointerSize pointer_size = image_pointer_size_;
+  if (std::any_of(klass->GetDirectMethods(pointer_size).begin(),
+                  klass->GetDirectMethods(pointer_size).end(),
+                  [](const ArtMethod& m) { return m.IsCriticalNative(); })) {
+    // Store registered @CriticalNative methods, if any, to JNI entrypoints.
+    // Direct methods are a contiguous chunk of memory, so use the ordering of the map.
+    ArtMethod* first_method = klass->GetDirectMethod(0u, pointer_size);
+    ArtMethod* last_method = klass->GetDirectMethod(num_direct_methods - 1u, pointer_size);
+    MutexLock lock(self, critical_native_code_with_clinit_check_lock_);
+    auto lb = critical_native_code_with_clinit_check_.lower_bound(first_method);
+    while (lb != critical_native_code_with_clinit_check_.end() && lb->first <= last_method) {
+      lb->first->SetEntryPointFromJni(lb->second);
+      lb = critical_native_code_with_clinit_check_.erase(lb);
+    }
   }
   Runtime* runtime = Runtime::Current();
   if (!runtime->IsStarted()) {
@@ -3548,18 +3637,13 @@ void ClassLinker::FixupStaticTrampolines(ObjPtr<mirror::Class> klass) {
   }
 
   const DexFile& dex_file = klass->GetDexFile();
-  const uint16_t class_def_idx = klass->GetDexClassDefIndex();
-  CHECK_NE(class_def_idx, DexFile::kDexNoIndex16);
-  ClassAccessor accessor(dex_file, class_def_idx);
-  // There should always be class data if there were direct methods.
-  CHECK(accessor.HasClassData()) << klass->PrettyDescriptor();
   bool has_oat_class;
   OatFile::OatClass oat_class = OatFile::FindOatClass(dex_file,
                                                       klass->GetDexClassDefIndex(),
                                                       &has_oat_class);
   // Link the code of methods skipped by LinkCode.
-  for (size_t method_index = 0; method_index < accessor.NumDirectMethods(); ++method_index) {
-    ArtMethod* method = klass->GetDirectMethod(method_index, image_pointer_size_);
+  for (size_t method_index = 0; method_index < num_direct_methods; ++method_index) {
+    ArtMethod* method = klass->GetDirectMethod(method_index, pointer_size);
     if (!method->IsStatic()) {
       // Only update static methods.
       continue;
@@ -3664,8 +3748,10 @@ static void LinkCode(ClassLinker* class_linker,
   }
 
   if (method->IsNative()) {
-    // Unregistering restores the dlsym lookup stub.
-    method->UnregisterNative();
+    // Set up the dlsym lookup stub. Do not go through `UnregisterNative()`
+    // as the extra processing for @CriticalNative is not needed yet.
+    method->SetEntryPointFromJni(
+        method->IsCriticalNative() ? GetJniDlsymLookupCriticalStub() : GetJniDlsymLookupStub());
 
     if (enter_interpreter || quick_code == nullptr) {
       // We have a native method here without code. Then it should have the generic JNI
@@ -4574,7 +4660,9 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
     VerifyClass(self, supertype);
   }
 
-  if (supertype->IsVerified() || supertype->ShouldVerifyAtRuntime()) {
+  if (supertype->IsVerified()
+      || supertype->ShouldVerifyAtRuntime()
+      || supertype->IsVerifiedNeedsAccessChecks()) {
     // The supertype is either verified, or we soft failed at AOT time.
     DCHECK(supertype->IsVerified() || Runtime::Current()->IsAotCompiler());
     return true;
@@ -4614,8 +4702,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
 
     // Is somebody verifying this now?
     ClassStatus old_status = klass->GetStatus();
-    while (old_status == ClassStatus::kVerifying ||
-        old_status == ClassStatus::kVerifyingAtRuntime) {
+    while (old_status == ClassStatus::kVerifying) {
       lock.WaitIgnoringInterrupts();
       // WaitIgnoringInterrupts can still receive an interrupt and return early, in this
       // case we may see the same status again. b/62912904. This is why the check is
@@ -4640,20 +4727,25 @@ verifier::FailureKind ClassLinker::VerifyClass(
       return verifier::FailureKind::kNoFailure;
     }
 
+    if (klass->IsVerifiedNeedsAccessChecks()) {
+      if (!Runtime::Current()->IsAotCompiler()) {
+        // Mark the class as having a verification attempt to avoid re-running
+        // the verifier and avoid calling EnsureSkipAccessChecksMethods.
+        klass->SetVerificationAttempted();
+        mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
+      }
+      return verifier::FailureKind::kAccessChecksFailure;
+    }
+
     // For AOT, don't attempt to re-verify if we have already found we should
     // verify at runtime.
-    if (Runtime::Current()->IsAotCompiler() && klass->ShouldVerifyAtRuntime()) {
+    if (klass->ShouldVerifyAtRuntime()) {
+      CHECK(Runtime::Current()->IsAotCompiler());
       return verifier::FailureKind::kSoftFailure;
     }
 
-    if (klass->GetStatus() == ClassStatus::kResolved) {
-      mirror::Class::SetStatus(klass, ClassStatus::kVerifying, self);
-    } else {
-      CHECK_EQ(klass->GetStatus(), ClassStatus::kRetryVerificationAtRuntime)
-          << klass->PrettyClass();
-      CHECK(!Runtime::Current()->IsAotCompiler());
-      mirror::Class::SetStatus(klass, ClassStatus::kVerifyingAtRuntime, self);
-    }
+    DCHECK_EQ(klass->GetStatus(), ClassStatus::kResolved);
+    mirror::Class::SetStatus(klass, ClassStatus::kVerifying, self);
 
     // Skip verification if disabled.
     if (!Runtime::Current()->IsVerificationEnabled()) {
@@ -4726,7 +4818,8 @@ verifier::FailureKind ClassLinker::VerifyClass(
                      << klass->PrettyDescriptor()
                      << " in " << klass->GetDexCache()->GetLocation()->ToModifiedUtf8()
                      << ": "
-                     << preverified;
+                     << preverified
+                     << "( " << oat_file_class_status << ")";
 
   // If the oat file says the class had an error, re-run the verifier. That way we will get a
   // precise error message. To ensure a rerun, test:
@@ -4755,21 +4848,29 @@ verifier::FailureKind ClassLinker::VerifyClass(
     if (verifier_failure == verifier::FailureKind::kNoFailure) {
       // Even though there were no verifier failures we need to respect whether the super-class and
       // super-default-interfaces were verified or requiring runtime reverification.
-      if (supertype == nullptr || supertype->IsVerified()) {
+      if (supertype == nullptr
+          || supertype->IsVerified()
+          || supertype->IsVerifiedNeedsAccessChecks()) {
         mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
       } else {
+        CHECK(Runtime::Current()->IsAotCompiler());
         CHECK_EQ(supertype->GetStatus(), ClassStatus::kRetryVerificationAtRuntime);
         mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
         // Pretend a soft failure occurred so that we don't consider the class verified below.
         verifier_failure = verifier::FailureKind::kSoftFailure;
       }
     } else {
-      CHECK_EQ(verifier_failure, verifier::FailureKind::kSoftFailure);
+      CHECK(verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kAccessChecksFailure);
       // Soft failures at compile time should be retried at runtime. Soft
       // failures at runtime will be handled by slow paths in the generated
       // code. Set status accordingly.
       if (Runtime::Current()->IsAotCompiler()) {
-        mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+        if (verifier_failure == verifier::FailureKind::kSoftFailure) {
+          mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
+        } else {
+          mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
+        }
       } else {
         mirror::Class::SetStatus(klass, ClassStatus::kVerified, self);
         // As this is a fake verified status, make sure the methods are _not_ marked
@@ -4786,18 +4887,18 @@ verifier::FailureKind ClassLinker::VerifyClass(
     mirror::Class::SetStatus(klass, ClassStatus::kErrorResolved, self);
   }
   if (preverified || verifier_failure == verifier::FailureKind::kNoFailure) {
-    // Class is verified so we don't need to do any access check on its methods.
-    // Let the interpreter know it by setting the kAccSkipAccessChecks flag onto each
-    // method.
-    // Note: we're going here during compilation and at runtime. When we set the
-    // kAccSkipAccessChecks flag when compiling image classes, the flag is recorded
-    // in the image and is set when loading the image.
-
-    if (UNLIKELY(Runtime::Current()->IsVerificationSoftFail())) {
+    if (oat_file_class_status == ClassStatus::kVerifiedNeedsAccessChecks ||
+        UNLIKELY(Runtime::Current()->IsVerificationSoftFail())) {
       // Never skip access checks if the verification soft fail is forced.
       // Mark the class as having a verification attempt to avoid re-running the verifier.
       klass->SetVerificationAttempted();
     } else {
+      // Class is verified so we don't need to do any access check on its methods.
+      // Let the interpreter know it by setting the kAccSkipAccessChecks flag onto each
+      // method.
+      // Note: we're going here during compilation and at runtime. When we set the
+      // kAccSkipAccessChecks flag when compiling image classes, the flag is recorded
+      // in the image and is set when loading the image.
       EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
     }
   }
@@ -4850,31 +4951,20 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
   if (oat_file_class_status >= ClassStatus::kVerified) {
     return true;
   }
+  if (oat_file_class_status >= ClassStatus::kVerifiedNeedsAccessChecks) {
+    // We return that the clas has already been verified, and the caller should
+    // check the class status to ensure we run with access checks.
+    return true;
+  }
   // If we only verified a subset of the classes at compile time, we can end up with classes that
   // were resolved by the verifier.
   if (oat_file_class_status == ClassStatus::kResolved) {
     return false;
   }
-  if (oat_file_class_status == ClassStatus::kRetryVerificationAtRuntime) {
-    // Compile time verification failed with a soft error. Compile time verification can fail
-    // because we have incomplete type information. Consider the following:
-    // class ... {
-    //   Foo x;
-    //   .... () {
-    //     if (...) {
-    //       v1 gets assigned a type of resolved class Foo
-    //     } else {
-    //       v1 gets assigned a type of unresolved class Bar
-    //     }
-    //     iput x = v1
-    // } }
-    // when we merge v1 following the if-the-else it results in Conflict
-    // (see verifier::RegType::Merge) as we can't know the type of Bar and we could possibly be
-    // allowing an unsafe assignment to the field x in the iput (javac may have compiled this as
-    // it knew Bar was a sub-class of Foo, but for us this may have been moved into a separate apk
-    // at compile time).
-    return false;
-  }
+  // We never expect a .oat file to have kRetryVerificationAtRuntime statuses.
+  CHECK_NE(oat_file_class_status, ClassStatus::kRetryVerificationAtRuntime)
+      << klass->PrettyClass() << " " << dex_file.GetLocation();
+
   if (mirror::Class::IsErroneous(oat_file_class_status)) {
     // Compile time verification failed with a hard error. This is caused by invalid instructions
     // in the class. These errors are unrecoverable.
@@ -5342,7 +5432,7 @@ bool ClassLinker::InitializeClass(Thread* self,
           VlogClassInitializationFailure(klass);
         } else {
           CHECK(Runtime::Current()->IsAotCompiler());
-          CHECK_EQ(klass->GetStatus(), ClassStatus::kRetryVerificationAtRuntime);
+          CHECK(klass->ShouldVerifyAtRuntime() || klass->IsVerifiedNeedsAccessChecks());
           self->AssertNoPendingException();
           self->SetException(Runtime::Current()->GetPreAllocatedNoClassDefFoundError());
         }
@@ -6435,7 +6525,11 @@ bool ClassLinker::LinkVirtualMethods(
         // If the dex file does not support default methods, throw ClassFormatError.
         // This check is necessary to protect from odd cases, such as native default
         // methods, that the dex file verifier permits for old dex file versions. b/157170505
-        if (!m->GetDexFile()->SupportsDefaultMethods()) {
+        // FIXME: This should be `if (!m->GetDexFile()->SupportsDefaultMethods())` but we're
+        // currently running CTS tests for default methods with dex file version 035 which
+        // does not support default methods. So, we limit this to native methods. b/157718952
+        if (m->IsNative()) {
+          DCHECK(!m->GetDexFile()->SupportsDefaultMethods());
           ThrowClassFormatError(klass.Get(),
                                 "Dex file does not support default method '%s'",
                                 m->PrettyMethod().c_str());

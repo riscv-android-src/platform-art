@@ -17,6 +17,7 @@ package art
 import (
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 
 	"github.com/google/blueprint/proptools"
@@ -48,9 +49,6 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	if tlab {
 		cflags = append(cflags, "-DART_USE_TLAB=1")
 	}
-
-	imtSize := ctx.Config().GetenvWithDefault("ART_IMT_SIZE", "43")
-	cflags = append(cflags, "-DIMT_SIZE="+imtSize)
 
 	if ctx.Config().IsEnvTrue("ART_HEAP_POISONING") {
 		cflags = append(cflags, "-DART_HEAP_POISONING=1")
@@ -274,6 +272,33 @@ func testInstall(ctx android.InstallHookContext) {
 	testMap[name] = tests
 }
 
+var testcasesContentKey = android.NewOnceKey("artTestcasesContent")
+
+func testcasesContent(config android.Config) map[string]string {
+	return config.Once(testcasesContentKey, func() interface{} {
+		return make(map[string]string)
+	}).(map[string]string)
+}
+
+// Binaries and libraries also need to be copied in the testcases directory for
+// running tests on host.  This method adds module to the list of needed files.
+// The 'key' is the file in testcases and 'value' is the path to copy it from.
+// The actual copy will be done in make since soong does not do installations.
+func addTestcasesFile(ctx android.InstallHookContext) {
+	testcasesContent := testcasesContent(ctx.Config())
+
+	artTestMutex.Lock()
+	defer artTestMutex.Unlock()
+
+	if ctx.Os().Class == android.Host {
+		src := ctx.SrcPath().String()
+		path := strings.Split(ctx.Path().ToMakePath().String(), "/")
+		// Keep last two parts of the install path (e.g. bin/dex2oat).
+		dst := strings.Join(path[len(path)-2:], "/")
+		testcasesContent[dst] = src
+	}
+}
+
 var artTestMutex sync.Mutex
 
 func init() {
@@ -392,6 +417,7 @@ func artLibrary() android.Module {
 
 	installCodegenCustomizer(module, staticAndSharedLibrary)
 
+	android.AddInstallHook(module, addTestcasesFile)
 	return module
 }
 
@@ -408,6 +434,7 @@ func artBinary() android.Module {
 
 	android.AddLoadHook(module, customLinker)
 	android.AddLoadHook(module, prefer32Bit)
+	android.AddInstallHook(module, addTestcasesFile)
 	return module
 }
 

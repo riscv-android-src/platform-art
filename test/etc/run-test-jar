@@ -61,7 +61,6 @@ OPTIMIZE="y"
 PREBUILD="y"
 QUIET="n"
 RELOCATE="n"
-STRIP_DEX="n"
 SECONDARY_DEX=""
 TIME_OUT="n"  # "n" (disabled), "timeout" (use timeout), "gdb" (use gdb)
 TIMEOUT_DUMPER=signal_dumper
@@ -256,9 +255,6 @@ while true; do
         shift
     elif [ "x$1" = "x--no-secondary-compilation" ]; then
         SECONDARY_COMPILATION="n"
-        shift
-    elif [ "x$1" = "x--strip-dex" ]; then
-        STRIP_DEX="y"
         shift
     elif [ "x$1" = "x--host" ]; then
         HOST="y"
@@ -709,7 +705,7 @@ if [ "$USE_JVM" = "y" ]; then
 fi
 
 # Note: This must start with the CORE_IMG_JARS in Android.common_path.mk
-# because that's what we use for compiling the core.art image.
+# because that's what we use for compiling the boot.art image.
 # It may contain additional modules from TEST_CORE_JARS.
 bpath_modules="core-oj core-libart okhttp bouncycastle apache-xml core-icu4j conscrypt"
 bpath=""
@@ -756,7 +752,7 @@ if [ "$HAVE_IMAGE" = "n" ]; then
     if [ "${RELOCATE}" = "y" ] ; then
       DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
     else
-      DALVIKVM_BOOT_OPT="-Ximage:/system/non-existent/core.art"
+      DALVIKVM_BOOT_OPT="-Ximage:/system/non-existent/boot.art"
     fi
 else
     DALVIKVM_BOOT_OPT="-Ximage:${BOOT_IMAGE}"
@@ -1038,10 +1034,6 @@ if [ "$PREBUILD" = "y" ]; then
     dm_cmdline="$base_dm_cmdline" # Only use primary dm.
     vdex_cmdline="$base_vdex_cmdline && $vdex_cmdline"
   fi
-fi
-
-if [ "$STRIP_DEX" = "y" ]; then
-  strip_cmdline="zip --quiet --delete $DEX_LOCATION/$TEST_NAME.jar classes.dex"
 fi
 
 if [ "$SYNC_BEFORE_RUN" = "y" ]; then

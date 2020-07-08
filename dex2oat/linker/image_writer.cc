@@ -3167,6 +3167,11 @@ void ImageWriter::FixupClass(mirror::Class* orig, mirror::Class* copy) {
 
   // Remove the clinitThreadId. This is required for image determinism.
   copy->SetClinitThreadId(static_cast<pid_t>(0));
+  // We never emit kRetryVerificationAtRuntime, instead we mark the class as
+  // resolved and the class will therefore be re-verified at runtime.
+  if (orig->ShouldVerifyAtRuntime()) {
+    copy->SetStatusInternal(ClassStatus::kResolved);
+  }
 }
 
 void ImageWriter::FixupObject(Object* orig, Object* copy) {
@@ -3427,6 +3432,9 @@ void ImageWriter::CopyAndFixupMethod(ArtMethod* orig,
       CopyAndFixupPointer(copy, ArtMethod::DataOffset(target_ptr_size_), orig_table);
     } else if (UNLIKELY(orig == runtime->GetResolutionMethod())) {
       quick_code = GetOatAddress(StubType::kQuickResolutionTrampoline);
+      // Set JNI entrypoint for resolving @CriticalNative methods called from compiled code .
+      const void* jni_code = GetOatAddress(StubType::kJNIDlsymLookupCriticalTrampoline);
+      copy->SetEntryPointFromJniPtrSize(jni_code, target_ptr_size_);
     } else {
       bool found_one = false;
       for (size_t i = 0; i < static_cast<size_t>(CalleeSaveType::kLastCalleeSaveType); ++i) {

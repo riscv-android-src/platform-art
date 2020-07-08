@@ -35,44 +35,6 @@ ART_TARGET_NATIVETEST_OUT := $(TARGET_OUT_DATA_NATIVE_TESTS)/art
 ART_TARGET_TEST_DIR := /data/art-test
 ART_TARGET_TEST_OUT := $(TARGET_OUT_DATA)/art-test
 
-# core.oat location on the device.
-TARGET_CORE_OAT := $(ART_TARGET_TEST_DIR)/$(DEX2OAT_TARGET_ARCH)/core.oat
-ifdef TARGET_2ND_ARCH
-2ND_TARGET_CORE_OAT := $(ART_TARGET_TEST_DIR)/$($(TARGET_2ND_ARCH_VAR_PREFIX)DEX2OAT_TARGET_ARCH)/core.oat
-endif
-
-CORE_OAT_SUFFIX := .oat
-
-# core.oat locations under the out directory.
-HOST_CORE_OAT_OUT_BASE := $(HOST_OUT_JAVA_LIBRARIES)/$(ART_HOST_ARCH)/core
-ifneq ($(HOST_PREFER_32_BIT),true)
-2ND_HOST_CORE_OAT_OUT_BASE := $(HOST_OUT_JAVA_LIBRARIES)/$(2ND_ART_HOST_ARCH)/core
-endif
-HOST_CORE_OAT_OUTS :=
-TARGET_CORE_OAT_OUT_BASE := $(ART_TARGET_TEST_OUT)/$(DEX2OAT_TARGET_ARCH)/core
-ifdef TARGET_2ND_ARCH
-2ND_TARGET_CORE_OAT_OUT_BASE := $(ART_TARGET_TEST_OUT)/$($(TARGET_2ND_ARCH_VAR_PREFIX)DEX2OAT_TARGET_ARCH)/core
-endif
-TARGET_CORE_OAT_OUTS :=
-
-CORE_IMG_SUFFIX := .art
-
-# core.art locations under the out directory.
-HOST_CORE_IMG_OUT_BASE := $(HOST_OUT_JAVA_LIBRARIES)/$(ART_HOST_ARCH)/core
-ifneq ($(HOST_PREFER_32_BIT),true)
-2ND_HOST_CORE_IMG_OUT_BASE := $(HOST_OUT_JAVA_LIBRARIES)/$(2ND_ART_HOST_ARCH)/core
-endif
-HOST_CORE_IMG_OUTS :=
-TARGET_CORE_IMG_OUT_BASE := $(ART_TARGET_TEST_OUT)/$(DEX2OAT_TARGET_ARCH)/core
-ifdef TARGET_2ND_ARCH
-2ND_TARGET_CORE_IMG_OUT_BASE := $(ART_TARGET_TEST_OUT)/$($(TARGET_2ND_ARCH_VAR_PREFIX)DEX2OAT_TARGET_ARCH)/core
-endif
-TARGET_CORE_IMG_OUTS :=
-
-# Oat location of core.art.
-HOST_CORE_IMG_LOCATION := $(HOST_OUT_JAVA_LIBRARIES)/core.art
-TARGET_CORE_IMG_LOCATION := $(ART_TARGET_TEST_OUT)/core.art
-
 # Modules to compile for core.art.
 CORE_IMG_JARS := core-oj core-libart okhttp bouncycastle apache-xml
 HOST_CORE_IMG_JARS   := $(addsuffix -hostdex,$(CORE_IMG_JARS))
@@ -105,7 +67,7 @@ ART_TARGET_DEX_DEPENDENCIES := com.android.art.testing com.android.conscrypt com
 
 ART_CORE_SHARED_LIBRARIES := libjavacore libopenjdk libopenjdkjvm libopenjdkjvmti
 ART_CORE_SHARED_DEBUG_LIBRARIES := libopenjdkd libopenjdkjvmd libopenjdkjvmtid
-ART_HOST_CORE_SHARED_LIBRARIES := $(ART_CORE_SHARED_LIBRARIES) libandroidicu-host libicuuc-host libicui18n-host libicu_jni
+ART_HOST_CORE_SHARED_LIBRARIES := $(ART_CORE_SHARED_LIBRARIES) libicuuc-host libicui18n-host libicu_jni
 ART_HOST_SHARED_LIBRARY_DEPENDENCIES := $(foreach lib,$(ART_HOST_CORE_SHARED_LIBRARIES), $(ART_HOST_OUT_SHARED_LIBRARIES)/$(lib)$(ART_HOST_SHLIB_EXTENSION))
 ART_HOST_SHARED_LIBRARY_DEBUG_DEPENDENCIES := $(foreach lib,$(ART_CORE_SHARED_DEBUG_LIBRARIES), $(ART_HOST_OUT_SHARED_LIBRARIES)/$(lib)$(ART_HOST_SHLIB_EXTENSION))
 ifdef HOST_2ND_ARCH
@@ -158,6 +120,8 @@ DEBUG_ART_APEX := com.android.art.debug
 # Testing ART APEX, used in ART device testing.
 TESTING_ART_APEX := com.android.art.testing
 
+# Runtime (Bionic) APEX
+RUNTIME_APEX := com.android.runtime
 # Conscrypt APEX
 CONSCRYPT_APEX := com.android.conscrypt
 # i18n APEX

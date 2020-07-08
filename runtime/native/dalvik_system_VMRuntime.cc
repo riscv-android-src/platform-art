@@ -399,7 +399,6 @@ static void PreloadDexCachesResolveString(
   if (string == nullptr) {
     return;
   }
-  // LOG(INFO) << "VMRuntime.preloadDexCaches resolved string=" << utf8;
   dex_cache->SetResolvedString(string_idx, string);
 }
 
@@ -419,17 +418,10 @@ static void PreloadDexCachesResolveType(Thread* self,
   ObjPtr<mirror::Class> klass = (class_name[1] == '\0')
       ? linker->LookupPrimitiveClass(class_name[0])
       : linker->LookupClass(self, class_name, nullptr);
-  if (klass == nullptr) {
+  if (klass == nullptr || !klass->IsResolved()) {
     return;
   }
-  // LOG(INFO) << "VMRuntime.preloadDexCaches resolved klass=" << class_name;
   dex_cache->SetResolvedType(type_idx, klass);
-  // Skip uninitialized classes because filled static storage entry implies it is initialized.
-  if (!klass->IsInitialized()) {
-    // LOG(INFO) << "VMRuntime.preloadDexCaches uninitialized klass=" << class_name;
-    return;
-  }
-  // LOG(INFO) << "VMRuntime.preloadDexCaches static storage klass=" << class_name;
 }
 
 // Based on ClassLinker::ResolveField.
@@ -727,11 +719,6 @@ static void VMRuntime_setProcessDataDirectory(JNIEnv* env, jclass, jstring java_
   Runtime::Current()->SetProcessDataDirectory(data_dir.c_str());
 }
 
-static jboolean VMRuntime_hasBootImageSpaces(JNIEnv* env ATTRIBUTE_UNUSED,
-                                             jclass klass ATTRIBUTE_UNUSED) {
-  return Runtime::Current()->GetHeap()->HasBootImageSpace() ? JNI_TRUE : JNI_FALSE;
-}
-
 static void VMRuntime_bootCompleted(JNIEnv* env ATTRIBUTE_UNUSED,
                                     jclass klass ATTRIBUTE_UNUSED) {
   jit::Jit* jit = Runtime::Current()->GetJit();
@@ -788,7 +775,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, clearGrowthLimit, "()V"),
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
   NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
-  FAST_NATIVE_METHOD(VMRuntime, hasBootImageSpaces, "()Z"),  // Could be CRITICAL.
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),

@@ -267,7 +267,8 @@ JitCodeCache::JitCodeCache()
       collection_in_progress_(false),
       last_collection_increased_code_cache_(false),
       garbage_collect_code_(true),
-      number_of_compilations_(0),
+      number_of_baseline_compilations_(0),
+      number_of_optimized_compilations_(0),
       number_of_osr_compilations_(0),
       number_of_collections_(0),
       histogram_stack_map_memory_use_("Memory used for stack maps", 16),
@@ -663,10 +664,10 @@ bool JitCodeCache::Commit(Thread* self,
                           ArrayRef<const uint8_t> stack_map,
                           const std::vector<uint8_t>& debug_info,
                           bool is_full_debug_info,
-                          bool osr,
+                          CompilationKind compilation_kind,
                           bool has_should_deoptimize_flag,
                           const ArenaSet<ArtMethod*>& cha_single_implementation_list) {
-  DCHECK(!method->IsNative() || !osr);
+  DCHECK(!method->IsNative() || (compilation_kind != CompilationKind::kOsr));
 
   if (!method->IsNative()) {
     // We need to do this before grabbing the lock_ because it needs to be able to see the string
@@ -694,7 +695,17 @@ bool JitCodeCache::Commit(Thread* self,
     return false;
   }
 
-  number_of_compilations_++;
+  switch (compilation_kind) {
+    case CompilationKind::kOsr:
+      number_of_osr_compilations_++;
+      break;
+    case CompilationKind::kBaseline:
+      number_of_baseline_compilations_++;
+      break;
+    case CompilationKind::kOptimized:
+      number_of_optimized_compilations_++;
+      break;
+  }
 
   // We need to update the debug info before the entry point gets set.
   // At the same time we want to do under JIT lock so that debug info and JIT maps are in sync.
@@ -749,8 +760,7 @@ bool JitCodeCache::Commit(Thread* self,
       } else {
         method_code_map_.Put(code_ptr, method);
       }
-      if (osr) {
-        number_of_osr_compilations_++;
+      if (compilation_kind == CompilationKind::kOsr) {
         osr_code_map_.Put(method, code_ptr);
       } else if (NeedsClinitCheckBeforeCall(method) &&
                  !method->GetDeclaringClass()->IsVisiblyInitialized()) {
@@ -773,7 +783,7 @@ bool JitCodeCache::Commit(Thread* self,
       GetLiveBitmap()->AtomicTestAndSet(FromCodeToAllocation(code_ptr));
     }
     VLOG(jit)
-        << "JIT added (osr=" << std::boolalpha << osr << std::noboolalpha << ") "
+        << "JIT added (kind=" << compilation_kind << ") "
         << ArtMethod::PrettyMethod(method) << "@" << method
         << " ccache_size=" << PrettySize(CodeCacheSizeLocked()) << ": "
         << " dcache_size=" << PrettySize(DataCacheSizeLocked()) << ": "
@@ -1287,6 +1297,53 @@ void JitCodeCache::SetGarbageCollectCode(bool value) {
   }
 }
 
+void JitCodeCache::RemoveMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  DCHECK(IsMethodBeingCompiled(method, kind));
+  switch (kind) {
+    case CompilationKind::kOsr:
+      current_osr_compilations_.erase(method);
+      break;
+    case CompilationKind::kBaseline:
+      current_baseline_compilations_.erase(method);
+      break;
+    case CompilationKind::kOptimized:
+      current_optimized_compilations_.erase(method);
+      break;
+  }
+}
+
+void JitCodeCache::AddMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  DCHECK(!IsMethodBeingCompiled(method, kind));
+  switch (kind) {
+    case CompilationKind::kOsr:
+      current_osr_compilations_.insert(method);
+      break;
+    case CompilationKind::kBaseline:
+      current_baseline_compilations_.insert(method);
+      break;
+    case CompilationKind::kOptimized:
+      current_optimized_compilations_.insert(method);
+      break;
+  }
+}
+
+bool JitCodeCache::IsMethodBeingCompiled(ArtMethod* method, CompilationKind kind) {
+  switch (kind) {
+    case CompilationKind::kOsr:
+      return ContainsElement(current_osr_compilations_, method);
+    case CompilationKind::kBaseline:
+      return ContainsElement(current_baseline_compilations_, method);
+    case CompilationKind::kOptimized:
+      return ContainsElement(current_optimized_compilations_, method);
+  }
+}
+
+bool JitCodeCache::IsMethodBeingCompiled(ArtMethod* method) {
+  return ContainsElement(current_optimized_compilations_, method) ||
+      ContainsElement(current_osr_compilations_, method) ||
+      ContainsElement(current_baseline_compilations_, method);
+}
+
 void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
   ScopedTrace trace(__FUNCTION__);
   {
@@ -1317,7 +1374,10 @@ void JitCodeCache::DoCollection(Thread* self, bool collect_profiling_info) {
         // Also remove the saved entry point from the ProfilingInfo objects.
         for (ProfilingInfo* info : profiling_infos_) {
           const void* ptr = info->GetMethod()->GetEntryPointFromQuickCompiledCode();
-          if (!ContainsPc(ptr) && !info->IsInUseByCompiler() && !IsInZygoteDataSpace(info)) {
+          if (!ContainsPc(ptr) &&
+              !IsMethodBeingCompiled(info->GetMethod()) &&
+              !info->IsInUseByCompiler() &&
+              !IsInZygoteDataSpace(info)) {
             info->GetMethod()->SetProfilingInfo(nullptr);
           }
 
@@ -1642,19 +1702,19 @@ bool JitCodeCache::IsOsrCompiled(ArtMethod* method) {
 
 bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
                                        Thread* self,
-                                       bool osr,
+                                       CompilationKind compilation_kind,
                                        bool prejit,
-                                       bool baseline,
                                        JitMemoryRegion* region) {
   const void* existing_entry_point = method->GetEntryPointFromQuickCompiledCode();
-  if (!osr && ContainsPc(existing_entry_point)) {
+  if (compilation_kind != CompilationKind::kOsr && ContainsPc(existing_entry_point)) {
     OatQuickMethodHeader* method_header =
         OatQuickMethodHeader::FromEntryPoint(existing_entry_point);
-    if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr()) == baseline) {
+    bool is_baseline = (compilation_kind == CompilationKind::kBaseline);
+    if (CodeInfo::IsBaseline(method_header->GetOptimizedCodeInfoPtr()) == is_baseline) {
       VLOG(jit) << "Not compiling "
                 << method->PrettyMethod()
                 << " because it has already been compiled"
-                << " baseline=" << std::boolalpha << baseline;
+                << " kind=" << compilation_kind;
       return false;
     }
   }
@@ -1682,7 +1742,7 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     }
   }
 
-  if (osr) {
+  if (compilation_kind == CompilationKind::kOsr) {
     MutexLock mu(self, *Locks::jit_lock_);
     if (osr_code_map_.find(method) != osr_code_map_.end()) {
       return false;
@@ -1719,7 +1779,9 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
     return new_compilation;
   } else {
     ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-    if (CanAllocateProfilingInfo() && baseline && info == nullptr) {
+    if (CanAllocateProfilingInfo() &&
+        (compilation_kind == CompilationKind::kBaseline) &&
+        (info == nullptr)) {
       // We can retry allocation here as we're the JIT thread.
       if (ProfilingInfo::Create(self, method, /* retry_allocation= */ true)) {
         info = method->GetProfilingInfo(kRuntimePointerSize);
@@ -1734,13 +1796,12 @@ bool JitCodeCache::NotifyCompilationOf(ArtMethod* method,
         ClearMethodCounter(method, /*was_warm=*/ false);
         return false;
       }
-    } else {
-      MutexLock mu(self, *Locks::jit_lock_);
-      if (info->IsMethodBeingCompiled(osr)) {
-        return false;
-      }
-      info->SetIsMethodBeingCompiled(true, osr);
     }
+    MutexLock mu(self, *Locks::jit_lock_);
+    if (IsMethodBeingCompiled(method, compilation_kind)) {
+      return false;
+    }
+    AddMethodBeingCompiled(method, compilation_kind);
     return true;
   }
 }
@@ -1764,7 +1825,9 @@ void JitCodeCache::DoneCompilerUse(ArtMethod* method, Thread* self) {
   info->DecrementInlineUse();
 }
 
-void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self, bool osr) {
+void JitCodeCache::DoneCompiling(ArtMethod* method,
+                                 Thread* self,
+                                 CompilationKind compilation_kind) {
   DCHECK_EQ(Thread::Current(), self);
   MutexLock mu(self, *Locks::jit_lock_);
   if (UNLIKELY(method->IsNative())) {
@@ -1777,11 +1840,7 @@ void JitCodeCache::DoneCompiling(ArtMethod* method, Thread* self, bool osr) {
       jni_stubs_map_.erase(it);  // Remove the entry added in NotifyCompilationOf().
     }  // else Commit() updated entrypoints of all methods in the JniStubData.
   } else {
-    ProfilingInfo* info = method->GetProfilingInfo(kRuntimePointerSize);
-    if (info != nullptr) {
-      DCHECK(info->IsMethodBeingCompiled(osr));
-      info->SetIsMethodBeingCompiled(false, osr);
-    }
+    RemoveMethodBeingCompiled(method, compilation_kind);
   }
 }
 
@@ -1864,7 +1923,8 @@ void JitCodeCache::Dump(std::ostream& os) {
      << "Current JIT capacity: " << PrettySize(GetCurrentRegion()->GetCurrentCapacity()) << "\n"
      << "Current number of JIT JNI stub entries: " << jni_stubs_map_.size() << "\n"
      << "Current number of JIT code cache entries: " << method_code_map_.size() << "\n"
-     << "Total number of JIT compilations: " << number_of_compilations_ << "\n"
+     << "Total number of JIT baseline compilations: " << number_of_baseline_compilations_ << "\n"
+     << "Total number of JIT optimized compilations: " << number_of_optimized_compilations_ << "\n"
      << "Total number of JIT compilations for on stack replacement: "
         << number_of_osr_compilations_ << "\n"
      << "Total number of JIT code cache collections: " << number_of_collections_ << std::endl;
@@ -1898,7 +1958,8 @@ void JitCodeCache::PostForkChildAction(bool is_system_server, bool is_zygote) {
   }
 
   // Reset all statistics to be specific to this process.
-  number_of_compilations_ = 0;
+  number_of_baseline_compilations_ = 0;
+  number_of_optimized_compilations_ = 0;
   number_of_osr_compilations_ = 0;
   number_of_collections_ = 0;
   histogram_stack_map_memory_use_.Reset();

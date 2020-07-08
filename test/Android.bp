@@ -181,6 +181,37 @@ art_cc_library {
 
 // ART run-tests.
 
+filegroup {
+    name: "art-run-test-template",
+    srcs: [
+        "AndroidTestTemplate.xml",
+    ],
+}
+
+java_defaults {
+    name: "art-run-test-defaults",
+
+    // Compile against the "core" bootclasspath, not the "default" one (current
+    // platform) -- use the same settings as Libcore tests (see e.g. the
+    // definition of module `core-tests` in libcore/JavaLibrary.bp).
+    //
+    // Note: The legacy way to build ART run-tests uses the
+    // `javac_with_bootclasspath` function defined in `test/etc/default-build`.
+    // See also `tools/javac-helper.sh`.
+    sdk_version: "none",
+    system_modules: "core-all-system-modules",
+
+    // Some ART run-tests contain constructs which break ErrorProne checks;
+    // disable them on `errorprone` builds.
+    errorprone: {
+        javacflags: ["-XepDisableAllChecks"],
+    },
+
+    data: ["expected.txt"],
+    test_config_template: ":art-run-test-template",
+    test_suites: ["general-tests"],
+}
+
 art_cc_test_library {
     name: "libarttest",
     defaults: ["libarttest-defaults"],
@@ -372,6 +403,7 @@ art_cc_defaults {
         "1976-hello-structural-static-methods/structural_transform_methods.cc",
         "2005-pause-all-redefine-multithreaded/pause-all.cc",
         "2009-structural-local-ref/local-ref.cc",
+        "2035-structural-native-method/structural-native.cc",
     ],
     // Use NDK-compatible headers for ctstiagent.
     header_libs: [
@@ -1013,6 +1045,7 @@ java_defaults {
         enabled: false,
     },
     sdk_version: "core_platform",
+    uncompress_dex: false,
 }
 
 // The following modules are just trivial compilations (non-trivial cases are the end).
@@ -1396,4 +1429,11 @@ genrule {
     defaults: ["art-gtest-jars-smali-defaults"],
     srcs: ["VerifySoftFailDuringClinit/**/*.smali"],
     out: ["art-gtest-jars-VerifySoftFailDuringClinit.jar"],
+}
+
+genrule {
+    name: "art-gtest-jars-LinkageTest",
+    defaults: ["art-gtest-jars-smali-defaults"],
+    srcs: ["LinkageTest/*.smali"],
+    out: ["art-gtest-jars-LinkageTest.jar"],
 }
