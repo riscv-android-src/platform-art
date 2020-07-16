@@ -86,8 +86,8 @@ class DwarfTest : public CommonCompilerTest {
 
     // Read the elf file back using objdump.
     std::vector<std::string> lines;
-    std::string cmd = GetAndroidHostToolsDir();
-    cmd = cmd + "objdump " + args + " " + file.GetFilename() + " 2>&1";
+    std::string cmd = GetAndroidTool("llvm-dwarfdump");
+    cmd = cmd + " " + args + " " + file.GetFilename() + " 2>&1";
     FILE* output = popen(cmd.data(), "r");
     char buffer[1024];
     const char* line;
@@ -96,12 +96,13 @@ class DwarfTest : public CommonCompilerTest {
         printf("%s", line);
       }
       if (line[0] != '\0' && line[0] != '\n') {
-        EXPECT_TRUE(strstr(line, "objdump: Error:") == nullptr) << line;
-        EXPECT_TRUE(strstr(line, "objdump: Warning:") == nullptr) << line;
+        EXPECT_TRUE(strstr(line, "error:") == nullptr) << line;
+        EXPECT_TRUE(strstr(line, "warning:") == nullptr) << line;
         std::string str(line);
         if (str.back() == '\n') {
           str.pop_back();
         }
+        std::replace(str.begin(), str.end(), '\t', ' ');
         lines.push_back(str);
       }
     }
