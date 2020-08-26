@@ -110,7 +110,9 @@ struct WellKnownClasses {
   static jmethodID java_lang_Daemons_start;
   static jmethodID java_lang_Daemons_stop;
   static jmethodID java_lang_Daemons_waitForDaemonStart;
+  static jmethodID java_lang_Double_doubleToRawLongBits;
   static jmethodID java_lang_Double_valueOf;
+  static jmethodID java_lang_Float_floatToRawIntBits;
   static jmethodID java_lang_Float_valueOf;
   static jmethodID java_lang_Integer_valueOf;
   static jmethodID java_lang_invoke_MethodHandles_lookup;
@@ -130,6 +132,7 @@ struct WellKnownClasses {
   static jmethodID java_lang_Thread_run;
   static jmethodID java_lang_ThreadGroup_add;
   static jmethodID java_lang_ThreadGroup_removeThread;
+  static jmethodID java_nio_Buffer_isDirect;
   static jmethodID java_nio_DirectByteBuffer_init;
   static jmethodID java_util_function_Consumer_accept;
   static jmethodID libcore_reflect_AnnotationFactory_createAnnotation;

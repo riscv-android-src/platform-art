@@ -103,12 +103,36 @@ class MatchLines_Test(unittest.TestCase):
 
 class MatchFiles_Test(unittest.TestCase):
 
-  def assertMatches(self, checkerString, c1String):
+  def assertMatches(self, checkerString, c1String, isa=None, instructionSetFeatures=None):
     checkerString = \
       """
         /// CHECK-START: MyMethod MyPass
       """ + checkerString
-    c1String = \
+    metaData = ""
+    if isa:
+      metaData += "isa:" + isa
+
+    if instructionSetFeatures:
+      if metaData:
+        metaData += " "
+
+      joinedFeatures = ",".join(map(lambda feature: feature
+                                                    if instructionSetFeatures[feature]
+                                                    else "-" + feature,
+                                    instructionSetFeatures))
+      metaData += "isa_features:" + joinedFeatures
+
+    metaDataString = ""
+    if metaData:
+      metaDataString = \
+        """
+          begin_compilation
+            name "%s"
+            method "%s"
+            date 1234
+          end_compilation
+        """ % (metaData, metaData)
+    c1String = metaDataString + \
       """
         begin_compilation
           name "MyMethod"
@@ -125,11 +149,11 @@ class MatchFiles_Test(unittest.TestCase):
     c1File = ParseC1visualizerStream("<c1-file>", io.StringIO(ToUnicode(c1String)))
     assert len(checkerFile.testCases) == 1
     assert len(c1File.passes) == 1
-    MatchTestCase(checkerFile.testCases[0], c1File.passes[0])
+    MatchTestCase(checkerFile.testCases[0], c1File.passes[0], c1File.instructionSetFeatures)
 
-  def assertDoesNotMatch(self, checkerString, c1String):
+  def assertDoesNotMatch(self, checkerString, c1String, isa=None, instructionSetFeatures=None):
     with self.assertRaises(MatchFailedException):
-      self.assertMatches(checkerString, c1String)
+      self.assertMatches(checkerString, c1String, isa, instructionSetFeatures)
 
   def assertBadStructure(self, checkerString, c1String):
     with self.assertRaises(BadStructureException):
@@ -916,3 +940,76 @@ class MatchFiles_Test(unittest.TestCase):
       """
       foo
       """)
+
+  def test_hasIsaFeature(self):
+    no_isa = None
+    self.assertMatches(
+      """
+        /// CHECK-EVAL: hasIsaFeature('feature1') and not hasIsaFeature('feature2')
+      """,
+      """
+      foo
+      """,
+      no_isa,
+      ImmutableDict({"feature1": True})
+    )
+    self.assertDoesNotMatch(
+      """
+        /// CHECK-EVAL: not hasIsaFeature('feature1')
+      """,
+      """
+      foo
+      """,
+      no_isa,
+      ImmutableDict({"feature1": True})
+    )
+    self.assertMatches(
+      """
+        /// CHECK-IF: hasIsaFeature('feature2')
+        ///   CHECK: bar1
+        /// CHECK-ELSE:
+        ///   CHECK: bar2
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      bar1
+      """,
+      no_isa,
+      ImmutableDict({"feature1": False, "feature2": True})
+    )
+    self.assertMatches(
+      """
+        /// CHECK-EVAL: hasIsaFeature('feature1') and not hasIsaFeature('feature2')
+      """,
+      """
+      foo
+      """,
+      "some_isa",
+      ImmutableDict({"feature1": True})
+    )
+    self.assertDoesNotMatch(
+      """
+        /// CHECK-EVAL: not hasIsaFeature('feature1')
+      """,
+      """
+      foo
+      """,
+      "some_isa",
+      ImmutableDict({"feature1": True})
+    )
+    self.assertMatches(
+      """
+        /// CHECK-IF: hasIsaFeature('feature2')
+        ///   CHECK: bar1
+        /// CHECK-ELSE:
+        ///   CHECK: bar2
+        /// CHECK-FI:
+      """,
+      """
+      foo
+      bar1
+      """,
+      "some_isa",
+      ImmutableDict({"feature1": False, "feature2": True})
+    )

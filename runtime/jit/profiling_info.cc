@@ -28,18 +28,15 @@ namespace art {
 ProfilingInfo::ProfilingInfo(ArtMethod* method, const std::vector<uint32_t>& entries)
       : baseline_hotness_count_(0),
         method_(method),
-        saved_entry_point_(nullptr),
         number_of_inline_caches_(entries.size()),
-        current_inline_uses_(0),
-        is_method_being_compiled_(false),
-        is_osr_method_being_compiled_(false) {
+        current_inline_uses_(0) {
   memset(&cache_, 0, number_of_inline_caches_ * sizeof(InlineCache));
   for (size_t i = 0; i < number_of_inline_caches_; ++i) {
     cache_[i].dex_pc_ = entries[i];
   }
 }
 
-bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocation) {
+ProfilingInfo* ProfilingInfo::Create(Thread* self, ArtMethod* method) {
   // Walk over the dex instructions of the method and keep track of
   // instructions we are interested in profiling.
   DCHECK(!method->IsNative());
@@ -66,7 +63,7 @@ bool ProfilingInfo::Create(Thread* self, ArtMethod* method, bool retry_allocatio
 
   // Allocate the `ProfilingInfo` object int the JIT's data space.
   jit::JitCodeCache* code_cache = Runtime::Current()->GetJit()->GetCodeCache();
-  return code_cache->AddProfilingInfo(self, method, entries, retry_allocation) != nullptr;
+  return code_cache->AddProfilingInfo(self, method, entries);
 }
 
 InlineCache* ProfilingInfo::GetInlineCache(uint32_t dex_pc) {
@@ -76,6 +73,7 @@ InlineCache* ProfilingInfo::GetInlineCache(uint32_t dex_pc) {
       return &cache_[i];
     }
   }
+  ScopedObjectAccess soa(Thread::Current());
   LOG(FATAL) << "No inline cache found for "  << ArtMethod::PrettyMethod(method_) << "@" << dex_pc;
   UNREACHABLE();
 }
@@ -108,6 +106,21 @@ void ProfilingInfo::AddInvokeInfo(uint32_t dex_pc, mirror::Class* cls) {
   }
   // Unsuccessfull - cache is full, making it megamorphic. We do not DCHECK it though,
   // as the garbage collector might clear the entries concurrently.
+}
+
+ScopedProfilingInfoUse::ScopedProfilingInfoUse(jit::Jit* jit, ArtMethod* method, Thread* self)
+    : jit_(jit),
+      method_(method),
+      self_(self),
+      // Fetch the profiling info ahead of using it. If it's null when fetching,
+      // we should not call JitCodeCache::DoneCompilerUse.
+      profiling_info_(jit->GetCodeCache()->NotifyCompilerUse(method, self)) {
+}
+
+ScopedProfilingInfoUse::~ScopedProfilingInfoUse() {
+  if (profiling_info_ != nullptr) {
+    jit_->GetCodeCache()->DoneCompilerUse(method_, self_);
+  }
 }
 
 }  // namespace art

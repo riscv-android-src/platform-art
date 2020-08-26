@@ -93,6 +93,29 @@ class InvokeDexCallingConventionVisitorX86 : public InvokeDexCallingConventionVi
   DISALLOW_COPY_AND_ASSIGN(InvokeDexCallingConventionVisitorX86);
 };
 
+class CriticalNativeCallingConventionVisitorX86 : public InvokeDexCallingConventionVisitor {
+ public:
+  explicit CriticalNativeCallingConventionVisitorX86(bool for_register_allocation)
+      : for_register_allocation_(for_register_allocation) {}
+
+  virtual ~CriticalNativeCallingConventionVisitorX86() {}
+
+  Location GetNextLocation(DataType::Type type) override;
+  Location GetReturnLocation(DataType::Type type) const override;
+  Location GetMethodLocation() const override;
+
+  size_t GetStackOffset() const { return stack_offset_; }
+
+ private:
+  // Register allocator does not support adjusting frame size, so we cannot provide final locations
+  // of stack arguments for register allocation. We ask the register allocator for any location and
+  // move these arguments to the right place after adjusting the SP when generating the call.
+  const bool for_register_allocation_;
+  size_t stack_offset_ = 0u;
+
+  DISALLOW_COPY_AND_ASSIGN(CriticalNativeCallingConventionVisitorX86);
+};
+
 class FieldAccessCallingConventionX86 : public FieldAccessCallingConvention {
  public:
   FieldAccessCallingConventionX86() {}
@@ -209,6 +232,17 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
   // generates less code/data with a small num_entries.
   static constexpr uint32_t kPackedSwitchJumpTableThreshold = 5;
 
+  // Generate a GC root reference load:
+  //
+  //   root <- *address
+  //
+  // while honoring read barriers based on read_barrier_option.
+  void GenerateGcRootFieldLoad(HInstruction* instruction,
+                               Location root,
+                               const Address& address,
+                               Label* fixup_label,
+                               ReadBarrierOption read_barrier_option);
+
  private:
   // Generate code for the given suspend check. If not null, `successor`
   // is the block to branch to if the suspend check is not needed, and after
@@ -269,16 +303,6 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
                                          Location obj,
                                          uint32_t offset,
                                          ReadBarrierOption read_barrier_option);
-  // Generate a GC root reference load:
-  //
-  //   root <- *address
-  //
-  // while honoring read barriers based on read_barrier_option.
-  void GenerateGcRootFieldLoad(HInstruction* instruction,
-                               Location root,
-                               const Address& address,
-                               Label* fixup_label,
-                               ReadBarrierOption read_barrier_option);
 
   // Push value to FPU stack. `is_fp` specifies whether the value is floating point or not.
   // `is_wide` specifies whether it is long/double or not.
@@ -410,6 +434,13 @@ class CodeGeneratorX86 : public CodeGenerator {
   void Move32(Location destination, Location source);
   // Helper method to move a 64bits value between two locations.
   void Move64(Location destination, Location source);
+  // Helper method to move a value from an address to a register.
+  void MoveFromMemory(DataType::Type dst_type,
+                      Location dst,
+                      Register src_base,
+                      Register src_index = Register::kNoRegister,
+                      ScaleFactor src_scale = TIMES_1,
+                      int32_t src_disp = 0);
 
   // Check if the desired_string_load_kind is supported. If it is, return it,
   // otherwise return a fall-back kind that should be used instead.
@@ -624,6 +655,9 @@ class CodeGeneratorX86 : public CodeGenerator {
     }
   }
 
+  void IncreaseFrame(size_t adjustment) override;
+  void DecreaseFrame(size_t adjustment) override;
+
   void GenerateNop() override;
   void GenerateImplicitNullCheck(HNullCheck* instruction) override;
   void GenerateExplicitNullCheck(HNullCheck* instruction) override;
@@ -631,9 +665,9 @@ class CodeGeneratorX86 : public CodeGenerator {
   void MaybeGenerateInlineCacheCheck(HInstruction* instruction, Register klass);
   void MaybeIncrementHotness(bool is_frame_entry);
 
-  // When we don't know the proper offset for the value, we use kDummy32BitOffset.
+  // When we don't know the proper offset for the value, we use kPlaceholder32BitOffset.
   // The correct value will be inserted when processing Assembler fixups.
-  static constexpr int32_t kDummy32BitOffset = 256;
+  static constexpr int32_t kPlaceholder32BitOffset = 256;
 
  private:
   struct X86PcRelativePatchInfo : PatchInfo<Label> {

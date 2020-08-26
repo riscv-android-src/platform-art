@@ -63,7 +63,7 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
 
-// Enforce that we he have the right index for runtime methods.
+// Enforce that we have the right index for runtime methods.
 static_assert(ArtMethod::kRuntimeMethodDexMethodIndex == dex::kDexNoIndex,
               "Wrong runtime-method dex method index");
 
@@ -390,24 +390,6 @@ void ArtMethod::Invoke(Thread* self, uint32_t* args, uint32_t args_size, JValue*
 
   // Pop transition.
   self->PopManagedStackFragment(fragment);
-}
-
-const void* ArtMethod::RegisterNative(const void* native_method) {
-  CHECK(IsNative()) << PrettyMethod();
-  CHECK(native_method != nullptr) << PrettyMethod();
-  void* new_native_method = nullptr;
-  Runtime::Current()->GetRuntimeCallbacks()->RegisterNativeMethod(this,
-                                                                  native_method,
-                                                                  /*out*/&new_native_method);
-  SetEntryPointFromJni(new_native_method);
-  return new_native_method;
-}
-
-void ArtMethod::UnregisterNative() {
-  CHECK(IsNative()) << PrettyMethod();
-  // restore stub to lookup native pointer via dlsym
-  SetEntryPointFromJni(
-      IsCriticalNative() ? GetJniDlsymLookupCriticalStub() : GetJniDlsymLookupStub());
 }
 
 bool ArtMethod::IsOverridableByDefaultMethod() {
@@ -780,9 +762,17 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
           image_pointer_size);
     }
   }
-  // Clear the profiling info for the same reasons as the JIT code.
+    if (interpreter::IsNterpSupported() &&
+        (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
+            interpreter::GetNterpEntryPoint())) {
+    // If the entrypoint is nterp, it's too early to check if the new method
+    // will support it. So for simplicity, use the interpreter bridge.
+    SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);
+  }
+
+  // Clear the data pointer, it will be set if needed by the caller.
   if (!src->IsNative()) {
-    SetProfilingInfoPtrSize(nullptr, image_pointer_size);
+    SetDataPtrSize(nullptr, image_pointer_size);
   }
   // Clear hotness to let the JIT properly decide when to compile this method.
   hotness_count_ = 0;

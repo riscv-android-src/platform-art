@@ -667,7 +667,7 @@ bool DexFileVerifier::CheckMap() {
   uint32_t data_items_left = header_->data_size_;
   uint32_t used_bits = 0;
 
-  // Sanity check the size of the map list.
+  // Check the validity of the size of the map list.
   if (!CheckListSize(item, count, sizeof(dex::MapItem), "map size")) {
     return false;
   }
@@ -1724,7 +1724,7 @@ bool DexFileVerifier::CheckIntraStringDataItem() {
 }
 
 bool DexFileVerifier::CheckIntraDebugInfoItem() {
-  DECODE_UNSIGNED_CHECKED_FROM(ptr_, dummy);
+  DECODE_UNSIGNED_CHECKED_FROM(ptr_, unused_line_start);
   DECODE_UNSIGNED_CHECKED_FROM(ptr_, parameters_size);
   if (UNLIKELY(parameters_size > 65536)) {
     ErrorStringPrintf("Invalid parameters_size: %x", parameters_size);
@@ -1748,11 +1748,11 @@ bool DexFileVerifier::CheckIntraDebugInfoItem() {
         return true;
       }
       case DexFile::DBG_ADVANCE_PC: {
-        DECODE_UNSIGNED_CHECKED_FROM(ptr_, advance_pc_dummy);
+        DECODE_UNSIGNED_CHECKED_FROM(ptr_, unused_advance_pc);
         break;
       }
       case DexFile::DBG_ADVANCE_LINE: {
-        DECODE_SIGNED_CHECKED_FROM(ptr_, advance_line_dummy);
+        DECODE_SIGNED_CHECKED_FROM(ptr_, unused_advance_line);
         break;
       }
       case DexFile::DBG_START_LOCAL: {
@@ -2269,7 +2269,7 @@ bool DexFileVerifier::CheckIntraDataSection(size_t offset, uint32_t count) {
   size_t data_start = header_->data_off_;
   size_t data_end = data_start + header_->data_size_;
 
-  // Sanity check the offset of the section.
+  // Check the validity of the offset of the section.
   if (UNLIKELY((offset < data_start) || (offset > data_end))) {
     ErrorStringPrintf("Bad offset for data subsection: %zx", offset);
     return false;

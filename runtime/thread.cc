@@ -295,6 +295,15 @@ enum {
   kNoPermitWaiterWaiting = 2
 };
 
+static inline time_t SaturatedTimeT(int64_t secs) {
+  if (sizeof(time_t) < sizeof(int64_t)) {
+    return static_cast<time_t>(std::min(secs,
+                                        static_cast<int64_t>(std::numeric_limits<time_t>::max())));
+  } else {
+    return secs;
+  }
+}
+
 void Thread::Park(bool is_absolute, int64_t time) {
   DCHECK(this == Thread::Current());
 #if ART_USE_FUTEXES
@@ -340,7 +349,7 @@ void Thread::Park(bool is_absolute, int64_t time) {
       if (is_absolute) {
         // Time is millis when scheduled for an absolute time
         timespec.tv_nsec = (time % 1000) * 1000000;
-        timespec.tv_sec = time / 1000;
+        timespec.tv_sec = SaturatedTimeT(time / 1000);
         // This odd looking pattern is recommended by futex documentation to
         // wait until an absolute deadline, with otherwise identical behavior to
         // FUTEX_WAIT_PRIVATE. This also allows parkUntil() to return at the
@@ -353,7 +362,7 @@ void Thread::Park(bool is_absolute, int64_t time) {
                        FUTEX_BITSET_MATCH_ANY);
       } else {
         // Time is nanos when scheduled for a relative time
-        timespec.tv_sec = time / 1000000000;
+        timespec.tv_sec = SaturatedTimeT(time / 1000000000);
         timespec.tv_nsec = time % 1000000000;
         result = futex(tls32_.park_state_.Address(),
                        FUTEX_WAIT_PRIVATE,
@@ -482,7 +491,7 @@ static FrameIdToShadowFrame* FindFrameIdToShadowFrame(FrameIdToShadowFrame* head
   for (FrameIdToShadowFrame* record = head; record != nullptr; record = record->GetNext()) {
     if (record->GetFrameId() == frame_id) {
       if (kIsDebugBuild) {
-        // Sanity check we have at most one record for this frame.
+        // Check we have at most one record for this frame.
         CHECK(found == nullptr) << "Multiple records for the frame " << frame_id;
         found = record;
       } else {
@@ -659,7 +668,7 @@ Thread* Thread::FromManagedThread(const ScopedObjectAccessAlreadyRunnable& soa,
                                   ObjPtr<mirror::Object> thread_peer) {
   ArtField* f = jni::DecodeArtField(WellKnownClasses::java_lang_Thread_nativePeer);
   Thread* result = reinterpret_cast64<Thread*>(f->GetLong(thread_peer));
-  // Sanity check that if we have a result it is either suspended or we hold the thread_list_lock_
+  // Check that if we have a result it is either suspended or we hold the thread_list_lock_
   // to stop it from going away.
   if (kIsDebugBuild) {
     MutexLock mu(soa.Self(), *Locks::thread_suspend_count_lock_);
@@ -1334,7 +1343,7 @@ bool Thread::InitStackHwm() {
     InstallImplicitProtection();
   }
 
-  // Sanity check.
+  // Consistency check.
   CHECK_GT(FindStackTop(), reinterpret_cast<void*>(tlsPtr_.stack_end));
 
   return true;
@@ -1412,9 +1421,8 @@ bool Thread::ModifySuspendCountInternal(Thread* self,
                                         AtomicInteger* suspend_barrier,
                                         SuspendReason reason) {
   if (kIsDebugBuild) {
-    DCHECK(delta == -1 || delta == +1 || delta == -tls32_.debug_suspend_count)
-          << reason << " " << delta << " " << tls32_.debug_suspend_count << " " << this;
-    DCHECK_GE(tls32_.suspend_count, tls32_.debug_suspend_count) << this;
+    DCHECK(delta == -1 || delta == +1)
+          << reason << " " << delta << " " << this;
     Locks::thread_suspend_count_lock_->AssertHeld(self);
     if (this != self && !IsSuspended()) {
       Locks::thread_list_lock_->AssertHeld(self);
@@ -1877,7 +1885,7 @@ void Thread::DumpState(std::ostream& os, const Thread* thread, pid_t tid) {
     auto suspend_log_fn = [&]() REQUIRES(Locks::thread_suspend_count_lock_) {
       os << "  | group=\"" << group_name << "\""
          << " sCount=" << thread->tls32_.suspend_count
-         << " dsCount=" << thread->tls32_.debug_suspend_count
+         << " ucsCount=" << thread->tls32_.user_code_suspend_count
          << " flags=" << thread->tls32_.state_and_flags.as_struct.flags
          << " obj=" << reinterpret_cast<void*>(thread->tlsPtr_.opeer)
          << " self=" << reinterpret_cast<const void*>(thread) << "\n";

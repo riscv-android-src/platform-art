@@ -121,8 +121,6 @@ class OatFileAssistant {
                    int oat_fd,
                    int zip_fd);
 
-  ~OatFileAssistant();
-
   // Returns true if the dex location refers to an element of the boot class
   // path.
   bool IsInBootClassPath();
@@ -200,11 +198,8 @@ class OatFileAssistant {
                            const std::string& dex_location,
                            std::vector<std::unique_ptr<const DexFile>>* out_dex_files);
 
-  // Returns true if there are dex files in the original dex location that can
-  // be compiled with dex2oat for this dex location.
-  // Returns false if there is no original dex file, or if the original dex
-  // file is an apk/zip without a classes.dex entry.
-  bool HasOriginalDexFiles();
+  // Returns whether this is an apk/zip wit a classes.dex entry.
+  bool HasDexFiles();
 
   // If the dex file has been installed with a compiled oat file alongside
   // it, the compiled oat file will have the extension .odex, and is referred
@@ -402,11 +397,6 @@ class OatFileAssistant {
 
   // Validates the boot class path checksum of an OatFile.
   bool ValidateBootClassPathChecksums(const OatFile& oat_file);
-
-  // To implement Lock(), we lock a dummy file where the oat file would go
-  // (adding ".flock" to the target file name) and retain the lock for the
-  // remaining lifetime of the OatFileAssistant object.
-  ScopedFlock flock_;
 
   std::string dex_location_;
 

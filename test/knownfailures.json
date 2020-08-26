@@ -49,12 +49,6 @@
                         "loaded systems."]
     },
     {
-        "tests": "147-stripped-dex-fallback",
-        "variant": "target",
-        "description": ["147-stripped-dex-fallback isn't supported on device",
-                        "because --strip-dex  requires the zip command."]
-    },
-    {
         "tests": "569-checker-pattern-replacement",
         "variant": "target",
         "description": ["569-checker-pattern-replacement tests behaviour",
@@ -62,15 +56,13 @@
     },
     {
         "tests": ["116-nodex2oat",
-                  "118-noimage-dex2oat",
-                  "134-nodex2oat-nofallback"],
+                  "118-noimage-dex2oat"],
         "variant": "prebuild",
         "description": ["Note 116-nodex2oat is not broken per-se it just",
                         "doesn't (and isn't meant to) work with --prebuild."]
     },
     {
-        "tests": ["147-stripped-dex-fallback",
-                  "608-checker-unresolved-lse"],
+        "tests": ["608-checker-unresolved-lse"],
         "variant": "no-prebuild"
     },
     {
@@ -170,18 +162,12 @@
         "bug": "http://b/2133391"
     },
     {
-        "tests": "147-stripped-dex-fallback",
-        "variant": "no-image",
-        "description": ["147-stripped-dex-fallback is disabled because it",
-                        "requires --prebuild."]
-    },
-    {
         "tests": ["116-nodex2oat",
                   "118-noimage-dex2oat",
                   "137-cfi",
                   "138-duplicate-classes-check2"],
         "variant": "no-image",
-        "description": ["All these tests check that we have sane behavior if we",
+        "description": ["All these tests check that we have appropriate behavior if we",
                         "don't have a dex2oat. Therefore we",
                         "shouldn't run them in situations where we actually",
                         "don't have these since they explicitly test for them.",
@@ -251,7 +237,8 @@
         "variant": "trace | stream"
     },
     {
-        "tests": ["604-hot-static-interface",
+        "tests": ["566-polymorphic-inlining",
+                  "604-hot-static-interface",
                   "612-jit-dex-cache",
                   "613-inlining-dex-cache",
                   "626-set-resolved-string",
@@ -341,8 +328,6 @@
     },
     {
         "tests": ["000-nop",
-                  "134-nodex2oat-nofallback",
-                  "147-stripped-dex-fallback",
                   "595-profile-saving"],
         "description": "The doesn't compile anything",
         "env_vars": {"ART_TEST_BISECTION": "true"},
@@ -843,7 +828,6 @@
           "130-hprof",
           "1337-gc-coverage",
           "1338-gc-no-los",
-          "134-nodex2oat-nofallback",
           "134-reg-promotion",
           "135-MirandaDispatch",
           "136-daemon-jni-shutdown",
@@ -857,7 +841,6 @@
           "144-static-field-sigquit",
           "145-alloc-tracking-stress",
           "146-bad-interface",
-          "147-stripped-dex-fallback",
           "148-multithread-gc-annotations",
           "150-loadlibrary",
           "154-gc-loop",
@@ -917,7 +900,6 @@
           "518-null-array-get",
           "520-equivalent-phi",
           "529-checker-unresolved",
-          "530-checker-lse",
           "530-checker-lse3",
           "530-checker-regression-reftyp-final",
           "536-checker-intrinsic-optimization",
@@ -995,7 +977,6 @@
           "649-vdex-duplicate-method",
           "652-deopt-intrinsic",
           "656-annotation-lookup-generic-jni",
-          "656-checker-simd-opt",
           "659-unpadded-array",
           "660-clinit",
           "660-store-8-16",
@@ -1196,7 +1177,8 @@
                   "2011-stack-walk-concurrent-instrument",
                   "2012-structural-redefinition-failures-jni-id",
                   "2033-shutdown-mechanics",
-                  "2035-structural-native-method"],
+                  "2035-structural-native-method",
+                  "2036-structural-subclass-shadow"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1336,6 +1318,11 @@
         "bug": "b/135507613",
         "description": ["These tests run dalvikvm multiple times, this can mess up the",
                         "zipapex runner."]
+    },
+    {
+        "tests": ["175-alloc-big-bignums"],
+        "variant": "interpreter | interp-ac | trace | no-image | debuggable",
+        "description": "Interpreting BigInteger.add() is too slow (timeouts)"
     },
     {
         "tests": ["2029-contended-monitors"],

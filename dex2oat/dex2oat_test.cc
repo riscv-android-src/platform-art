@@ -43,7 +43,6 @@
 #include "dex/dex_file-inl.h"
 #include "dex/dex_file_loader.h"
 #include "dex2oat_environment_test.h"
-#include "dex2oat_return_codes.h"
 #include "gc_root-inl.h"
 #include "intern_table-inl.h"
 #include "oat.h"
@@ -1084,12 +1083,6 @@ class Dex2oatReturnCodeTest : public Dex2oatTest {
   }
 };
 
-TEST_F(Dex2oatReturnCodeTest, TestCreateRuntime) {
-  TEST_DISABLED_FOR_MEMORY_TOOL();  // b/19100793
-  int status = RunTest({ "--boot-image=/this/does/not/exist/yolo.oat" });
-  EXPECT_EQ(static_cast<int>(dex2oat::ReturnCode::kCreateRuntime), WEXITSTATUS(status)) << output_;
-}
-
 class Dex2oatClassLoaderContextTest : public Dex2oatTest {
  protected:
   void RunTest(const char* class_loader_context,
@@ -1998,7 +1991,7 @@ TEST_F(Dex2oatTest, DontExtract) {
 
   // Generate a quickened dex by using the input dm file to verify.
   generate_and_check(CompilerFilter::Filter::kQuicken);
-  // Use verify compiler filter to sanity check that FastVerify works for that filter too.
+  // Use verify compiler filter to check that FastVerify works for that filter too.
   generate_and_check(CompilerFilter::Filter::kVerify);
 }
 

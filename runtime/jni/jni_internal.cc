@@ -2304,6 +2304,7 @@ class JNI {
       return JNI_ERR;  // Not reached except in unit tests.
     }
     CHECK_NON_NULL_ARGUMENT_FN_NAME("RegisterNatives", java_class, JNI_ERR);
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
     ScopedObjectAccess soa(env);
     StackHandleScope<1> hs(soa.Self());
     Handle<mirror::Class> c = hs.NewHandle(soa.Decode<mirror::Class>(java_class));
@@ -2420,7 +2421,7 @@ class JNI {
         // TODO: make this a hard register error in the future.
       }
 
-      const void* final_function_ptr = m->RegisterNative(fnPtr);
+      const void* final_function_ptr = class_linker->RegisterNative(soa.Self(), m, fnPtr);
       UNUSED(final_function_ptr);
     }
     return JNI_OK;
@@ -2434,10 +2435,11 @@ class JNI {
     VLOG(jni) << "[Unregistering JNI native methods for " << mirror::Class::PrettyClass(c) << "]";
 
     size_t unregistered_count = 0;
-    auto pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
+    ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
+    auto pointer_size = class_linker->GetImagePointerSize();
     for (auto& m : c->GetMethods(pointer_size)) {
       if (m.IsNative()) {
-        m.UnregisterNative();
+        class_linker->UnregisterNative(soa.Self(), &m);
         unregistered_count++;
       }
     }
@@ -2534,8 +2536,24 @@ class JNI {
   }
 
   static jlong GetDirectBufferCapacity(JNIEnv* env, jobject java_buffer) {
-    // Check if |java_buffer| is a direct buffer, bail if not.
-    if (GetDirectBufferAddress(env, java_buffer) == nullptr) {
+    if (java_buffer == nullptr) {
+      return -1;
+    }
+
+    if (!IsInstanceOf(env, java_buffer, WellKnownClasses::java_nio_Buffer)) {
+      return -1;
+    }
+
+    // When checking the buffer capacity, it's important to note that a zero-sized direct buffer
+    // may have a null address field which means we can't tell whether it is direct or not.
+    // We therefore call Buffer.isDirect(). One path that creates such a buffer is
+    // FileChannel.map() if the file size is zero.
+    //
+    // NB GetDirectBufferAddress() does not need to call Buffer.isDirect() since it is only
+    // able return a valid address if the Buffer address field is not-null.
+    jboolean direct = env->CallBooleanMethod(java_buffer,
+                                             WellKnownClasses::java_nio_Buffer_isDirect);
+    if (!direct) {
       return -1;
     }
 
@@ -2666,7 +2684,7 @@ class JNI {
     bool is_copy = array_data != elements;
     size_t bytes = array->GetLength() * component_size;
     if (is_copy) {
-      // Sanity check: If elements is not the same as the java array's data, it better not be a
+      // Integrity check: If elements is not the same as the java array's data, it better not be a
       // heap address. TODO: This might be slow to check, may be worth keeping track of which
       // copies we make?
       if (heap->IsNonDiscontinuousSpaceHeapAddress(elements)) {

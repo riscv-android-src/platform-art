@@ -685,7 +685,7 @@ void RegisterAllocatorTest::ExpectedInRegisterHint(Strategy strategy) {
         RegisterAllocator::Create(GetScopedAllocator(), &codegen, liveness, strategy);
     register_allocator->AllocateRegisters();
 
-    // Sanity check that in normal conditions, the register should be hinted to 0 (EAX).
+    // Check the validity that in normal conditions, the register should be hinted to 0 (EAX).
     ASSERT_EQ(field->GetLiveInterval()->GetRegister(), 0);
   }
 
@@ -753,7 +753,7 @@ void RegisterAllocatorTest::SameAsFirstInputHint(Strategy strategy) {
         RegisterAllocator::Create(GetScopedAllocator(), &codegen, liveness, strategy);
     register_allocator->AllocateRegisters();
 
-    // Sanity check that in normal conditions, the registers are the same.
+    // Check the validity that in normal conditions, the registers are the same.
     ASSERT_EQ(first_sub->GetLiveInterval()->GetRegister(), 1);
     ASSERT_EQ(second_sub->GetLiveInterval()->GetRegister(), 1);
   }
@@ -864,8 +864,8 @@ TEST_F(RegisterAllocatorTest, SpillInactive) {
   // We create a synthesized user requesting a register, to avoid just spilling the
   // intervals.
   HPhi* user = new (GetAllocator()) HPhi(GetAllocator(), 0, 1, DataType::Type::kInt32);
-  user->AddInput(one);
   user->SetBlock(block);
+  user->AddInput(one);
   LocationSummary* locations = new (GetAllocator()) LocationSummary(user, LocationSummary::kNoCall);
   locations->SetInAt(0, Location::RequiresRegister());
   static constexpr size_t phi_ranges[][2] = {{20, 30}};

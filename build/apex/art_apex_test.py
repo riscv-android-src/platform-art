@@ -542,6 +542,7 @@ class ReleaseChecker:
     self._checker.check_native_library('libartpalette')
     self._checker.check_native_library('libdexfile')
     self._checker.check_native_library('libdexfile_support')
+    self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libopenjdkjvm')
     self._checker.check_native_library('libopenjdkjvmti')
     self._checker.check_native_library('libprofile')
@@ -575,7 +576,6 @@ class ReleaseChecker:
     self._checker.check_native_library('libbacktrace')
     self._checker.check_native_library('libbase')
     self._checker.check_native_library('libc++')
-    self._checker.check_native_library('libdt_fd_forward')
     self._checker.check_native_library('libdt_socket')
     self._checker.check_native_library('libjdwp')
     self._checker.check_native_library('liblzma')
@@ -617,7 +617,6 @@ class ReleaseTargetChecker:
     self._checker.check_multilib_executable('dex2oat')
 
     # Check internal libraries for ART.
-    self._checker.check_prefer64_library('libart-disassembler')
     self._checker.check_native_library('libperfetto_hprof')
 
     # Check exported native libraries for Managed Core Library.
@@ -626,12 +625,6 @@ class ReleaseTargetChecker:
     # Check internal native library dependencies.
     self._checker.check_native_library('libcrypto')
     self._checker.check_native_library('libexpat')
-
-    # TODO(b/139046641): Fix proper 2nd arch checks. For now, just ignore these
-    # directories.
-    self._checker.ignore_path('bin/arm')
-    self._checker.ignore_path('lib/arm')
-    self._checker.ignore_path('lib64/arm')
 
 
 class ReleaseHostChecker:
@@ -678,7 +671,6 @@ class DebugChecker:
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libadbconnectiond')
-    self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbased')
     self._checker.check_native_library('libartd')
     self._checker.check_native_library('libartd-compiler')
@@ -770,7 +762,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_data('art-gtest-jars-Main.jar')
     self._checker.check_art_test_data('art-gtest-jars-ProtoCompare.jar')
     self._checker.check_art_test_data('art-gtest-jars-Transaction.jar')
-    self._checker.check_art_test_data('art-gtest-jars-VerifierDepsMulti.jar')
+    self._checker.check_art_test_data('art-gtest-jars-VerifierDepsMulti.dex')
     self._checker.check_art_test_data('art-gtest-jars-Nested.jar')
     self._checker.check_art_test_data('art-gtest-jars-MyClass.jar')
     self._checker.check_art_test_data('art-gtest-jars-ManyMethods.jar')
@@ -784,10 +776,10 @@ class TestingTargetChecker:
     self._checker.check_art_test_data('art-gtest-jars-DexToDexDecompiler.jar')
     self._checker.check_art_test_data('art-gtest-jars-HiddenApiSignatures.jar')
     self._checker.check_art_test_data('art-gtest-jars-ForClassLoaderB.jar')
-    self._checker.check_art_test_data('art-gtest-jars-LinkageTest.jar')
+    self._checker.check_art_test_data('art-gtest-jars-LinkageTest.dex')
     self._checker.check_art_test_data('art-gtest-jars-MethodTypes.jar')
     self._checker.check_art_test_data('art-gtest-jars-ErroneousInit.jar')
-    self._checker.check_art_test_data('art-gtest-jars-VerifierDeps.jar')
+    self._checker.check_art_test_data('art-gtest-jars-VerifierDeps.dex')
     self._checker.check_art_test_data('art-gtest-jars-StringLiterals.jar')
     self._checker.check_art_test_data('art-gtest-jars-XandY.jar')
     self._checker.check_art_test_data('art-gtest-jars-ExceptionHandle.jar')
@@ -804,7 +796,7 @@ class TestingTargetChecker:
     self._checker.check_art_test_data('art-gtest-jars-MultiDexUncompressedAligned.jar')
     self._checker.check_art_test_data('art-gtest-jars-StaticsFromCode.jar')
     self._checker.check_art_test_data('art-gtest-jars-ProfileTestMultiDex.jar')
-    self._checker.check_art_test_data('art-gtest-jars-VerifySoftFailDuringClinit.jar')
+    self._checker.check_art_test_data('art-gtest-jars-VerifySoftFailDuringClinit.dex')
     self._checker.check_art_test_data('art-gtest-jars-MainStripped.jar')
     self._checker.check_art_test_data('art-gtest-jars-ForClassLoaderA.jar')
     self._checker.check_art_test_data('art-gtest-jars-StaticLeafMethods.jar')
@@ -1064,7 +1056,7 @@ def art_apex_test_default(test_parser):
     sys.exit(1)
   host_out = os.environ['ANDROID_HOST_OUT']
 
-  test_args = test_parser.parse_args(['dummy'])  # For consistency.
+  test_args = test_parser.parse_args(['unused'])  # For consistency.
   test_args.debugfs = '%s/bin/debugfs' % host_out
   test_args.tmpdir = '.'
   test_args.tree = False

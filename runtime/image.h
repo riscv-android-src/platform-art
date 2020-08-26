@@ -457,7 +457,7 @@ class PACKED(8) ImageHeader {
   // Image file checksum (calculated with the checksum field set to 0).
   uint32_t image_checksum_ = 0u;
 
-  // Checksum of the oat file we link to for load time sanity check.
+  // Checksum of the oat file we link to for load time consistency check.
   uint32_t oat_checksum_ = 0u;
 
   // Start address for oat file. Will be before oat_data_begin_ for .so files.
@@ -579,11 +579,12 @@ T ClearDexCacheNativeRefTags(T val) {
   return val & ~3u;
 }
 
-std::ostream& operator<<(std::ostream& os, const ImageHeader::ImageMethod& method);
-std::ostream& operator<<(std::ostream& os, const ImageHeader::ImageRoot& root);
-std::ostream& operator<<(std::ostream& os, const ImageHeader::ImageSections& section);
+std::ostream& operator<<(std::ostream& os, ImageHeader::ImageMethod method);
+std::ostream& operator<<(std::ostream& os, ImageHeader::ImageRoot root);
+std::ostream& operator<<(std::ostream& os, ImageHeader::ImageSections section);
+std::ostream& operator<<(std::ostream& os, ImageHeader::StorageMode mode);
+
 std::ostream& operator<<(std::ostream& os, const ImageSection& section);
-std::ostream& operator<<(std::ostream& os, const ImageHeader::StorageMode& mode);
 
 }  // namespace art
 

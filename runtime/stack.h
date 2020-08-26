@@ -54,7 +54,7 @@ enum VRegKind {
   kImpreciseConstant,
   kUndefined,
 };
-std::ostream& operator<<(std::ostream& os, const VRegKind& rhs);
+std::ostream& operator<<(std::ostream& os, VRegKind rhs);
 
 // Size in bytes of the should_deoptimize flag on stack.
 // We just need 4 bytes for our purpose regardless of the architecture. Frame size
@@ -346,7 +346,7 @@ class StackVisitor {
   ShadowFrame* PrepareSetVReg(ArtMethod* m, uint16_t vreg, bool wide)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void SanityCheckFrame() const REQUIRES_SHARED(Locks::mutator_lock_);
+  void ValidateFrame() const REQUIRES_SHARED(Locks::mutator_lock_);
 
   ALWAYS_INLINE CodeInfo* GetCurrentInlineInfo() const;
   ALWAYS_INLINE StackMap* GetCurrentStackMap() const;

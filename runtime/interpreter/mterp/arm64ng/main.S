@@ -21,7 +21,6 @@
  */
 #include "asm_support.h"
 #include "arch/arm64/asm_support_arm64.S"
-#include "interpreter/cfi_asm_support.h"
 
 /**
  * ARM64 Runtime register usage conventions.
@@ -313,7 +312,7 @@ END \name
     ldr x0, [sp]
     ldrh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     add x2, x2, #1
-    and w2, w2, #0xffff
+    and w2, w2, #NTERP_HOTNESS_MASK
     strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     // If the counter overflows, handle this in the runtime.
     cbz w2, NterpHandleHotnessOverflow
@@ -363,7 +362,7 @@ END \name
     .cfi_def_cfa_register x13
     mov sp, x14
     str x13, [\refs, #-8]
-    CFI_DEFINE_CFA_DEREF(\cfi_refs, -8, CALLEE_SAVES_SIZE)
+    CFI_DEF_CFA_BREG_PLUS_UCONST \cfi_refs, -8, CALLEE_SAVES_SIZE
 
     // Put nulls in reference frame.
     cbz ip, 2f
@@ -382,7 +381,7 @@ END \name
     ldr x0, [sp]
     ldrh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     add x2, x2, #1
-    and w2, w2, #0xffff
+    and w2, w2, #NTERP_HOTNESS_MASK
     strh w2, [x0, #ART_METHOD_HOTNESS_COUNT_OFFSET]
     // If the counter overflows, handle this in the runtime.
     cbz w2, 2f
@@ -573,7 +572,7 @@ END \name
    // Start executing the method.
    mov xFP, xNEW_FP
    mov xREFS, xNEW_REFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, CALLEE_SAVES_SIZE)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, CALLEE_SAVES_SIZE
    START_EXECUTING_INSTRUCTIONS
 .endm
 
@@ -621,7 +620,7 @@ END \name
    .endif
    mov xFP, xNEW_FP
    mov xREFS, xNEW_REFS
-   CFI_DEFINE_CFA_DEREF(CFI_REFS, -8, CALLEE_SAVES_SIZE)
+   CFI_DEF_CFA_BREG_PLUS_UCONST CFI_REFS, -8, CALLEE_SAVES_SIZE
    START_EXECUTING_INSTRUCTIONS
 .endm
 

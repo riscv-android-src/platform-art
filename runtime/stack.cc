@@ -30,6 +30,7 @@
 #include "entrypoints/runtime_asm_entrypoints.h"
 #include "gc/space/image_space.h"
 #include "gc/space/space-inl.h"
+#include "interpreter/mterp/nterp.h"
 #include "interpreter/shadow_frame-inl.h"
 #include "jit/jit.h"
 #include "jit/jit_code_cache.h"
@@ -712,7 +713,7 @@ static void AssertPcIsWithinQuickCode(ArtMethod* method, uintptr_t pc)
       << " code_size=" << code_size;
 }
 
-void StackVisitor::SanityCheckFrame() const {
+void StackVisitor::ValidateFrame() const {
   if (kIsDebugBuild) {
     ArtMethod* method = GetMethod();
     ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass();
@@ -757,7 +758,7 @@ void StackVisitor::SanityCheckFrame() const {
     }
     if (cur_quick_frame_ != nullptr) {
       AssertPcIsWithinQuickCode(method, cur_quick_frame_pc_);
-      // Frame sanity.
+      // Frame consistency checks.
       size_t frame_size = GetCurrentQuickFrameInfo().FrameSizeInBytes();
       CHECK_NE(frame_size, 0u);
       // For compiled code, we could try to have a rough guess at an upper size we expect
@@ -766,7 +767,7 @@ void StackVisitor::SanityCheckFrame() const {
       // 2 words HandleScope overhead
       // 3+3 register spills
       // const size_t kMaxExpectedFrameSize = (256 + 2 + 3 + 3) * sizeof(word);
-      const size_t kMaxExpectedFrameSize = interpreter::kMaxNterpFrame;
+      const size_t kMaxExpectedFrameSize = interpreter::kNterpMaxFrame;
       CHECK_LE(frame_size, kMaxExpectedFrameSize) << method->PrettyMethod();
       size_t return_pc_offset = GetCurrentQuickFrameInfo().GetReturnPcOffset();
       CHECK_LT(return_pc_offset, frame_size);
@@ -885,7 +886,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
           cur_oat_quick_method_header_ = method->GetOatQuickMethodHeader(cur_quick_frame_pc_);
         }
         header_retrieved = false;  // Force header retrieval in next iteration.
-        SanityCheckFrame();
+        ValidateFrame();
 
         if ((walk_kind_ == StackWalkKind::kIncludeInlinedFrames)
             && (cur_oat_quick_method_header_ != nullptr)
@@ -979,7 +980,7 @@ void StackVisitor::WalkStack(bool include_transitions) {
       cur_oat_quick_method_header_ = nullptr;
     } else if (cur_shadow_frame_ != nullptr) {
       do {
-        SanityCheckFrame();
+        ValidateFrame();
         bool should_continue = VisitFrame();
         if (UNLIKELY(!should_continue)) {
           return;

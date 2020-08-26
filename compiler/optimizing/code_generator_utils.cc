@@ -100,4 +100,17 @@ bool IsBooleanValueOrMaterializedCondition(HInstruction* cond_input) {
   return !cond_input->IsCondition() || !cond_input->IsEmittedAtUseSite();
 }
 
+
+bool HasNonNegativeInputAt(HInstruction* instr, size_t i) {
+  HInstruction* input = instr->InputAt(i);
+  return IsGEZero(input);
+}
+
+bool HasNonNegativeOrMinIntInputAt(HInstruction* instr, size_t i) {
+  HInstruction* input = instr->InputAt(i);
+  return input->IsAbs() ||
+         IsInt64Value(input, DataType::MinValueOfIntegralType(input->GetType())) ||
+         HasNonNegativeInputAt(instr, i);
+}
+
 }  // namespace art

@@ -17,6 +17,7 @@
 #include "optimization.h"
 
 #ifdef ART_ENABLE_CODEGEN_arm
+#include "critical_native_abi_fixup_arm.h"
 #include "instruction_simplifier_arm.h"
 #endif
 #ifdef ART_ENABLE_CODEGEN_arm64
@@ -83,6 +84,7 @@ const char* OptimizationPassName(OptimizationPass pass) {
       return HInliner::kInlinerPassName;
     case OptimizationPass::kSelectGenerator:
       return HSelectGenerator::kSelectGeneratorPassName;
+    case OptimizationPass::kAggressiveInstructionSimplifier:
     case OptimizationPass::kInstructionSimplifier:
       return InstructionSimplifier::kInstructionSimplifierPassName;
     case OptimizationPass::kCHAGuardOptimization:
@@ -96,6 +98,8 @@ const char* OptimizationPassName(OptimizationPass pass) {
 #ifdef ART_ENABLE_CODEGEN_arm
     case OptimizationPass::kInstructionSimplifierArm:
       return arm::InstructionSimplifierArm::kInstructionSimplifierArmPassName;
+    case OptimizationPass::kCriticalNativeAbiFixupArm:
+      return arm::CriticalNativeAbiFixupArm::kCriticalNativeAbiFixupArmPassName;
 #endif
 #ifdef ART_ENABLE_CODEGEN_arm64
     case OptimizationPass::kInstructionSimplifierArm64:
@@ -142,6 +146,7 @@ OptimizationPass OptimizationPassByName(const std::string& pass_name) {
   X(OptimizationPass::kSideEffectsAnalysis);
 #ifdef ART_ENABLE_CODEGEN_arm
   X(OptimizationPass::kInstructionSimplifierArm);
+  X(OptimizationPass::kCriticalNativeAbiFixupArm);
 #endif
 #ifdef ART_ENABLE_CODEGEN_arm64
   X(OptimizationPass::kInstructionSimplifierArm64);
@@ -212,11 +217,6 @@ ArenaVector<HOptimization*> ConstructOptimizations(
         opt = new (allocator) BoundsCheckElimination(
             graph, *most_recent_side_effects, most_recent_induction, pass_name);
         break;
-      case OptimizationPass::kLoadStoreElimination:
-        CHECK(most_recent_side_effects != nullptr && most_recent_induction != nullptr);
-        opt = new (allocator) LoadStoreElimination(
-            graph, *most_recent_side_effects, stats, pass_name);
-        break;
       //
       // Regular passes.
       //
@@ -248,6 +248,13 @@ ArenaVector<HOptimization*> ConstructOptimizations(
       case OptimizationPass::kInstructionSimplifier:
         opt = new (allocator) InstructionSimplifier(graph, codegen, stats, pass_name);
         break;
+      case OptimizationPass::kAggressiveInstructionSimplifier:
+        opt = new (allocator) InstructionSimplifier(graph,
+                                                    codegen,
+                                                    stats,
+                                                    pass_name,
+                                                    /* use_all_optimizations_ = */ true);
+        break;
       case OptimizationPass::kCHAGuardOptimization:
         opt = new (allocator) CHAGuardOptimization(graph, pass_name);
         break;
@@ -256,6 +263,9 @@ ArenaVector<HOptimization*> ConstructOptimizations(
         break;
       case OptimizationPass::kConstructorFenceRedundancyElimination:
         opt = new (allocator) ConstructorFenceRedundancyElimination(graph, stats, pass_name);
+        break;
+      case OptimizationPass::kLoadStoreElimination:
+        opt = new (allocator) LoadStoreElimination(graph, stats, pass_name);
         break;
       case OptimizationPass::kScheduling:
         opt = new (allocator) HInstructionScheduling(
@@ -268,6 +278,10 @@ ArenaVector<HOptimization*> ConstructOptimizations(
       case OptimizationPass::kInstructionSimplifierArm:
         DCHECK(alt_name == nullptr) << "arch-specific pass does not support alternative name";
         opt = new (allocator) arm::InstructionSimplifierArm(graph, stats);
+        break;
+      case OptimizationPass::kCriticalNativeAbiFixupArm:
+        DCHECK(alt_name == nullptr) << "arch-specific pass does not support alternative name";
+        opt = new (allocator) arm::CriticalNativeAbiFixupArm(graph, stats);
         break;
 #endif
 #ifdef ART_ENABLE_CODEGEN_arm64
@@ -301,7 +315,7 @@ ArenaVector<HOptimization*> ConstructOptimizations(
 
     // Add each next optimization to result vector.
     CHECK(opt != nullptr);
-    DCHECK_STREQ(pass_name, opt->GetPassName());  // sanity
+    DCHECK_STREQ(pass_name, opt->GetPassName());  // Consistency check.
     optimizations.push_back(opt);
   }
 

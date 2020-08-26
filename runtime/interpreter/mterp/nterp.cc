@@ -17,7 +17,7 @@
 /*
  * Mterp entry point and support functions.
  */
-#include "mterp.h"
+#include "nterp.h"
 
 #include "base/quasi_atomic.h"
 #include "dex/dex_instruction_utils.h"
@@ -33,19 +33,29 @@ namespace art {
 namespace interpreter {
 
 bool IsNterpSupported() {
-  return (kRuntimeISA == InstructionSet::kX86_64) && !kPoisonHeapReferences && kUseReadBarrier;
+  return !kPoisonHeapReferences && kUseReadBarrier;
 }
 
 bool CanRuntimeUseNterp() REQUIRES_SHARED(Locks::mutator_lock_) {
-  // Nterp has the same restrictions as Mterp.
-  return IsNterpSupported() && CanUseMterp();
+  Runtime* runtime = Runtime::Current();
+  instrumentation::Instrumentation* instr = runtime->GetInstrumentation();
+  // Nterp shares the same restrictions as Mterp.
+  // If the runtime is interpreter only, we currently don't use nterp as some
+  // parts of the runtime (like instrumentation) make assumption on an
+  // interpreter-only runtime to always be in a switch-like interpreter.
+  return IsNterpSupported() && CanUseMterp() && !instr->InterpretOnly();
 }
 
 bool CanMethodUseNterp(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
-  return method->SkipAccessChecks() &&
-      !method->IsNative() &&
+  return !method->IsNative() &&
+      method->SkipAccessChecks() &&
+      method->IsInvokable() &&
+      !method->MustCountLocks() &&
       method->GetDexFile()->IsStandardDexFile() &&
-      NterpGetFrameSize(method) < kMaxNterpFrame;
+      // Proxy methods do not go through the JIT like other methods, so we don't
+      // run them with nterp.
+      !method->IsProxyMethod() &&
+      NterpGetFrameSize(method) < kNterpMaxFrame;
 }
 
 const void* GetNterpEntryPoint() {
@@ -68,6 +78,25 @@ void CheckNterpAsmConstants() {
   if ((interp_size == 0) || (interp_size != (art::kNumPackedOpcodes * width))) {
       LOG(FATAL) << "ERROR: unexpected asm interp size " << interp_size
                  << "(did an instruction handler exceed " << width << " bytes?)";
+  }
+  static_assert(IsPowerOfTwo(kNterpHotnessMask + 1), "Hotness mask must be a (power of 2) - 1");
+}
+
+inline void UpdateHotness(ArtMethod* method) REQUIRES_SHARED(Locks::mutator_lock_) {
+  // The hotness we will add to a method when we perform a
+  // field/method/class/string lookup.
+  constexpr uint16_t kNterpHotnessLookup = 0xf;
+
+  // Convert to uint32_t to handle uint16_t overflow.
+  uint32_t counter = method->GetCounter();
+  uint32_t new_counter = counter + kNterpHotnessLookup;
+  if (new_counter > kNterpHotnessMask) {
+    // Let the nterp code actually call the compilation: we want to make sure
+    // there's at least a second execution of the method or a back-edge to avoid
+    // compiling straightline initialization methods.
+    method->SetCounter(kNterpHotnessMask);
+  } else {
+    method->SetCounter(new_counter);
   }
 }
 
@@ -129,6 +158,7 @@ extern "C" const char* NterpGetShortyFromInvokeCustom(ArtMethod* caller, uint16_
 
 extern "C" size_t NterpGetMethod(Thread* self, ArtMethod* caller, uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
   InvokeType invoke_type = kStatic;
   uint16_t method_index = 0;
@@ -320,6 +350,7 @@ static ArtField* ResolveFieldWithAccessChecks(Thread* self,
 
 extern "C" size_t NterpGetStaticField(Thread* self, ArtMethod* caller, uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
   uint16_t field_index = inst->VRegB_21c();
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
@@ -360,6 +391,7 @@ extern "C" uint32_t NterpGetInstanceFieldOffset(Thread* self,
                                                 ArtMethod* caller,
                                                 uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
   uint16_t field_index = inst->VRegC_22c();
   ClassLinker* const class_linker = Runtime::Current()->GetClassLinker();
@@ -387,6 +419,7 @@ extern "C" mirror::Object* NterpGetClassOrAllocateObject(Thread* self,
                                                          ArtMethod* caller,
                                                          uint16_t* dex_pc_ptr)
     REQUIRES_SHARED(Locks::mutator_lock_) {
+  UpdateHotness(caller);
   const Instruction* inst = Instruction::At(dex_pc_ptr);
   dex::TypeIndex index;
   switch (inst->Opcode()) {
@@ -446,6 +479,7 @@ extern "C" mirror::Object* NterpLoadObject(Thread* self, ArtMethod* caller, uint
   switch (inst->Opcode()) {
     case Instruction::CONST_STRING:
     case Instruction::CONST_STRING_JUMBO: {
+      UpdateHotness(caller);
       dex::StringIndex string_index(
           (inst->Opcode() == Instruction::CONST_STRING)
               ? inst->VRegB_21c()
@@ -500,11 +534,12 @@ static mirror::Object* DoFilledNewArray(Thread* self,
     DCHECK_LE(length, 5);
   }
   uint16_t type_idx = is_range ? inst->VRegB_3rc() : inst->VRegB_35c();
-  ObjPtr<mirror::Class> array_class = ResolveVerifyAndClinit(dex::TypeIndex(type_idx),
-                                                             caller,
-                                                             self,
-                                                             /* can_run_clinit= */ true,
-                                                             /* verify_access= */ false);
+  ObjPtr<mirror::Class> array_class =
+      ResolveVerifyAndClinit(dex::TypeIndex(type_idx),
+                             caller,
+                             self,
+                             /* can_run_clinit= */ true,
+                             /* verify_access= */ !caller->SkipAccessChecks());
   if (UNLIKELY(array_class == nullptr)) {
     DCHECK(self->IsExceptionPending());
     return nullptr;

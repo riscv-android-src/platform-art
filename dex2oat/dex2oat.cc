@@ -71,7 +71,6 @@
 #include "dex/quick_compiler_callbacks.h"
 #include "dex/verification_results.h"
 #include "dex2oat_options.h"
-#include "dex2oat_return_codes.h"
 #include "dexlayout.h"
 #include "driver/compiler_driver.h"
 #include "driver/compiler_options.h"
@@ -105,6 +104,14 @@
 #include "well_known_classes.h"
 
 namespace art {
+
+namespace dex2oat {
+  enum class ReturnCode : int {
+    kNoFailure = 0,          // No failure, execution completed successfully.
+    kOther = 1,              // Some other not closer specified error occurred.
+    kCreateRuntime = 2,      // Dex2oat failed creating a runtime.
+  };
+}  // namespace dex2oat
 
 using android::base::StringAppendV;
 using android::base::StringPrintf;
@@ -2569,18 +2576,21 @@ class Dex2Oat final {
     // cleaning up before that (e.g. the oat writers are created before the
     // runtime).
     profile_compilation_info_.reset(new ProfileCompilationInfo());
-    ScopedFlock profile_file;
-    std::string error;
+    // Dex2oat only uses the reference profile and that is not updated concurrently by the app or
+    // other processes. So we don't need to lock (as we have to do in profman or when writing the
+    // profile info).
+    std::unique_ptr<File> profile_file;
     if (profile_file_fd_ != -1) {
-      profile_file = LockedFile::DupOf(profile_file_fd_, "profile",
-                                       true /* read_only_mode */, &error);
+      profile_file.reset(new File(DupCloexec(profile_file_fd_),
+                                  "profile",
+                                  /* check_usage= */ false,
+                                  /* read_only_mode= */ true));
     } else if (profile_file_ != "") {
-      profile_file = LockedFile::Open(profile_file_.c_str(), O_RDONLY, true, &error);
+      profile_file.reset(OS::OpenFileForReading(profile_file_.c_str()));
     }
 
-    // Return early if we're unable to obtain a lock on the profile.
     if (profile_file.get() == nullptr) {
-      LOG(ERROR) << "Cannot lock profiles: " << error;
+      PLOG(ERROR) << "Cannot lock profiles";
       return false;
     }
 
@@ -2794,12 +2804,6 @@ class Dex2Oat final {
         std::make_pair("imageinstructionset",
                        GetInstructionSetString(compiler_options_->GetInstructionSet())));
 
-    // Only allow no boot image for the runtime if we're compiling one. When we compile an app,
-    // we don't want fallback mode, it will abort as we do not push a boot classpath (it might
-    // have been stripped in preopting, anyways).
-    if (!IsBootImage()) {
-      raw_options.push_back(std::make_pair("-Xno-dex-file-fallback", nullptr));
-    }
     // Never allow implicit image compilation.
     raw_options.push_back(std::make_pair("-Xnoimage-dex2oat", nullptr));
     // Disable libsigchain. We don't don't need it during compilation and it prevents us
@@ -2898,13 +2902,13 @@ class Dex2Oat final {
   template <typename T>
   static std::unique_ptr<T> ReadCommentedInputFromFile(
       const char* input_filename, std::function<std::string(const char*)>* process) {
-    std::unique_ptr<std::ifstream> input_file(new std::ifstream(input_filename, std::ifstream::in));
-    if (input_file.get() == nullptr) {
+    std::ifstream input_file(input_filename, std::ifstream::in);
+    if (!input_file.good()) {
       LOG(ERROR) << "Failed to open input file " << input_filename;
       return nullptr;
     }
-    std::unique_ptr<T> result = ReadCommentedInputStream<T>(*input_file, process);
-    input_file->close();
+    std::unique_ptr<T> result = ReadCommentedInputStream<T>(input_file, process);
+    input_file.close();
     return result;
   }
 

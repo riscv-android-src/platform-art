@@ -432,6 +432,36 @@ libart_cc_defaults {
     export_shared_lib_headers: ["libbase"],
 }
 
+cc_defaults {
+    name: "libart_pgo",
+
+    pgo: {
+        sampling: true,
+    },
+    target: {
+        android_arm64: {
+            pgo: {
+                profile_file: "art/libart_arm_arm64.profdata",
+            },
+        },
+        android_arm: {
+            pgo: {
+                profile_file: "art/libart_arm_arm64.profdata",
+            },
+        },
+        android_x86_64: {
+            pgo: {
+                profile_file: "art/libart_x86_x86_64.profdata",
+            },
+        },
+        android_x86: {
+            pgo: {
+                profile_file: "art/libart_x86_x86_64.profdata",
+            },
+        },
+    },
+}
+
 libart_static_cc_defaults {
     name: "libart_static_base_defaults",
     static_libs: [
@@ -441,7 +471,7 @@ libart_static_cc_defaults {
         "liblog",
         "libnativebridge",
         "libnativeloader",
-        "libsigchain_dummy",
+        "libsigchain_fake",
         "libunwindstack",
         "libz",
     ],
@@ -484,15 +514,13 @@ gensrcs {
     srcs: [
         "base/callee_save_type.h",
         "base/locks.h",
-        "class_loader_context.h",
         "class_status.h",
-        "debugger.h",
+        "compilation_kind.h",
         "gc_root.h",
         "gc/allocator_type.h",
         "gc/allocator/rosalloc.h",
         "gc/collector_type.h",
         "gc/collector/gc_type.h",
-        "gc/heap.h",
         "gc/space/region_space.h",
         "gc/space/space.h",
         "gc/weak_root_state.h",
@@ -503,14 +531,12 @@ gensrcs {
         "jni_id_type.h",
         "lock_word.h",
         "oat_file.h",
-        "object_callbacks.h",
         "process_state.h",
         "reflective_value_visitor.h",
         "stack.h",
         "suspend_reason.h",
         "thread.h",
         "thread_state.h",
-        "ti/agent.h",
         "trace.h",
         "verifier/verifier_enums.h",
     ],
@@ -525,6 +551,7 @@ art_cc_library {
     defaults: [
         "libart_defaults",
         "libart_nativeunwind_defaults",
+        "libart_pgo",
     ],
     whole_static_libs: [
     ],
@@ -718,7 +745,11 @@ art_cc_test {
         "verifier/method_verifier_test.cc",
         "verifier/reg_type_test.cc",
     ],
-    required: ["dex2oatd"],
+    target: {
+        host: {
+            required: ["dex2oatd"],
+        },
+    },
     shared_libs: [
         "libbacktrace",
     ],
@@ -736,7 +767,11 @@ art_cc_test {
         "reflection_test.cc",
         "module_exclusion_test.cc",
     ],
-    required: ["dex2oatd"],
+    target: {
+        host: {
+            required: ["dex2oatd"],
+        },
+    },
     data: [
         ":art-gtest-jars-Main",
         ":art-gtest-jars-NonStaticLeafMethods",

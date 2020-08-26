@@ -268,7 +268,6 @@ Runtime::Runtime()
       dump_gc_performance_on_shutdown_(false),
       preinitialization_transactions_(),
       verify_(verifier::VerifyMode::kNone),
-      allow_dex_file_fallback_(true),
       target_sdk_version_(static_cast<uint32_t>(SdkVersion::kUnset)),
       implicit_null_checks_(false),
       implicit_so_checks_(false),
@@ -1315,7 +1314,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   intern_table_ = new InternTable;
 
   verify_ = runtime_options.GetOrDefault(Opt::Verify);
-  allow_dex_file_fallback_ = !runtime_options.Exists(Opt::NoDexFileFallback);
 
   target_sdk_version_ = runtime_options.GetOrDefault(Opt::TargetSdkVersion);
 
@@ -1403,6 +1401,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::LongPauseLogThreshold),
                        runtime_options.GetOrDefault(Opt::LongGCLogThreshold),
                        runtime_options.Exists(Opt::IgnoreMaxFootprint),
+                       runtime_options.GetOrDefault(Opt::AlwaysLogExplicitGcs),
                        runtime_options.GetOrDefault(Opt::UseTLAB),
                        xgc_option.verify_pre_gc_heap_,
                        xgc_option.verify_pre_sweeping_heap_,
@@ -1418,11 +1417,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
                        runtime_options.Exists(Opt::DumpRegionInfoAfterGC),
                        image_space_loading_order_);
-
-  if (!heap_->HasBootImageSpace() && !allow_dex_file_fallback_) {
-    LOG(ERROR) << "Dex file fallback disabled, cannot continue without image.";
-    return false;
-  }
 
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
@@ -2307,8 +2301,10 @@ ArtMethod* Runtime::CreateResolutionMethod() {
   if (IsAotCompiler()) {
     PointerSize pointer_size = GetInstructionSetPointerSize(instruction_set_);
     method->SetEntryPointFromQuickCompiledCodePtrSize(nullptr, pointer_size);
+    method->SetEntryPointFromJniPtrSize(nullptr, pointer_size);
   } else {
     method->SetEntryPointFromQuickCompiledCode(GetQuickResolutionStub());
+    method->SetEntryPointFromJni(GetJniDlsymLookupCriticalStub());
   }
   return method;
 }

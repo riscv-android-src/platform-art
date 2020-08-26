@@ -398,12 +398,7 @@ static void CreateFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invoke
   locations->SetInAt(0, Location::FpuRegisterLocation(calling_convention.GetFpuRegisterAt(0)));
   locations->SetOut(Location::FpuRegisterLocation(XMM0));
 
-  // We have to ensure that the native code doesn't clobber the XMM registers which are
-  // non-volatile for ART, but volatile for Native calls.  This will ensure that they are
-  // saved in the prologue and properly restored.
-  for (FloatRegister fp_reg : non_volatile_xmm_regs) {
-    locations->AddTemp(Location::FpuRegisterLocation(fp_reg));
-  }
+  CodeGeneratorX86_64::BlockNonVolatileXmmRegisters(locations);
 }
 
 static void GenFPToFPCall(HInvoke* invoke, CodeGeneratorX86_64* codegen,
@@ -535,12 +530,7 @@ static void CreateFPFPToFPCallLocations(ArenaAllocator* allocator, HInvoke* invo
   locations->SetInAt(1, Location::FpuRegisterLocation(calling_convention.GetFpuRegisterAt(1)));
   locations->SetOut(Location::FpuRegisterLocation(XMM0));
 
-  // We have to ensure that the native code doesn't clobber the XMM registers which are
-  // non-volatile for ART, but volatile for Native calls.  This will ensure that they are
-  // saved in the prologue and properly restored.
-  for (FloatRegister fp_reg : non_volatile_xmm_regs) {
-    locations->AddTemp(Location::FpuRegisterLocation(fp_reg));
-  }
+  CodeGeneratorX86_64::BlockNonVolatileXmmRegisters(locations);
 }
 
 void IntrinsicLocationsBuilderX86_64::VisitMathAtan2(HInvoke* invoke) {
@@ -2694,6 +2684,42 @@ void IntrinsicLocationsBuilderX86_64::VisitReachabilityFence(HInvoke* invoke) {
 
 void IntrinsicCodeGeneratorX86_64::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
 
+void IntrinsicLocationsBuilderX86_64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+  locations->SetInAt(0, Location::RegisterLocation(RAX));
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::SameAsFirstInput());
+  // Intel uses edx:eax as the dividend.
+  locations->AddTemp(Location::RegisterLocation(RDX));
+}
+
+void IntrinsicCodeGeneratorX86_64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  X86_64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  Location out = locations->Out();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  CpuRegister rdx = locations->GetTemp(0).AsRegister<CpuRegister>();
+  CpuRegister second_reg = second.AsRegister<CpuRegister>();
+
+  DCHECK_EQ(RAX, first.AsRegister<Register>());
+  DCHECK_EQ(RAX, out.AsRegister<Register>());
+  DCHECK_EQ(RDX, rdx.AsRegister());
+
+  // Check if divisor is zero, bail to managed implementation to handle.
+  __ testl(second_reg, second_reg);
+  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86_64(invoke);
+  codegen_->AddSlowPath(slow_path);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  __ xorl(rdx, rdx);
+  __ divl(second_reg);
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
+
 UNIMPLEMENTED_INTRINSIC(X86_64, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(X86_64, FloatIsInfinite)
 UNIMPLEMENTED_INTRINSIC(X86_64, DoubleIsInfinite)
@@ -2734,6 +2760,45 @@ UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(X86_64, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(X86_64, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGet)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(X86_64, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(X86_64)
 

@@ -32,7 +32,6 @@
 #include "gc/accounting/card_table-inl.h"
 #include "imt_conflict_table.h"
 #include "imtable-inl.h"
-#include "index_bss_mapping.h"
 #include "instrumentation.h"
 #include "interpreter/interpreter.h"
 #include "interpreter/interpreter_common.h"
@@ -589,8 +588,8 @@ static void HandleDeoptimization(JValue* result,
   // Coming from partial-fragment deopt.
   Thread* self = Thread::Current();
   if (kIsDebugBuild) {
-    // Sanity-check: are the methods as expected? We check that the last shadow frame (the bottom
-    // of the call-stack) corresponds to the called method.
+    // Consistency-check: are the methods as expected? We check that the last shadow frame
+    // (the bottom of the call-stack) corresponds to the called method.
     ShadowFrame* linked = deopt_frame;
     while (linked->GetLink() != nullptr) {
       linked = linked->GetLink();
@@ -618,19 +617,19 @@ static void HandleDeoptimization(JValue* result,
 
   // Ensure that the stack is still in order.
   if (kIsDebugBuild) {
-    class DummyStackVisitor : public StackVisitor {
+    class EntireStackVisitor : public StackVisitor {
      public:
-      explicit DummyStackVisitor(Thread* self_in) REQUIRES_SHARED(Locks::mutator_lock_)
+      explicit EntireStackVisitor(Thread* self_in) REQUIRES_SHARED(Locks::mutator_lock_)
           : StackVisitor(self_in, nullptr, StackVisitor::StackWalkKind::kIncludeInlinedFrames) {}
 
       bool VisitFrame() override REQUIRES_SHARED(Locks::mutator_lock_) {
-        // Nothing to do here. In a debug build, SanityCheckFrame will do the work in the walking
+        // Nothing to do here. In a debug build, ValidateFrame will do the work in the walking
         // logic. Just always say we want to continue.
         return true;
       }
     };
-    DummyStackVisitor dsv(self);
-    dsv.WalkStack();
+    EntireStackVisitor esv(self);
+    esv.WalkStack();
   }
 
   // Restore the exception that was pending before deoptimization then interpret the
@@ -1095,7 +1094,7 @@ extern "C" TwoWordReturn artInstrumentationMethodExitFromCode(Thread* self,
   // Instrumentation exit stub must not be entered with a pending exception.
   CHECK(!self->IsExceptionPending()) << "Enter instrumentation exit stub with pending exception "
                                      << self->GetException()->Dump();
-  // Compute address of return PC and sanity check that it currently holds 0.
+  // Compute address of return PC and check that it currently holds 0.
   constexpr size_t return_pc_offset =
       RuntimeCalleeSaveFrame::GetReturnPcOffset(CalleeSaveType::kSaveEverything);
   uintptr_t* return_pc_addr = reinterpret_cast<uintptr_t*>(reinterpret_cast<uint8_t*>(sp) +
@@ -1312,33 +1311,16 @@ extern "C" const void* artQuickResolutionTrampoline(
   // Resolve method filling in dex cache.
   if (!called_method_known_on_entry) {
     StackHandleScope<1> hs(self);
-    mirror::Object* dummy = nullptr;
+    mirror::Object* fake_receiver = nullptr;
     HandleWrapper<mirror::Object> h_receiver(
-        hs.NewHandleWrapper(virtual_or_interface ? &receiver : &dummy));
+        hs.NewHandleWrapper(virtual_or_interface ? &receiver : &fake_receiver));
     DCHECK_EQ(caller->GetDexFile(), called_method.dex_file);
     called = linker->ResolveMethod<ClassLinker::ResolveMode::kCheckICCEAndIAE>(
         self, called_method.index, caller, invoke_type);
 
-    // Update .bss entry in oat file if any.
-    if (called != nullptr && called_method.dex_file->GetOatDexFile() != nullptr) {
-      size_t bss_offset = IndexBssMappingLookup::GetBssOffset(
-          called_method.dex_file->GetOatDexFile()->GetMethodBssMapping(),
-          called_method.index,
-          called_method.dex_file->NumMethodIds(),
-          static_cast<size_t>(kRuntimePointerSize));
-      if (bss_offset != IndexBssMappingLookup::npos) {
-        DCHECK_ALIGNED(bss_offset, static_cast<size_t>(kRuntimePointerSize));
-        const OatFile* oat_file = called_method.dex_file->GetOatDexFile()->GetOatFile();
-        ArtMethod** method_entry = reinterpret_cast<ArtMethod**>(const_cast<uint8_t*>(
-            oat_file->BssBegin() + bss_offset));
-        DCHECK_GE(method_entry, oat_file->GetBssMethods().data());
-        DCHECK_LT(method_entry,
-                  oat_file->GetBssMethods().data() + oat_file->GetBssMethods().size());
-        std::atomic<ArtMethod*>* atomic_entry =
-            reinterpret_cast<std::atomic<ArtMethod*>*>(method_entry);
-        static_assert(sizeof(*method_entry) == sizeof(*atomic_entry), "Size check.");
-        atomic_entry->store(called, std::memory_order_release);
-      }
+    // If successful, update .bss entry in oat file if any.
+    if (called != nullptr) {
+      MaybeUpdateBssMethodEntry(called, called_method);
     }
   }
   const void* code = nullptr;
@@ -1451,7 +1433,6 @@ extern "C" const void* artQuickResolutionTrampoline(
 template<class T> class BuildNativeCallFrameStateMachine {
  public:
 #if defined(__arm__)
-  // TODO: These are all dummy values!
   static constexpr bool kNativeSoftFloatAbi = true;
   static constexpr size_t kNumNativeGprArgs = 4;  // 4 arguments passed in GPRs, r0-r3
   static constexpr size_t kNumNativeFprArgs = 0;  // 0 arguments passed in FPRs.
@@ -1476,7 +1457,6 @@ template<class T> class BuildNativeCallFrameStateMachine {
   static constexpr bool kAlignLongOnStack = false;
   static constexpr bool kAlignDoubleOnStack = false;
 #elif defined(__i386__)
-  // TODO: Check these!
   static constexpr bool kNativeSoftFloatAbi = false;  // Not using int registers for fp
   static constexpr size_t kNumNativeGprArgs = 0;  // 0 arguments passed in GPRs.
   static constexpr size_t kNumNativeFprArgs = 0;  // 0 arguments passed in FPRs.

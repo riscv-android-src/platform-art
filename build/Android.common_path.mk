@@ -67,7 +67,7 @@ ART_TARGET_DEX_DEPENDENCIES := com.android.art.testing com.android.conscrypt com
 
 ART_CORE_SHARED_LIBRARIES := libjavacore libopenjdk libopenjdkjvm libopenjdkjvmti
 ART_CORE_SHARED_DEBUG_LIBRARIES := libopenjdkd libopenjdkjvmd libopenjdkjvmtid
-ART_HOST_CORE_SHARED_LIBRARIES := $(ART_CORE_SHARED_LIBRARIES) libandroidicu-host libicuuc-host libicui18n-host libicu_jni
+ART_HOST_CORE_SHARED_LIBRARIES := $(ART_CORE_SHARED_LIBRARIES) libicuuc-host libicui18n-host libicu_jni
 ART_HOST_SHARED_LIBRARY_DEPENDENCIES := $(foreach lib,$(ART_HOST_CORE_SHARED_LIBRARIES), $(ART_HOST_OUT_SHARED_LIBRARIES)/$(lib)$(ART_HOST_SHLIB_EXTENSION))
 ART_HOST_SHARED_LIBRARY_DEBUG_DEPENDENCIES := $(foreach lib,$(ART_CORE_SHARED_DEBUG_LIBRARIES), $(ART_HOST_OUT_SHARED_LIBRARIES)/$(lib)$(ART_HOST_SHLIB_EXTENSION))
 ifdef HOST_2ND_ARCH
@@ -120,9 +120,14 @@ DEBUG_ART_APEX := com.android.art.debug
 # Testing ART APEX, used in ART device testing.
 TESTING_ART_APEX := com.android.art.testing
 
+# Runtime (Bionic) APEX
+RUNTIME_APEX := com.android.runtime
 # Conscrypt APEX
 CONSCRYPT_APEX := com.android.conscrypt
 # i18n APEX
 I18N_APEX := com.android.i18n
+
+# A phony file to create the ICU data file for host.
+HOST_I18N_DATA := $(HOST_OUT)/$(I18N_APEX)/timestamp
 
 endif # ART_ANDROID_COMMON_PATH_MK

@@ -112,7 +112,6 @@ working_packages=("libcore.android.system"
                   "libcore.libcore.net"
                   "libcore.libcore.reflect"
                   "libcore.libcore.util"
-                  "libcore.libcore.timezone"
                   "libcore.sun.invoke"
                   "libcore.sun.net"
                   "libcore.sun.misc"
@@ -270,6 +269,9 @@ fi  # $execution_mode = "device"
 if [ $execution_mode = "device" -o $execution_mode = "host" ]; then
   # Add timeout to vogar command-line.
   vogar_args="$vogar_args --timeout $timeout_secs"
+
+  # Suppress explicit gc logs that are triggered an absurd number of times by these tests.
+  vogar_args="$vogar_args --vm-arg -XX:AlwaysLogExplicitGcs:false"
 
   # set the toolchain to use.
   vogar_args="$vogar_args --toolchain d8 --language CUR"

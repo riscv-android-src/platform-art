@@ -489,13 +489,6 @@ class ArtMethod final {
     ClearFastInterpreterToInterpreterInvokeFlag();
   }
 
-  // Registers the native method and returns the new entry point. NB The returned entry point might
-  // be different from the native_method argument if some MethodCallback modifies it.
-  const void* RegisterNative(const void* native_method)
-      REQUIRES_SHARED(Locks::mutator_lock_) WARN_UNUSED;
-
-  void UnregisterNative() REQUIRES_SHARED(Locks::mutator_lock_);
-
   static constexpr MemberOffset DataOffset(PointerSize pointer_size) {
     return MemberOffset(PtrSizedFieldsOffset(pointer_size) + OFFSETOF_MEMBER(
         PtrSizedFields, data_) / sizeof(void*) * static_cast<size_t>(pointer_size));
@@ -520,27 +513,6 @@ class ArtMethod final {
       REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK(IsRuntimeMethod());
     SetDataPtrSize(table, pointer_size);
-  }
-
-  ProfilingInfo* GetProfilingInfo(PointerSize pointer_size) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (UNLIKELY(IsNative() || IsProxyMethod() || !IsInvokable())) {
-      return nullptr;
-    }
-    return reinterpret_cast<ProfilingInfo*>(GetDataPtrSize(pointer_size));
-  }
-
-  ALWAYS_INLINE void SetProfilingInfo(ProfilingInfo* info) REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetDataPtrSize(info, kRuntimePointerSize);
-  }
-
-  ALWAYS_INLINE void SetProfilingInfoPtrSize(ProfilingInfo* info, PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-    SetDataPtrSize(info, pointer_size);
-  }
-
-  static MemberOffset ProfilingInfoOffset() {
-    DCHECK(IsImagePointerSize(kRuntimePointerSize));
-    return DataOffset(kRuntimePointerSize);
   }
 
   template <ReadBarrierOption kReadBarrierOption = kWithReadBarrier>
@@ -587,7 +559,9 @@ class ArtMethod final {
 
   void SetEntryPointFromJni(const void* entrypoint)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(IsNative());
+    // The resolution method also has a JNI entrypoint for direct calls from
+    // compiled code to the JNI dlsym lookup stub for @CriticalNative.
+    DCHECK(IsNative() || IsRuntimeMethod());
     SetEntryPointFromJniPtrSize(entrypoint, kRuntimePointerSize);
   }
 
@@ -837,6 +811,8 @@ class ArtMethod final {
     // Depending on the method type, the data is
     //   - native method: pointer to the JNI function registered to this method
     //                    or a function to resolve the JNI function,
+    //   - resolution method: pointer to a function to resolve the method and
+    //                        the JNI function for @CriticalNative.
     //   - conflict method: ImtConflictTable,
     //   - abstract/interface method: the single-implementation if any,
     //   - proxy method: the original interface method or constructor,

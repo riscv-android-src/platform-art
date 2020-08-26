@@ -17,6 +17,55 @@
 # Build rules are excluded from Mac, since we can not run ART tests there in the first place.
 ifneq ($(HOST_OS),darwin)
 
+###################################################################################################
+# Create module in testcases to hold all common data and tools needed for ART host tests.
+
+# ART binary tools and libraries (automatic list of all art_cc_binary/art_cc_library modules).
+my_files := $(ART_TESTCASES_CONTENT)
+
+# Manually add system libraries that we need to run the host ART tools.
+my_files += \
+  $(foreach lib, libbacktrace libbase libc++ libicu_jni liblog libsigchain libunwindstack \
+    libziparchive libjavacore libandroidio libopenjdkd, \
+    $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib).so \
+    $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib).so) \
+  $(foreach lib, libcrypto libz libicuuc libicui18n libandroidicu libexpat, \
+    $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib)-host.so \
+    $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib)-host.so)
+
+# Add apex directories for art, conscrypt and i18n.
+icu_data_file := $(firstword $(wildcard external/icu/icu4c/source/stubdata/icu*.dat))
+my_files += $(foreach infix,_ _VDEX_,$(foreach suffix,$(HOST_ARCH) $(HOST_2ND_ARCH), \
+  $(DEXPREOPT_IMAGE$(infix)BUILT_INSTALLED_art_host_$(suffix))))
+my_files += \
+  $(foreach jar,$(CORE_IMG_JARS),\
+    $(HOST_OUT_JAVA_LIBRARIES)/$(jar)-hostdex.jar:apex/com.android.art/javalib/$(jar).jar) \
+  $(HOST_OUT_JAVA_LIBRARIES)/conscrypt-hostdex.jar:apex/com.android.conscrypt/javalib/conscrypt.jar\
+  $(HOST_OUT_JAVA_LIBRARIES)/core-icu4j-hostdex.jar:apex/com.android.i18n/javalib/core-icu4j.jar \
+  $(icu_data_file):com.android.i18n/etc/icu/$(notdir $(icu_data_file))
+
+# Create phony module that will copy all the data files into testcases directory.
+# For now, this copies everything to "out/host/linux-x86/" subdirectory, since it
+# is hard-coded in many places. TODO: Refactor tests to remove the need for this.
+include $(CLEAR_VARS)
+LOCAL_IS_HOST_MODULE := true
+LOCAL_MODULE := art_common
+LOCAL_MODULE_TAGS := tests
+LOCAL_MODULE_CLASS := NATIVE_TESTS
+LOCAL_MODULE_SUFFIX := .txt
+LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_COMPATIBILITY_SUPPORT_FILES := $(ART_TESTCASES_PREBUILT_CONTENT) \
+	$(foreach f,$(my_files),$(call word-colon,1,$f):out/host/linux-x86/$(call word-colon,2,$f))
+include $(BUILD_SYSTEM)/base_rules.mk
+
+$(LOCAL_BUILT_MODULE):
+	@mkdir -p $(dir $@)
+	echo "This directory contains common data and tools needed for ART host tests" > $@
+
+my_files :=
+include $(CLEAR_VARS)
+###################################################################################################
+
 # The path for which all the dex files are relative, not actually the current directory.
 LOCAL_PATH := art/test
 
@@ -128,6 +177,7 @@ define define-art-gtest-rule-host
   # Dependencies for all host gtests.
   gtest_deps := $$(ART_HOST_DEX_DEPENDENCIES) \
     $$(ART_TEST_HOST_GTEST_DEPENDENCIES) \
+    $$(HOST_OUT)/$$(I18N_APEX)/timestamp \
     $$(HOST_BOOT_IMAGE_JARS) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libicu_jni$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libjavacore$$(ART_HOST_SHLIB_EXTENSION) \
@@ -206,7 +256,7 @@ endif
   gtest_suffix :=
 endef  # define-art-gtest-rule-host
 
-ART_TEST_HOST_GTEST_DEPENDENCIES :=
+ART_TEST_HOST_GTEST_DEPENDENCIES := $(HOST_I18N_DATA)
 ART_TEST_TARGET_GTEST_DEPENDENCIES := $(TESTING_ART_APEX)
 
 # Add the additional dependencies for the specified test
@@ -258,7 +308,7 @@ endef  # define-art-gtest-host-both
 ifeq ($(ART_BUILD_TARGET),true)
   $(foreach name,$(ART_TARGET_GTEST_NAMES), $(eval $(call add-art-gtest-dependencies,$(name),)))
   ART_TEST_TARGET_GTEST_DEPENDENCIES += \
-    libicu_jni.com.android.i18n \
+    com.android.i18n \
     libjavacore.com.android.art.testing \
     libopenjdkd.com.android.art.testing \
     com.android.art.testing \

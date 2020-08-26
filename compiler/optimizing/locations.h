@@ -440,8 +440,8 @@ class Location : public ValueObject {
   // way that none of them can be interpreted as a kConstant tag.
   uintptr_t value_;
 };
-std::ostream& operator<<(std::ostream& os, const Location::Kind& rhs);
-std::ostream& operator<<(std::ostream& os, const Location::Policy& rhs);
+std::ostream& operator<<(std::ostream& os, Location::Kind rhs);
+std::ostream& operator<<(std::ostream& os, Location::Policy rhs);
 
 class RegisterSet : public ValueObject {
  public:
@@ -476,6 +476,23 @@ class RegisterSet : public ValueObject {
 
   static bool Contains(uint32_t register_set, uint32_t reg) {
     return (register_set & (1 << reg)) != 0;
+  }
+
+  bool OverlapsRegisters(Location out) {
+    DCHECK(out.IsRegisterKind());
+    switch (out.GetKind()) {
+      case Location::Kind::kRegister:
+        return ContainsCoreRegister(out.reg());
+      case Location::Kind::kFpuRegister:
+        return ContainsFloatingPointRegister(out.reg());
+      case Location::Kind::kRegisterPair:
+        return ContainsCoreRegister(out.low()) || ContainsCoreRegister(out.high());
+      case Location::Kind::kFpuRegisterPair:
+        return ContainsFloatingPointRegister(out.low()) ||
+               ContainsFloatingPointRegister(out.high());
+      default:
+        return false;
+    }
   }
 
   size_t GetNumberOfRegisters() const {

@@ -22,6 +22,7 @@
 #include "art_method.h"
 #include "base/bit_utils.h"
 #include "code_generator_x86.h"
+#include "data_type-inl.h"
 #include "entrypoints/quick/quick_entrypoints.h"
 #include "heap_poisoning.h"
 #include "intrinsics.h"
@@ -31,6 +32,7 @@
 #include "mirror/object_array-inl.h"
 #include "mirror/reference.h"
 #include "mirror/string.h"
+#include "mirror/var_handle.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread-current-inl.h"
 #include "utils/x86/assembler_x86.h"
@@ -2977,7 +2979,8 @@ void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
       DCHECK(method_address != nullptr);
       Register method_address_reg =
           invoke->GetLocations()->InAt(method_address_index).AsRegister<Register>();
-      __ movl(out, Address(method_address_reg, out, TIMES_4, CodeGeneratorX86::kDummy32BitOffset));
+      __ movl(out,
+              Address(method_address_reg, out, TIMES_4, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageIntrinsicPatch(method_address, info.array_data_boot_image_reference);
     } else {
       // Note: We're about to clobber the index in `out`, so we need to use `in` and
@@ -3027,6 +3030,190 @@ void IntrinsicLocationsBuilderX86::VisitReachabilityFence(HInvoke* invoke) {
 
 void IntrinsicCodeGeneratorX86::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
 
+void IntrinsicLocationsBuilderX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  LocationSummary* locations = new (allocator_) LocationSummary(invoke,
+                                                                LocationSummary::kCallOnSlowPath,
+                                                                kIntrinsified);
+  locations->SetInAt(0, Location::RegisterLocation(EAX));
+  locations->SetInAt(1, Location::RequiresRegister());
+  locations->SetOut(Location::SameAsFirstInput());
+  // Intel uses edx:eax as the dividend.
+  locations->AddTemp(Location::RegisterLocation(EDX));
+}
+
+void IntrinsicCodeGeneratorX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  Location out = locations->Out();
+  Location first = locations->InAt(0);
+  Location second = locations->InAt(1);
+  Register edx = locations->GetTemp(0).AsRegister<Register>();
+  Register second_reg = second.AsRegister<Register>();
+
+  DCHECK_EQ(EAX, first.AsRegister<Register>());
+  DCHECK_EQ(EAX, out.AsRegister<Register>());
+  DCHECK_EQ(EDX, edx);
+
+  // Check if divisor is zero, bail to managed implementation to handle.
+  __ testl(second_reg, second_reg);
+  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86(invoke);
+  codegen_->AddSlowPath(slow_path);
+  __ j(kEqual, slow_path->GetEntryLabel());
+
+  __ xorl(edx, edx);
+  __ divl(second_reg);
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
+void IntrinsicLocationsBuilderX86::VisitVarHandleGet(HInvoke* invoke) {
+  // The only read barrier implementation supporting the
+  // VarHandleGet intrinsic is the Baker-style read barriers.
+  if (kEmitCompilerReadBarrier && !kUseBakerReadBarrier) {
+    return;
+  }
+
+  DataType::Type type = invoke->GetType();
+
+  if (type == DataType::Type::kVoid) {
+    // Return type should not be void for get.
+    return;
+  }
+
+  if (invoke->GetNumberOfArguments() == 1u) {
+    // Static field get
+    ArenaAllocator* allocator = invoke->GetBlock()->GetGraph()->GetAllocator();
+    LocationSummary* locations = new (allocator) LocationSummary(
+        invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+    locations->SetInAt(0, Location::RequiresRegister());
+    locations->AddTemp(Location::RequiresRegister());
+
+    switch (DataType::Kind(type)) {
+      case DataType::Type::kInt64:
+        locations->AddTemp(Location::RequiresRegister());
+        FALLTHROUGH_INTENDED;
+      case DataType::Type::kInt32:
+        locations->SetOut(Location::RequiresRegister());
+        break;
+      case DataType::Type::kReference:
+        // The second input is not an instruction argument. It is the callsite return type
+        // used to check the compatibility with VarHandle type.
+        locations->SetInAt(1, Location::RequiresRegister());
+        locations->SetOut(Location::RequiresRegister());
+        break;
+      default:
+        DCHECK(DataType::IsFloatingPointType(type));
+        locations->AddTemp(Location::RequiresRegister());
+        locations->SetOut(Location::RequiresFpuRegister());
+    }
+  }
+
+  // TODO: support instance fields, arrays, etc.
+}
+
+void IntrinsicCodeGeneratorX86::VisitVarHandleGet(HInvoke* invoke) {
+  // The only read barrier implementation supporting the
+  // VarHandleGet intrinsic is the Baker-style read barriers.
+  DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
+
+  X86Assembler* assembler = codegen_->GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  Register varhandle_object = locations->InAt(0).AsRegister<Register>();
+  const uint32_t access_modes_bitmask_offset =
+      mirror::VarHandle::AccessModesBitMaskOffset().Uint32Value();
+  mirror::VarHandle::AccessMode access_mode =
+      mirror::VarHandle::GetAccessModeByIntrinsic(invoke->GetIntrinsic());
+  const uint32_t access_mode_bit = 1u << static_cast<uint32_t>(access_mode);
+  const uint32_t var_type_offset = mirror::VarHandle::VarTypeOffset().Uint32Value();
+  const uint32_t coordtype0_offset = mirror::VarHandle::CoordinateType0Offset().Uint32Value();
+  const uint32_t super_class_offset = mirror::Class::SuperClassOffset().Uint32Value();
+  DataType::Type type = invoke->GetType();
+  DCHECK_NE(type, DataType::Type::kVoid);
+  Register temp = locations->GetTemp(0).AsRegister<Register>();
+  InstructionCodeGeneratorX86* instr_codegen =
+      down_cast<InstructionCodeGeneratorX86*>(codegen_->GetInstructionVisitor());
+
+  // If the access mode is not supported, bail to runtime implementation to handle
+  __ testl(Address(varhandle_object, access_modes_bitmask_offset), Immediate(access_mode_bit));
+  SlowPathCode* slow_path = new (codegen_->GetScopedAllocator()) IntrinsicSlowPathX86(invoke);
+  codegen_->AddSlowPath(slow_path);
+  __ j(kZero, slow_path->GetEntryLabel());
+
+  // Check that the varhandle references a static field by checking that coordinateType0 == null.
+  // Do not emit read barrier (or unpoison the reference) for comparing to null.
+  __ cmpl(Address(varhandle_object, coordtype0_offset), Immediate(0));
+  __ j(kNotEqual, slow_path->GetEntryLabel());
+  // For primitive types, we do not need a read barrier when loading a reference only for loading
+  // constant field through the reference. For reference types, we deliberately avoid the read
+  // barrier, letting the slow path handle the false negatives.
+  __ movl(temp, Address(varhandle_object, var_type_offset));
+  __ MaybeUnpoisonHeapReference(temp);
+  // Check the varType against the type we're trying to retrieve.
+  if (type == DataType::Type::kReference) {
+    // For reference types, check the type's class reference and if it's not an exact match,
+    // check if it is an inherited type.
+    Register callsite_ret_type = locations->InAt(1).AsRegister<Register>();
+    NearLabel check_ret_type_compatibility, ret_type_matched;
+
+    __ Bind(&check_ret_type_compatibility);
+    __ cmpl(temp, callsite_ret_type);
+    __ j(kEqual, &ret_type_matched);
+    // Load the super class.
+    __ movl(temp, Address(temp, super_class_offset));
+    __ MaybeUnpoisonHeapReference(temp);
+    // If the super class is null, we reached the root of the hierarchy. The types are not
+    // compatible.
+    __ cmpl(temp, Immediate(0));
+    __ j(kEqual, slow_path->GetEntryLabel());
+    __ jmp(&check_ret_type_compatibility);
+    __ Bind(&ret_type_matched);
+  } else {
+    // For primitive types, check the varType.primitiveType field.
+    uint32_t primitive_type = static_cast<uint32_t>(DataTypeToPrimitive(type));
+    const uint32_t primitive_type_offset = mirror::Class::PrimitiveTypeOffset().Uint32Value();
+
+    __ cmpw(Address(temp, primitive_type_offset), Immediate(primitive_type));
+    __ j(kNotEqual, slow_path->GetEntryLabel());
+  }
+
+  Location out = locations->Out();
+  // Use 'out' as a temporary register if it's a core register
+  Register offset =
+      out.IsRegister() ? out.AsRegister<Register>() : locations->GetTemp(1).AsRegister<Register>();
+  const uint32_t artfield_offset = mirror::FieldVarHandle::ArtFieldOffset().Uint32Value();
+  const uint32_t offset_offset = ArtField::OffsetOffset().Uint32Value();
+  const uint32_t declaring_class_offset = ArtField::DeclaringClassOffset().Uint32Value();
+
+  // Load the ArtField, the offset and declaring class
+  __ movl(temp, Address(varhandle_object, artfield_offset));
+  __ movl(offset, Address(temp, offset_offset));
+  instr_codegen->GenerateGcRootFieldLoad(invoke,
+                                         Location::RegisterLocation(temp),
+                                         Address(temp, declaring_class_offset),
+                                         /* fixup_label= */ nullptr,
+                                         kCompilerReadBarrierOption);
+
+  // Load the value from the field
+  CodeGeneratorX86* codegen_x86 = down_cast<CodeGeneratorX86*>(codegen_);
+  if (type == DataType::Type::kReference) {
+    if (kCompilerReadBarrierOption == kWithReadBarrier) {
+      codegen_x86->GenerateReferenceLoadWithBakerReadBarrier(invoke,
+                                                             out,
+                                                             temp,
+                                                             Address(temp, offset, TIMES_1, 0),
+                                                             /* needs_null_check= */ false);
+    } else {
+      __ movl(out.AsRegister<Register>(), Address(temp, offset, TIMES_1, 0));
+      __ MaybeUnpoisonHeapReference(out.AsRegister<Register>());
+    }
+  } else {
+    codegen_x86->MoveFromMemory(type, out, temp, offset);
+  }
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
+
 UNIMPLEMENTED_INTRINSIC(X86, MathRoundDouble)
 UNIMPLEMENTED_INTRINSIC(X86, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(X86, FloatIsInfinite)
@@ -3070,6 +3257,44 @@ UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(X86, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(X86)
 
