@@ -21,6 +21,9 @@ import resolved.ResolvedPublicSubclassOfPackagePrivateClass;
 
 public class UnresolvedClass {
   public static void $noinline$main() {
+    $noinline$testResolvedPublicClass();
+    $noinline$testResolvedPackagePrivateClass();
+
     $noinline$testPublicFieldInResolvedPackagePrivateClass();
     $noinline$testPublicFieldInPackagePrivateClassViaResolvedPublicSubclass();
     $noinline$testPrivateFieldInResolvedPackagePrivateClass();
@@ -38,6 +41,21 @@ public class UnresolvedClass {
     System.out.println("UnresolvedClass passed");
   }
 
+  /// CHECK-START: void unresolved.UnresolvedClass.$noinline$testResolvedPublicClass() builder (after)
+  /// CHECK: LoadClass class_name:resolved.ResolvedPublicSubclassOfPackagePrivateClass needs_access_check:false
+  static void $noinline$testResolvedPublicClass() {
+    Class<?> c = ResolvedPublicSubclassOfPackagePrivateClass.class;
+  }
+
+  /// CHECK-START: void unresolved.UnresolvedClass.$noinline$testResolvedPackagePrivateClass() builder (after)
+  /// CHECK: LoadClass class_name:resolved.ResolvedPackagePrivateClass needs_access_check:true
+  static void $noinline$testResolvedPackagePrivateClass() {
+    try {
+      Class<?> c = ResolvedPackagePrivateClass.class;
+      throw new Error("Unreachable");
+    } catch (IllegalAccessError expected) {}
+  }
+
   /// CHECK-START: void unresolved.UnresolvedClass.$noinline$testPublicFieldInResolvedPackagePrivateClass() builder (after)
   /// CHECK: UnresolvedStaticFieldSet
 
@@ -51,12 +69,11 @@ public class UnresolvedClass {
   }
 
   /// CHECK-START: void unresolved.UnresolvedClass.$noinline$testPublicFieldInPackagePrivateClassViaResolvedPublicSubclass() builder (after)
-  /// CHECK: UnresolvedStaticFieldSet
+  /// CHECK: StaticFieldSet
 
   /// CHECK-START: void unresolved.UnresolvedClass.$noinline$testPublicFieldInPackagePrivateClassViaResolvedPublicSubclass() builder (after)
-  /// CHECK-NOT: StaticFieldSet
+  /// CHECK-NOT: UnresolvedStaticFieldSet
   static void $noinline$testPublicFieldInPackagePrivateClassViaResolvedPublicSubclass() {
-    // TODO: Use StaticFieldSet when the referenced class is public.
     ResolvedPublicSubclassOfPackagePrivateClass.publicIntField = 42;
   }
 
