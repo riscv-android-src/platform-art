@@ -167,7 +167,7 @@ InvokeType ArtMethod::GetInvokeType() {
     return kInterface;
   } else if (IsDirect()) {
     return kDirect;
-  } else if (IsPolymorphicSignature()) {
+  } else if (IsSignaturePolymorphic()) {
     return kPolymorphic;
   } else {
     return kVirtual;
@@ -396,7 +396,7 @@ bool ArtMethod::IsOverridableByDefaultMethod() {
   return GetDeclaringClass()->IsInterface();
 }
 
-bool ArtMethod::IsPolymorphicSignature() {
+bool ArtMethod::IsSignaturePolymorphic() {
   // Methods with a polymorphic signature have constraints that they
   // are native and varargs and belong to either MethodHandle or VarHandle.
   if (!IsNative() || !IsVarargs()) {
@@ -771,7 +771,7 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
   }
 
   // Clear the data pointer, it will be set if needed by the caller.
-  if (!src->IsNative()) {
+  if (!src->HasCodeItem() && !src->IsNative()) {
     SetDataPtrSize(nullptr, image_pointer_size);
   }
   // Clear hotness to let the JIT properly decide when to compile this method.

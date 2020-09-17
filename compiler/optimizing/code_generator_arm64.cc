@@ -642,7 +642,7 @@ class ReadBarrierForHeapReferenceSlowPathARM64 : public SlowPathCodeARM64 {
            instruction_->IsArrayGet() ||
            instruction_->IsInstanceOf() ||
            instruction_->IsCheckCast() ||
-           (instruction_->IsInvokeVirtual() && instruction_->GetLocations()->Intrinsified()))
+           (instruction_->IsInvoke() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier for heap reference slow path: "
         << instruction_->DebugName();
     // The read barrier instrumentation of object ArrayGet
@@ -708,14 +708,15 @@ class ReadBarrierForHeapReferenceSlowPathARM64 : public SlowPathCodeARM64 {
             "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
         __ Add(index_reg, index_reg, Operand(offset_));
       } else {
-        // In the case of the UnsafeGetObject/UnsafeGetObjectVolatile
+        // In the case of the UnsafeGetObject/UnsafeGetObjectVolatile/VarHandleGet
         // intrinsics, `index_` is not shifted by a scale factor of 2
         // (as in the case of ArrayGet), as it is actually an offset
         // to an object field within an object.
         DCHECK(instruction_->IsInvoke()) << instruction_->DebugName();
         DCHECK(instruction_->GetLocations()->Intrinsified());
         DCHECK((instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObject) ||
-               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile))
+               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kUnsafeGetObjectVolatile ||
+               (instruction_->AsInvoke()->GetIntrinsic() == Intrinsics::kVarHandleGet)))
             << instruction_->AsInvoke()->GetIntrinsic();
         DCHECK_EQ(offset_, 0u);
         DCHECK(index_.IsRegister());
@@ -802,7 +803,9 @@ class ReadBarrierForRootSlowPathARM64 : public SlowPathCodeARM64 {
     DataType::Type type = DataType::Type::kReference;
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(out_.reg()));
-    DCHECK(instruction_->IsLoadClass() || instruction_->IsLoadString())
+    DCHECK(instruction_->IsLoadClass() ||
+           instruction_->IsLoadString() ||
+           (instruction_->IsInvoke() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier for GC root slow path: "
         << instruction_->DebugName();
 
@@ -4350,7 +4353,7 @@ void InstructionCodeGeneratorARM64::VisitInvokeInterface(HInvokeInterface* invok
   MacroAssembler* masm = GetVIXLAssembler();
   UseScratchRegisterScope scratch_scope(masm);
   scratch_scope.Exclude(ip1);
-  __ Mov(ip1, invoke->GetDexMethodIndex());
+  __ Mov(ip1, invoke->GetMethodReference().index);
 
   __ Ldr(temp,
       MemOperand(temp, mirror::Class::ImtPtrOffset(kArm64PointerSize).Uint32Value()));
@@ -4436,11 +4439,12 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
       // Add ADRP with its PC-relative method patch.
-      vixl::aarch64::Label* adrp_label = NewBootImageMethodPatch(invoke->GetTargetMethod());
+      vixl::aarch64::Label* adrp_label =
+          NewBootImageMethodPatch(invoke->GetResolvedMethodReference());
       EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
       // Add ADD with its PC-relative method patch.
       vixl::aarch64::Label* add_label =
-          NewBootImageMethodPatch(invoke->GetTargetMethod(), adrp_label);
+          NewBootImageMethodPatch(invoke->GetResolvedMethodReference(), adrp_label);
       EmitAddPlaceholder(add_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
     }
@@ -4457,12 +4461,11 @@ void CodeGeneratorARM64::GenerateStaticOrDirectCall(
     }
     case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
       // Add ADRP with its PC-relative .bss entry patch.
-      MethodReference target_method(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex());
-      vixl::aarch64::Label* adrp_label = NewMethodBssEntryPatch(target_method);
+      vixl::aarch64::Label* adrp_label = NewMethodBssEntryPatch(invoke->GetMethodReference());
       EmitAdrpPlaceholder(adrp_label, XRegisterFrom(temp));
       // Add LDR with its PC-relative .bss entry patch.
       vixl::aarch64::Label* ldr_label =
-          NewMethodBssEntryPatch(target_method, adrp_label);
+          NewMethodBssEntryPatch(invoke->GetMethodReference(), adrp_label);
       // All aligned loads are implicitly atomic consume operations on ARM64.
       EmitLdrOffsetPlaceholder(ldr_label, XRegisterFrom(temp), XRegisterFrom(temp));
       break;
@@ -4811,7 +4814,7 @@ void CodeGeneratorARM64::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* inv
   if (GetCompilerOptions().IsBootImage()) {
     DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
-    MethodReference target_method = invoke->GetTargetMethod();
+    MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     // Add ADRP with its PC-relative type patch.
     vixl::aarch64::Label* adrp_label = NewBootImageTypePatch(*target_method.dex_file, type_idx);

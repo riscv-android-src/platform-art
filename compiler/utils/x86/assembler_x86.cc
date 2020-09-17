@@ -3039,6 +3039,14 @@ void X86Assembler::andl(Register dst, const Immediate& imm) {
 }
 
 
+void X86Assembler::andw(const Address& address, const Immediate& imm) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  CHECK(imm.is_uint16() || imm.is_int16()) << imm.value();
+  EmitOperandSizeOverride();
+  EmitComplex(4, address, imm, /* is_16_op= */ true);
+}
+
+
 void X86Assembler::orl(Register dst, Register src) {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0x0B);
@@ -3633,6 +3641,23 @@ X86Assembler* X86Assembler::lock() {
   AssemblerBuffer::EnsureCapacity ensured(&buffer_);
   EmitUint8(0xF0);
   return this;
+}
+
+
+void X86Assembler::cmpxchgb(const Address& address, ByteRegister reg) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitUint8(0x0F);
+  EmitUint8(0xB0);
+  EmitOperand(reg, address);
+}
+
+
+void X86Assembler::cmpxchgw(const Address& address, Register reg) {
+  AssemblerBuffer::EnsureCapacity ensured(&buffer_);
+  EmitOperandSizeOverride();
+  EmitUint8(0x0F);
+  EmitUint8(0xB1);
+  EmitOperand(reg, address);
 }
 
 

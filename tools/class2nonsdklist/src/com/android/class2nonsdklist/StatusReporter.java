@@ -16,23 +16,16 @@
 
 package com.android.class2nonsdklist;
 
-import com.google.common.base.Joiner;
+public interface StatusReporter {
+    /**
+     * Report an error in this context. The final error message will include
+     * the class and member names, and the source file name.
+     */
+    void reportError(String message, Object... args);
 
-import java.util.List;
-
-public class MultipleAlternativesFoundError extends AlternativeNotFoundError {
-    public final ApiComponents alternative;
-    public final List<ApiComponents> almostMatches;
-
-    public MultipleAlternativesFoundError(ApiComponents alternative,
-            List<ApiComponents> almostMatches) {
-        this.alternative = alternative;
-        this.almostMatches = almostMatches;
-    }
-
-    @Override
-    public String toString() {
-        return "Alternative " + alternative + " returned multiple matches: "
-                + Joiner.on(", ").join(almostMatches);
-    }
+    /**
+     * Report a warning in this context. The final message will include the
+     * class and member names, and the source file name.
+     */
+    void reportWarning(String message, Object... args);
 }

@@ -33,6 +33,7 @@
 #include "lock_word.h"
 #include "mirror/array-inl.h"
 #include "mirror/class-inl.h"
+#include "mirror/var_handle.h"
 #include "scoped_thread_state_change-inl.h"
 #include "thread.h"
 #include "utils/assembler.h"
@@ -568,11 +569,14 @@ class ReadBarrierMarkAndUpdateFieldSlowPathX86 : public SlowPathCode {
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(ref_reg)) << ref_reg;
     // This slow path is only used by the UnsafeCASObject intrinsic.
-    DCHECK((instruction_->IsInvokeVirtual() && instruction_->GetLocations()->Intrinsified()))
+    DCHECK((instruction_->IsInvoke() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier marking and field updating slow path: "
         << instruction_->DebugName();
     DCHECK(instruction_->GetLocations()->Intrinsified());
-    DCHECK_EQ(instruction_->AsInvoke()->GetIntrinsic(), Intrinsics::kUnsafeCASObject);
+    Intrinsics intrinsic = instruction_->AsInvoke()->GetIntrinsic();
+    static constexpr auto kVarHandleCAS = mirror::VarHandle::AccessModeTemplate::kCompareAndSet;
+    DCHECK(intrinsic == Intrinsics::kUnsafeCASObject ||
+           mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleCAS);
 
     __ Bind(GetEntryLabel());
     if (unpoison_ref_before_marking_) {
@@ -1336,6 +1340,9 @@ void CodeGeneratorX86::Move32(Location destination, Location source) {
       __ movl(destination.AsRegister<Register>(), source.AsRegister<Register>());
     } else if (source.IsFpuRegister()) {
       __ movd(destination.AsRegister<Register>(), source.AsFpuRegister<XmmRegister>());
+    } else if (source.IsConstant()) {
+      int32_t value = GetInt32ValueOf(source.GetConstant());
+      __ movl(destination.AsRegister<Register>(), Immediate(value));
     } else {
       DCHECK(source.IsStackSlot());
       __ movl(destination.AsRegister<Register>(), Address(ESP, source.GetStackIndex()));
@@ -1493,6 +1500,84 @@ void CodeGeneratorX86::MoveFromMemory(DataType::Type dst_type,
     case DataType::Type::kVoid:
     case DataType::Type::kReference:
       LOG(FATAL) << "Unreachable type " << dst_type;
+  }
+}
+
+void CodeGeneratorX86::MoveToMemory(DataType::Type src_type,
+                                    Location src,
+                                    Register dst_base,
+                                    Register dst_index,
+                                    ScaleFactor dst_scale,
+                                    int32_t dst_disp) {
+  DCHECK(dst_base != Register::kNoRegister);
+  Address dst = CreateAddress(dst_base, dst_index, dst_scale, dst_disp);
+
+  switch (src_type) {
+    case DataType::Type::kBool:
+    case DataType::Type::kUint8:
+    case DataType::Type::kInt8: {
+      if (src.IsConstant()) {
+        __ movb(dst, Immediate(CodeGenerator::GetInt8ValueOf(src.GetConstant())));
+      } else {
+        __ movb(dst, src.AsRegister<ByteRegister>());
+      }
+      break;
+    }
+    case DataType::Type::kUint16:
+    case DataType::Type::kInt16: {
+      if (src.IsConstant()) {
+        __ movw(dst, Immediate(CodeGenerator::GetInt16ValueOf(src.GetConstant())));
+      } else {
+        __ movw(dst, src.AsRegister<Register>());
+      }
+      break;
+    }
+    case DataType::Type::kUint32:
+    case DataType::Type::kInt32: {
+      if (src.IsConstant()) {
+        int32_t v = CodeGenerator::GetInt32ValueOf(src.GetConstant());
+        __ movl(dst, Immediate(v));
+      } else {
+        __ movl(dst, src.AsRegister<Register>());
+      }
+      break;
+    }
+    case DataType::Type::kUint64:
+    case DataType::Type::kInt64: {
+      Address dst_next_4_bytes = CreateAddress(dst_base, dst_index, dst_scale, dst_disp + 4);
+      if (src.IsConstant()) {
+        int64_t v = CodeGenerator::GetInt64ValueOf(src.GetConstant());
+        __ movl(dst, Immediate(Low32Bits(v)));
+        __ movl(dst_next_4_bytes, Immediate(High32Bits(v)));
+      } else {
+        __ movl(dst, src.AsRegisterPairLow<Register>());
+        __ movl(dst_next_4_bytes, src.AsRegisterPairHigh<Register>());
+      }
+      break;
+    }
+    case DataType::Type::kFloat32: {
+      if (src.IsConstant()) {
+        int32_t v = CodeGenerator::GetInt32ValueOf(src.GetConstant());
+        __ movl(dst, Immediate(v));
+      } else {
+        __ movss(dst, src.AsFpuRegister<XmmRegister>());
+      }
+      break;
+    }
+    case DataType::Type::kFloat64: {
+      Address dst_next_4_bytes = CreateAddress(dst_base, dst_index, dst_scale, dst_disp + 4);
+      if (src.IsConstant()) {
+        int64_t v = CodeGenerator::GetInt64ValueOf(src.GetConstant());
+        __ movl(dst, Immediate(Low32Bits(v)));
+        __ movl(dst_next_4_bytes, Immediate(High32Bits(v)));
+      } else {
+        __ movsd(dst, src.AsFpuRegister<XmmRegister>());
+      }
+      break;
+    }
+    case DataType::Type::kVoid:
+    case DataType::Type::kReference:
+      LOG(FATAL) << "Unreachable type " << src_type;
   }
 }
 
@@ -2502,7 +2587,7 @@ void InstructionCodeGeneratorX86::VisitInvokeInterface(HInvokeInterface* invoke)
   // Set the hidden argument. This is safe to do this here, as XMM7
   // won't be modified thereafter, before the `call` instruction.
   DCHECK_EQ(XMM7, hidden_reg);
-  __ movl(temp, Immediate(invoke->GetDexMethodIndex()));
+  __ movl(temp, Immediate(invoke->GetMethodReference().index));
   __ movd(hidden_reg, temp);
 
   if (receiver.IsStackSlot()) {
@@ -5234,16 +5319,21 @@ void CodeGeneratorX86::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke)
   HX86ComputeBaseMethodAddress* method_address =
       invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
   boot_image_method_patches_.emplace_back(
-      method_address, invoke->GetTargetMethod().dex_file, invoke->GetTargetMethod().index);
+      method_address,
+      invoke->GetResolvedMethodReference().dex_file,
+      invoke->GetResolvedMethodReference().index);
   __ Bind(&boot_image_method_patches_.back().label);
 }
 
 void CodeGeneratorX86::RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke) {
+  DCHECK(IsSameDexFile(GetGraph()->GetDexFile(), *invoke->GetMethodReference().dex_file));
   HX86ComputeBaseMethodAddress* method_address =
       invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
   // Add the patch entry and bind its label at the end of the instruction.
   method_bss_entry_patches_.emplace_back(
-      method_address, &GetGraph()->GetDexFile(), invoke->GetDexMethodIndex());
+      method_address,
+      invoke->GetMethodReference().dex_file,
+      invoke->GetMethodReference().index);
   __ Bind(&method_bss_entry_patches_.back().label);
 }
 
@@ -5321,7 +5411,7 @@ void CodeGeneratorX86::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invok
     Register method_address_reg =
         invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex()).AsRegister<Register>();
     __ leal(argument, Address(method_address_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
-    MethodReference target_method = invoke->GetTargetMethod();
+    MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     boot_image_type_patches_.emplace_back(method_address, target_method.dex_file, type_idx.index_);
     __ Bind(&boot_image_type_patches_.back().label);
@@ -5632,18 +5722,16 @@ void LocationsBuilderX86::HandleFieldSet(HInstruction* instruction, const FieldI
 }
 
 void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
-                                                 const FieldInfo& field_info,
+                                                 uint32_t value_index,
+                                                 DataType::Type field_type,
+                                                 Address field_addr,
+                                                 Register base,
+                                                 bool is_volatile,
                                                  bool value_can_be_null) {
-  DCHECK(instruction->IsInstanceFieldSet() || instruction->IsStaticFieldSet());
-
   LocationSummary* locations = instruction->GetLocations();
-  Register base = locations->InAt(0).AsRegister<Register>();
-  Location value = locations->InAt(1);
-  bool is_volatile = field_info.IsVolatile();
-  DataType::Type field_type = field_info.GetFieldType();
-  uint32_t offset = field_info.GetFieldOffset().Uint32Value();
+  Location value = locations->InAt(value_index);
   bool needs_write_barrier =
-      CodeGenerator::StoreNeedsWriteBarrier(field_type, instruction->InputAt(1));
+      CodeGenerator::StoreNeedsWriteBarrier(field_type, instruction->InputAt(value_index));
 
   if (is_volatile) {
     codegen_->GenerateMemoryBarrier(MemBarrierKind::kAnyStore);
@@ -5655,17 +5743,20 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
     case DataType::Type::kInt8: {
-      __ movb(Address(base, offset), value.AsRegister<ByteRegister>());
+      if (value.IsConstant()) {
+        __ movb(field_addr, Immediate(CodeGenerator::GetInt8ValueOf(value.GetConstant())));
+      } else {
+        __ movb(field_addr, value.AsRegister<ByteRegister>());
+      }
       break;
     }
 
     case DataType::Type::kUint16:
     case DataType::Type::kInt16: {
       if (value.IsConstant()) {
-        __ movw(Address(base, offset),
-                Immediate(CodeGenerator::GetInt16ValueOf(value.GetConstant())));
+        __ movw(field_addr, Immediate(CodeGenerator::GetInt16ValueOf(value.GetConstant())));
       } else {
-        __ movw(Address(base, offset), value.AsRegister<Register>());
+        __ movw(field_addr, value.AsRegister<Register>());
       }
       break;
     }
@@ -5680,13 +5771,13 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
         Register temp = locations->GetTemp(0).AsRegister<Register>();
         __ movl(temp, value.AsRegister<Register>());
         __ PoisonHeapReference(temp);
-        __ movl(Address(base, offset), temp);
+        __ movl(field_addr, temp);
       } else if (value.IsConstant()) {
         int32_t v = CodeGenerator::GetInt32ValueOf(value.GetConstant());
-        __ movl(Address(base, offset), Immediate(v));
+        __ movl(field_addr, Immediate(v));
       } else {
         DCHECK(value.IsRegister()) << value;
-        __ movl(Address(base, offset), value.AsRegister<Register>());
+        __ movl(field_addr, value.AsRegister<Register>());
       }
       break;
     }
@@ -5698,17 +5789,17 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
         __ movd(temp1, value.AsRegisterPairLow<Register>());
         __ movd(temp2, value.AsRegisterPairHigh<Register>());
         __ punpckldq(temp1, temp2);
-        __ movsd(Address(base, offset), temp1);
+        __ movsd(field_addr, temp1);
         codegen_->MaybeRecordImplicitNullCheck(instruction);
       } else if (value.IsConstant()) {
         int64_t v = CodeGenerator::GetInt64ValueOf(value.GetConstant());
-        __ movl(Address(base, offset), Immediate(Low32Bits(v)));
+        __ movl(field_addr, Immediate(Low32Bits(v)));
         codegen_->MaybeRecordImplicitNullCheck(instruction);
-        __ movl(Address(base, kX86WordSize + offset), Immediate(High32Bits(v)));
+        __ movl(field_addr.displaceBy(kX86WordSize), Immediate(High32Bits(v)));
       } else {
-        __ movl(Address(base, offset), value.AsRegisterPairLow<Register>());
+        __ movl(field_addr, value.AsRegisterPairLow<Register>());
         codegen_->MaybeRecordImplicitNullCheck(instruction);
-        __ movl(Address(base, kX86WordSize + offset), value.AsRegisterPairHigh<Register>());
+        __ movl(field_addr.displaceBy(kX86WordSize), value.AsRegisterPairHigh<Register>());
       }
       maybe_record_implicit_null_check_done = true;
       break;
@@ -5717,22 +5808,23 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
     case DataType::Type::kFloat32: {
       if (value.IsConstant()) {
         int32_t v = CodeGenerator::GetInt32ValueOf(value.GetConstant());
-        __ movl(Address(base, offset), Immediate(v));
+        __ movl(field_addr, Immediate(v));
       } else {
-        __ movss(Address(base, offset), value.AsFpuRegister<XmmRegister>());
+        __ movss(field_addr, value.AsFpuRegister<XmmRegister>());
       }
       break;
     }
 
     case DataType::Type::kFloat64: {
       if (value.IsConstant()) {
+        DCHECK(!is_volatile);
         int64_t v = CodeGenerator::GetInt64ValueOf(value.GetConstant());
-        __ movl(Address(base, offset), Immediate(Low32Bits(v)));
+        __ movl(field_addr, Immediate(Low32Bits(v)));
         codegen_->MaybeRecordImplicitNullCheck(instruction);
-        __ movl(Address(base, kX86WordSize + offset), Immediate(High32Bits(v)));
+        __ movl(field_addr.displaceBy(kX86WordSize), Immediate(High32Bits(v)));
         maybe_record_implicit_null_check_done = true;
       } else {
-        __ movsd(Address(base, offset), value.AsFpuRegister<XmmRegister>());
+        __ movsd(field_addr, value.AsFpuRegister<XmmRegister>());
       }
       break;
     }
@@ -5757,6 +5849,28 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
   if (is_volatile) {
     codegen_->GenerateMemoryBarrier(MemBarrierKind::kAnyAny);
   }
+}
+
+void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
+                                                 const FieldInfo& field_info,
+                                                 bool value_can_be_null) {
+  DCHECK(instruction->IsInstanceFieldSet() || instruction->IsStaticFieldSet());
+
+  LocationSummary* locations = instruction->GetLocations();
+  Register base = locations->InAt(0).AsRegister<Register>();
+  bool is_volatile = field_info.IsVolatile();
+  DataType::Type field_type = field_info.GetFieldType();
+  uint32_t offset = field_info.GetFieldOffset().Uint32Value();
+
+  Address field_addr(base, offset);
+
+  HandleFieldSet(instruction,
+                 /* value_index= */ 1,
+                 field_type,
+                 field_addr,
+                 base,
+                 is_volatile,
+                 value_can_be_null);
 }
 
 void LocationsBuilderX86::VisitStaticFieldGet(HStaticFieldGet* instruction) {

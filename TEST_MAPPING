@@ -3,9 +3,10 @@
   "presubmit": [
     {
       "name": "CtsJdwpTestCases"
-    }
-  ],
-  "postsubmit": [
+    },
+    {
+      "name": "BootImageProfileTest"
+    },
     // ART gtests.
     {
       "name": "ArtGtestsTarget"
