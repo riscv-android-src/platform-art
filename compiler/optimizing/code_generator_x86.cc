@@ -26,6 +26,7 @@
 #include "gc/accounting/card_table.h"
 #include "gc/space/image_space.h"
 #include "heap_poisoning.h"
+#include "interpreter/mterp/nterp.h"
 #include "intrinsics.h"
 #include "intrinsics_x86.h"
 #include "jit/profiling_info.h"
@@ -575,8 +576,11 @@ class ReadBarrierMarkAndUpdateFieldSlowPathX86 : public SlowPathCode {
     DCHECK(instruction_->GetLocations()->Intrinsified());
     Intrinsics intrinsic = instruction_->AsInvoke()->GetIntrinsic();
     static constexpr auto kVarHandleCAS = mirror::VarHandle::AccessModeTemplate::kCompareAndSet;
+    static constexpr auto kVarHandleGetAndSet =
+        mirror::VarHandle::AccessModeTemplate::kGetAndUpdate;
     DCHECK(intrinsic == Intrinsics::kUnsafeCASObject ||
-           mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleCAS);
+           mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleCAS ||
+           mirror::VarHandle::GetAccessModeTemplateByIntrinsic(intrinsic) == kVarHandleGetAndSet);
 
     __ Bind(GetEntryLabel());
     if (unpoison_ref_before_marking_) {
@@ -1116,7 +1120,9 @@ void CodeGeneratorX86::MaybeIncrementHotness(bool is_frame_entry) {
         __ movl(EAX, Immediate(address));
         __ addw(Address(EAX, ProfilingInfo::BaselineHotnessCountOffset().Int32Value()),
                 Immediate(1));
-        __ j(kCarryClear, &done);
+        __ andw(Address(EAX, ProfilingInfo::BaselineHotnessCountOffset().Int32Value()),
+                Immediate(interpreter::kTieredHotnessMask));
+        __ j(kNotZero, &done);
         GenerateInvokeRuntime(
             GetThreadOffset<kX86PointerSize>(kQuickCompileOptimized).Int32Value());
         __ Bind(&done);
@@ -1457,15 +1463,11 @@ static Address CreateAddress(Register base,
   return Address(base, index, scale, disp);
 }
 
-void CodeGeneratorX86::MoveFromMemory(DataType::Type dst_type,
-                                      Location dst,
-                                      Register src_base,
-                                      Register src_index,
-                                      ScaleFactor src_scale,
-                                      int32_t src_disp) {
-  DCHECK(src_base != Register::kNoRegister);
-  Address src = CreateAddress(src_base, src_index, src_scale, src_disp);
-
+void CodeGeneratorX86::LoadFromMemoryNoBarrier(DataType::Type dst_type,
+                                               Location dst,
+                                               Address src,
+                                               XmmRegister temp,
+                                               bool is_atomic_load) {
   switch (dst_type) {
     case DataType::Type::kBool:
     case DataType::Type::kUint8:
@@ -1481,14 +1483,20 @@ void CodeGeneratorX86::MoveFromMemory(DataType::Type dst_type,
       __ movzxw(dst.AsRegister<Register>(), src);
       break;
     case DataType::Type::kInt32:
-    case DataType::Type::kUint32:
       __ movl(dst.AsRegister<Register>(), src);
       break;
-    case DataType::Type::kInt64:
-    case DataType::Type::kUint64: {
-      Address src_next_4_bytes = CreateAddress(src_base, src_index, src_scale, src_disp + 4);
-      __ movl(dst.AsRegisterPairLow<Register>(), src);
-      __ movl(dst.AsRegisterPairHigh<Register>(), src_next_4_bytes);
+    case DataType::Type::kInt64: {
+      if (is_atomic_load) {
+        __ movsd(temp, src);
+        __ movd(dst.AsRegisterPairLow<Register>(), temp);
+        __ psrlq(temp, Immediate(32));
+        __ movd(dst.AsRegisterPairHigh<Register>(), temp);
+      } else {
+        DCHECK_NE(src.GetBaseRegister(), dst.AsRegisterPairLow<Register>());
+        Address src_high = src.displaceBy(kX86WordSize);
+        __ movl(dst.AsRegisterPairLow<Register>(), src);
+        __ movl(dst.AsRegisterPairHigh<Register>(), src_high);
+      }
       break;
     }
     case DataType::Type::kFloat32:
@@ -1497,8 +1505,11 @@ void CodeGeneratorX86::MoveFromMemory(DataType::Type dst_type,
     case DataType::Type::kFloat64:
       __ movsd(dst.AsFpuRegister<XmmRegister>(), src);
       break;
-    case DataType::Type::kVoid:
     case DataType::Type::kReference:
+      __ movl(dst.AsRegister<Register>(), src);
+      __ MaybeUnpoisonHeapReference(dst.AsRegister<Register>());
+      break;
+    default:
       LOG(FATAL) << "Unreachable type " << dst_type;
   }
 }
