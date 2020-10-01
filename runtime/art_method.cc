@@ -63,7 +63,7 @@ extern "C" void art_quick_invoke_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, 
 extern "C" void art_quick_invoke_static_stub(ArtMethod*, uint32_t*, uint32_t, Thread*, JValue*,
                                              const char*);
 
-// Enforce that we he have the right index for runtime methods.
+// Enforce that we have the right index for runtime methods.
 static_assert(ArtMethod::kRuntimeMethodDexMethodIndex == dex::kDexNoIndex,
               "Wrong runtime-method dex method index");
 
@@ -167,7 +167,7 @@ InvokeType ArtMethod::GetInvokeType() {
     return kInterface;
   } else if (IsDirect()) {
     return kDirect;
-  } else if (IsPolymorphicSignature()) {
+  } else if (IsSignaturePolymorphic()) {
     return kPolymorphic;
   } else {
     return kVirtual;
@@ -396,7 +396,7 @@ bool ArtMethod::IsOverridableByDefaultMethod() {
   return GetDeclaringClass()->IsInterface();
 }
 
-bool ArtMethod::IsPolymorphicSignature() {
+bool ArtMethod::IsSignaturePolymorphic() {
   // Methods with a polymorphic signature have constraints that they
   // are native and varargs and belong to either MethodHandle or VarHandle.
   if (!IsNative() || !IsVarargs()) {
@@ -762,9 +762,17 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
           image_pointer_size);
     }
   }
-  // Clear the profiling info for the same reasons as the JIT code.
-  if (!src->IsNative()) {
-    SetProfilingInfoPtrSize(nullptr, image_pointer_size);
+    if (interpreter::IsNterpSupported() &&
+        (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
+            interpreter::GetNterpEntryPoint())) {
+    // If the entrypoint is nterp, it's too early to check if the new method
+    // will support it. So for simplicity, use the interpreter bridge.
+    SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);
+  }
+
+  // Clear the data pointer, it will be set if needed by the caller.
+  if (!src->HasCodeItem() && !src->IsNative()) {
+    SetDataPtrSize(nullptr, image_pointer_size);
   }
   // Clear hotness to let the JIT properly decide when to compile this method.
   hotness_count_ = 0;
@@ -856,6 +864,15 @@ const char* ArtMethod::GetRuntimeMethodName() {
   } else {
     return "<unknown runtime internal method>";
   }
+}
+
+void ArtMethod::SetCodeItem(const dex::CodeItem* code_item) {
+  DCHECK(HasCodeItem());
+  // We mark the lowest bit for the interpreter to know whether it's executing a
+  // method in a compact or standard dex file.
+  uintptr_t data =
+      reinterpret_cast<uintptr_t>(code_item) | (GetDexFile()->IsCompactDexFile() ? 1 : 0);
+  SetDataPtrSize(reinterpret_cast<void*>(data), kRuntimePointerSize);
 }
 
 // AssertSharedHeld doesn't work in GetAccessFlags, so use a NO_THREAD_SAFETY_ANALYSIS helper.

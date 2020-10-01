@@ -504,19 +504,19 @@ void CodeGenerator::CreateCommonInvokeLocationSummary(
 
   if (invoke->IsInvokeStaticOrDirect()) {
     HInvokeStaticOrDirect* call = invoke->AsInvokeStaticOrDirect();
-    HInvokeStaticOrDirect::MethodLoadKind method_load_kind = call->GetMethodLoadKind();
-    HInvokeStaticOrDirect::CodePtrLocation code_ptr_location = call->GetCodePtrLocation();
-    if (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+    MethodLoadKind method_load_kind = call->GetMethodLoadKind();
+    CodePtrLocation code_ptr_location = call->GetCodePtrLocation();
+    if (code_ptr_location == CodePtrLocation::kCallCriticalNative) {
       locations->AddTemp(Location::RequiresRegister());  // For target method.
     }
-    if (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative ||
-        method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kRecursive) {
+    if (code_ptr_location == CodePtrLocation::kCallCriticalNative ||
+        method_load_kind == MethodLoadKind::kRecursive) {
       // For `kCallCriticalNative` we need the current method as the hidden argument
       // if we reach the dlsym lookup stub for @CriticalNative.
       locations->SetInAt(call->GetCurrentMethodIndex(), visitor->GetMethodLocation());
     } else {
       locations->AddTemp(visitor->GetMethodLocation());
-      if (method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall) {
+      if (method_load_kind == MethodLoadKind::kRuntimeCall) {
         locations->SetInAt(call->GetCurrentMethodIndex(), Location::RequiresRegister());
       }
     }
@@ -573,7 +573,8 @@ const char* CodeGenerator::GetCriticalNativeShorty(HInvokeStaticOrDirect* invoke
 
 void CodeGenerator::GenerateInvokeStaticOrDirectRuntimeCall(
     HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
-  MoveConstant(temp, invoke->GetDexMethodIndex());
+  MethodReference method_reference(invoke->GetMethodReference());
+  MoveConstant(temp, method_reference.index);
 
   // The access check is unnecessary but we do not want to introduce
   // extra entrypoints for the codegens that do not support some
@@ -602,7 +603,8 @@ void CodeGenerator::GenerateInvokeStaticOrDirectRuntimeCall(
   InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), slow_path);
 }
 void CodeGenerator::GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invoke) {
-  MoveConstant(invoke->GetLocations()->GetTemp(0), invoke->GetDexMethodIndex());
+  MethodReference method_reference(invoke->GetMethodReference());
+  MoveConstant(invoke->GetLocations()->GetTemp(0), method_reference.index);
 
   // Initialize to anything to silent compiler warnings.
   QuickEntrypointEnum entrypoint = kQuickInvokeStaticTrampolineWithAccessCheck;
@@ -630,12 +632,13 @@ void CodeGenerator::GenerateInvokeUnresolvedRuntimeCall(HInvokeUnresolved* invok
   InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), nullptr);
 }
 
-void CodeGenerator::GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke) {
+void CodeGenerator::GenerateInvokePolymorphicCall(HInvokePolymorphic* invoke,
+                                                  SlowPathCode* slow_path) {
   // invoke-polymorphic does not use a temporary to convey any additional information (e.g. a
   // method index) since it requires multiple info from the instruction (registers A, B, H). Not
   // using the reservation has no effect on the registers used in the runtime call.
   QuickEntrypointEnum entrypoint = kQuickInvokePolymorphic;
-  InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), nullptr);
+  InvokeRuntime(entrypoint, invoke, invoke->GetDexPc(), slow_path);
 }
 
 void CodeGenerator::GenerateInvokeCustomCall(HInvokeCustom* invoke) {
@@ -921,7 +924,7 @@ uint32_t CodeGenerator::GetBootImageOffset(HLoadString* load_string) NO_THREAD_S
 }
 
 uint32_t CodeGenerator::GetBootImageOffset(HInvokeStaticOrDirect* invoke) {
-  DCHECK_EQ(invoke->GetMethodLoadKind(), HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo);
+  DCHECK_EQ(invoke->GetMethodLoadKind(), MethodLoadKind::kBootImageRelRo);
   ArtMethod* method = invoke->GetResolvedMethod();
   DCHECK(method != nullptr);
   return GetBootImageOffsetImpl(method, ImageHeader::kSectionArtMethods);
@@ -1687,8 +1690,7 @@ void CodeGenerator::ValidateInvokeRuntimeWithoutRecordingPcInfo(HInstruction* in
          instruction->IsLoadString() ||
          instruction->IsInstanceOf() ||
          instruction->IsCheckCast() ||
-         (instruction->IsInvokeVirtual() && instruction->GetLocations()->Intrinsified()) ||
-         (instruction->IsInvokeStaticOrDirect() && instruction->GetLocations()->Intrinsified()))
+         (instruction->IsInvoke() && instruction->GetLocations()->Intrinsified()))
       << "instruction->DebugName()=" << instruction->DebugName()
       << " slow_path->GetDescription()=" << slow_path->GetDescription();
 }

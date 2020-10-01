@@ -1857,14 +1857,20 @@ class JNI {
       ThrowSIOOBE(soa, start, length, s->GetLength());
     } else {
       CHECK_NON_NULL_MEMCPY_ARGUMENT(length, buf);
+      if (length == 0 && buf == nullptr) {
+        // Don't touch anything when length is 0 and null buffer.
+        return;
+      }
       if (s->IsCompressed()) {
         for (int i = 0; i < length; ++i) {
           buf[i] = s->CharAt(start+i);
         }
+        buf[length] = '\0';
       } else {
         const jchar* chars = s->GetValue();
         size_t bytes = CountUtf8Bytes(chars + start, length);
         ConvertUtf16ToModifiedUtf8(buf, bytes, chars + start, length);
+        buf[bytes] = '\0';
       }
     }
   }
@@ -1909,17 +1915,6 @@ class JNI {
     ScopedObjectAccess soa(env);
     ObjPtr<mirror::String> s = soa.Decode<mirror::String>(java_string);
     gc::Heap* heap = Runtime::Current()->GetHeap();
-    if (heap->IsMovableObject(s)) {
-      StackHandleScope<1> hs(soa.Self());
-      HandleWrapperObjPtr<mirror::String> h(hs.NewHandleWrapper(&s));
-      if (!kUseReadBarrier) {
-        heap->IncrementDisableMovingGC(soa.Self());
-      } else {
-        // For the CC collector, we only need to wait for the thread flip rather than the whole GC
-        // to occur thanks to the to-space invariant.
-        heap->IncrementDisableThreadFlip(soa.Self());
-      }
-    }
     if (s->IsCompressed()) {
       if (is_copy != nullptr) {
         *is_copy = JNI_TRUE;
@@ -1931,6 +1926,17 @@ class JNI {
       }
       return chars;
     } else {
+      if (heap->IsMovableObject(s)) {
+        StackHandleScope<1> hs(soa.Self());
+        HandleWrapperObjPtr<mirror::String> h(hs.NewHandleWrapper(&s));
+        if (!kUseReadBarrier) {
+          heap->IncrementDisableMovingGC(soa.Self());
+        } else {
+          // For the CC collector, we only need to wait for the thread flip rather
+          // than the whole GC to occur thanks to the to-space invariant.
+          heap->IncrementDisableThreadFlip(soa.Self());
+        }
+      }
       if (is_copy != nullptr) {
         *is_copy = JNI_FALSE;
       }
@@ -1945,14 +1951,16 @@ class JNI {
     ScopedObjectAccess soa(env);
     gc::Heap* heap = Runtime::Current()->GetHeap();
     ObjPtr<mirror::String> s = soa.Decode<mirror::String>(java_string);
-    if (heap->IsMovableObject(s)) {
+    if (!s->IsCompressed() && heap->IsMovableObject(s)) {
       if (!kUseReadBarrier) {
         heap->DecrementDisableMovingGC(soa.Self());
       } else {
         heap->DecrementDisableThreadFlip(soa.Self());
       }
     }
-    if (s->IsCompressed() || (s->IsCompressed() == false && s->GetValue() != chars)) {
+    // TODO: For uncompressed strings GetStringCritical() always returns `s->GetValue()`.
+    // Should we report an error if the user passes a different `chars`?
+    if (s->IsCompressed() || (!s->IsCompressed() && s->GetValue() != chars)) {
       delete[] chars;
     }
   }
@@ -2684,7 +2692,7 @@ class JNI {
     bool is_copy = array_data != elements;
     size_t bytes = array->GetLength() * component_size;
     if (is_copy) {
-      // Sanity check: If elements is not the same as the java array's data, it better not be a
+      // Integrity check: If elements is not the same as the java array's data, it better not be a
       // heap address. TODO: This might be slow to check, may be worth keeping track of which
       // copies we make?
       if (heap->IsNonDiscontinuousSpaceHeapAddress(elements)) {

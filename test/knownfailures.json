@@ -167,7 +167,7 @@
                   "137-cfi",
                   "138-duplicate-classes-check2"],
         "variant": "no-image",
-        "description": ["All these tests check that we have sane behavior if we",
+        "description": ["All these tests check that we have appropriate behavior if we",
                         "don't have a dex2oat. Therefore we",
                         "shouldn't run them in situations where we actually",
                         "don't have these since they explicitly test for them.",
@@ -237,7 +237,8 @@
         "variant": "trace | stream"
     },
     {
-        "tests": ["604-hot-static-interface",
+        "tests": ["566-polymorphic-inlining",
+                  "604-hot-static-interface",
                   "612-jit-dex-cache",
                   "613-inlining-dex-cache",
                   "626-set-resolved-string",
@@ -1130,6 +1131,10 @@
                   "692-vdex-inmem-loader",
                   "693-vdex-inmem-loader-evict",
                   "723-string-init-range",
+                  "808-checker-invoke-super",
+                  "809-checker-invoke-super-bss",
+                  "810-checker-invoke-super-default",
+                  "811-checker-invoke-super-secondary",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1176,7 +1181,8 @@
                   "2011-stack-walk-concurrent-instrument",
                   "2012-structural-redefinition-failures-jni-id",
                   "2033-shutdown-mechanics",
-                  "2035-structural-native-method"],
+                  "2035-structural-native-method",
+                  "2036-structural-subclass-shadow"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1316,6 +1322,11 @@
         "bug": "b/135507613",
         "description": ["These tests run dalvikvm multiple times, this can mess up the",
                         "zipapex runner."]
+    },
+    {
+        "tests": ["175-alloc-big-bignums"],
+        "variant": "interpreter | interp-ac | trace | no-image | debuggable",
+        "description": "Interpreting BigInteger.add() is too slow (timeouts)"
     },
     {
         "tests": ["2029-contended-monitors"],

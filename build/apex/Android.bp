@@ -118,6 +118,7 @@ art_tools_debug_binaries_both = [
 
 // Tools exclusively for the device APEX derived from art-tools in art/Android.mk.
 art_tools_device_only_binaries = [
+    "compile_bcp.sh",
     // oatdump cannot link with host linux_bionic due to not using clang lld;
     // TODO: Make it work with clang lld.
     "oatdump",
@@ -214,6 +215,9 @@ apex_defaults {
     key: "com.android.art.key",
     required: [
         "com.android.i18n",
+    ],
+    prebuilts: [
+        "art-linker-config",
     ],
     // ART APEXes depend on bouncycastle which is disabled for PDK builds.
     // Since the dependency is disabled, ART APEXes can't be built either.
@@ -410,8 +414,9 @@ genrule {
     cmd: art_check_apex_gen_stem +
         " --flavor release" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-release-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-release-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
@@ -427,8 +432,9 @@ genrule {
     cmd: art_check_apex_gen_stem +
         " --flavor debug" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-debug-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-debug-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
@@ -444,12 +450,20 @@ genrule {
     cmd: art_check_apex_gen_stem +
         " --flavor testing" +
         " $(in)" +
-        " && touch $(out)",
-    out: ["art-check-testing-apex-gen.dummy"],
+        " && touch $(out)" +
+        " && chmod a+x $(out)",
+    out: ["art-check-testing-apex-gen.unused"],
 }
 
 cc_prebuilt_binary {
     name: "art-check-testing-apex-gen-fakebin",
     defaults: ["art-check-apex-gen-fakebin-defaults"],
     srcs: [":art-check-testing-apex-gen"],
+}
+
+prebuilt_etc {
+    name: "art-linker-config",
+    src: "linker.config.txt",
+    filename: "linker.config.txt",
+    installable: false,
 }

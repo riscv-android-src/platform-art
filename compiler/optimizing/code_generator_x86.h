@@ -232,6 +232,25 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
   // generates less code/data with a small num_entries.
   static constexpr uint32_t kPackedSwitchJumpTableThreshold = 5;
 
+  // Generate a GC root reference load:
+  //
+  //   root <- *address
+  //
+  // while honoring read barriers based on read_barrier_option.
+  void GenerateGcRootFieldLoad(HInstruction* instruction,
+                               Location root,
+                               const Address& address,
+                               Label* fixup_label,
+                               ReadBarrierOption read_barrier_option);
+
+  void HandleFieldSet(HInstruction* instruction,
+                      uint32_t value_index,
+                      DataType::Type type,
+                      Address field_addr,
+                      Register base,
+                      bool is_volatile,
+                      bool value_can_be_null);
+
  private:
   // Generate code for the given suspend check. If not null, `successor`
   // is the block to branch to if the suspend check is not needed, and after
@@ -292,16 +311,6 @@ class InstructionCodeGeneratorX86 : public InstructionCodeGenerator {
                                          Location obj,
                                          uint32_t offset,
                                          ReadBarrierOption read_barrier_option);
-  // Generate a GC root reference load:
-  //
-  //   root <- *address
-  //
-  // while honoring read barriers based on read_barrier_option.
-  void GenerateGcRootFieldLoad(HInstruction* instruction,
-                               Location root,
-                               const Address& address,
-                               Label* fixup_label,
-                               ReadBarrierOption read_barrier_option);
 
   // Push value to FPU stack. `is_fp` specifies whether the value is floating point or not.
   // `is_wide` specifies whether it is long/double or not.
@@ -433,6 +442,19 @@ class CodeGeneratorX86 : public CodeGenerator {
   void Move32(Location destination, Location source);
   // Helper method to move a 64bits value between two locations.
   void Move64(Location destination, Location source);
+  // Helper method to load a value from an address to a register.
+  void LoadFromMemoryNoBarrier(DataType::Type dst_type,
+                               Location dst,
+                               Address src,
+                               XmmRegister temp = kNoXmmRegister,
+                               bool is_atomic_load = false);
+  // Helper method to move a primitive value from a location to an address.
+  void MoveToMemory(DataType::Type src_type,
+                    Location src,
+                    Register dst_base,
+                    Register dst_index = Register::kNoRegister,
+                    ScaleFactor dst_scale = TIMES_1,
+                    int32_t dst_disp = 0);
 
   // Check if the desired_string_load_kind is supported. If it is, return it,
   // otherwise return a fall-back kind that should be used instead.
@@ -657,9 +679,9 @@ class CodeGeneratorX86 : public CodeGenerator {
   void MaybeGenerateInlineCacheCheck(HInstruction* instruction, Register klass);
   void MaybeIncrementHotness(bool is_frame_entry);
 
-  // When we don't know the proper offset for the value, we use kDummy32BitOffset.
+  // When we don't know the proper offset for the value, we use kPlaceholder32BitOffset.
   // The correct value will be inserted when processing Assembler fixups.
-  static constexpr int32_t kDummy32BitOffset = 256;
+  static constexpr int32_t kPlaceholder32BitOffset = 256;
 
  private:
   struct X86PcRelativePatchInfo : PatchInfo<Label> {
@@ -693,6 +715,10 @@ class CodeGeneratorX86 : public CodeGenerator {
   ArenaDeque<X86PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative public type patch info for kBssEntryPublic.
+  ArenaDeque<X86PcRelativePatchInfo> public_type_bss_entry_patches_;
+  // PC-relative package type patch info for kBssEntryPackage.
+  ArenaDeque<X86PcRelativePatchInfo> package_type_bss_entry_patches_;
   // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<X86PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.

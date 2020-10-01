@@ -275,6 +275,15 @@ static void CreateIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) 
   locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
 }
 
+static void CreateIntIntToIntSlowPathCallLocations(ArenaAllocator* allocator, HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator) LocationSummary(invoke, LocationSummary::kCallOnSlowPath, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresRegister());
+  locations->SetInAt(1, Location::RequiresRegister());
+  // Force kOutputOverlap; see comments in IntrinsicSlowPath::EmitNativeCode.
+  locations->SetOut(Location::RequiresRegister(), Location::kOutputOverlap);
+}
+
 static void CreateLongToLongLocationsWithOverlap(ArenaAllocator* allocator, HInvoke* invoke) {
   LocationSummary* locations =
       new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
@@ -3013,11 +3022,33 @@ void IntrinsicLocationsBuilderARMVIXL::VisitReachabilityFence(HInvoke* invoke) {
 
 void IntrinsicCodeGeneratorARMVIXL::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
 
+void IntrinsicLocationsBuilderARMVIXL::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  CreateIntIntToIntSlowPathCallLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorARMVIXL::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  ArmVIXLAssembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  vixl32::Register dividend = RegisterFrom(locations->InAt(0));
+  vixl32::Register divisor = RegisterFrom(locations->InAt(1));
+  vixl32::Register out = RegisterFrom(locations->Out());
+
+  // Check if divisor is zero, bail to managed implementation to handle.
+  SlowPathCodeARMVIXL* slow_path =
+      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathARMVIXL(invoke);
+  codegen_->AddSlowPath(slow_path);
+  __ CompareAndBranchIfZero(divisor, slow_path->GetEntryLabel());
+
+  __ Udiv(out, dividend, divisor);
+
+  __ Bind(slow_path->GetExitLabel());
+}
+
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, MathRoundDouble)   // Could be done by changing rounding mode, maybe?
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeCASLong)     // High register pressure.
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, SystemArrayCopyChar)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, ReferenceGetReferent)
-UNIMPLEMENTED_INTRINSIC(ARMVIXL, IntegerDivideUnsigned)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, LongDivideUnsigned)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32Update)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32UpdateBytes)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, CRC32UpdateByteBuffer)
@@ -3055,6 +3086,45 @@ UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(ARMVIXL, UnsafeGetAndSetObject)
+
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleFullFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleAcquireFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleReleaseFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleLoadLoadFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleStoreStoreFence)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, MethodHandleInvoke)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchange)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchangeAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndExchangeRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAdd)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAddAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndAddRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAnd)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAndAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseAndRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOr)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOrAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseOrRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXor)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXorAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndBitwiseXorRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetAndSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleGetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetOpaque)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetRelease)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleSetVolatile)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSet)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetAcquire)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetPlain)
+UNIMPLEMENTED_INTRINSIC(ARMVIXL, VarHandleWeakCompareAndSetRelease)
 
 UNREACHABLE_INTRINSICS(ARMVIXL)
 

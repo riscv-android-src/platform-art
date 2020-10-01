@@ -400,6 +400,9 @@ class OptimizingCompiler final : public Compiler {
 
   std::vector<uint8_t> GenerateJitDebugInfo(const debug::MethodDebugInfo& method_debug_info);
 
+  // This must be called before any other function that dumps data to the cfg
+  void DumpInstructionSetFeaturesToCfg() const;
+
   std::unique_ptr<OptimizingCompilerStats> compilation_stats_;
 
   std::unique_ptr<std::ostream> visualizer_output_;
@@ -421,6 +424,7 @@ OptimizingCompiler::OptimizingCompiler(const CompilerOptions& compiler_options,
     std::ios_base::openmode cfg_file_mode =
         compiler_options.GetDumpCfgAppend() ? std::ofstream::app : std::ofstream::out;
     visualizer_output_.reset(new std::ofstream(cfg_file_name, cfg_file_mode));
+    DumpInstructionSetFeaturesToCfg();
   }
   if (compiler_options.GetDumpStats()) {
     compilation_stats_.reset(new OptimizingCompilerStats());
@@ -431,6 +435,19 @@ OptimizingCompiler::~OptimizingCompiler() {
   if (compilation_stats_.get() != nullptr) {
     compilation_stats_->Log();
   }
+}
+
+void OptimizingCompiler::DumpInstructionSetFeaturesToCfg() const {
+  const CompilerOptions& compiler_options = GetCompilerOptions();
+  const InstructionSetFeatures* features = compiler_options.GetInstructionSetFeatures();
+  std::string isa_string =
+      std::string("isa:") + GetInstructionSetString(features->GetInstructionSet());
+  std::string features_string = "isa_features:" + features->GetFeatureString();
+  // It is assumed that visualizer_output_ is empty when calling this function, hence the fake
+  // compilation block containing the ISA features will be printed at the beginning of the .cfg
+  // file.
+  *visualizer_output_
+      << HGraphVisualizer::InsertMetaDataAsCompilationBlock(isa_string + ' ' + features_string);
 }
 
 bool OptimizingCompiler::CanCompileMethod(uint32_t method_idx ATTRIBUTE_UNUSED,
@@ -451,6 +468,19 @@ bool OptimizingCompiler::RunBaselineOptimizations(HGraph* graph,
                                                   const DexCompilationUnit& dex_compilation_unit,
                                                   PassObserver* pass_observer) const {
   switch (codegen->GetCompilerOptions().GetInstructionSet()) {
+#if defined(ART_ENABLE_CODEGEN_arm)
+    case InstructionSet::kThumb2:
+    case InstructionSet::kArm: {
+      OptimizationDef arm_optimizations[] = {
+        OptDef(OptimizationPass::kCriticalNativeAbiFixupArm),
+      };
+      return RunOptimizations(graph,
+                              codegen,
+                              dex_compilation_unit,
+                              pass_observer,
+                              arm_optimizations);
+    }
+#endif
 #ifdef ART_ENABLE_CODEGEN_x86
     case InstructionSet::kX86: {
       OptimizationDef x86_optimizations[] = {
@@ -484,6 +514,7 @@ bool OptimizingCompiler::RunArchOptimizations(HGraph* graph,
         OptDef(OptimizationPass::kInstructionSimplifierArm),
         OptDef(OptimizationPass::kSideEffectsAnalysis),
         OptDef(OptimizationPass::kGlobalValueNumbering, "GVN$after_arch"),
+        OptDef(OptimizationPass::kCriticalNativeAbiFixupArm),
         OptDef(OptimizationPass::kScheduling)
       };
       return RunOptimizations(graph,
@@ -644,8 +675,6 @@ void OptimizingCompiler::RunOptimizations(HGraph* graph,
     OptDef(OptimizationPass::kAggressiveInstructionSimplifier,
            "instruction_simplifier$after_bce"),
     // Other high-level optimizations.
-    OptDef(OptimizationPass::kSideEffectsAnalysis,
-           "side_effects$before_lse"),
     OptDef(OptimizationPass::kLoadStoreElimination),
     OptDef(OptimizationPass::kCHAGuardOptimization),
     OptDef(OptimizationPass::kDeadCodeElimination,
@@ -1021,8 +1050,11 @@ CompiledMethod* OptimizingCompiler::Compile(const dex::CodeItem* code_item,
           /*verified_method=*/ nullptr,  // Not needed by the Optimizing compiler.
           dex_cache,
           compiling_class);
+      // All signature polymorphic methods are native.
+      DCHECK(method == nullptr || !method->IsSignaturePolymorphic());
       // Go to native so that we don't block GC during compilation.
       ScopedThreadSuspension sts(soa.Self(), kNative);
+      // Try to compile a fully intrinsified implementation.
       if (method != nullptr && UNLIKELY(method->IsIntrinsic())) {
         DCHECK(compiler_options.IsBootImage());
         codegen.reset(
@@ -1125,7 +1157,10 @@ CompiledMethod* OptimizingCompiler::JniCompile(uint32_t access_flags,
     ScopedObjectAccess soa(Thread::Current());
     ArtMethod* method = runtime->GetClassLinker()->LookupResolvedMethod(
         method_idx, dex_cache.Get(), /*class_loader=*/ nullptr);
-    if (method != nullptr && UNLIKELY(method->IsIntrinsic())) {
+    // Try to compile a fully intrinsified implementation. Do not try to do this for
+    // signature polymorphic methods as the InstructionBuilder cannot handle them;
+    // and it would be useless as they always have a slow path for type conversions.
+    if (method != nullptr && UNLIKELY(method->IsIntrinsic()) && !method->IsSignaturePolymorphic()) {
       VariableSizedHandleScope handles(soa.Self());
       ScopedNullHandle<mirror::ClassLoader> class_loader;  // null means boot class path loader.
       Handle<mirror::Class> compiling_class = handles.NewHandle(method->GetDeclaringClass());
@@ -1209,7 +1244,7 @@ bool OptimizingCompiler::JitCompile(Thread* self,
 
   const DexFile* dex_file = method->GetDexFile();
   const uint16_t class_def_idx = method->GetClassDefIndex();
-  const dex::CodeItem* code_item = dex_file->GetCodeItem(method->GetCodeItemOffset());
+  const dex::CodeItem* code_item = method->GetCodeItem();
   const uint32_t method_idx = method->GetDexMethodIndex();
   const uint32_t access_flags = method->GetAccessFlags();
 

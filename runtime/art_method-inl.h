@@ -120,6 +120,8 @@ inline bool ArtMethod::CheckIncompatibleClassChange(InvokeType type) {
       ObjPtr<mirror::Class> methods_class = GetDeclaringClass();
       return IsDirect() || !(methods_class->IsInterface() || methods_class->IsObjectClass());
     }
+    case kPolymorphic:
+      return !IsSignaturePolymorphic();
     default:
       LOG(FATAL) << "Unreachable - invocation type: " << type;
       UNREACHABLE();
@@ -221,7 +223,15 @@ inline ObjPtr<mirror::String> ArtMethod::ResolveNameString() {
 }
 
 inline const dex::CodeItem* ArtMethod::GetCodeItem() {
-  return GetDexFile()->GetCodeItem(GetCodeItemOffset());
+  if (!HasCodeItem()) {
+    return nullptr;
+  }
+  Runtime* runtime = Runtime::Current();
+  PointerSize pointer_size = runtime->GetClassLinker()->GetImagePointerSize();
+  return runtime->IsAotCompiler()
+      ? GetDexFile()->GetCodeItem(reinterpret_cast32<uint32_t>(GetDataPtrSize(pointer_size)))
+      : reinterpret_cast<const dex::CodeItem*>(
+          reinterpret_cast<uintptr_t>(GetDataPtrSize(pointer_size)) & ~1);
 }
 
 inline bool ArtMethod::IsResolvedTypeIdx(dex::TypeIndex type_idx) {
@@ -382,8 +392,6 @@ inline void ArtMethod::UpdateEntrypoints(const Visitor& visitor, PointerSize poi
     if (old_native_code != new_native_code) {
       SetEntryPointFromJniPtrSize(new_native_code, pointer_size);
     }
-  } else {
-    DCHECK(GetDataPtrSize(pointer_size) == nullptr);
   }
   const void* old_code = GetEntryPointFromQuickCompiledCodePtrSize(pointer_size);
   const void* new_code = visitor(old_code);

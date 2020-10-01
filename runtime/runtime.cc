@@ -685,8 +685,14 @@ void Runtime::PreZygoteFork() {
 }
 
 void Runtime::PostZygoteFork() {
-  if (GetJit() != nullptr) {
-    GetJit()->PostZygoteFork();
+  jit::Jit* jit = GetJit();
+  if (jit != nullptr) {
+    jit->PostZygoteFork();
+    // Ensure that the threads in the JIT pool have been created with the right
+    // priority.
+    if (kIsDebugBuild && jit->GetThreadPool() != nullptr) {
+      jit->GetThreadPool()->CheckPthreadPriority(jit->GetThreadPoolPthreadPriority());
+    }
   }
   // Reset all stats.
   ResetStats(0xFFFFFFFF);
@@ -1190,7 +1196,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   using Opt = RuntimeArgumentMap;
   Opt runtime_options(std::move(runtime_options_in));
   ScopedTrace trace(__FUNCTION__);
-  CHECK_EQ(sysconf(_SC_PAGE_SIZE), kPageSize);
+  CHECK_EQ(static_cast<size_t>(sysconf(_SC_PAGE_SIZE)), kPageSize);
 
   // Early override for logging output.
   if (runtime_options.Exists(Opt::UseStderrLogger)) {
@@ -1401,6 +1407,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::LongPauseLogThreshold),
                        runtime_options.GetOrDefault(Opt::LongGCLogThreshold),
                        runtime_options.Exists(Opt::IgnoreMaxFootprint),
+                       runtime_options.GetOrDefault(Opt::AlwaysLogExplicitGcs),
                        runtime_options.GetOrDefault(Opt::UseTLAB),
                        xgc_option.verify_pre_gc_heap_,
                        xgc_option.verify_pre_sweeping_heap_,

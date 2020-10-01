@@ -26,7 +26,7 @@ my_files := $(ART_TESTCASES_CONTENT)
 # Manually add system libraries that we need to run the host ART tools.
 my_files += \
   $(foreach lib, libbacktrace libbase libc++ libicu_jni liblog libsigchain libunwindstack \
-    libziparchive libjavacore libandroidio libopenjdkd, \
+    libziparchive libjavacore libandroidio libopenjdkd liblz4 liblzma, \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib).so \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib).so) \
   $(foreach lib, libcrypto libz libicuuc libicui18n libandroidicu libexpat, \
@@ -44,7 +44,7 @@ my_files += \
   $(HOST_OUT_JAVA_LIBRARIES)/core-icu4j-hostdex.jar:apex/com.android.i18n/javalib/core-icu4j.jar \
   $(icu_data_file):com.android.i18n/etc/icu/$(notdir $(icu_data_file))
 
-# Create dummy module that will copy all the data files into testcases directory.
+# Create phony module that will copy all the data files into testcases directory.
 # For now, this copies everything to "out/host/linux-x86/" subdirectory, since it
 # is hard-coded in many places. TODO: Refactor tests to remove the need for this.
 include $(CLEAR_VARS)
@@ -53,7 +53,7 @@ LOCAL_MODULE := art_common
 LOCAL_MODULE_TAGS := tests
 LOCAL_MODULE_CLASS := NATIVE_TESTS
 LOCAL_MODULE_SUFFIX := .txt
-LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_COMPATIBILITY_SUITE := general-tests art-host-tests
 LOCAL_COMPATIBILITY_SUPPORT_FILES := $(ART_TESTCASES_PREBUILT_CONTENT) \
 	$(foreach f,$(my_files),$(call word-colon,1,$f):out/host/linux-x86/$(call word-colon,2,$f))
 include $(BUILD_SYSTEM)/base_rules.mk
@@ -63,6 +63,25 @@ $(LOCAL_BUILT_MODULE):
 	echo "This directory contains common data and tools needed for ART host tests" > $@
 
 my_files :=
+include $(CLEAR_VARS)
+###################################################################################################
+
+# Create a phony module that contains data needed for ART chroot-based testing.
+include $(CLEAR_VARS)
+LOCAL_MODULE := art_chroot
+LOCAL_MODULE_TAGS := tests
+LOCAL_MODULE_CLASS := NATIVE_TESTS
+LOCAL_MODULE_SUFFIX := .txt
+LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_COMPATIBILITY_SUPPORT_FILES := \
+	$(foreach apex,$(TESTING_ART_APEX) $(RUNTIME_APEX) $(CONSCRYPT_APEX) $(I18N_APEX),\
+		$(PRODUCT_OUT)/system/apex/$(apex).apex:system/apex/$(apex).apex)
+include $(BUILD_SYSTEM)/base_rules.mk
+
+$(LOCAL_BUILT_MODULE):
+	@mkdir -p $(dir $@)
+	echo "This directory contains common data and tools needed for ART target tests" > $@
+
 include $(CLEAR_VARS)
 ###################################################################################################
 
@@ -138,9 +157,15 @@ endif
 ART_TEST_HOST_GTEST$(ART_PHONY_TEST_HOST_SUFFIX)_RULES :=
 ART_TEST_HOST_GTEST$(2ND_ART_PHONY_TEST_HOST_SUFFIX)_RULES :=
 ART_TEST_HOST_GTEST_RULES :=
+ART_TEST_HOST_GTEST$(ART_PHONY_TEST_HOST_SUFFIX)_BUILD_RULES :=
+ART_TEST_HOST_GTEST$(2ND_ART_PHONY_TEST_HOST_SUFFIX)_BUILD_RULES :=
+ART_TEST_HOST_GTEST_BUILD_RULES :=
 ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
+ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_BUILD_RULES :=
+ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_BUILD_RULES :=
+ART_TEST_TARGET_GTEST_BUILD_RULES :=
 ART_TEST_HOST_GTEST_DEPENDENCIES :=
 ART_TEST_TARGET_GTEST_DEPENDENCIES :=
 
@@ -171,13 +196,14 @@ endif
 define define-art-gtest-rule-host
   gtest_suffix := $(1)$$($(3)ART_PHONY_TEST_HOST_SUFFIX)
   gtest_rule := test-art-host-gtest-$$(gtest_suffix)
+  gtest_build_rule := test-art-host-gtest-dependencies-$$(gtest_suffix)
   gtest_output := $(call intermediates-dir-for,PACKAGING,art-host-gtest,HOST)/$$(gtest_suffix).xml
   $$(call dist-for-goals,$$(gtest_rule),$$(gtest_output):gtest/$$(gtest_suffix))
   gtest_exe := $(2)
   # Dependencies for all host gtests.
   gtest_deps := $$(ART_HOST_DEX_DEPENDENCIES) \
     $$(ART_TEST_HOST_GTEST_DEPENDENCIES) \
-    $$(HOST_OUT)/$$(I18N_APEX)/etc \
+    $$(HOST_OUT)/$$(I18N_APEX)/timestamp \
     $$(HOST_BOOT_IMAGE_JARS) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libicu_jni$$(ART_HOST_SHLIB_EXTENSION) \
     $$($(3)ART_HOST_OUT_SHARED_LIBRARIES)/libjavacore$$(ART_HOST_SHLIB_EXTENSION) \
@@ -208,6 +234,10 @@ define define-art-gtest-rule-host
   else
     gtest_deps += $$($(3)HOST_BOOT_IMAGE)
   endif
+
+.PHONY: $$(gtest_build_rule)
+$$(gtest_build_rule) : $$(gtest_exe) $$(gtest_deps)
+
 
 .PHONY: $$(gtest_rule)
 $$(gtest_rule): $$(gtest_output)
@@ -244,6 +274,8 @@ $$(gtest_output): $$(gtest_exe) $$(gtest_deps)
 endif
 
   ART_TEST_HOST_GTEST$$($(3)ART_PHONY_TEST_HOST_SUFFIX)_RULES += $$(gtest_rule)
+  ART_TEST_HOST_GTEST_BUILD_RULES += $$(gtest_build_rule)
+  ART_TEST_HOST_GTEST$$($(3)ART_PHONY_TEST_HOST_SUFFIX)_BUILD_RULES += $$(gtest_build_rule)
   ART_TEST_HOST_GTEST_RULES += $$(gtest_rule)
   ART_TEST_HOST_GTEST_$(1)_RULES += $$(gtest_rule)
 
@@ -256,7 +288,7 @@ endif
   gtest_suffix :=
 endef  # define-art-gtest-rule-host
 
-ART_TEST_HOST_GTEST_DEPENDENCIES := $(host-i18n-data-file)
+ART_TEST_HOST_GTEST_DEPENDENCIES := $(HOST_I18N_DATA)
 ART_TEST_TARGET_GTEST_DEPENDENCIES := $(TESTING_ART_APEX)
 
 # Add the additional dependencies for the specified test
@@ -380,6 +412,48 @@ ifneq ($(HOST_PREFER_32_BIT),true)
 $(eval $(call define-test-art-gtest-combination,host,HOST,$(2ND_ART_PHONY_TEST_HOST_SUFFIX)))
 endif
 
+# Define all the combinations of host/target and suffix such as:
+# test-art-host-gtest-dependencies or test-art-host-gtest-dependencies64
+# $(1): host or target
+# $(2): HOST or TARGET
+# $(3): undefined, 32 or 64
+define define-test-art-gtest-dependency-combination
+  ifeq ($(1),host)
+    ifneq ($(2),HOST)
+      $$(error argument mismatch $(1) and ($2))
+    endif
+  else
+    ifneq ($(1),target)
+      $$(error found $(1) expected host or target)
+    endif
+    ifneq ($(2),TARGET)
+      $$(error argument mismatch $(1) and ($2))
+    endif
+  endif
+
+  rule_name := test-art-$(1)-gtest-dependencies$(3)
+  dependencies := $$(ART_TEST_$(2)_GTEST$(3)_BUILD_RULES)
+
+.PHONY: $$(rule_name)
+$$(rule_name): $$(dependencies) d8
+
+  # Clear locally defined variables.
+  rule_name :=
+  dependencies :=
+endef  # define-test-art-gtest-dependency-combination
+
+# TODO Get target-deps working too
+# $(eval $(call define-test-art-gtest-dependency-combination,target,TARGET,))
+# $(eval $(call define-test-art-gtest-dependency-combination,target,TARGET,$(ART_PHONY_TEST_TARGET_SUFFIX)))
+# ifdef 2ND_ART_PHONY_TEST_TARGET_SUFFIX
+# $(eval $(call define-test-art-gtest-dependency-combination,target,TARGET,$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)))
+# endif
+$(eval $(call define-test-art-gtest-dependency-combination,host,HOST,))
+$(eval $(call define-test-art-gtest-dependency-combination,host,HOST,$(ART_PHONY_TEST_HOST_SUFFIX)))
+ifneq ($(HOST_PREFER_32_BIT),true)
+$(eval $(call define-test-art-gtest-dependency-combination,host,HOST,$(2ND_ART_PHONY_TEST_HOST_SUFFIX)))
+endif
+
 # Clear locally defined variables.
 define-art-gtest-rule-target :=
 define-art-gtest-rule-host :=
@@ -394,9 +468,15 @@ COMPILER_GTEST_HOST_SRC_FILES :=
 ART_TEST_HOST_GTEST$(ART_PHONY_TEST_HOST_SUFFIX)_RULES :=
 ART_TEST_HOST_GTEST$(2ND_ART_PHONY_TEST_HOST_SUFFIX)_RULES :=
 ART_TEST_HOST_GTEST_RULES :=
+ART_TEST_HOST_GTEST$(ART_PHONY_TEST_HOST_SUFFIX)_BUILD_RULES :=
+ART_TEST_HOST_GTEST$(2ND_ART_PHONY_TEST_HOST_SUFFIX)_BUILD_RULES :=
+ART_TEST_HOST_GTEST_BUILD_RULES :=
 ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_RULES :=
 ART_TEST_TARGET_GTEST_RULES :=
+ART_TEST_TARGET_GTEST$(ART_PHONY_TEST_TARGET_SUFFIX)_BUILD_RULES :=
+ART_TEST_TARGET_GTEST$(2ND_ART_PHONY_TEST_TARGET_SUFFIX)_BUILD_RULES :=
+ART_TEST_TARGET_GTEST_BUILD_RULES :=
 ART_GTEST_TARGET_ANDROID_ROOT :=
 ART_GTEST_TARGET_ANDROID_I18N_ROOT :=
 ART_GTEST_TARGET_ANDROID_ART_ROOT :=

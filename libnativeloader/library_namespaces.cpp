@@ -50,10 +50,6 @@ constexpr const char* kApexPath = "/apex/";
 constexpr const char* kVendorNamespaceName = "sphal";
 constexpr const char* kVndkNamespaceName = "vndk";
 constexpr const char* kVndkProductNamespaceName = "vndk_product";
-constexpr const char* kArtNamespaceName = "com_android_art";
-constexpr const char* kI18nNamespaceName = "com_android_i18n";
-constexpr const char* kNeuralNetworksNamespaceName = "com_android_neuralnetworks";
-constexpr const char* kStatsdNamespaceName = "com_android_os_statsd";
 
 // classloader-namespace is a linker namespace that is created for the loaded
 // app. To be specific, it is created for the app classloader. When
@@ -140,11 +136,42 @@ void LibraryNamespaces::Initialize() {
   }
 }
 
+// "ALL" is a magic name that allows all public libraries even when the
+// target SDK is > 30. Currently this is used for (Java) shared libraries
+// which don't use <uses-native-library>
+// TODO(b/142191088) remove this hack
+static constexpr const char LIBRARY_ALL[] = "ALL";
+
+// Returns the colon-separated list of library names by filtering uses_libraries from
+// public_libraries. The returned names will actually be available to the app. If the app is pre-S
+// (<= 30), the filtering is not done; the entire public_libraries are provided.
+static const std::string filter_public_libraries(
+    uint32_t target_sdk_version, const std::vector<std::string>& uses_libraries,
+    const std::string& public_libraries) {
+  // Apps targeting Android 11 or earlier gets all public libraries
+  if (target_sdk_version <= 30) {
+    return public_libraries;
+  }
+  if (std::find(uses_libraries.begin(), uses_libraries.end(), LIBRARY_ALL) !=
+      uses_libraries.end()) {
+    return public_libraries;
+  }
+  std::vector<std::string> filtered;
+  std::vector<std::string> orig = android::base::Split(public_libraries, ":");
+  for (const auto& lib : uses_libraries) {
+    if (std::find(orig.begin(), orig.end(), lib) != orig.end()) {
+      filtered.emplace_back(lib);
+    }
+  }
+  return android::base::Join(filtered, ":");
+}
+
 Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t target_sdk_version,
                                                          jobject class_loader, bool is_shared,
                                                          jstring dex_path_j,
                                                          jstring java_library_path,
-                                                         jstring java_permitted_path) {
+                                                         jstring java_permitted_path,
+                                                         jstring uses_library_list) {
   std::string library_path;  // empty string by default.
   std::string dex_path;
 
@@ -156,6 +183,23 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   if (dex_path_j != nullptr) {
     ScopedUtfChars dex_path_chars(env, dex_path_j);
     dex_path = dex_path_chars.c_str();
+  }
+
+  std::vector<std::string> uses_libraries;
+  if (uses_library_list != nullptr) {
+    ScopedUtfChars names(env, uses_library_list);
+    uses_libraries = android::base::Split(names.c_str(), ":");
+  } else {
+    // uses_library_list could be nullptr when System.loadLibrary is called from a
+    // custom classloader. In that case, we don't know the list of public
+    // libraries because we don't know which apk the classloader is for. Only
+    // choices we can have are 1) allowing all public libs (as before), or 2)
+    // not allowing all but NDK libs. Here we take #1 because #2 would surprise
+    // developers unnecessarily.
+    // TODO(b/142191088) finalize the policy here. We could either 1) allow all
+    // public libs, 2) disallow any lib, or 3) use the libs that were granted to
+    // the first (i.e. app main) classloader.
+    uses_libraries.emplace_back(LIBRARY_ALL);
   }
 
   ApkOrigin apk_origin = GetApkOriginFromDexPath(dex_path);
@@ -220,10 +264,12 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     ALOGD("classloader namespace configured for unbundled %s apk. library_path=%s",
           origin_partition, library_path.c_str());
   } else {
+    auto libs = filter_public_libraries(target_sdk_version, uses_libraries,
+                                        extended_public_libraries());
     // extended public libraries are NOT available to vendor apks, otherwise it
     // would be system->vendor violation.
-    if (!extended_public_libraries().empty()) {
-      system_exposed_libraries = system_exposed_libraries + ':' + extended_public_libraries();
+    if (!libs.empty()) {
+      system_exposed_libraries = system_exposed_libraries + ':' + libs;
     }
   }
 
@@ -247,7 +293,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   // racing here.
   auto app_ns = NativeLoaderNamespace::Create(
       namespace_name, library_path, permitted_path, parent_ns, is_shared,
-      target_sdk_version < 24 /* is_greylist_enabled */, also_used_as_anonymous);
+      target_sdk_version < 24 /* is_exempt_list_enabled */, also_used_as_anonymous);
   if (!app_ns.ok()) {
     return app_ns.error();
   }
@@ -264,31 +310,14 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     return linked.error();
   }
 
-  auto art_ns = NativeLoaderNamespace::GetExportedNamespace(kArtNamespaceName, is_bridged);
-  // ART APEX does not exist on host, and under certain build conditions.
-  if (art_ns.ok()) {
-    linked = app_ns->Link(*art_ns, art_public_libraries());
-    if (!linked.ok()) {
-      return linked.error();
-    }
-  }
-
-  auto i18n_ns = NativeLoaderNamespace::GetExportedNamespace(kI18nNamespaceName, is_bridged);
-  // i18n APEX does not exist on host, and under certain build conditions.
-  if (i18n_ns.ok()) {
-    linked = app_ns->Link(*i18n_ns, i18n_public_libraries());
-    if (!linked.ok()) {
-      return linked.error();
-    }
-  }
-
-  // Give access to NNAPI libraries (apex-updated LLNDK library).
-  auto nnapi_ns =
-      NativeLoaderNamespace::GetExportedNamespace(kNeuralNetworksNamespaceName, is_bridged);
-  if (nnapi_ns.ok()) {
-    linked = app_ns->Link(*nnapi_ns, neuralnetworks_public_libraries());
-    if (!linked.ok()) {
-      return linked.error();
+  for (const auto&[apex_ns_name, public_libs] : apex_public_libraries()) {
+    auto ns = NativeLoaderNamespace::GetExportedNamespace(apex_ns_name, is_bridged);
+    // Even if APEX namespace is visible, it may not be available to bridged.
+    if (ns.ok()) {
+      linked = app_ns->Link(*ns, public_libs);
+      if (!linked.ok()) {
+        return linked.error();
+      }
     }
   }
 
@@ -320,30 +349,22 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     if (jni_libs != "") {
       auto apex_ns = NativeLoaderNamespace::GetExportedNamespace(*apex_ns_name, is_bridged);
       if (apex_ns.ok()) {
-        auto link = app_ns->Link(*apex_ns, jni_libs);
-        if (!link.ok()) {
+        linked = app_ns->Link(*apex_ns, jni_libs);
+        if (!linked.ok()) {
           return linked.error();
         }
       }
     }
   }
 
-  // Give access to StatsdAPI libraries
-  auto statsd_ns =
-      NativeLoaderNamespace::GetExportedNamespace(kStatsdNamespaceName, is_bridged);
-  if (statsd_ns.ok()) {
-    linked = app_ns->Link(*statsd_ns, statsd_public_libraries());
-    if (!linked.ok()) {
-      return linked.error();
-    }
-  }
-
-  if (!vendor_public_libraries().empty()) {
+  auto vendor_libs = filter_public_libraries(target_sdk_version, uses_libraries,
+                                             vendor_public_libraries());
+  if (!vendor_libs.empty()) {
     auto vendor_ns = NativeLoaderNamespace::GetExportedNamespace(kVendorNamespaceName, is_bridged);
     // when vendor_ns is not configured, link to the system namespace
     auto target_ns = vendor_ns.ok() ? vendor_ns : system_ns;
     if (target_ns.ok()) {
-      linked = app_ns->Link(*target_ns, vendor_public_libraries());
+      linked = app_ns->Link(*target_ns, vendor_libs);
       if (!linked.ok()) {
         return linked.error();
       }
