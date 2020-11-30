@@ -202,7 +202,7 @@
     str     \reg, [xFP, \vreg, uxtw #2]
     str     wzr, [xREFS, \vreg, uxtw #2]
 .endm
-.macro SET_VREG_OBJECT reg, vreg, tmpreg
+.macro SET_VREG_OBJECT reg, vreg
     str     \reg, [xFP, \vreg, uxtw #2]
     str     \reg, [xREFS, \vreg, uxtw #2]
 .endm
@@ -391,7 +391,7 @@ END \name
 .macro SETUP_STACK_FRAME code_item, refs, fp, cfi_refs, load_ins
     FETCH_CODE_ITEM_INFO \code_item, wip, wip2, w15, \load_ins
 
-    // Compute required frame size: ((2 * ip) + ip1) * 4 + 24
+    // Compute required frame size: ((2 * ip) + ip2) * 4 + 24
     // 24 is for saving the previous frame, pc, and method being executed.
     add x14, ip, ip
     add x14, x14, ip2
@@ -903,8 +903,10 @@ END \name
    bl art_quick_invoke_custom
    .else
       .if \is_interface
-      // Setup hidden argument
-      FETCH wip2, 1
+      // Setup hidden argument. As we don't have access to the interface method,
+      // just pass the method from the IMT. If the method is the conflict trampoline,
+      // this will make the stub go to runtime, otherwise the hidden argument is unused.
+      mov ip2, x0
       .endif
       ldr lr, [x0, #ART_METHOD_QUICK_CODE_OFFSET_64]
       blr lr
@@ -1128,10 +1130,10 @@ END \name
    .if \is_string_init
    add x10, x10, #1  // arg start index
    mov x11, #1       // index in stack
-   LOOP_RANGE_OVER_SHORTY_LOADING_GPRS x1, w1, x9, w10, w11, .Lgpr_setup_finished_\suffix
+   LOOP_RANGE_OVER_SHORTY_LOADING_GPRS x1, w1, x9, w10, w11, .Lgpr_setup_finished_range_\suffix
    .elseif \is_static
    mov x11, xzr      // index in stack
-   LOOP_RANGE_OVER_SHORTY_LOADING_GPRS x1, w1, x9, w10, w11 .Lgpr_setup_finished_\suffix
+   LOOP_RANGE_OVER_SHORTY_LOADING_GPRS x1, w1, x9, w10, w11 .Lgpr_setup_finished_range_\suffix
    .else
    add x10, x10, #1  // arg start index
    mov x11, #1       // index in stack
@@ -1152,8 +1154,10 @@ END \name
    bl art_quick_invoke_custom
    .else
       .if \is_interface
-      // Setup hidden argument
-      FETCH wip2, 1
+      // Setup hidden argument. As we don't have access to the interface method,
+      // just pass the method from the IMT. If the method is the conflict trampoline,
+      // this will make the stub go to runtime, otherwise the hidden argument is unused.
+      mov ip2, x0
       .endif
       ldr lr, [x0, #ART_METHOD_QUICK_CODE_OFFSET_64]
       blr lr
@@ -1162,7 +1166,7 @@ END \name
    cmp ip, #68       // Test if result type char == 'D'.
    b.eq .Lreturn_double_range_\suffix
    cmp ip, #70
-   b.ne .Ldone_return_\suffix
+   b.ne .Ldone_return_range_\suffix
 .Lreturn_float_range_\suffix:
    fmov w0, s0
    b .Ldone_return_range_\suffix
@@ -1542,14 +1546,12 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     // TODO: Get shorty in a better way and remove below
     SPILL_ALL_ARGUMENTS
 
-    // Save method in callee-save xINST
-    mov xINST, x0
     bl NterpGetShorty
     // Save shorty in callee-save xIBASE.
     mov xIBASE, x0
 
     RESTORE_ALL_ARGUMENTS
-    ldr xPC, [xINST, #ART_METHOD_DATA_OFFSET_64]
+    ldr xPC, [x0, #ART_METHOD_DATA_OFFSET_64]
 
     // Setup the stack for executing the method.
     SETUP_STACK_FRAME xPC, xREFS, xFP, CFI_REFS, load_ins=1
@@ -1628,7 +1630,7 @@ common_errDivideByZero:
     EXPORT_PC
     bl art_quick_throw_div_zero
 
-// Expect array in w0, index in w1, length in w2
+// Expect index in w1, length in w3.
 common_errArrayIndex:
     EXPORT_PC
     mov x0, x1
@@ -1840,7 +1842,7 @@ NterpPutObjectStaticField:
    ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
    cbnz wMR, 7f
 6:
-   lsr w2, wINST, #8                    // w1 <- A
+   lsr w2, wINST, #8                    // w2 <- A
    GET_VREG w2, w2
    add ip, x0, x1
    stlr w2, [ip]
@@ -2001,7 +2003,7 @@ NterpCheckCast:
    cbnz wMR, 4f
 1:
    lsr     w2, wINST, #8               // w2<- A
-   GET_VREG w0, w2                     // w2<- vA (object)
+   GET_VREG w0, w2                     // w0<- vA (object)
    cbz w0, 2f
    bl art_quick_check_instance_of
 2:

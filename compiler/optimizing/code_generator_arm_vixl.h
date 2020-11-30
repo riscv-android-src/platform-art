@@ -540,7 +540,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                   vixl::aarch32::Register card,
                   vixl::aarch32::Register object,
                   vixl::aarch32::Register value,
-                  bool can_be_null);
+                  bool value_can_be_null);
 
   void GenerateMemoryBarrier(MemBarrierKind kind);
 
@@ -581,6 +581,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       ArtMethod* method) override;
 
+  void LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke);
   void GenerateStaticOrDirectCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) override;
   void GenerateVirtualCall(
@@ -615,7 +616,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   PcRelativePatchInfo* NewBootImageMethodPatch(MethodReference target_method);
   PcRelativePatchInfo* NewMethodBssEntryPatch(MethodReference target_method);
   PcRelativePatchInfo* NewBootImageTypePatch(const DexFile& dex_file, dex::TypeIndex type_index);
-  PcRelativePatchInfo* NewTypeBssEntryPatch(const DexFile& dex_file, dex::TypeIndex type_index);
+  PcRelativePatchInfo* NewTypeBssEntryPatch(HLoadClass* load_class);
   PcRelativePatchInfo* NewBootImageStringPatch(const DexFile& dex_file,
                                                dex::StringIndex string_index);
   PcRelativePatchInfo* NewStringBssEntryPatch(const DexFile& dex_file,
@@ -637,7 +638,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                                 Handle<mirror::Class> handle);
 
   void LoadBootImageAddress(vixl::aarch32::Register reg, uint32_t boot_image_reference);
-  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+  void LoadIntrinsicDeclaringClass(vixl::aarch32::Register reg, HInvoke* invoke);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
   bool NeedsThunkCode(const linker::LinkerPatch& patch) const override;
@@ -676,7 +677,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                              Location ref,
                                              vixl::aarch32::Register obj,
                                              uint32_t offset,
-                                             Location temp,
+                                             Location maybe_temp,
                                              bool needs_null_check);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference array load when Baker's read barriers are used.
@@ -924,6 +925,10 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   ArenaDeque<PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative public type patch info for kBssEntryPublic.
+  ArenaDeque<PcRelativePatchInfo> public_type_bss_entry_patches_;
+  // PC-relative package type patch info for kBssEntryPackage.
+  ArenaDeque<PcRelativePatchInfo> package_type_bss_entry_patches_;
   // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.

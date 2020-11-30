@@ -504,19 +504,19 @@ void CodeGenerator::CreateCommonInvokeLocationSummary(
 
   if (invoke->IsInvokeStaticOrDirect()) {
     HInvokeStaticOrDirect* call = invoke->AsInvokeStaticOrDirect();
-    HInvokeStaticOrDirect::MethodLoadKind method_load_kind = call->GetMethodLoadKind();
-    HInvokeStaticOrDirect::CodePtrLocation code_ptr_location = call->GetCodePtrLocation();
-    if (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative) {
+    MethodLoadKind method_load_kind = call->GetMethodLoadKind();
+    CodePtrLocation code_ptr_location = call->GetCodePtrLocation();
+    if (code_ptr_location == CodePtrLocation::kCallCriticalNative) {
       locations->AddTemp(Location::RequiresRegister());  // For target method.
     }
-    if (code_ptr_location == HInvokeStaticOrDirect::CodePtrLocation::kCallCriticalNative ||
-        method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kRecursive) {
+    if (code_ptr_location == CodePtrLocation::kCallCriticalNative ||
+        method_load_kind == MethodLoadKind::kRecursive) {
       // For `kCallCriticalNative` we need the current method as the hidden argument
       // if we reach the dlsym lookup stub for @CriticalNative.
       locations->SetInAt(call->GetCurrentMethodIndex(), visitor->GetMethodLocation());
     } else {
       locations->AddTemp(visitor->GetMethodLocation());
-      if (method_load_kind == HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall) {
+      if (method_load_kind == MethodLoadKind::kRuntimeCall) {
         locations->SetInAt(call->GetCurrentMethodIndex(), Location::RequiresRegister());
       }
     }
@@ -891,7 +891,6 @@ void CodeGenerator::GenerateLoadMethodTypeRuntimeCall(HLoadMethodType* method_ty
 
 static uint32_t GetBootImageOffsetImpl(const void* object, ImageHeader::ImageSections section) {
   Runtime* runtime = Runtime::Current();
-  DCHECK(runtime->IsAotCompiler());
   const std::vector<gc::space::ImageSpace*>& boot_image_spaces =
       runtime->GetHeap()->GetBootImageSpaces();
   // Check that the `object` is in the expected section of one of the boot image files.
@@ -905,6 +904,10 @@ static uint32_t GetBootImageOffsetImpl(const void* object, ImageHeader::ImageSec
   uintptr_t begin = reinterpret_cast<uintptr_t>(boot_image_spaces.front()->Begin());
   uintptr_t offset = reinterpret_cast<uintptr_t>(object) - begin;
   return dchecked_integral_cast<uint32_t>(offset);
+}
+
+uint32_t CodeGenerator::GetBootImageOffset(ObjPtr<mirror::Object> object) {
+  return GetBootImageOffsetImpl(object.Ptr(), ImageHeader::kSectionObjects);
 }
 
 // NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image classes are non-moveable.
@@ -923,11 +926,20 @@ uint32_t CodeGenerator::GetBootImageOffset(HLoadString* load_string) NO_THREAD_S
   return GetBootImageOffsetImpl(string.Ptr(), ImageHeader::kSectionObjects);
 }
 
-uint32_t CodeGenerator::GetBootImageOffset(HInvokeStaticOrDirect* invoke) {
-  DCHECK_EQ(invoke->GetMethodLoadKind(), HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo);
+uint32_t CodeGenerator::GetBootImageOffset(HInvoke* invoke) {
   ArtMethod* method = invoke->GetResolvedMethod();
   DCHECK(method != nullptr);
   return GetBootImageOffsetImpl(method, ImageHeader::kSectionArtMethods);
+}
+
+// NO_THREAD_SAFETY_ANALYSIS: Avoid taking the mutator lock, boot image classes are non-moveable.
+uint32_t CodeGenerator::GetBootImageOffsetOfIntrinsicDeclaringClass(HInvoke* invoke)
+    NO_THREAD_SAFETY_ANALYSIS {
+  DCHECK_NE(invoke->GetIntrinsic(), Intrinsics::kNone);
+  ArtMethod* method = invoke->GetResolvedMethod();
+  DCHECK(method != nullptr);
+  ObjPtr<mirror::Class> declaring_class = method->GetDeclaringClass<kWithoutReadBarrier>();
+  return GetBootImageOffsetImpl(declaring_class.Ptr(), ImageHeader::kSectionObjects);
 }
 
 void CodeGenerator::BlockIfInRegister(Location location, bool is_out) const {

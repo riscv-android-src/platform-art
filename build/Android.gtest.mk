@@ -25,11 +25,11 @@ my_files := $(ART_TESTCASES_CONTENT)
 
 # Manually add system libraries that we need to run the host ART tools.
 my_files += \
-  $(foreach lib, libbacktrace libbase libc++ libicu_jni liblog libsigchain libunwindstack \
-    libziparchive libjavacore libandroidio libopenjdkd, \
+  $(foreach lib, libbacktrace libbase libc++ libicu libicu_jni liblog libsigchain libunwindstack \
+    libziparchive libjavacore libandroidio libopenjdkd liblz4 liblzma, \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib).so \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib).so) \
-  $(foreach lib, libcrypto libz libicuuc libicui18n libandroidicu libexpat, \
+  $(foreach lib, libcrypto libz libicuuc libicui18n libexpat, \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST)/$(lib).so:lib64/$(lib)-host.so \
     $(call intermediates-dir-for,SHARED_LIBRARIES,$(lib),HOST,,2ND)/$(lib).so:lib/$(lib)-host.so)
 
@@ -53,7 +53,7 @@ LOCAL_MODULE := art_common
 LOCAL_MODULE_TAGS := tests
 LOCAL_MODULE_CLASS := NATIVE_TESTS
 LOCAL_MODULE_SUFFIX := .txt
-LOCAL_COMPATIBILITY_SUITE := general-tests
+LOCAL_COMPATIBILITY_SUITE := art-host-tests
 LOCAL_COMPATIBILITY_SUPPORT_FILES := $(ART_TESTCASES_PREBUILT_CONTENT) \
 	$(foreach f,$(my_files),$(call word-colon,1,$f):out/host/linux-x86/$(call word-colon,2,$f))
 include $(BUILD_SYSTEM)/base_rules.mk
@@ -354,21 +354,6 @@ ifeq ($(ART_BUILD_HOST),true)
   # Rules to run the different architecture versions of the gtest.
   $(foreach file,$(ART_HOST_GTEST_FILES), $(eval $(call define-art-gtest-host-both,$$(notdir $$(basename $$(file))))))
 endif
-
-# Used outside the art project to get a list of the current tests
-RUNTIME_TARGET_GTEST_MAKE_TARGETS :=
-art_target_gtest_files := $(foreach m,$(ART_TEST_MODULES),$(ART_TEST_LIST_device_$(TARGET_ARCH)_$(m)))
-# If testdir == testfile, assume this is not a test_per_src module
-$(foreach file,$(art_target_gtest_files),\
-  $(eval testdir := $$(notdir $$(patsubst %/,%,$$(dir $$(file)))))\
-  $(eval testfile := $$(notdir $$(basename $$(file))))\
-  $(if $(call streq,$(testdir),$(testfile)),,\
-    $(eval testfile := $(testdir)_$(testfile)))\
-  $(eval RUNTIME_TARGET_GTEST_MAKE_TARGETS += $(testfile))\
-)
-testdir :=
-testfile :=
-art_target_gtest_files :=
 
 # Define all the combinations of host/target and suffix such as:
 # test-art-host-gtest or test-art-host-gtest64

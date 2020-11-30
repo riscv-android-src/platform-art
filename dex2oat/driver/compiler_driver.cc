@@ -355,8 +355,11 @@ static optimizer::DexToDexCompiler::CompilationLevel GetDexToDexCompilationLevel
   if (dex_file.GetContainer() != nullptr && dex_file.GetContainer()->IsReadOnly()) {
     return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
   }
+  if (!driver.GetCompilerOptions().IsQuickeningCompilationEnabled()) {
+    // b/170086509 Quickening compilation is being deprecated.
+    return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
+  }
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   ObjPtr<mirror::Class> klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -1480,21 +1483,6 @@ bool CompilerDriver::ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompi
   }
 }
 
-bool CompilerDriver::IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc) {
-  if (!compiler_options_->IsVerificationEnabled()) {
-    // If we didn't verify, every cast has to be treated as non-safe.
-    return false;
-  }
-  DCHECK(mUnit->GetVerifiedMethod() != nullptr);
-  bool result = mUnit->GetVerifiedMethod()->IsSafeCast(dex_pc);
-  if (result) {
-    stats_->SafeCast();
-  } else {
-    stats_->NotASafeCast();
-  }
-  return result;
-}
-
 class CompilationVisitor {
  public:
   virtual ~CompilationVisitor() {}
@@ -1904,9 +1892,6 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
   if (!verifier_deps->ValidateDependencies(
       soa.Self(),
       class_loader,
-      // This returns classpath dex files in no particular order but VerifierDeps
-      // does not care about the order.
-      classpath_classes_.GetDexFiles(),
       &error_msg)) {
     LOG(WARNING) << "Fast verification failed: " << error_msg;
     return false;
@@ -1933,12 +1918,13 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
           ClassReference ref(dex_file, accessor.GetClassDefIndex());
           const ClassStatus existing = ClassStatus::kNotReady;
           ClassStateTable::InsertResult result =
-             compiled_classes_.Insert(ref, existing, ClassStatus::kVerified);
+             compiled_classes_.Insert(ref, existing, ClassStatus::kVerifiedNeedsAccessChecks);
           CHECK_EQ(result, ClassStateTable::kInsertResultSuccess) << ref.dex_file->GetLocation();
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
-          LoadAndUpdateStatus(accessor, ClassStatus::kVerified, class_loader, soa.Self());
+          LoadAndUpdateStatus(
+              accessor, ClassStatus::kVerifiedNeedsAccessChecks, class_loader, soa.Self());
           // Create `VerifiedMethod`s for each methods, the compiler expects one for
           // quickening or compiling.
           // Note that this means:
@@ -2077,16 +2063,6 @@ class VerifyClassVisitor : public CompilationVisitor {
       }
     } else if (&klass->GetDexFile() != &dex_file) {
       // Skip a duplicate class (as the resolved class is from another, earlier dex file).
-      // Record the information that we skipped this class in the vdex.
-      // If the class resolved to a dex file not covered by the vdex, e.g. boot class path,
-      // it is considered external, dependencies on it will be recorded and the vdex will
-      // remain usable regardless of whether the class remains redefined or not (in the
-      // latter case, this class will be verify-at-runtime).
-      // On the other hand, if the class resolved to a dex file covered by the vdex, i.e.
-      // a different dex file within the same APK, this class will always be eclipsed by it.
-      // Recording that it was redefined is not necessary but will save class resolution
-      // time during fast-verify.
-      verifier::VerifierDeps::MaybeRecordClassRedefinition(dex_file, class_def);
       return;  // Do not update state.
     } else if (!SkipClass(jclass_loader, dex_file, klass.Get())) {
       CHECK(klass->IsResolved()) << klass->PrettyClass();

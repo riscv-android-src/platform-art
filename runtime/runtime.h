@@ -21,20 +21,21 @@
 #include <stdio.h>
 
 #include <iosfwd>
+#include <memory>
 #include <set>
 #include <string>
 #include <utility>
-#include <memory>
 #include <vector>
 
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
+#include "base/metrics.h"
 #include "base/string_view_cpp20.h"
+#include "compat_framework.h"
 #include "deoptimization_kind.h"
 #include "dex/dex_file_types.h"
 #include "experimental_flags.h"
-#include "gc/space/image_space_loading_order.h"
 #include "gc_root.h"
 #include "instrumentation.h"
 #include "jdwp_provider.h"
@@ -672,17 +673,8 @@ class Runtime {
     return target_sdk_version_;
   }
 
-  void SetDisabledCompatChanges(const std::set<uint64_t>& disabled_changes) {
-    disabled_compat_changes_ = disabled_changes;
-  }
-
-  std::set<uint64_t> GetDisabledCompatChanges() const {
-    return disabled_compat_changes_;
-  }
-
-  bool isChangeEnabled(uint64_t change_id) const {
-    // TODO(145743810): add an up call to java to log to statsd
-    return disabled_compat_changes_.count(change_id) == 0;
+  CompatFramework& GetCompatFramework() {
+    return compat_framework_;
   }
 
   uint32_t GetZygoteMaxFailedBoots() const {
@@ -964,10 +956,6 @@ class Runtime {
   // Return true if startup is already completed.
   bool GetStartupCompleted() const;
 
-  gc::space::ImageSpaceLoadingOrder GetImageSpaceLoadingOrder() const {
-    return image_space_loading_order_;
-  }
-
   bool IsVerifierMissingKThrowFatal() const {
     return verifier_missing_kthrow_fatal_;
   }
@@ -978,6 +966,8 @@ class Runtime {
 
   // Return true if we should load oat files as executable or not.
   bool GetOatFilesExecutable() const;
+
+  metrics::ArtMetrics* GetMetrics() { return &metrics_; }
 
  private:
   static void InitPlatformSignalHandlers();
@@ -1174,8 +1164,8 @@ class Runtime {
   // Specifies target SDK version to allow workarounds for certain API levels.
   uint32_t target_sdk_version_;
 
-  // A set of disabled compat changes for the running app, all other changes are enabled.
-  std::set<uint64_t> disabled_compat_changes_;
+  // ART counterpart for the compat framework (go/compat-framework).
+  CompatFramework compat_framework_;
 
   // Implicit checks flags.
   bool implicit_null_checks_;       // NullPointer checks are implicit.
@@ -1328,11 +1318,10 @@ class Runtime {
   // If startup has completed, must happen at most once.
   std::atomic<bool> startup_completed_ = false;
 
-  gc::space::ImageSpaceLoadingOrder image_space_loading_order_ =
-      gc::space::ImageSpaceLoadingOrder::kSystemFirst;
-
   bool verifier_missing_kthrow_fatal_;
   bool perfetto_hprof_enabled_;
+
+  metrics::ArtMetrics metrics_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();
@@ -1343,6 +1332,8 @@ class Runtime {
 
   DISALLOW_COPY_AND_ASSIGN(Runtime);
 };
+
+inline metrics::ArtMetrics* GetMetrics() { return Runtime::Current()->GetMetrics(); }
 
 }  // namespace art
 

@@ -643,7 +643,7 @@ class ReleaseHostChecker:
     self._checker.check_symlinked_first_executable('dex2oat')
 
     # Check exported native libraries for Managed Core Library.
-    self._checker.check_native_library('libandroidicu-host')
+    self._checker.check_native_library('libicu')
     self._checker.check_native_library('libandroidio')
 
     # Check internal libraries for Managed Core Library.
@@ -1074,7 +1074,7 @@ def art_apex_test_default(test_parser):
   # TODO: Add host support.
   # TODO: Add support for flattened APEX packages.
   configs = [
-    {'name': 'com.android.art.release', 'flavor': FLAVOR_RELEASE, 'host': False},
+    {'name': 'com.android.art',         'flavor': FLAVOR_RELEASE, 'host': False},
     {'name': 'com.android.art.debug',   'flavor': FLAVOR_DEBUG,   'host': False},
     {'name': 'com.android.art.testing', 'flavor': FLAVOR_TESTING, 'host': False},
   ]

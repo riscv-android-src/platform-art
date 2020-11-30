@@ -76,12 +76,6 @@ static void VMRuntime_nativeSetTargetHeapUtilization(JNIEnv*, jobject, jfloat ta
   Runtime::Current()->GetHeap()->SetTargetHeapUtilization(target);
 }
 
-static void VMRuntime_startJitCompilation(JNIEnv*, jobject) {
-}
-
-static void VMRuntime_disableJitCompilation(JNIEnv*, jobject) {
-}
-
 static void VMRuntime_setHiddenApiExemptions(JNIEnv* env,
                                             jclass,
                                             jobjectArray exemptions) {
@@ -283,7 +277,7 @@ static void VMRuntime_setDisabledCompatChangesNative(JNIEnv* env, jobject,
   for (int i = 0; i < length; i++) {
     disabled_compat_changes_set.insert(static_cast<uint64_t>(elements[i]));
   }
-  Runtime::Current()->SetDisabledCompatChanges(disabled_compat_changes_set);
+  Runtime::Current()->GetCompatFramework().SetDisabledCompatChanges(disabled_compat_changes_set);
 }
 
 static inline size_t clamp_to_size_t(jlong n) {
@@ -774,7 +768,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, classPath, "()Ljava/lang/String;"),
   NATIVE_METHOD(VMRuntime, clearGrowthLimit, "()V"),
   NATIVE_METHOD(VMRuntime, concurrentGC, "()V"),
-  NATIVE_METHOD(VMRuntime, disableJitCompilation, "()V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiExemptions, "([Ljava/lang/String;)V"),
   NATIVE_METHOD(VMRuntime, setHiddenApiAccessLogSamplingRate, "(I)V"),
   NATIVE_METHOD(VMRuntime, getTargetHeapUtilization, "()F"),
@@ -798,7 +791,6 @@ static JNINativeMethod gMethods[] = {
   NATIVE_METHOD(VMRuntime, runHeapTasks, "()V"),
   NATIVE_METHOD(VMRuntime, updateProcessState, "(I)V"),
   NATIVE_METHOD(VMRuntime, startHeapTaskProcessor, "()V"),
-  NATIVE_METHOD(VMRuntime, startJitCompilation, "()V"),
   NATIVE_METHOD(VMRuntime, stopHeapTaskProcessor, "()V"),
   NATIVE_METHOD(VMRuntime, trimHeap, "()V"),
   NATIVE_METHOD(VMRuntime, vmVersion, "()Ljava/lang/String;"),

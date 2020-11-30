@@ -2311,7 +2311,7 @@ void InstructionSimplifierVisitor::SimplifySystemArrayCopy(HInvoke* instruction)
       // is unlikely that it exists. The most usual situation for such typed
       // arraycopy methods is a direct pointer to the boot image.
       invoke->SetDispatchInfo(
-          HSharpening::SharpenInvokeStaticOrDirect(method, /* has_method_id= */ true, codegen_));
+          HSharpening::SharpenLoadMethod(method, /* has_method_id= */ true, codegen_));
     }
   }
 }
@@ -2326,14 +2326,14 @@ void InstructionSimplifierVisitor::SimplifyFP2Int(HInvoke* invoke) {
   if (type == DataType::Type::kFloat64) {
     nan = GetGraph()->GetLongConstant(0x7ff8000000000000L);
     invoke->SetIntrinsic(Intrinsics::kDoubleDoubleToRawLongBits,
-                         kNeedsEnvironmentOrCache,
+                         kNeedsEnvironment,
                          kNoSideEffects,
                          kNoThrow);
   } else {
     DCHECK_EQ(type, DataType::Type::kFloat32);
     nan = GetGraph()->GetIntConstant(0x7fc00000);
     invoke->SetIntrinsic(Intrinsics::kFloatFloatToRawIntBits,
-                         kNeedsEnvironmentOrCache,
+                         kNeedsEnvironment,
                          kNoSideEffects,
                          kNoThrow);
   }

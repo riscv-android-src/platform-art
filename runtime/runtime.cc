@@ -269,6 +269,7 @@ Runtime::Runtime()
       preinitialization_transactions_(),
       verify_(verifier::VerifyMode::kNone),
       target_sdk_version_(static_cast<uint32_t>(SdkVersion::kUnset)),
+      compat_framework_(),
       implicit_null_checks_(false),
       implicit_so_checks_(false),
       implicit_suspend_checks_(false),
@@ -1085,6 +1086,9 @@ void Runtime::InitNonZygoteOrPostFork(
       SetJniIdType(JniIdType::kPointer);
     }
   }
+  ATraceIntegerValue(
+      "profilebootclasspath",
+      static_cast<int>(jit_options_->GetProfileSaverOptions().GetProfileBootClassPath()));
   // Start the JDWP thread. If the command-line debugger flags specified "suspend=y",
   // this will pause the runtime (in the internal debugger implementation), so we probably want
   // this to come last.
@@ -1380,8 +1384,6 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Generational CC collection is currently only compatible with Baker read barriers.
   bool use_generational_cc = kUseBakerReadBarrier && xgc_option.generational_cc;
 
-  image_space_loading_order_ = runtime_options.GetOrDefault(Opt::ImageSpaceLoadingOrder);
-
   heap_ = new gc::Heap(runtime_options.GetOrDefault(Opt::MemoryInitialSize),
                        runtime_options.GetOrDefault(Opt::HeapGrowthLimit),
                        runtime_options.GetOrDefault(Opt::HeapMinFree),
@@ -1421,8 +1423,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        use_generational_cc,
                        runtime_options.GetOrDefault(Opt::HSpaceCompactForOOMMinIntervalsMs),
                        runtime_options.Exists(Opt::DumpRegionInfoBeforeGC),
-                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC),
-                       image_space_loading_order_);
+                       runtime_options.Exists(Opt::DumpRegionInfoAfterGC));
 
   dump_gc_performance_on_shutdown_ = runtime_options.Exists(Opt::DumpGCPerformanceOnShutdown);
 
@@ -2023,6 +2024,7 @@ void Runtime::DumpForSigQuit(std::ostream& os) {
   }
   DumpDeoptimizations(os);
   TrackedAllocators::Dump(os);
+  GetMetrics()->DumpForSigQuit(os);
   os << "\n";
 
   thread_list_->DumpForSigQuit(os);

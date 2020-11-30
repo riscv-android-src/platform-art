@@ -16,15 +16,20 @@
 
 #include "load_store_elimination.h"
 
+#include "base/arena_allocator.h"
 #include "base/arena_bit_vector.h"
 #include "base/array_ref.h"
 #include "base/bit_vector-inl.h"
+#include "base/bit_vector.h"
 #include "base/scoped_arena_allocator.h"
 #include "base/scoped_arena_containers.h"
 #include "escape.h"
+#include "execution_subgraph.h"
 #include "load_store_analysis.h"
-#include "optimizing/optimizing_compiler_stats.h"
+#include "nodes.h"
+#include "optimizing_compiler_stats.h"
 #include "reference_type_propagation.h"
+#include "side_effects_analysis.h"
 
 /**
  * The general algorithm of load-store elimination (LSE).
@@ -123,7 +128,7 @@
  * but if we use TryReplacingLoopPhiPlaceholderWithDefault() for default value
  * replacement search, there are additional dependencies to consider, see below.
  *
- * In the successful case (no unknown inputs found) we use the Floyd-Warshal
+ * In the successful case (no unknown inputs found) we use the Floyd-Warshall
  * algorithm to determine transitive closures for each found Phi placeholder,
  * and then match or materialize Phis from the smallest transitive closure,
  * so that we can determine if such subset has a single other input. This has
@@ -162,7 +167,7 @@
  *    O(phi_placeholder_dependencies * phi_placeholders)
  * term from unknown input cases is actually
  *    O(heap_locations^3 * blocks^3) ,
- * exactly as the estimate for the Floyd-Warshal parts of successful cases.
+ * exactly as the estimate for the Floyd-Warshall parts of successful cases.
  * Adding the other term from the unknown input cases (to account for the case
  * with significantly more instructions than blocks and heap locations), the
  * phase 2 time complexity is
@@ -258,6 +263,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
     enum class Type {
       kInvalid,
       kUnknown,
+      kMergedUnknown,
       kDefault,
       kInstruction,
       kNeedsNonLoopPhi,
@@ -279,6 +285,13 @@ class LSEVisitor final : private HGraphDelegateVisitor {
       Value value;
       value.type_ = Type::kUnknown;
       value.instruction_ = nullptr;
+      return value;
+    }
+
+    static Value MergedUnknown(const PhiPlaceholder* phi_placeholder) {
+      Value value;
+      value.type_ = Type::kMergedUnknown;
+      value.phi_placeholder_ = phi_placeholder;
       return value;
     }
 
@@ -325,8 +338,16 @@ class LSEVisitor final : private HGraphDelegateVisitor {
       return type_ == Type::kInvalid;
     }
 
-    bool IsUnknown() const {
+    bool IsMergedUnknown() const {
+      return type_ == Type::kMergedUnknown;
+    }
+
+    bool IsPureUnknown() const {
       return type_ == Type::kUnknown;
+    }
+
+    bool IsUnknown() const {
+      return type_ == Type::kUnknown || type_ == Type::kMergedUnknown;
     }
 
     bool IsDefault() const {
@@ -355,8 +376,23 @@ class LSEVisitor final : private HGraphDelegateVisitor {
     }
 
     const PhiPlaceholder* GetPhiPlaceholder() const {
-      DCHECK(NeedsPhi());
+      DCHECK(NeedsPhi() || IsMergedUnknown());
       return phi_placeholder_;
+    }
+
+    uint32_t GetMergeBlockId() const {
+      DCHECK(IsMergedUnknown()) << this;
+      return phi_placeholder_->GetBlockId();
+    }
+
+    HBasicBlock* GetMergeBlock(const HGraph* graph) const {
+      DCHECK(IsMergedUnknown()) << this;
+      return graph->GetBlocks()[GetMergeBlockId()];
+    }
+
+    size_t GetHeapLocation() const {
+      DCHECK(IsMergedUnknown() || NeedsPhi()) << this;
+      return phi_placeholder_->GetHeapLocation();
     }
 
     bool Equals(Value other) const {
@@ -369,9 +405,9 @@ class LSEVisitor final : private HGraphDelegateVisitor {
                (other.IsDefault() && IsInstruction() && IsZeroBitPattern(GetInstruction()));
       } else {
         // Note: Two unknown values are considered different.
-        return IsDefault() ||
-               (IsInstruction() && GetInstruction() == other.GetInstruction()) ||
-               (NeedsPhi() && GetPhiPlaceholder() == other.GetPhiPlaceholder());
+        return IsDefault() || (IsInstruction() && GetInstruction() == other.GetInstruction()) ||
+               (NeedsPhi() && GetPhiPlaceholder() == other.GetPhiPlaceholder()) ||
+               (IsMergedUnknown() && GetPhiPlaceholder() == other.GetPhiPlaceholder());
       }
     }
 
@@ -379,7 +415,11 @@ class LSEVisitor final : private HGraphDelegateVisitor {
       return Equals(ForInstruction(instruction));
     }
 
+    std::ostream& Dump(std::ostream& os) const;
+
    private:
+    friend std::ostream& operator<<(std::ostream& os, const Value& v);
+
     Type type_;
     union {
       HInstruction* instruction_;
@@ -395,6 +435,20 @@ class LSEVisitor final : private HGraphDelegateVisitor {
 
   size_t PhiPlaceholderIndex(Value phi_placeholder) const {
     return PhiPlaceholderIndex(phi_placeholder.GetPhiPlaceholder());
+  }
+
+  bool IsPartialNoEscape(HBasicBlock* blk, size_t idx) {
+    auto* ri = heap_location_collector_.GetHeapLocation(idx)->GetReferenceInfo();
+    auto* sg = ri->GetNoEscapeSubgraph();
+    return ri->IsPartialSingleton() &&
+           std::none_of(sg->GetExcludedCohorts().cbegin(),
+                        sg->GetExcludedCohorts().cend(),
+                        [&](const ExecutionSubgraph::ExcludedCohort& ex) -> bool {
+                          // Make sure we haven't yet and never will escape.
+                          return ex.PrecedesBlock(blk) ||
+                                 ex.ContainsBlock(blk) ||
+                                 ex.SucceedsBlock(blk);
+                        });
   }
 
   const PhiPlaceholder* GetPhiPlaceholder(uint32_t block_id, size_t idx) const {
@@ -545,7 +599,12 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   // Keep the store referenced by the instruction, or all stores that feed a Phi placeholder.
   // This is necessary if the stored heap value can be observed.
   void KeepStores(Value value) {
-    if (value.IsUnknown()) {
+    if (value.IsPureUnknown()) {
+      return;
+    }
+    if (value.IsMergedUnknown()) {
+      kept_merged_unknowns_.SetBit(PhiPlaceholderIndex(value));
+      phi_placeholders_to_search_for_kept_stores_.SetBit(PhiPlaceholderIndex(value));
       return;
     }
     if (value.NeedsPhi()) {
@@ -568,7 +627,9 @@ class LSEVisitor final : private HGraphDelegateVisitor {
         // We use this function when reading a location with unknown value and
         // therefore we cannot know what exact store wrote that unknown value.
         // But we can have a phi placeholder here marking multiple stores to keep.
-        DCHECK(!heap_values[i].stored_by.IsInstruction());
+        DCHECK(
+            !heap_values[i].stored_by.IsInstruction() ||
+            heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo()->IsPartialSingleton());
         KeepStores(heap_values[i].stored_by);
         heap_values[i].stored_by = Value::Unknown();
       } else if (heap_location_collector_.MayAlias(i, loc_index)) {
@@ -779,7 +840,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
     ScopedArenaVector<ValueRecord>& heap_values = heap_values_for_[block->GetBlockId()];
     for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
       ReferenceInfo* ref_info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
-      if (!ref_info->IsSingletonAndRemovable()) {
+      if (!ref_info->IsSingletonAndRemovable() &&
+          !(ref_info->IsPartialSingleton() && IsPartialNoEscape(block, i))) {
         KeepStores(heap_values[i].stored_by);
         heap_values[i].stored_by = Value::Unknown();
       }
@@ -804,7 +866,23 @@ class LSEVisitor final : private HGraphDelegateVisitor {
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
     for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
       ReferenceInfo* ref_info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
-      if (ref_info->IsSingleton()) {
+      ArrayRef<const ExecutionSubgraph::ExcludedCohort> cohorts =
+          ref_info->GetNoEscapeSubgraph()->GetExcludedCohorts();
+      HBasicBlock* blk = instruction->GetBlock();
+      // We don't need to do anything if the reference has not escaped at this point.
+      // This is true if either we (1) never escape or (2) sometimes escape but
+      // there is no possible execution where we have done so at this time. NB
+      // We count being in the excluded cohort as escaping. Technically, this is
+      // a bit over-conservative (since we can have multiple non-escaping calls
+      // before a single escaping one) but this simplifies everything greatly.
+      if (ref_info->IsSingleton() ||
+          // partial and we aren't currently escaping and we haven't escaped yet.
+          (ref_info->IsPartialSingleton() && ref_info->GetNoEscapeSubgraph()->ContainsBlock(blk) &&
+           std::none_of(cohorts.begin(),
+                        cohorts.end(),
+                        [&](const ExecutionSubgraph::ExcludedCohort& cohort) {
+                          return cohort.PrecedesBlock(blk);
+                        }))) {
         // Singleton references cannot be seen by the callee.
       } else {
         if (side_effects.DoesAnyRead() || side_effects.DoesAnyWrite()) {
@@ -953,10 +1031,43 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   // The unknown heap value is used to mark Phi placeholders that cannot be replaced.
   ScopedArenaVector<Value> phi_placeholder_replacements_;
 
+  // Merged-unknowns that must have their predecessor values kept to ensure
+  // partially escaped values are written
+  ArenaBitVector kept_merged_unknowns_;
+
   ScopedArenaVector<HInstruction*> singleton_new_instances_;
+
+  friend std::ostream& operator<<(std::ostream& os, const Value& v);
 
   DISALLOW_COPY_AND_ASSIGN(LSEVisitor);
 };
+
+std::ostream& LSEVisitor::Value::Dump(std::ostream& os) const {
+  switch (type_) {
+    case Type::kDefault:
+      return os << "Default";
+    case Type::kInstruction:
+      return os << "Instruction[id: " << instruction_->GetId()
+                << ", block: " << instruction_->GetBlock()->GetBlockId() << "]";
+    case Type::kUnknown:
+      return os << "Unknown";
+    case Type::kInvalid:
+      return os << "Invalid";
+    case Type::kMergedUnknown:
+      return os << "MergedUnknown[block: " << phi_placeholder_->GetBlockId()
+                << ", heap_loc: " << phi_placeholder_->GetHeapLocation() << "]";
+    case Type::kNeedsLoopPhi:
+      return os << "NeedsLoopPhi[block: " << phi_placeholder_->GetBlockId()
+                << ", heap_loc: " << phi_placeholder_->GetHeapLocation() << "]";
+    case Type::kNeedsNonLoopPhi:
+      return os << "NeedsNonLoopPhi[block: " << phi_placeholder_->GetBlockId()
+                << ", heap_loc: " << phi_placeholder_->GetHeapLocation() << "]";
+  }
+}
+
+std::ostream& operator<<(std::ostream& os, const LSEVisitor::Value& v) {
+  return v.Dump(os);
+}
 
 ScopedArenaVector<LSEVisitor::PhiPlaceholder> LSEVisitor::CreatePhiPlaceholders(
     HGraph* graph,
@@ -1032,6 +1143,10 @@ LSEVisitor::LSEVisitor(HGraph* graph,
       phi_placeholder_replacements_(phi_placeholders_.size(),
                                     Value::Invalid(),
                                     allocator_.Adapter(kArenaAllocLSE)),
+      kept_merged_unknowns_(&allocator_,
+                            /*start_bits=*/ phi_placeholders_.size(),
+                            /*expandable=*/ false,
+                            kArenaAllocLSE),
       singleton_new_instances_(allocator_.Adapter(kArenaAllocLSE)) {
   // Clear bit vectors.
   phi_placeholders_to_search_for_kept_stores_.ClearAllBits();
@@ -1049,18 +1164,21 @@ LSEVisitor::Value LSEVisitor::PrepareLoopValue(HBasicBlock* block, size_t idx) {
   uint32_t pre_header_block_id = loop_info->GetPreHeader()->GetBlockId();
   Value pre_header_value = ReplacementOrValue(heap_values_for_[pre_header_block_id][idx].value);
   if (pre_header_value.IsUnknown()) {
-    return Value::Unknown();
+    return pre_header_value;
   }
   if (kIsDebugBuild) {
     // Check that the reference indeed dominates this loop.
     HeapLocation* location = heap_location_collector_.GetHeapLocation(idx);
     HInstruction* ref = location->GetReferenceInfo()->GetReference();
-    CHECK(ref->GetBlock() != block && ref->GetBlock()->Dominates(block));
+    CHECK(ref->GetBlock() != block && ref->GetBlock()->Dominates(block))
+        << GetGraph()->PrettyMethod();
     // Check that the index, if defined inside the loop, tracks a default value
     // or a Phi placeholder requiring a loop Phi.
     HInstruction* index = location->GetIndex();
     if (index != nullptr && loop_info->Contains(*index->GetBlock())) {
-      CHECK(pre_header_value.NeedsLoopPhi() || pre_header_value.Equals(Value::Default()));
+      CHECK(pre_header_value.NeedsLoopPhi() || pre_header_value.Equals(Value::Default()))
+          << GetGraph()->PrettyMethod() << " blk: " << block->GetBlockId() << " "
+          << pre_header_value;
     }
   }
   const PhiPlaceholder* phi_placeholder = GetPhiPlaceholder(block->GetBlockId(), idx);
@@ -1115,14 +1233,20 @@ LSEVisitor::Value LSEVisitor::MergePredecessorValues(HBasicBlock* block, size_t 
   Value merged_value =
       ReplacementOrValue(heap_values_for_[predecessors[0]->GetBlockId()][idx].value);
   for (size_t i = 1u, size = predecessors.size(); i != size; ++i) {
-    if (merged_value.IsUnknown()) {
-      break;
-    }
     Value pred_value =
         ReplacementOrValue(heap_values_for_[predecessors[i]->GetBlockId()][idx].value);
-    if (pred_value.IsUnknown()) {
-      merged_value = Value::Unknown();
-    } else if (!pred_value.Equals(merged_value)) {
+    if (pred_value.Equals(merged_value)) {
+      // Value is the same. No need to update our merged value.
+      continue;
+    } else if (pred_value.IsUnknown() || merged_value.IsUnknown()) {
+      // If one is unknown and the other is a different type of unknown
+      const PhiPlaceholder* phi_placeholder = GetPhiPlaceholder(block->GetBlockId(), idx);
+      merged_value = Value::MergedUnknown(phi_placeholder);
+      // We know that at least one of the merge points is unknown (and both are
+      // not pure-unknowns since that's captured above). This means that the
+      // overall value needs to be a MergedUnknown. Just return that.
+      break;
+    } else {
       // There are conflicting known values. We may still be able to replace loads with a Phi.
       const PhiPlaceholder* phi_placeholder = GetPhiPlaceholder(block->GetBlockId(), idx);
       // Propagate the need for a new loop Phi from all predecessors.
@@ -1130,6 +1254,8 @@ LSEVisitor::Value LSEVisitor::MergePredecessorValues(HBasicBlock* block, size_t 
       merged_value = ReplacementOrValue(Value::ForPhiPlaceholder(phi_placeholder, needs_loop_phi));
     }
   }
+  DCHECK(!merged_value.IsPureUnknown() || block->GetPredecessors().size() <= 1)
+      << merged_value << " in " << GetGraph()->PrettyMethod();
   return merged_value;
 }
 
@@ -1247,7 +1373,8 @@ void LSEVisitor::MaterializeNonLoopPhis(const PhiPlaceholder* phi_placeholder,
     phi_inputs.clear();
     for (HBasicBlock* predecessor : current_block->GetPredecessors()) {
       Value pred_value = ReplacementOrValue(heap_values_for_[predecessor->GetBlockId()][idx].value);
-      DCHECK(!pred_value.IsUnknown());
+      DCHECK(!pred_value.IsUnknown())
+          << "block " << current_block->GetBlockId() << " pred: " << predecessor->GetBlockId();
       if (pred_value.NeedsNonLoopPhi()) {
         // We need to process the Phi placeholder first.
         work_queue.push_back(pred_value.GetPhiPlaceholder());
@@ -1287,8 +1414,10 @@ void LSEVisitor::VisitGetLocation(HInstruction* instruction, size_t idx) {
   } else if (record.value.IsUnknown()) {
     // Load isn't eliminated. Put the load as the value into the HeapLocation.
     // This acts like GVN but with better aliasing analysis.
+    Value old_value = record.value;
     record.value = Value::ForInstruction(instruction);
     KeepStoresIfAliasedToLocation(heap_values, idx);
+    KeepStores(old_value);
   } else if (record.value.NeedsLoopPhi()) {
     // We do not know yet if the value is known for all back edges. Record for future processing.
     loads_requiring_loop_phi_.insert(std::make_pair(instruction, record));
@@ -1864,7 +1993,8 @@ const LSEVisitor::PhiPlaceholder* LSEVisitor::TryToMaterializeLoopPhis(
 void LSEVisitor::ProcessLoopPhiWithUnknownInput(const PhiPlaceholder* loop_phi_with_unknown_input) {
   size_t loop_phi_with_unknown_input_index = PhiPlaceholderIndex(loop_phi_with_unknown_input);
   DCHECK(phi_placeholder_replacements_[loop_phi_with_unknown_input_index].IsInvalid());
-  phi_placeholder_replacements_[loop_phi_with_unknown_input_index] = Value::Unknown();
+  phi_placeholder_replacements_[loop_phi_with_unknown_input_index] =
+      Value::MergedUnknown(loop_phi_with_unknown_input);
 
   uint32_t block_id = loop_phi_with_unknown_input->GetBlockId();
   const ArenaVector<HBasicBlock*> reverse_post_order = GetGraph()->GetReversePostOrder();
@@ -1895,7 +2025,8 @@ void LSEVisitor::ProcessLoopPhiWithUnknownInput(const PhiPlaceholder* loop_phi_w
     Value value;
     if (block->IsLoopHeader()) {
       if (block->GetLoopInformation()->IsIrreducible()) {
-        value = Value::Unknown();
+        const PhiPlaceholder* placeholder = GetPhiPlaceholder(block->GetBlockId(), idx);
+        value = Value::MergedUnknown(placeholder);
       } else {
         value = PrepareLoopValue(block, idx);
       }
@@ -2047,17 +2178,29 @@ void LSEVisitor::SearchPhiPlaceholdersForKeptStores() {
     work_queue.push_back(index);
   }
   const ArenaVector<HBasicBlock*>& blocks = GetGraph()->GetBlocks();
+  std::optional<ArenaBitVector> not_kept_stores;
+  if (stats_) {
+    not_kept_stores.emplace(GetGraph()->GetAllocator(),
+                            kept_stores_.GetBitSizeOf(),
+                            false,
+                            ArenaAllocKind::kArenaAllocLSE);
+  }
   while (!work_queue.empty()) {
-    const PhiPlaceholder* phi_placeholder = &phi_placeholders_[work_queue.back()];
+    uint32_t cur_phi_idx = work_queue.back();
+    const PhiPlaceholder* phi_placeholder = &phi_placeholders_[cur_phi_idx];
+    // Only writes to partial-escapes need to be specifically kept.
+    bool is_partial_kept_merged_unknown =
+        kept_merged_unknowns_.IsBitSet(cur_phi_idx) &&
+        heap_location_collector_.GetHeapLocation(phi_placeholder->GetHeapLocation())
+            ->GetReferenceInfo()
+            ->IsPartialSingleton();
     work_queue.pop_back();
     size_t idx = phi_placeholder->GetHeapLocation();
     HBasicBlock* block = blocks[phi_placeholder->GetBlockId()];
-    HeapLocation* heap_loc = heap_location_collector_.GetHeapLocation(idx);
-    bool unknown_array_stores = false;
     for (HBasicBlock* predecessor : block->GetPredecessors()) {
       ScopedArenaVector<ValueRecord>& heap_values = heap_values_for_[predecessor->GetBlockId()];
-      // For loop back-edges we must also preserve all stores to locations that may alias
-      // with the location `idx`.
+      // For loop back-edges we must also preserve all stores to locations that
+      // may alias with the location `idx`.
       // TODO: Review whether we need to keep stores to aliased locations from pre-header.
       // TODO: Add tests cases around this.
       bool is_back_edge =
@@ -2066,65 +2209,65 @@ void LSEVisitor::SearchPhiPlaceholdersForKeptStores() {
       size_t end = is_back_edge ? heap_values.size() : idx + 1u;
       for (size_t i = start; i != end; ++i) {
         Value stored_by = heap_values[i].stored_by;
-        if (!stored_by.IsUnknown() && (i == idx || heap_location_collector_.MayAlias(i, idx))) {
+        auto may_alias = [this, block, idx](size_t i) {
+            DCHECK_NE(i, idx);
+            DCHECK(block->IsLoopHeader());
+            if (heap_location_collector_.MayAlias(i, idx)) {
+              return true;
+            }
+            // For array locations with index defined inside the loop, include
+            // all other locations in the array, even those that LSA declares
+            // non-aliasing, such as `a[i]` and `a[i + 1]`, as they may actually
+            // refer to the same locations for different iterations. (LSA's
+            // `ComputeMayAlias()` does not consider different loop iterations.)
+            HeapLocation* heap_loc = heap_location_collector_.GetHeapLocation(idx);
+            HeapLocation* other_loc = heap_location_collector_.GetHeapLocation(i);
+            if (heap_loc->IsArray() &&
+                other_loc->IsArray() &&
+                heap_loc->GetReferenceInfo() == other_loc->GetReferenceInfo() &&
+                block->GetLoopInformation()->Contains(*heap_loc->GetIndex()->GetBlock())) {
+              // If one location has index defined inside and the other index defined outside
+              // of the loop, LSA considers them aliasing and we take an early return above.
+              DCHECK(block->GetLoopInformation()->Contains(*other_loc->GetIndex()->GetBlock()));
+              return true;
+            }
+            return false;
+        };
+        if (!stored_by.IsUnknown() && (i == idx || may_alias(i))) {
           if (stored_by.NeedsPhi()) {
             size_t phi_placeholder_index = PhiPlaceholderIndex(stored_by);
+            if (is_partial_kept_merged_unknown) {
+              // Propagate merged-unknown keep since otherwise this might look
+              // like a partial escape we can remove.
+              kept_merged_unknowns_.SetBit(phi_placeholder_index);
+            }
             if (!phi_placeholders_to_search_for_kept_stores_.IsBitSet(phi_placeholder_index)) {
               phi_placeholders_to_search_for_kept_stores_.SetBit(phi_placeholder_index);
               work_queue.push_back(phi_placeholder_index);
             }
           } else {
             DCHECK(IsStore(stored_by.GetInstruction()));
-            kept_stores_.SetBit(stored_by.GetInstruction()->GetId());
-          }
-        } else if (stored_by.IsUnknown() && heap_loc->IsArray()) {
-          // See comment below. We are an array load where we don't know how the
-          // value got there. Need to ensure that writes aren't omitted (in
-          // ways that are observable) since this looks like a read from an
-          // arbitrary point in the array.
-          unknown_array_stores = true;
-        }
-      }
-    }
-    if (unknown_array_stores) {
-      // Since we are an array, actually ended up here, and don't have a known
-      // set this must be from a previous iteration (otherwise we'd either not
-      // reach this because stores were kept from escapes or just known from
-      // earlier). We need to keep all stores that could affect this read.
-      //
-      // This is sufficient since
-      // (1) If we are not an array then all loads and stores are at known,
-      //     exact offsets (fields and such).
-      // (2) If we didn't end up here then we either had no chance to turn
-      //     this load into a phi or we know what the actual value is (above
-      //     branch).
-      //
-      // Since none of these are true we are reading from some location in
-      // the array and we have no idea where/if it was written. This means
-      // we need to be super conservative and preserve all writes that could
-      // possibly occur before this read, in case one of them is the write
-      // that supplies the value. This means keeping the last store for
-      // every heap location touching this array in every block.
-      //
-      // TODO We can do better and do partial LSE around this but we don't
-      // have the data for that at the moment.
-      // TODO Can we be more selective w/o partial LSE data?
-      // TODO Do some analysis to see how much we are leaving on the table
-      // with this.
-      for (uint32_t j = 0; j < heap_location_collector_.GetNumberOfHeapLocations(); ++j) {
-        auto candidate_heap_location = heap_location_collector_.GetHeapLocation(j);
-        // If the heap-location is part of this same array.
-        if (candidate_heap_location->GetReferenceInfo() == heap_loc->GetReferenceInfo()) {
-          for (const auto& hv : heap_values_for_) {
-            if (hv.size() > j && hv[j].stored_by.IsInstruction()) {
-              // This is the last store in this block. We can't tell if it's
-              // to the right location or not so we'll need to keep it.
-              kept_stores_.SetBit(hv[j].stored_by.GetInstruction()->GetId());
+            ReferenceInfo* ri = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
+            DCHECK(ri != nullptr) << "No heap value for " << stored_by.GetInstruction()->DebugName()
+                                  << " id: " << stored_by.GetInstruction()->GetId() << " block: "
+                                  << stored_by.GetInstruction()->GetBlock()->GetBlockId();
+            if (!is_partial_kept_merged_unknown && IsPartialNoEscape(predecessor, idx)) {
+              if (not_kept_stores) {
+                not_kept_stores->SetBit(stored_by.GetInstruction()->GetId());
+              }
+            } else {
+              kept_stores_.SetBit(stored_by.GetInstruction()->GetId());
             }
           }
         }
       }
     }
+  }
+  if (not_kept_stores) {
+    // a - b := (a & ~b)
+    not_kept_stores->Subtract(&kept_stores_);
+    auto num_removed = not_kept_stores->NumSetBits();
+    MaybeRecordStat(stats_, MethodCompilationStat::kPartialStoreRemoved, num_removed);
   }
 }
 
@@ -2296,6 +2439,7 @@ void LSEVisitor::Run() {
     if (!new_instance->HasNonEnvironmentUses()) {
       new_instance->RemoveEnvironmentUsers();
       new_instance->GetBlock()->RemoveInstruction(new_instance);
+      MaybeRecordStat(stats_, MethodCompilationStat::kFullLSEAllocationRemoved);
     }
   }
 }
@@ -2307,8 +2451,14 @@ bool LoadStoreElimination::Run() {
     // Skip this optimization.
     return false;
   }
+  // We need to be able to determine reachability. Clear it just to be safe but
+  // this should initially be empty.
+  graph_->ClearReachabilityInformation();
+  // This is O(blocks^3) time complexity. It means we can query reachability in
+  // O(1) though.
+  graph_->ComputeReachabilityInformation();
   ScopedArenaAllocator allocator(graph_->GetArenaStack());
-  LoadStoreAnalysis lsa(graph_, &allocator);
+  LoadStoreAnalysis lsa(graph_, stats_, &allocator, /*for_elimination=*/true);
   lsa.Run();
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   if (heap_location_collector.GetNumberOfHeapLocations() == 0) {

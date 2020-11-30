@@ -472,6 +472,7 @@ class CodeGeneratorX86 : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       ArtMethod* method) override;
 
+  void LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke);
   // Generate a call to a static or direct method.
   void GenerateStaticOrDirectCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) override;
@@ -483,17 +484,18 @@ class CodeGeneratorX86 : public CodeGenerator {
                                      uint32_t intrinsic_data);
   void RecordBootImageRelRoPatch(HX86ComputeBaseMethodAddress* method_address,
                                  uint32_t boot_image_offset);
-  void RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke);
-  void RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke);
+  void RecordBootImageMethodPatch(HInvoke* invoke);
+  void RecordMethodBssEntryPatch(HInvoke* invoke);
   void RecordBootImageTypePatch(HLoadClass* load_class);
   Label* NewTypeBssEntryPatch(HLoadClass* load_class);
   void RecordBootImageStringPatch(HLoadString* load_string);
   Label* NewStringBssEntryPatch(HLoadString* load_string);
+  void RecordBootImageJniEntrypointPatch(HInvokeStaticOrDirect* invoke);
 
   void LoadBootImageAddress(Register reg,
                             uint32_t boot_image_reference,
                             HInvokeStaticOrDirect* invoke);
-  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+  void LoadIntrinsicDeclaringClass(Register reg, HInvokeStaticOrDirect* invoke);
 
   Label* NewJitRootStringPatch(const DexFile& dex_file,
                                dex::StringIndex string_index,
@@ -697,6 +699,7 @@ class CodeGeneratorX86 : public CodeGenerator {
   void EmitPcRelativeLinkerPatches(const ArenaDeque<X86PcRelativePatchInfo>& infos,
                                    ArenaVector<linker::LinkerPatch>* linker_patches);
 
+  Register GetInvokeExtraParameter(HInvoke* invoke, Register temp);
   Register GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke, Register temp);
 
   // Labels for each block that will be compiled.
@@ -715,10 +718,16 @@ class CodeGeneratorX86 : public CodeGenerator {
   ArenaDeque<X86PcRelativePatchInfo> boot_image_type_patches_;
   // PC-relative type patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> type_bss_entry_patches_;
+  // PC-relative public type patch info for kBssEntryPublic.
+  ArenaDeque<X86PcRelativePatchInfo> public_type_bss_entry_patches_;
+  // PC-relative package type patch info for kBssEntryPackage.
+  ArenaDeque<X86PcRelativePatchInfo> package_type_bss_entry_patches_;
   // PC-relative String patch info for kBootImageLinkTimePcRelative.
   ArenaDeque<X86PcRelativePatchInfo> boot_image_string_patches_;
   // PC-relative String patch info for kBssEntry.
   ArenaDeque<X86PcRelativePatchInfo> string_bss_entry_patches_;
+  // PC-relative method patch info for kBootImageLinkTimePcRelative+kCallCriticalNative.
+  ArenaDeque<X86PcRelativePatchInfo> boot_image_jni_entrypoint_patches_;
   // PC-relative patch info for IntrinsicObjects for the boot image,
   // and for method/type/string patches for kBootImageRelRo otherwise.
   ArenaDeque<X86PcRelativePatchInfo> boot_image_other_patches_;
