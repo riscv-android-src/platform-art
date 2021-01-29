@@ -244,8 +244,7 @@ Heap::Heap(size_t initial_size,
            bool use_generational_cc,
            uint64_t min_interval_homogeneous_space_compaction_by_oom,
            bool dump_region_info_before_gc,
-           bool dump_region_info_after_gc,
-           space::ImageSpaceLoadingOrder image_space_loading_order)
+           bool dump_region_info_after_gc)
     : non_moving_space_(nullptr),
       rosalloc_space_(nullptr),
       dlmalloc_space_(nullptr),
@@ -419,10 +418,8 @@ Heap::Heap(size_t initial_size,
                                        boot_class_path_locations,
                                        image_file_name,
                                        image_instruction_set,
-                                       image_space_loading_order,
                                        runtime->ShouldRelocate(),
                                        /*executable=*/ !runtime->IsAotCompiler(),
-                                       is_zygote,
                                        heap_reservation_size,
                                        &boot_image_spaces,
                                        &heap_reservation)) {
@@ -710,7 +707,8 @@ Heap::Heap(size_t initial_size,
             "young",
             measure_gc_performance);
       }
-      active_concurrent_copying_collector_ = concurrent_copying_collector_;
+      active_concurrent_copying_collector_.store(concurrent_copying_collector_,
+                                                 std::memory_order_relaxed);
       DCHECK(region_space_ != nullptr);
       concurrent_copying_collector_->SetRegionSpace(region_space_);
       if (use_generational_cc_) {
@@ -1984,67 +1982,6 @@ void Heap::CountInstances(const std::vector<Handle<mirror::Class>>& classes,
   VisitObjects(instance_counter);
 }
 
-void Heap::GetInstances(VariableSizedHandleScope& scope,
-                        Handle<mirror::Class> h_class,
-                        bool use_is_assignable_from,
-                        int32_t max_count,
-                        std::vector<Handle<mirror::Object>>& instances) {
-  DCHECK_GE(max_count, 0);
-  auto instance_collector = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (MatchesClass(obj, h_class, use_is_assignable_from)) {
-      if (max_count == 0 || instances.size() < static_cast<size_t>(max_count)) {
-        instances.push_back(scope.NewHandle(obj));
-      }
-    }
-  };
-  VisitObjects(instance_collector);
-}
-
-void Heap::GetReferringObjects(VariableSizedHandleScope& scope,
-                               Handle<mirror::Object> o,
-                               int32_t max_count,
-                               std::vector<Handle<mirror::Object>>& referring_objects) {
-  class ReferringObjectsFinder {
-   public:
-    ReferringObjectsFinder(VariableSizedHandleScope& scope_in,
-                           Handle<mirror::Object> object_in,
-                           int32_t max_count_in,
-                           std::vector<Handle<mirror::Object>>& referring_objects_in)
-        REQUIRES_SHARED(Locks::mutator_lock_)
-        : scope_(scope_in),
-          object_(object_in),
-          max_count_(max_count_in),
-          referring_objects_(referring_objects_in) {}
-
-    // For Object::VisitReferences.
-    void operator()(ObjPtr<mirror::Object> obj,
-                    MemberOffset offset,
-                    bool is_static ATTRIBUTE_UNUSED) const
-        REQUIRES_SHARED(Locks::mutator_lock_) {
-      mirror::Object* ref = obj->GetFieldObject<mirror::Object>(offset);
-      if (ref == object_.Get() && (max_count_ == 0 || referring_objects_.size() < max_count_)) {
-        referring_objects_.push_back(scope_.NewHandle(obj));
-      }
-    }
-
-    void VisitRootIfNonNull(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED)
-        const {}
-    void VisitRoot(mirror::CompressedReference<mirror::Object>* root ATTRIBUTE_UNUSED) const {}
-
-   private:
-    VariableSizedHandleScope& scope_;
-    Handle<mirror::Object> const object_;
-    const uint32_t max_count_;
-    std::vector<Handle<mirror::Object>>& referring_objects_;
-    DISALLOW_COPY_AND_ASSIGN(ReferringObjectsFinder);
-  };
-  ReferringObjectsFinder finder(scope, o, max_count, referring_objects);
-  auto referring_objects_finder = [&](mirror::Object* obj) REQUIRES_SHARED(Locks::mutator_lock_) {
-    obj->VisitReferences(finder, VoidFunctor());
-  };
-  VisitObjects(referring_objects_finder);
-}
-
 void Heap::CollectGarbage(bool clear_soft_references, GcCause cause) {
   // Even if we waited for a GC we still need to do another GC since weaks allocated during the
   // last GC will not have necessarily been cleared.
@@ -2639,19 +2576,24 @@ collector::GcType Heap::CollectGarbageInternal(collector::GcType gc_type,
         collector = semi_space_collector_;
         break;
       case kCollectorTypeCC:
+        collector::ConcurrentCopying* active_cc_collector;
         if (use_generational_cc_) {
           // TODO: Other threads must do the flip checkpoint before they start poking at
           // active_concurrent_copying_collector_. So we should not concurrency here.
-          active_concurrent_copying_collector_ = (gc_type == collector::kGcTypeSticky) ?
-              young_concurrent_copying_collector_ : concurrent_copying_collector_;
-          DCHECK(active_concurrent_copying_collector_->RegionSpace() == region_space_);
+          active_cc_collector = (gc_type == collector::kGcTypeSticky) ?
+                  young_concurrent_copying_collector_ : concurrent_copying_collector_;
+          active_concurrent_copying_collector_.store(active_cc_collector,
+                                                     std::memory_order_relaxed);
+          DCHECK(active_cc_collector->RegionSpace() == region_space_);
+          collector = active_cc_collector;
+        } else {
+          collector = active_concurrent_copying_collector_.load(std::memory_order_relaxed);
         }
-        collector = active_concurrent_copying_collector_;
         break;
       default:
         LOG(FATAL) << "Invalid collector type " << static_cast<size_t>(collector_type_);
     }
-    if (collector != active_concurrent_copying_collector_) {
+    if (collector != active_concurrent_copying_collector_.load(std::memory_order_relaxed)) {
       temp_space_->GetMemMap()->Protect(PROT_READ | PROT_WRITE);
       if (kIsDebugBuild) {
         // Try to read each page of the memory map in case mprotect didn't work properly b/19894268.

@@ -18,6 +18,7 @@
 #define ART_COMPILER_OPTIMIZING_CODE_GENERATOR_ARM_VIXL_H_
 
 #include "base/enums.h"
+#include "class_root.h"
 #include "code_generator.h"
 #include "common_arm.h"
 #include "dex/string_reference.h"
@@ -540,7 +541,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                   vixl::aarch32::Register card,
                   vixl::aarch32::Register object,
                   vixl::aarch32::Register value,
-                  bool can_be_null);
+                  bool value_can_be_null);
 
   void GenerateMemoryBarrier(MemBarrierKind kind);
 
@@ -581,6 +582,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
       const HInvokeStaticOrDirect::DispatchInfo& desired_dispatch_info,
       ArtMethod* method) override;
 
+  void LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke);
   void GenerateStaticOrDirectCall(
       HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path = nullptr) override;
   void GenerateVirtualCall(
@@ -637,7 +639,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                                 Handle<mirror::Class> handle);
 
   void LoadBootImageAddress(vixl::aarch32::Register reg, uint32_t boot_image_reference);
-  void AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke, uint32_t boot_image_offset);
+  void LoadTypeForBootImageIntrinsic(vixl::aarch32::Register reg, TypeReference type_reference);
+  void LoadIntrinsicDeclaringClass(vixl::aarch32::Register reg, HInvoke* invoke);
+  void LoadClassRootForIntrinsic(vixl::aarch32::Register reg, ClassRoot class_root);
 
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
   bool NeedsThunkCode(const linker::LinkerPatch& patch) const override;
@@ -657,11 +661,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                vixl::aarch32::Register obj,
                                uint32_t offset,
                                ReadBarrierOption read_barrier_option);
-  // Generate ADD for UnsafeCASObject to reconstruct the old value from
-  // `old_value - expected` and mark it with Baker read barrier.
-  void GenerateUnsafeCasOldValueAddWithBakerReadBarrier(vixl::aarch32::Register old_value,
-                                                        vixl::aarch32::Register adjusted_old_value,
-                                                        vixl::aarch32::Register expected);
+  // Generate MOV for an intrinsic CAS to mark the old value with Baker read barrier.
+  void GenerateIntrinsicCasMoveWithBakerReadBarrier(vixl::aarch32::Register marked_old_value,
+                                                    vixl::aarch32::Register old_value);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
   // Overload suitable for Unsafe.getObject/-Volatile() intrinsic.
@@ -676,7 +678,7 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
                                              Location ref,
                                              vixl::aarch32::Register obj,
                                              uint32_t offset,
-                                             Location temp,
+                                             Location maybe_temp,
                                              bool needs_null_check);
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference array load when Baker's read barriers are used.
@@ -708,6 +710,18 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   // scratch pool.
   virtual void MaybeGenerateMarkingRegisterCheck(int code,
                                                  Location temp_loc = Location::NoLocation());
+
+  // Create slow path for a read barrier for a heap reference within `instruction`.
+  //
+  // This is a helper function for GenerateReadBarrierSlow() that has the same
+  // arguments. The creation and adding of the slow path is exposed for intrinsics
+  // that cannot use GenerateReadBarrierSlow() from their own slow paths.
+  SlowPathCodeARMVIXL* AddReadBarrierSlowPath(HInstruction* instruction,
+                                              Location out,
+                                              Location ref,
+                                              Location obj,
+                                              uint32_t offset,
+                                              Location index);
 
   // Generate a read barrier for a heap reference within `instruction`
   // using a slow path.
@@ -798,11 +812,11 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
   // Encoding of thunk type and data for link-time generated thunks for Baker read barriers.
 
   enum class BakerReadBarrierKind : uint8_t {
-    kField,       // Field get or array get with constant offset (i.e. constant index).
-    kArray,       // Array get with index in register.
-    kGcRoot,      // GC root load.
-    kUnsafeCas,   // UnsafeCASObject intrinsic.
-    kLast = kUnsafeCas
+    kField,         // Field get or array get with constant offset (i.e. constant index).
+    kArray,         // Array get with index in register.
+    kGcRoot,        // GC root load.
+    kIntrinsicCas,  // Unsafe/VarHandle CAS intrinsic.
+    kLast = kIntrinsicCas
   };
 
   enum class BakerReadBarrierWidth : uint8_t {
@@ -869,9 +883,9 @@ class CodeGeneratorARMVIXL : public CodeGenerator {
            BakerReadBarrierWidthField::Encode(width);
   }
 
-  static uint32_t EncodeBakerReadBarrierUnsafeCasData(uint32_t root_reg) {
+  static uint32_t EncodeBakerReadBarrierIntrinsicCasData(uint32_t root_reg) {
     CheckValidReg(root_reg);
-    return BakerReadBarrierKindField::Encode(BakerReadBarrierKind::kUnsafeCas) |
+    return BakerReadBarrierKindField::Encode(BakerReadBarrierKind::kIntrinsicCas) |
            BakerReadBarrierFirstRegField::Encode(root_reg) |
            BakerReadBarrierSecondRegField::Encode(kBakerReadBarrierInvalidEncodedReg) |
            BakerReadBarrierWidthField::Encode(BakerReadBarrierWidth::kWide);

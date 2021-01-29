@@ -27,6 +27,7 @@
 #include "base/enums.h"
 #include "base/globals.h"
 #include "base/memory_region.h"
+#include "class_root.h"
 #include "dex/string_reference.h"
 #include "dex/type_reference.h"
 #include "graph_visualizer.h"
@@ -630,9 +631,13 @@ class CodeGenerator : public DeletableArenaObject<kArenaAllocCodeGenerator> {
                                                              Location runtime_return_location);
   void GenerateLoadMethodTypeRuntimeCall(HLoadMethodType* method_type);
 
-  uint32_t GetBootImageOffset(HLoadClass* load_class);
-  uint32_t GetBootImageOffset(HLoadString* load_string);
-  uint32_t GetBootImageOffset(HInvokeStaticOrDirect* invoke);
+  static uint32_t GetBootImageOffset(ObjPtr<mirror::Object> object)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  static uint32_t GetBootImageOffset(HLoadClass* load_class);
+  static uint32_t GetBootImageOffset(HLoadString* load_string);
+  static uint32_t GetBootImageOffset(HInvoke* invoke);
+  static uint32_t GetBootImageOffset(ClassRoot class_root);
+  static uint32_t GetBootImageOffsetOfIntrinsicDeclaringClass(HInvoke* invoke);
 
   static void CreateSystemArrayCopyLocationSummary(HInvoke* invoke);
 

@@ -957,6 +957,11 @@ static ArtMethod* ResolveMethod(uint16_t method_idx,
           resolved_method, class_linker->GetImagePointerSize());
     } else {
       uint16_t vtable_index = resolved_method->GetMethodIndex();
+      if (vtable_index >= static_cast<uint32_t>(
+              compiling_class->GetSuperClass()->GetVTableLength())) {
+        // No super method. The runtime will throw a NoSuchMethodError.
+        return nullptr;
+      }
       actual_method = compiling_class->GetSuperClass()->GetVTableEntry(
           vtable_index, class_linker->GetImagePointerSize());
     }
@@ -1104,9 +1109,10 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
       }
     }
     HInvokeStaticOrDirect::DispatchInfo dispatch_info =
-        HSharpening::SharpenInvokeStaticOrDirect(resolved_method,
-                                                 has_method_id,
-                                                 code_generator_);
+        HSharpening::SharpenLoadMethod(resolved_method,
+                                       has_method_id,
+                                       /* for_interface_call= */ false,
+                                       code_generator_);
     if (dispatch_info.code_ptr_location == CodePtrLocation::kCallCriticalNative) {
       graph_->SetHasDirectCriticalNativeCall(true);
     }
@@ -1138,6 +1144,16 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                              /*vtable_index=*/ imt_or_vtable_index);
   } else {
     DCHECK_EQ(invoke_type, kInterface);
+    if (kIsDebugBuild) {
+      ScopedObjectAccess soa(Thread::Current());
+      DCHECK(resolved_method->GetDeclaringClass()->IsInterface());
+    }
+    MethodLoadKind load_kind = HSharpening::SharpenLoadMethod(
+        resolved_method,
+        /* has_method_id= */ true,
+        /* for_interface_call= */ true,
+        code_generator_)
+            .method_load_kind;
     invoke = new (allocator_) HInvokeInterface(allocator_,
                                                number_of_arguments,
                                                return_type,
@@ -1145,7 +1161,8 @@ bool HInstructionBuilder::BuildInvoke(const Instruction& instruction,
                                                method_reference,
                                                resolved_method,
                                                resolved_method_reference,
-                                               /*imt_index=*/ imt_or_vtable_index);
+                                               /*imt_index=*/ imt_or_vtable_index,
+                                               load_kind);
   }
   return HandleInvoke(invoke, operands, shorty, /* is_unresolved= */ false);
 }
@@ -1256,6 +1273,7 @@ HNewInstance* HInstructionBuilder::BuildNewInstance(dex::TypeIndex type_index, u
   if (load_class->NeedsAccessCheck() ||
       klass == nullptr ||  // Finalizable/instantiable is unknown.
       klass->IsFinalizable() ||
+      klass.Get() == klass->GetClass() ||  // Classes cannot be allocated in code
       !klass->IsInstantiable()) {
     entrypoint = kQuickAllocObjectWithChecks;
   }
@@ -1669,6 +1687,12 @@ bool HInstructionBuilder::SetupInvokeArguments(HInstruction* invoke,
     invoke->SetRawInputAt(argument_index, graph_->GetCurrentMethod());
   }
 
+  if (invoke->IsInvokeInterface() &&
+      (invoke->AsInvokeInterface()->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive)) {
+    invoke->SetRawInputAt(invoke->AsInvokeInterface()->GetNumberOfArguments() - 1,
+                          graph_->GetCurrentMethod());
+  }
+
   return true;
 }
 
@@ -2026,10 +2050,9 @@ ArtField* HInstructionBuilder::ResolveField(uint16_t field_idx, bool is_static, 
   ClassLinker* class_linker = dex_compilation_unit_->GetClassLinker();
   Handle<mirror::ClassLoader> class_loader = dex_compilation_unit_->GetClassLoader();
 
-  ArtField* resolved_field = class_linker->ResolveField(field_idx,
-                                                        dex_compilation_unit_->GetDexCache(),
-                                                        class_loader,
-                                                        is_static);
+  ArtField* resolved_field = class_linker->ResolveFieldJLS(field_idx,
+                                                           dex_compilation_unit_->GetDexCache(),
+                                                           class_loader);
   DCHECK_EQ(resolved_field == nullptr, soa.Self()->IsExceptionPending())
       << "field="
       << ((resolved_field == nullptr) ? "null" : resolved_field->PrettyField())
@@ -2041,8 +2064,6 @@ ArtField* HInstructionBuilder::ResolveField(uint16_t field_idx, bool is_static, 
     return nullptr;
   }
 
-  // Check static/instance. The class linker has a fast path for looking into the dex cache
-  // and does not check static/instance if it hits it.
   if (UNLIKELY(resolved_field->IsStatic() != is_static)) {
     return nullptr;
   }

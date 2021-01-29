@@ -424,10 +424,8 @@ TEST_F(Dex2oatImageTest, TestExtension) {
                                                 /*boot_class_path_locations=*/ libcore_dex_files,
                                                 image_location,
                                                 kRuntimeISA,
-                                                gc::space::ImageSpaceLoadingOrder::kSystemFirst,
                                                 relocate,
                                                 /*executable=*/ true,
-                                                /*is_zygote=*/ false,
                                                 /*extra_reservation_size=*/ 0u,
                                                 &boot_image_spaces,
                                                 &extra_reservation);

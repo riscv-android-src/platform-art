@@ -45,7 +45,6 @@ flattened_apex_p=$($ANDROID_BUILD_TOP/build/soong/soong_ui.bash --dumpvar-mode T
   || setup_die
 
 # Switch the build system to unbundled mode in the reduced manifest branch.
-# TODO(b/159109002): Clean this up.
 if [ ! -d $ANDROID_BUILD_TOP/frameworks/base ]; then
   export TARGET_BUILD_UNBUNDLED=true
 fi
@@ -133,7 +132,7 @@ function fail_check {
 # Test all modules, if possible.
 
 apex_modules=(
-  "com.android.art.release"
+  "com.android.art"
   "com.android.art.debug"
   "com.android.art.testing"
 )
@@ -181,9 +180,9 @@ for apex_module in ${apex_modules[@]}; do
       art_apex_test_args="$art_apex_test_args --debugfs $ANDROID_HOST_OUT/bin/debugfs"
     fi
     case $apex_module in
-      (*.release) test_only_args="--flavor release";;
       (*.debug)   test_only_args="--flavor debug";;
       (*.testing) test_only_args="--flavor testing";;
+      (*)         test_only_args="--flavor release";;
     esac
   fi
   say "APEX package path: $apex_path"

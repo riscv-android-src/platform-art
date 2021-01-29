@@ -72,10 +72,8 @@ static std::string CommandLine() {
   return android::base::Join(command, ' ');
 }
 
-static constexpr int kInvalidFd = -1;
-
 static bool FdIsValid(int fd) {
-  return fd != kInvalidFd;
+  return fd != File::kInvalidFd;
 }
 
 static void UsageErrorV(const char* fmt, va_list ap) {
@@ -179,6 +177,10 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("      In this case, the reference profile must have a boot profile version.");
   UsageError("  --force-merge: performs a forced merge, without analyzing if there is a");
   UsageError("      significant difference between the current profile and the reference profile.");
+  UsageError("  --min-new-methods-percent-change=percentage between 0 and 100 (default 20)");
+  UsageError("      the min percent of new methods to trigger a compilation.");
+  UsageError("  --min-new-classes-percent-change=percentage between 0 and 100 (default 20)");
+  UsageError("      the min percent of new classes to trigger a compilation.");
   UsageError("");
 
   exit(EXIT_FAILURE);
@@ -269,12 +271,12 @@ static void ParseBoolOption(const char* raw_option,
 class ProfMan final {
  public:
   ProfMan() :
-      reference_profile_file_fd_(kInvalidFd),
+      reference_profile_file_fd_(File::kInvalidFd),
       dump_only_(false),
       dump_classes_and_methods_(false),
       generate_boot_image_profile_(false),
       generate_boot_profile_(false),
-      dump_output_to_fd_(kInvalidFd),
+      dump_output_to_fd_(File::kInvalidFd),
       test_profile_num_dex_(kDefaultTestProfileNumDex),
       test_profile_method_percerntage_(kDefaultTestProfileMethodPercentage),
       test_profile_class_percentage_(kDefaultTestProfileClassPercentage),
@@ -406,6 +408,24 @@ class ProfMan final {
                         &test_profile_class_percentage_);
       } else if (StartsWith(option, "--generate-test-profile-seed=")) {
         ParseUintOption(raw_option, "--generate-test-profile-seed=", &test_profile_seed_);
+      } else if (StartsWith(option, "--min-new-methods-percent-change=")) {
+        uint32_t min_new_methods_percent_change;
+        ParseUintOption(raw_option,
+                        "--min-new-methods-percent-change=",
+                        &min_new_methods_percent_change,
+                        0u,
+                        100u);
+        profile_assistant_options_.SetMinNewMethodsPercentChangeForCompilation(
+            min_new_methods_percent_change);
+      } else if (StartsWith(option, "--min-new-classes-percent-change=")) {
+        uint32_t min_new_classes_percent_change;
+        ParseUintOption(raw_option,
+                        "--min-new-classes-percent-change=",
+                        &min_new_classes_percent_change,
+                        0u,
+                        100u);
+        profile_assistant_options_.SetMinNewClassesPercentChangeForCompilation(
+            min_new_classes_percent_change);
       } else if (option == "--copy-and-update-profile-key") {
         copy_and_update_profile_key_ = true;
       } else if (option == "--boot-image-merge") {
@@ -684,7 +704,7 @@ class ProfMan final {
       }
     }
     for (const std::string& profile_file : profile_files_) {
-      int ret = DumpOneProfile(kOrdinaryProfile, profile_file, kInvalidFd, &dex_files, &dump);
+      int ret = DumpOneProfile(kOrdinaryProfile, profile_file, File::kInvalidFd, &dex_files, &dump);
       if (ret != 0) {
         return ret;
       }
@@ -703,7 +723,7 @@ class ProfMan final {
     if (!reference_profile_file_.empty()) {
       int ret = DumpOneProfile(kReferenceProfile,
                                reference_profile_file_,
-                               kInvalidFd,
+                               File::kInvalidFd,
                                &dex_files,
                                &dump);
       if (ret != 0) {
@@ -1227,7 +1247,7 @@ class ProfMan final {
       fd = open(reference_profile_file_.c_str(), flags, 0644);
       if (fd < 0) {
         PLOG(ERROR) << "Cannot open " << reference_profile_file_;
-        return kInvalidFd;
+        return File::kInvalidFd;
       }
     }
     return fd;

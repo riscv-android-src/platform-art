@@ -17,12 +17,6 @@
 cc_defaults {
     name: "libprofile_defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt binaries from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "profile/profile_boot_info.cc",
@@ -134,7 +128,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }

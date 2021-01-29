@@ -142,6 +142,8 @@ void CommonRuntimeTestImpl::FinalizeSetup() {
   if (!unstarted_initialized_) {
     interpreter::UnstartedRuntime::Initialize();
     unstarted_initialized_ = true;
+  } else {
+    interpreter::UnstartedRuntime::Reinitialize();
   }
 
   {
@@ -503,16 +505,6 @@ bool CommonRuntimeTestImpl::RunDex2Oat(const std::vector<std::string>& args,
     return false;
   }
   return res.StandardSuccess();
-}
-
-std::string CommonRuntimeTestImpl::GetImageDirectory() {
-  std::string prefix;
-  if (IsHost()) {
-    const char* host_dir = getenv("ANDROID_HOST_OUT");
-    CHECK(host_dir != nullptr);
-    prefix = host_dir;
-  }
-  return prefix + kAndroidArtApexDefaultPath + "/javalib";
 }
 
 std::string CommonRuntimeTestImpl::GetImageLocation() {

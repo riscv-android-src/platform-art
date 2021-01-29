@@ -3014,6 +3014,21 @@ void IntrinsicCodeGeneratorX86::VisitSystemArrayCopy(HInvoke* invoke) {
   __ Bind(intrinsic_slow_path->GetExitLabel());
 }
 
+static void RequestBaseMethodAddressInRegister(HInvoke* invoke) {
+  LocationSummary* locations = invoke->GetLocations();
+  if (locations != nullptr) {
+    HInvokeStaticOrDirect* invoke_static_or_direct = invoke->AsInvokeStaticOrDirect();
+    // Note: The base method address is not present yet when this is called from the
+    // PCRelativeHandlerVisitor via IsCallFreeIntrinsic() to determine whether to insert it.
+    if (invoke_static_or_direct->HasSpecialInput()) {
+      DCHECK(invoke_static_or_direct->InputAt(invoke_static_or_direct->GetSpecialInputIndex())
+                 ->IsX86ComputeBaseMethodAddress());
+      locations->SetInAt(invoke_static_or_direct->GetSpecialInputIndex(),
+                         Location::RequiresRegister());
+    }
+  }
+}
+
 void IntrinsicLocationsBuilderX86::VisitIntegerValueOf(HInvoke* invoke) {
   DCHECK(invoke->IsInvokeStaticOrDirect());
   InvokeRuntimeCallingConvention calling_convention;
@@ -3022,17 +3037,7 @@ void IntrinsicLocationsBuilderX86::VisitIntegerValueOf(HInvoke* invoke) {
       codegen_,
       Location::RegisterLocation(EAX),
       Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
-
-  LocationSummary* locations = invoke->GetLocations();
-  if (locations != nullptr) {
-    HInvokeStaticOrDirect* invoke_static_or_direct = invoke->AsInvokeStaticOrDirect();
-    if (invoke_static_or_direct->HasSpecialInput() &&
-        invoke->InputAt(invoke_static_or_direct->GetSpecialInputIndex())
-            ->IsX86ComputeBaseMethodAddress()) {
-      locations->SetInAt(invoke_static_or_direct->GetSpecialInputIndex(),
-                         Location::RequiresRegister());
-    }
-  }
+  RequestBaseMethodAddressInRegister(invoke);
 }
 
 void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
@@ -3043,7 +3048,12 @@ void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
   X86Assembler* assembler = GetAssembler();
 
   Register out = locations->Out().AsRegister<Register>();
-  InvokeRuntimeCallingConvention calling_convention;
+  auto allocate_instance = [&]() {
+    DCHECK_EQ(out, InvokeRuntimeCallingConvention().GetRegisterAt(0));
+    codegen_->LoadIntrinsicDeclaringClass(out, invoke->AsInvokeStaticOrDirect());
+    codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+    CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+  };
   if (invoke->InputAt(0)->IsConstant()) {
     int32_t value = invoke->InputAt(0)->AsIntConstant()->GetValue();
     if (static_cast<uint32_t>(value - info.low) < info.length) {
@@ -3056,8 +3066,7 @@ void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                             info.integer_boot_image_offset);
+      allocate_instance();
       __ movl(Address(out, info.value_offset), Immediate(value));
     }
   } else {
@@ -3097,11 +3106,65 @@ void IntrinsicCodeGeneratorX86::VisitIntegerValueOf(HInvoke* invoke) {
     __ jmp(&done);
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                           info.integer_boot_image_offset);
+    allocate_instance();
     __ movl(Address(out, info.value_offset), in);
     __ Bind(&done);
   }
+}
+
+void IntrinsicLocationsBuilderX86::VisitReferenceGetReferent(HInvoke* invoke) {
+  IntrinsicVisitor::CreateReferenceGetReferentLocations(invoke, codegen_);
+  RequestBaseMethodAddressInRegister(invoke);
+}
+
+void IntrinsicCodeGeneratorX86::VisitReferenceGetReferent(HInvoke* invoke) {
+  X86Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  Location obj = locations->InAt(0);
+  Location out = locations->Out();
+
+  SlowPathCode* slow_path = new (GetAllocator()) IntrinsicSlowPathX86(invoke);
+  codegen_->AddSlowPath(slow_path);
+
+  if (kEmitCompilerReadBarrier) {
+    // Check self->GetWeakRefAccessEnabled().
+    ThreadOffset32 offset = Thread::WeakRefAccessEnabledOffset<kX86PointerSize>();
+    __ fs()->cmpl(Address::Absolute(offset), Immediate(0));
+    __ j(kEqual, slow_path->GetEntryLabel());
+  }
+
+  // Load the java.lang.ref.Reference class, use the output register as a temporary.
+  codegen_->LoadIntrinsicDeclaringClass(out.AsRegister<Register>(),
+                                        invoke->AsInvokeStaticOrDirect());
+
+  // Check static fields java.lang.ref.Reference.{disableIntrinsic,slowPathEnabled} together.
+  MemberOffset disable_intrinsic_offset = IntrinsicVisitor::GetReferenceDisableIntrinsicOffset();
+  DCHECK_ALIGNED(disable_intrinsic_offset.Uint32Value(), 2u);
+  DCHECK_EQ(disable_intrinsic_offset.Uint32Value() + 1u,
+            IntrinsicVisitor::GetReferenceSlowPathEnabledOffset().Uint32Value());
+  __ cmpw(Address(out.AsRegister<Register>(), disable_intrinsic_offset.Uint32Value()),
+          Immediate(0));
+  __ j(kNotEqual, slow_path->GetEntryLabel());
+
+  // Load the value from the field.
+  uint32_t referent_offset = mirror::Reference::ReferentOffset().Uint32Value();
+  if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
+    codegen_->GenerateFieldLoadWithBakerReadBarrier(invoke,
+                                                    out,
+                                                    obj.AsRegister<Register>(),
+                                                    referent_offset,
+                                                    /*needs_null_check=*/ true);
+    // Note that the fence is a no-op, thanks to the x86 memory model.
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+  } else {
+    __ movl(out.AsRegister<Register>(), Address(obj.AsRegister<Register>(), referent_offset));
+    codegen_->MaybeRecordImplicitNullCheck(invoke);
+    // Note that the fence is a no-op, thanks to the x86 memory model.
+    codegen_->GenerateMemoryBarrier(MemBarrierKind::kLoadAny);  // `referent` is volatile.
+    codegen_->MaybeGenerateReadBarrierSlow(invoke, out, out, obj, referent_offset);
+  }
+  __ Bind(slow_path->GetExitLabel());
 }
 
 void IntrinsicLocationsBuilderX86::VisitThreadInterrupted(HInvoke* invoke) {
@@ -3167,34 +3230,6 @@ void IntrinsicCodeGeneratorX86::VisitIntegerDivideUnsigned(HInvoke* invoke) {
   __ Bind(slow_path->GetExitLabel());
 }
 
-static bool IsVarHandleGetAndBitwiseOp(HInvoke* invoke) {
-  switch (invoke->GetIntrinsic()) {
-    case Intrinsics::kVarHandleGetAndBitwiseOr:
-    case Intrinsics::kVarHandleGetAndBitwiseOrAcquire:
-    case Intrinsics::kVarHandleGetAndBitwiseOrRelease:
-    case Intrinsics::kVarHandleGetAndBitwiseXor:
-    case Intrinsics::kVarHandleGetAndBitwiseXorAcquire:
-    case Intrinsics::kVarHandleGetAndBitwiseXorRelease:
-    case Intrinsics::kVarHandleGetAndBitwiseAnd:
-    case Intrinsics::kVarHandleGetAndBitwiseAndAcquire:
-    case Intrinsics::kVarHandleGetAndBitwiseAndRelease:
-      return true;
-    default:
-      return false;
-  }
-}
-
-static bool IsVarHandleGetAndAdd(HInvoke* invoke) {
-  switch (invoke->GetIntrinsic()) {
-    case Intrinsics::kVarHandleGetAndAdd:
-    case Intrinsics::kVarHandleGetAndAddAcquire:
-    case Intrinsics::kVarHandleGetAndAddRelease:
-      return true;
-    default:
-      return false;
-  }
-}
-
 static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
   size_t expected_coordinates_count = GetExpectedVarHandleCoordinatesCount(invoke);
   if (expected_coordinates_count > 1u) {
@@ -3209,23 +3244,23 @@ static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
   }
 
   uint32_t number_of_arguments = invoke->GetNumberOfArguments();
-  DataType::Type type = invoke->GetType();
+  DataType::Type return_type = invoke->GetType();
   mirror::VarHandle::AccessModeTemplate access_mode_template =
       mirror::VarHandle::GetAccessModeTemplateByIntrinsic(invoke->GetIntrinsic());
   switch (access_mode_template) {
     case mirror::VarHandle::AccessModeTemplate::kGet:
-      // The return type should be the same as varType, so it shouldn't be void
-      if (type == DataType::Type::kVoid) {
+      // The return type should be the same as varType, so it shouldn't be void.
+      if (return_type == DataType::Type::kVoid) {
         return false;
       }
       break;
     case mirror::VarHandle::AccessModeTemplate::kSet:
-      if (type != DataType::Type::kVoid) {
+      if (return_type != DataType::Type::kVoid) {
         return false;
       }
       break;
     case mirror::VarHandle::AccessModeTemplate::kCompareAndSet: {
-      if (type != DataType::Type::kBool) {
+      if (return_type != DataType::Type::kBool) {
         return false;
       }
       uint32_t expected_value_index = number_of_arguments - 2;
@@ -3242,13 +3277,17 @@ static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
       DataType::Type value_type = GetDataTypeFromShorty(invoke, number_of_arguments - 1);
       if (IsVarHandleGetAndAdd(invoke) &&
           (value_type == DataType::Type::kReference || value_type == DataType::Type::kBool)) {
-        // We should only add numerical types
+        // We should only add numerical types.
         return false;
       } else if (IsVarHandleGetAndBitwiseOp(invoke) && !DataType::IsIntegralType(value_type)) {
         // We can only apply operators to bitwise integral types.
+        // Note that bitwise VarHandle operations accept a non-integral boolean type and
+        // perform the appropriate logical operation. However, the result is the same as
+        // using the bitwise operation on our boolean representation and this fits well
+        // with DataType::IsIntegralType() treating the compiler type kBool as integral.
         return false;
       }
-      if (value_type != type) {
+      if (value_type != return_type) {
         return false;
       }
       break;
@@ -3259,7 +3298,7 @@ static bool IsValidFieldVarHandleExpected(HInvoke* invoke) {
       DataType::Type expected_value_type = GetDataTypeFromShorty(invoke, expected_value_index);
       DataType::Type new_value_type = GetDataTypeFromShorty(invoke, new_value_index);
 
-      if (expected_value_type != new_value_type || type != expected_value_type) {
+      if (expected_value_type != new_value_type || return_type != expected_value_type) {
         return false;
       }
       break;
@@ -4496,7 +4535,6 @@ void IntrinsicCodeGeneratorX86::VisitVarHandleGetAndBitwiseAndRelease(HInvoke* i
 }
 
 UNIMPLEMENTED_INTRINSIC(X86, MathRoundDouble)
-UNIMPLEMENTED_INTRINSIC(X86, ReferenceGetReferent)
 UNIMPLEMENTED_INTRINSIC(X86, FloatIsInfinite)
 UNIMPLEMENTED_INTRINSIC(X86, DoubleIsInfinite)
 UNIMPLEMENTED_INTRINSIC(X86, IntegerHighestOneBit)
@@ -4540,11 +4578,6 @@ UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(X86, UnsafeGetAndSetObject)
 
-UNIMPLEMENTED_INTRINSIC(X86, VarHandleFullFence)
-UNIMPLEMENTED_INTRINSIC(X86, VarHandleAcquireFence)
-UNIMPLEMENTED_INTRINSIC(X86, VarHandleReleaseFence)
-UNIMPLEMENTED_INTRINSIC(X86, VarHandleLoadLoadFence)
-UNIMPLEMENTED_INTRINSIC(X86, VarHandleStoreStoreFence)
 UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvokeExact)
 UNIMPLEMENTED_INTRINSIC(X86, MethodHandleInvoke)
 

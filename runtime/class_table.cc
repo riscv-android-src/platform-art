@@ -56,7 +56,7 @@ ObjPtr<mirror::Class> ClassTable::UpdateClass(const char* descriptor,
   // Should only be updating latest table.
   DescriptorHashPair pair(descriptor, hash);
   auto existing_it = classes_.back().FindWithHash(pair, hash);
-  if (kIsDebugBuild && existing_it == classes_.back().end()) {
+  if (existing_it == classes_.back().end()) {
     for (const ClassSet& class_set : classes_) {
       if (class_set.FindWithHash(pair, hash) != class_set.end()) {
         LOG(FATAL) << "Updating class found in frozen table " << descriptor;
@@ -143,24 +143,6 @@ ObjPtr<mirror::Class> ClassTable::TryInsert(ObjPtr<mirror::Class> klass) {
 void ClassTable::Insert(ObjPtr<mirror::Class> klass) {
   const uint32_t hash = TableSlot::HashDescriptor(klass);
   WriterMutexLock mu(Thread::Current(), lock_);
-  classes_.back().InsertWithHash(TableSlot(klass, hash), hash);
-}
-
-void ClassTable::CopyWithoutLocks(const ClassTable& source_table) {
-  if (kIsDebugBuild) {
-    for (ClassSet& class_set : classes_) {
-      CHECK(class_set.empty());
-    }
-  }
-  for (const ClassSet& class_set : source_table.classes_) {
-    for (const TableSlot& slot : class_set) {
-      classes_.back().insert(slot);
-    }
-  }
-}
-
-void ClassTable::InsertWithoutLocks(ObjPtr<mirror::Class> klass) {
-  const uint32_t hash = TableSlot::HashDescriptor(klass);
   classes_.back().InsertWithHash(TableSlot(klass, hash), hash);
 }
 
@@ -253,26 +235,6 @@ bool ClassTable::InsertOatFileLocked(const OatFile* oat_file) {
   }
   oat_files_.push_back(oat_file);
   return true;
-}
-
-size_t ClassTable::WriteToMemory(uint8_t* ptr) const {
-  ReaderMutexLock mu(Thread::Current(), lock_);
-  ClassSet combined;
-  // Combine all the class sets in case there are multiple, also adjusts load factor back to
-  // default in case classes were pruned.
-  for (const ClassSet& class_set : classes_) {
-    for (const TableSlot& root : class_set) {
-      combined.insert(root);
-    }
-  }
-  const size_t ret = combined.WriteToMemory(ptr);
-  // Validity check
-  if (kIsDebugBuild && ptr != nullptr) {
-    size_t read_count;
-    ClassSet class_set(ptr, /*make copy*/false, &read_count);
-    class_set.Verify();
-  }
-  return ret;
 }
 
 size_t ClassTable::ReadFromMemory(uint8_t* ptr) {

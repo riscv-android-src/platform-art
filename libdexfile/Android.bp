@@ -17,12 +17,6 @@
 cc_defaults {
     name: "libdexfile_defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt dex2oat(d) from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "dex/art_dex_file_loader.cc",
@@ -182,7 +176,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -279,8 +273,10 @@ cc_library_headers {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.runtime",
     ],
 }
 
@@ -292,8 +288,8 @@ cc_library_headers {
     export_include_dirs: ["."],
 
     apex_available: [
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
     ],
 }
 
@@ -336,7 +332,7 @@ art_cc_library {
         "libdexfile",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -394,8 +390,11 @@ art_cc_library {
 
     apex_available: [
         "//apex_available:platform",
+        "com.android.art",
         "com.android.art.debug",
-        "com.android.art.release",
+        "com.android.media",
+        "com.android.media.swcodec",
+        "com.android.runtime",
     ],
 }
 
@@ -460,59 +459,37 @@ art_cc_test {
     ],
 }
 
-// External packages allowed to link in static libdexfile_support. This is not
-// allowed in any module that may end up in an APEX or platform image, so
-// visibility is restrictive.
-libdexfile_external_static_visibility = [
-    // Required for simpleperf, libsimpleperf_record, and libsimpleperf_report
-    // in the NDK.
-    "//system/extras/simpleperf",
-    "//cts/tests/tests/simpleperf",
-]
-
+// For use by external packages allowed to link in static libdexfile_support.
+// This is not allowed in any module that may end up in an APEX or platform
+// image, so visibility is restrictive.
 cc_library_static {
     name: "libdexfile_external_static",
     host_supported: true,
-    visibility: libdexfile_external_static_visibility,
-    // Include internal library dependencies that should have no external
-    // visibility. We cannot use libdexfile_support_static_defaults because that
-    // one also includes external dependencies, and libs using this one may then
-    // get duplicate copies of them.
-    whole_static_libs: [
-        "libartbase",
-        "libartpalette",
-        "libdexfile",
-        "libdexfile_external",
-        "libdexfile_support_static",
+    visibility: [
+        // Required for simpleperf, libsimpleperf_record, and libsimpleperf_report
+        // in the NDK.
+        "//system/extras/simpleperf",
+        "//cts/tests/tests/simpleperf",
     ],
-}
-
-cc_defaults {
-    name: "libdexfile_external_static_defaults",
-    defaults_visibility: libdexfile_external_static_visibility,
-    target: {
-        linux: {
-            // This cc_defaults somewhat arbitrarily limits the libs to linux,
-            // because that's what the users in simpleperf need.
-            static_libs: [
-                "libdexfile_external_static",
-                // External dependencies:
-                "libbase",
-                "liblog",
-                "libz",
-                "libziparchive",
-            ],
-        },
-    },
+    // Using libdexfile_support_static_defaults will link in external libs like
+    // libbase and libz statically as well, which are likely to cause duplicate
+    // copies in the depending module.
+    // TODO(b/169885605): Avoid exposing symbols from those libs.
+    defaults: [
+        "art_defaults",
+        "libdexfile_support_static_defaults",
+    ],
 }
 
 art_cc_test {
     name: "art_libdexfile_external_static_tests",
     host_supported: true,
     test_suites: ["general-tests"],
-    defaults: ["libdexfile_external_static_defaults"],
     srcs: [
         "external/dex_file_supp_test.cc",
+    ],
+    static_libs: [
+        "libdexfile_external_static",
     ],
     enabled: false,
     target: {
@@ -520,4 +497,9 @@ art_cc_test {
             enabled: true,
         },
     },
+}
+
+filegroup {
+    name: "art_libdexfile_dex_instruction_list_header",
+    srcs: ["dex/dex_instruction_list.h"],
 }

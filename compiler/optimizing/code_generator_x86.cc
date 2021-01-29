@@ -489,6 +489,7 @@ class ReadBarrierMarkSlowPathX86 : public SlowPathCode {
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(ref_reg)) << ref_reg;
     DCHECK(instruction_->IsInstanceFieldGet() ||
+           instruction_->IsPredicatedInstanceFieldGet() ||
            instruction_->IsStaticFieldGet() ||
            instruction_->IsArrayGet() ||
            instruction_->IsArraySet() ||
@@ -749,11 +750,12 @@ class ReadBarrierForHeapReferenceSlowPathX86 : public SlowPathCode {
     DCHECK(locations->CanCall());
     DCHECK(!locations->GetLiveRegisters()->ContainsCoreRegister(reg_out));
     DCHECK(instruction_->IsInstanceFieldGet() ||
+           instruction_->IsPredicatedInstanceFieldGet() ||
            instruction_->IsStaticFieldGet() ||
            instruction_->IsArrayGet() ||
            instruction_->IsInstanceOf() ||
            instruction_->IsCheckCast() ||
-           (instruction_->IsInvokeVirtual() && instruction_->GetLocations()->Intrinsified()))
+           (instruction_->IsInvoke() && instruction_->GetLocations()->Intrinsified()))
         << "Unexpected instruction in read barrier for heap reference slow path: "
         << instruction_->DebugName();
 
@@ -1065,6 +1067,7 @@ CodeGeneratorX86::CodeGeneratorX86(HGraph* graph,
       package_type_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       string_bss_entry_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
+      boot_image_jni_entrypoint_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       boot_image_other_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_string_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
       jit_class_patches_(graph->GetAllocator()->Adapter(kArenaAllocCodeGenerator)),
@@ -2564,6 +2567,16 @@ void LocationsBuilderX86::VisitInvokeInterface(HInvokeInterface* invoke) {
     // Add one temporary for inline cache update.
     invoke->GetLocations()->AddTemp(Location::RegisterLocation(EBP));
   }
+
+  // For PC-relative load kinds the invoke has an extra input, the PC-relative address base.
+  if (IsPcRelativeMethodLoadKind(invoke->GetHiddenArgumentLoadKind())) {
+    invoke->GetLocations()->SetInAt(invoke->GetSpecialInputIndex(), Location::RequiresRegister());
+  }
+
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive) {
+    invoke->GetLocations()->SetInAt(invoke->GetNumberOfArguments() - 1,
+                                    Location::RequiresRegister());
+  }
 }
 
 void CodeGeneratorX86::MaybeGenerateInlineCacheCheck(HInstruction* instruction, Register klass) {
@@ -2608,8 +2621,12 @@ void InstructionCodeGeneratorX86::VisitInvokeInterface(HInvokeInterface* invoke)
   // Set the hidden argument. This is safe to do this here, as XMM7
   // won't be modified thereafter, before the `call` instruction.
   DCHECK_EQ(XMM7, hidden_reg);
-  __ movl(temp, Immediate(invoke->GetMethodReference().index));
-  __ movd(hidden_reg, temp);
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRecursive) {
+    __ movd(hidden_reg, locations->InAt(invoke->GetNumberOfArguments() - 1).AsRegister<Register>());
+  } else if (invoke->GetHiddenArgumentLoadKind() != MethodLoadKind::kRuntimeCall) {
+    codegen_->LoadMethod(invoke->GetHiddenArgumentLoadKind(), locations->GetTemp(0), invoke);
+    __ movd(hidden_reg, temp);
+  }
 
   if (receiver.IsStackSlot()) {
     __ movl(temp, Address(ESP, receiver.GetStackIndex()));
@@ -2638,6 +2655,11 @@ void InstructionCodeGeneratorX86::VisitInvokeInterface(HInvokeInterface* invoke)
   uint32_t method_offset = static_cast<uint32_t>(ImTable::OffsetOfElement(
       invoke->GetImtIndex(), kX86PointerSize));
   __ movl(temp, Address(temp, method_offset));
+  if (invoke->GetHiddenArgumentLoadKind() == MethodLoadKind::kRuntimeCall) {
+    // We pass the method from the IMT in case of a conflict. This will ensure
+    // we go into the runtime to resolve the actual method.
+    __ movd(hidden_reg, temp);
+  }
   // call temp->GetEntryPoint();
   __ call(Address(temp,
                   ArtMethod::EntryPointFromQuickCompiledCodeOffset(kX86PointerSize).Int32Value()));
@@ -5147,6 +5169,16 @@ HInvokeStaticOrDirect::DispatchInfo CodeGeneratorX86::GetSupportedInvokeStaticOr
   return desired_dispatch_info;
 }
 
+Register CodeGeneratorX86::GetInvokeExtraParameter(HInvoke* invoke, Register temp) {
+  if (invoke->IsInvokeStaticOrDirect()) {
+    return GetInvokeStaticOrDirectExtraParameter(invoke->AsInvokeStaticOrDirect(), temp);
+  }
+  DCHECK(invoke->IsInvokeInterface());
+  Location location =
+      invoke->GetLocations()->InAt(invoke->AsInvokeInterface()->GetSpecialInputIndex());
+  return location.AsRegister<Register>();
+}
+
 Register CodeGeneratorX86::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOrDirect* invoke,
                                                                  Register temp) {
   Location location = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
@@ -5172,6 +5204,50 @@ Register CodeGeneratorX86::GetInvokeStaticOrDirectExtraParameter(HInvokeStaticOr
   return location.AsRegister<Register>();
 }
 
+void CodeGeneratorX86::LoadMethod(MethodLoadKind load_kind, Location temp, HInvoke* invoke) {
+  switch (load_kind) {
+    case MethodLoadKind::kBootImageLinkTimePcRelative: {
+      DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
+      Register base_reg = GetInvokeExtraParameter(invoke, temp.AsRegister<Register>());
+      __ leal(temp.AsRegister<Register>(),
+              Address(base_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
+      RecordBootImageMethodPatch(invoke);
+      break;
+    }
+    case MethodLoadKind::kBootImageRelRo: {
+      size_t index = invoke->IsInvokeInterface()
+          ? invoke->AsInvokeInterface()->GetSpecialInputIndex()
+          : invoke->AsInvokeStaticOrDirect()->GetSpecialInputIndex();
+      Register base_reg = GetInvokeExtraParameter(invoke, temp.AsRegister<Register>());
+      __ movl(temp.AsRegister<Register>(), Address(base_reg, kPlaceholder32BitOffset));
+      RecordBootImageRelRoPatch(
+          invoke->InputAt(index)->AsX86ComputeBaseMethodAddress(),
+          GetBootImageOffset(invoke));
+      break;
+    }
+    case MethodLoadKind::kBssEntry: {
+      Register base_reg = GetInvokeExtraParameter(invoke, temp.AsRegister<Register>());
+      __ movl(temp.AsRegister<Register>(), Address(base_reg, kPlaceholder32BitOffset));
+      RecordMethodBssEntryPatch(invoke);
+      // No need for memory fence, thanks to the x86 memory model.
+      break;
+    }
+    case MethodLoadKind::kJitDirectAddress: {
+      __ movl(temp.AsRegister<Register>(),
+              Immediate(reinterpret_cast32<uint32_t>(invoke->GetResolvedMethod())));
+      break;
+    }
+    case MethodLoadKind::kRuntimeCall: {
+      // Test situation, don't do anything.
+      break;
+    }
+    default: {
+      LOG(FATAL) << "Load kind should have already been handled " << load_kind;
+      UNREACHABLE();
+    }
+  }
+}
+
 void CodeGeneratorX86::GenerateStaticOrDirectCall(
     HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
@@ -5183,41 +5259,22 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
       __ fs()->movl(temp.AsRegister<Register>(), Address::Absolute(offset));
       break;
     }
-    case MethodLoadKind::kRecursive:
+    case MethodLoadKind::kRecursive: {
       callee_method = invoke->GetLocations()->InAt(invoke->GetCurrentMethodIndex());
       break;
-    case MethodLoadKind::kBootImageLinkTimePcRelative: {
-      DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
-      Register base_reg = GetInvokeStaticOrDirectExtraParameter(invoke,
-                                                                temp.AsRegister<Register>());
-      __ leal(temp.AsRegister<Register>(),
-              Address(base_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
-      RecordBootImageMethodPatch(invoke);
-      break;
     }
-    case MethodLoadKind::kBootImageRelRo: {
-      Register base_reg = GetInvokeStaticOrDirectExtraParameter(invoke,
-                                                                temp.AsRegister<Register>());
-      __ movl(temp.AsRegister<Register>(), Address(base_reg, kPlaceholder32BitOffset));
-      RecordBootImageRelRoPatch(
-          invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress(),
-          GetBootImageOffset(invoke));
-      break;
-    }
-    case MethodLoadKind::kBssEntry: {
-      Register base_reg = GetInvokeStaticOrDirectExtraParameter(invoke,
-                                                                temp.AsRegister<Register>());
-      __ movl(temp.AsRegister<Register>(), Address(base_reg, kPlaceholder32BitOffset));
-      RecordMethodBssEntryPatch(invoke);
-      // No need for memory fence, thanks to the x86 memory model.
-      break;
-    }
-    case MethodLoadKind::kJitDirectAddress:
-      __ movl(temp.AsRegister<Register>(), Immediate(invoke->GetMethodAddress()));
-      break;
     case MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
+    }
+    case MethodLoadKind::kBootImageLinkTimePcRelative:
+      // For kCallCriticalNative we skip loading the method and do the call directly.
+      if (invoke->GetCodePtrLocation() == CodePtrLocation::kCallCriticalNative) {
+        break;
+      }
+      FALLTHROUGH_INTENDED;
+    default: {
+      LoadMethod(invoke->GetMethodLoadKind(), callee_method, invoke);
     }
   }
 
@@ -5231,9 +5288,16 @@ void CodeGeneratorX86::GenerateStaticOrDirectCall(
           PrepareCriticalNativeCall<CriticalNativeCallingConventionVisitorX86,
                                     kNativeStackAlignment,
                                     GetCriticalNativeDirectCallFrameSize>(invoke);
-      // (callee_method + offset_of_jni_entry_point)()
-      __ call(Address(callee_method.AsRegister<Register>(),
-                      ArtMethod::EntryPointFromJniOffset(kX86PointerSize).Int32Value()));
+      if (invoke->GetMethodLoadKind() == MethodLoadKind::kBootImageLinkTimePcRelative) {
+        DCHECK(GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension());
+        Register base_reg = GetInvokeExtraParameter(invoke, temp.AsRegister<Register>());
+        __ call(Address(base_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
+        RecordBootImageJniEntrypointPatch(invoke);
+      } else {
+        // (callee_method + offset_of_jni_entry_point)()
+        __ call(Address(callee_method.AsRegister<Register>(),
+                        ArtMethod::EntryPointFromJniOffset(kX86PointerSize).Int32Value()));
+      }
       RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
       if (out_frame_size == 0u && DataType::IsFloatingPointType(invoke->GetType())) {
         // Create space for conversion.
@@ -5336,9 +5400,12 @@ void CodeGeneratorX86::RecordBootImageRelRoPatch(HX86ComputeBaseMethodAddress* m
   __ Bind(&boot_image_other_patches_.back().label);
 }
 
-void CodeGeneratorX86::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke) {
+void CodeGeneratorX86::RecordBootImageMethodPatch(HInvoke* invoke) {
+  size_t index = invoke->IsInvokeInterface()
+      ? invoke->AsInvokeInterface()->GetSpecialInputIndex()
+      : invoke->AsInvokeStaticOrDirect()->GetSpecialInputIndex();
   HX86ComputeBaseMethodAddress* method_address =
-      invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
+      invoke->InputAt(index)->AsX86ComputeBaseMethodAddress();
   boot_image_method_patches_.emplace_back(
       method_address,
       invoke->GetResolvedMethodReference().dex_file,
@@ -5346,10 +5413,13 @@ void CodeGeneratorX86::RecordBootImageMethodPatch(HInvokeStaticOrDirect* invoke)
   __ Bind(&boot_image_method_patches_.back().label);
 }
 
-void CodeGeneratorX86::RecordMethodBssEntryPatch(HInvokeStaticOrDirect* invoke) {
+void CodeGeneratorX86::RecordMethodBssEntryPatch(HInvoke* invoke) {
+  size_t index = invoke->IsInvokeInterface()
+      ? invoke->AsInvokeInterface()->GetSpecialInputIndex()
+      : invoke->AsInvokeStaticOrDirect()->GetSpecialInputIndex();
   DCHECK(IsSameDexFile(GetGraph()->GetDexFile(), *invoke->GetMethodReference().dex_file));
   HX86ComputeBaseMethodAddress* method_address =
-      invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
+      invoke->InputAt(index)->AsX86ComputeBaseMethodAddress();
   // Add the patch entry and bind its label at the end of the instruction.
   method_bss_entry_patches_.emplace_back(
       method_address,
@@ -5405,6 +5475,16 @@ Label* CodeGeneratorX86::NewStringBssEntryPatch(HLoadString* load_string) {
   return &string_bss_entry_patches_.back().label;
 }
 
+void CodeGeneratorX86::RecordBootImageJniEntrypointPatch(HInvokeStaticOrDirect* invoke) {
+  HX86ComputeBaseMethodAddress* method_address =
+      invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
+  boot_image_jni_entrypoint_patches_.emplace_back(
+      method_address,
+      invoke->GetResolvedMethodReference().dex_file,
+      invoke->GetResolvedMethodReference().index);
+  __ Bind(&boot_image_jni_entrypoint_patches_.back().label);
+}
+
 void CodeGeneratorX86::LoadBootImageAddress(Register reg,
                                             uint32_t boot_image_reference,
                                             HInvokeStaticOrDirect* invoke) {
@@ -5433,29 +5513,24 @@ void CodeGeneratorX86::LoadBootImageAddress(Register reg,
   }
 }
 
-void CodeGeneratorX86::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* invoke,
-                                                    uint32_t boot_image_offset) {
-  DCHECK(invoke->IsStatic());
-  InvokeRuntimeCallingConvention calling_convention;
-  Register argument = calling_convention.GetRegisterAt(0);
+void CodeGeneratorX86::LoadIntrinsicDeclaringClass(Register reg, HInvokeStaticOrDirect* invoke) {
+  DCHECK_NE(invoke->GetIntrinsic(), Intrinsics::kNone);
   if (GetCompilerOptions().IsBootImage()) {
-    DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
     HX86ComputeBaseMethodAddress* method_address =
         invoke->InputAt(invoke->GetSpecialInputIndex())->AsX86ComputeBaseMethodAddress();
     DCHECK(method_address != nullptr);
     Register method_address_reg =
         invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex()).AsRegister<Register>();
-    __ leal(argument, Address(method_address_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
+    __ leal(reg, Address(method_address_reg, CodeGeneratorX86::kPlaceholder32BitOffset));
     MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     boot_image_type_patches_.emplace_back(method_address, target_method.dex_file, type_idx.index_);
     __ Bind(&boot_image_type_patches_.back().label);
   } else {
-    LoadBootImageAddress(argument, boot_image_offset, invoke);
+    uint32_t boot_image_offset = GetBootImageOffsetOfIntrinsicDeclaringClass(invoke);
+    LoadBootImageAddress(reg, boot_image_offset, invoke);
   }
-  InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
-  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
 }
 
 // The label points to the end of the "movl" or another instruction but the literal offset
@@ -5495,6 +5570,7 @@ void CodeGeneratorX86::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linke
       package_type_bss_entry_patches_.size() +
       boot_image_string_patches_.size() +
       string_bss_entry_patches_.size() +
+      boot_image_jni_entrypoint_patches_.size() +
       boot_image_other_patches_.size();
   linker_patches->reserve(size);
   if (GetCompilerOptions().IsBootImage() || GetCompilerOptions().IsBootImageExtension()) {
@@ -5526,6 +5602,8 @@ void CodeGeneratorX86::EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linke
       package_type_bss_entry_patches_, linker_patches);
   EmitPcRelativeLinkerPatches<linker::LinkerPatch::StringBssEntryPatch>(
       string_bss_entry_patches_, linker_patches);
+  EmitPcRelativeLinkerPatches<linker::LinkerPatch::RelativeJniEntrypointPatch>(
+      boot_image_jni_entrypoint_patches_, linker_patches);
   DCHECK_EQ(size, linker_patches->size());
 }
 
@@ -5566,10 +5644,13 @@ void CodeGeneratorX86::MarkGCCard(Register temp,
 }
 
 void LocationsBuilderX86::HandleFieldGet(HInstruction* instruction, const FieldInfo& field_info) {
-  DCHECK(instruction->IsInstanceFieldGet() || instruction->IsStaticFieldGet());
+  DCHECK(instruction->IsInstanceFieldGet() ||
+         instruction->IsStaticFieldGet() ||
+         instruction->IsPredicatedInstanceFieldGet());
 
   bool object_field_get_with_read_barrier =
       kEmitCompilerReadBarrier && (instruction->GetType() == DataType::Type::kReference);
+  bool is_predicated = instruction->IsPredicatedInstanceFieldGet();
   LocationSummary* locations =
       new (GetGraph()->GetAllocator()) LocationSummary(instruction,
                                                        kEmitCompilerReadBarrier
@@ -5578,21 +5659,30 @@ void LocationsBuilderX86::HandleFieldGet(HInstruction* instruction, const FieldI
   if (object_field_get_with_read_barrier && kUseBakerReadBarrier) {
     locations->SetCustomSlowPathCallerSaves(RegisterSet::Empty());  // No caller-save registers.
   }
-  locations->SetInAt(0, Location::RequiresRegister());
-
+  // receiver_input
+  locations->SetInAt(is_predicated ? 1 : 0, Location::RequiresRegister());
+  if (is_predicated) {
+    if (DataType::IsFloatingPointType(instruction->GetType())) {
+      locations->SetInAt(0, Location::RequiresFpuRegister());
+    } else {
+      locations->SetInAt(0, Location::RequiresRegister());
+    }
+  }
   if (DataType::IsFloatingPointType(instruction->GetType())) {
-    locations->SetOut(Location::RequiresFpuRegister());
+    locations->SetOut(is_predicated ? Location::SameAsFirstInput()
+                                    : Location::RequiresFpuRegister());
   } else {
     // The output overlaps in case of long: we don't want the low move
     // to overwrite the object's location.  Likewise, in the case of
     // an object field get with read barriers enabled, we do not want
     // the move to overwrite the object's location, as we need it to emit
     // the read barrier.
-    locations->SetOut(
-        Location::RequiresRegister(),
-        (object_field_get_with_read_barrier || instruction->GetType() == DataType::Type::kInt64) ?
-            Location::kOutputOverlap :
-            Location::kNoOutputOverlap);
+    locations->SetOut(is_predicated ? Location::SameAsFirstInput() : Location::RequiresRegister(),
+                      (object_field_get_with_read_barrier ||
+                       instruction->GetType() == DataType::Type::kInt64 ||
+                       is_predicated)
+                          ? Location::kOutputOverlap
+                          : Location::kNoOutputOverlap);
   }
 
   if (field_info.IsVolatile() && (field_info.GetFieldType() == DataType::Type::kInt64)) {
@@ -5606,10 +5696,12 @@ void LocationsBuilderX86::HandleFieldGet(HInstruction* instruction, const FieldI
 
 void InstructionCodeGeneratorX86::HandleFieldGet(HInstruction* instruction,
                                                  const FieldInfo& field_info) {
-  DCHECK(instruction->IsInstanceFieldGet() || instruction->IsStaticFieldGet());
+  DCHECK(instruction->IsInstanceFieldGet() ||
+         instruction->IsStaticFieldGet() ||
+         instruction->IsPredicatedInstanceFieldGet());
 
   LocationSummary* locations = instruction->GetLocations();
-  Location base_loc = locations->InAt(0);
+  Location base_loc = locations->InAt(instruction->IsPredicatedInstanceFieldGet() ? 1 : 0);
   Register base = base_loc.AsRegister<Register>();
   Location out = locations->Out();
   bool is_volatile = field_info.IsVolatile();
@@ -5903,8 +5995,16 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
   bool is_volatile = field_info.IsVolatile();
   DataType::Type field_type = field_info.GetFieldType();
   uint32_t offset = field_info.GetFieldOffset().Uint32Value();
+  bool is_predicated =
+      instruction->IsInstanceFieldSet() && instruction->AsInstanceFieldSet()->GetIsPredicatedSet();
 
   Address field_addr(base, offset);
+
+  NearLabel pred_is_null;
+  if (is_predicated) {
+    __ testl(base, base);
+    __ j(kEqual, &pred_is_null);
+  }
 
   HandleFieldSet(instruction,
                  /* value_index= */ 1,
@@ -5913,6 +6013,10 @@ void InstructionCodeGeneratorX86::HandleFieldSet(HInstruction* instruction,
                  base,
                  is_volatile,
                  value_can_be_null);
+
+  if (is_predicated) {
+    __ Bind(&pred_is_null);
+  }
 }
 
 void LocationsBuilderX86::VisitStaticFieldGet(HStaticFieldGet* instruction) {
@@ -5939,10 +6043,25 @@ void InstructionCodeGeneratorX86::VisitInstanceFieldSet(HInstanceFieldSet* instr
   HandleFieldSet(instruction, instruction->GetFieldInfo(), instruction->GetValueCanBeNull());
 }
 
+void LocationsBuilderX86::VisitPredicatedInstanceFieldGet(
+    HPredicatedInstanceFieldGet* instruction) {
+  HandleFieldGet(instruction, instruction->GetFieldInfo());
+}
+
 void LocationsBuilderX86::VisitInstanceFieldGet(HInstanceFieldGet* instruction) {
   HandleFieldGet(instruction, instruction->GetFieldInfo());
 }
 
+void InstructionCodeGeneratorX86::VisitPredicatedInstanceFieldGet(
+    HPredicatedInstanceFieldGet* instruction) {
+  NearLabel finish;
+  LocationSummary* locations = instruction->GetLocations();
+  Register recv = locations->InAt(1).AsRegister<Register>();
+  __ testl(recv, recv);
+  __ j(kZero, &finish);
+  HandleFieldGet(instruction, instruction->GetFieldInfo());
+  __ Bind(&finish);
+}
 void InstructionCodeGeneratorX86::VisitInstanceFieldGet(HInstanceFieldGet* instruction) {
   HandleFieldGet(instruction, instruction->GetFieldInfo());
 }
@@ -7071,7 +7190,7 @@ void InstructionCodeGeneratorX86::VisitLoadClass(HLoadClass* cls) NO_THREAD_SAFE
       Register method_address = locations->InAt(0).AsRegister<Register>();
       __ movl(out, Address(method_address, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageRelRoPatch(cls->InputAt(0)->AsX86ComputeBaseMethodAddress(),
-                                          codegen_->GetBootImageOffset(cls));
+                                          CodeGenerator::GetBootImageOffset(cls));
       break;
     }
     case HLoadClass::LoadKind::kBssEntry:
@@ -7270,7 +7389,7 @@ void InstructionCodeGeneratorX86::VisitLoadString(HLoadString* load) NO_THREAD_S
       Register method_address = locations->InAt(0).AsRegister<Register>();
       __ movl(out, Address(method_address, CodeGeneratorX86::kPlaceholder32BitOffset));
       codegen_->RecordBootImageRelRoPatch(load->InputAt(0)->AsX86ComputeBaseMethodAddress(),
-                                          codegen_->GetBootImageOffset(load));
+                                          CodeGenerator::GetBootImageOffset(load));
       return;
     }
     case HLoadString::LoadKind::kBssEntry: {

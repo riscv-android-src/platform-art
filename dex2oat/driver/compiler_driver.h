@@ -40,7 +40,6 @@
 #include "driver/compiled_method_storage.h"
 #include "thread_pool.h"
 #include "utils/atomic_dex_ref_map.h"
-#include "utils/dex_cache_arrays_layout.h"
 
 namespace art {
 
@@ -129,6 +128,7 @@ class CompilerDriver {
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickImtConflictTrampoline() const;
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickResolutionTrampoline() const;
   std::unique_ptr<const std::vector<uint8_t>> CreateQuickToInterpreterBridge() const;
+  std::unique_ptr<const std::vector<uint8_t>> CreateNterpTrampoline() const;
 
   ClassStatus GetClassStatus(const ClassReference& ref) const;
   bool GetCompiledClass(const ClassReference& ref, ClassStatus* status) const;
@@ -182,8 +182,6 @@ class CompilerDriver {
                                      const ScopedObjectAccess& soa)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-
-  bool IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc);
 
   size_t GetThreadCount() const {
     return parallel_thread_count_;

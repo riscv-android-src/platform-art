@@ -90,6 +90,8 @@ JitCompilerInterface* (*Jit::jit_load_)(void) = nullptr;
 JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& options) {
   auto* jit_options = new JitOptions;
   jit_options->use_jit_compilation_ = options.GetOrDefault(RuntimeArgumentMap::UseJitCompilation);
+  jit_options->use_profiled_jit_compilation_ =
+      options.GetOrDefault(RuntimeArgumentMap::UseProfiledJitCompilation);
 
   jit_options->code_cache_initial_capacity_ =
       options.GetOrDefault(RuntimeArgumentMap::JITCodeCacheInitialCapacity);
@@ -101,6 +103,8 @@ JitOptions* JitOptions::CreateFromRuntimeArguments(const RuntimeArgumentMap& opt
       options.GetOrDefault(RuntimeArgumentMap::ProfileSaverOpts);
   jit_options->thread_pool_pthread_priority_ =
       options.GetOrDefault(RuntimeArgumentMap::JITPoolThreadPthreadPriority);
+  jit_options->zygote_thread_pool_pthread_priority_ =
+      options.GetOrDefault(RuntimeArgumentMap::JITZygotePoolThreadPthreadPriority);
 
   // Set default compile threshold to aid with checking defaults.
   jit_options->compile_threshold_ =
@@ -1060,8 +1064,26 @@ void Jit::MapBootImageMethods() {
     LOG(WARNING) << "Failed to create child mapping of boot image methods: " << error_str;
     return;
   }
+  //  We are going to mremap the child mapping into the image:
+  //
+  //                            ImageSection       ChildMappingMethods
+  //
+  //         section start -->  -----------
+  //                            |         |
+  //                            |         |
+  //            page_start -->  |         |   <-----   -----------
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //                            |         |            |         |
+  //             page_end  -->  |         |   <-----   -----------
+  //                            |         |
+  //         section end   -->  -----------
+  //
   size_t offset = 0;
-  ClassLinker* class_linker = Runtime::Current()->GetClassLinker();
   for (gc::space::ImageSpace* space : Runtime::Current()->GetHeap()->GetBootImageSpaces()) {
     const ImageHeader& header = space->GetImageHeader();
     const ImageSection& section = header.GetMethodsSection();
@@ -1073,10 +1095,13 @@ void Jit::MapBootImageMethods() {
       continue;
     }
     uint64_t capacity = page_end - page_start;
-    // Walk over methods in the boot image, and check for ones whose class is
-    // not initialized in the process, but are in the zygote process. For
-    // such methods, we need their entrypoints to be stubs that do the
-    // initialization check.
+    // Walk over methods in the boot image, and check for:
+    // 1) methods whose class is not initialized in the process, but are in the
+    // zygote process. For such methods, we need their entrypoints to be stubs
+    // that do the initialization check.
+    // 2) native methods whose data pointer is different than the one in the
+    // zygote. Such methods may have had custom native implementation provided
+    // by JNI RegisterNatives.
     header.VisitPackedArtMethods([&](ArtMethod& method) NO_THREAD_SAFETY_ANALYSIS {
       // Methods in the boot image should never have their single
       // implementation flag set (and therefore never have a `data_` pointing
@@ -1085,78 +1110,33 @@ void Jit::MapBootImageMethods() {
       if (method.IsRuntimeMethod()) {
         return;
       }
-      if (method.GetDeclaringClassUnchecked()->IsVisiblyInitialized() ||
-          !method.IsStatic() ||
-          method.IsConstructor()) {
-        // Method does not need any stub.
-        return;
+
+      // Pointer to the method we're currently using.
+      uint8_t* pointer = reinterpret_cast<uint8_t*>(&method);
+      // The data pointer of that method that we want to keep.
+      uint8_t* data_pointer = pointer + ArtMethod::DataOffset(kRuntimePointerSize).Int32Value();
+      if (method.IsNative() && data_pointer >= page_start && data_pointer < page_end) {
+        // The data pointer of the ArtMethod in the shared memory we are going to remap into our
+        // own mapping. This is the data that we will see after the remap.
+        uint8_t* new_data_pointer =
+            child_mapping_methods.Begin() + offset + (data_pointer - page_start);
+        CopyIfDifferent(new_data_pointer, data_pointer, sizeof(void*));
       }
 
-      //  We are going to mremap the child mapping into the image:
-      //
-      //                            ImageSection       ChildMappingMethods
-      //
-      //         section start -->  -----------
-      //                            |         |
-      //                            |         |
-      //            page_start -->  |         |   <-----   -----------
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //                            |         |            |         |
-      //             page_end  -->  |         |   <-----   -----------
-      //                            |         |
-      //         section end   -->  -----------
-
-
-      uint8_t* pointer = reinterpret_cast<uint8_t*>(&method);
-      // Note: We could refactor this to only check if the ArtMethod entrypoint is inside the
-      // page region. This would remove the need for the edge case handling below.
-      if (pointer >= page_start && pointer + sizeof(ArtMethod) < page_end) {
-        // For all the methods in the mapping, put the entrypoint to the
-        // resolution stub.
-        ArtMethod* new_method = reinterpret_cast<ArtMethod*>(
-            child_mapping_methods.Begin() + offset + (pointer - page_start));
-        const void* code = new_method->GetEntryPointFromQuickCompiledCode();
-        if (!class_linker->IsQuickGenericJniStub(code) &&
-            !class_linker->IsQuickToInterpreterBridge(code) &&
-            !class_linker->IsQuickResolutionStub(code)) {
-          LOG(INFO) << "Putting back the resolution stub to an ArtMethod";
-          new_method->SetEntryPointFromQuickCompiledCode(GetQuickResolutionStub());
-        }
-      } else if (pointer < page_start && (pointer + sizeof(ArtMethod)) > page_start) {
-        LOG(INFO) << "Copying parts of the contents of an ArtMethod spanning page_start";
-        // If the method spans `page_start`, copy the contents of the child
-        // into the pages we are going to remap into the image.
-        //
-        //         section start -->  -----------
-        //                            |         |
-        //                            |         |
-        //            page_start -->  |/////////|            -----------
-        //                            |/////////| -> copy -> |/////////|
-        //                            |         |            |         |
-        //
-        CopyIfDifferent(child_mapping_methods.Begin() + offset,
-                        page_start,
-                        pointer + sizeof(ArtMethod) - page_start);
-      } else if (pointer < page_end && (pointer + sizeof(ArtMethod)) > page_end) {
-        LOG(INFO) << "Copying parts of the contents of an ArtMethod spanning page_end";
-        // If the method spans `page_end`, copy the contents of the child
-        // into the pages we are going to remap into the image.
-        //
-        //                            |         |            |         |
-        //                            |/////////| -> copy -> |/////////|
-        //             page_end  -->  |/////////|            -----------
-        //                            |         |
-        //         section end   -->  -----------
-        //
-        size_t bytes_to_copy = (page_end - pointer);
-        CopyIfDifferent(child_mapping_methods.Begin() + offset + capacity - bytes_to_copy,
-                        page_end - bytes_to_copy,
-                        bytes_to_copy);
+      // The entrypoint of the method we're currently using and that we want to
+      // keep.
+      uint8_t* entry_point_pointer = pointer +
+          ArtMethod::EntryPointFromQuickCompiledCodeOffset(kRuntimePointerSize).Int32Value();
+      if (!method.GetDeclaringClassUnchecked()->IsVisiblyInitialized() &&
+          method.IsStatic() &&
+          !method.IsConstructor() &&
+          entry_point_pointer >= page_start &&
+          entry_point_pointer < page_end) {
+        // The entry point of the ArtMethod in the shared memory we are going to remap into our
+        // own mapping. This is the entrypoint that we will see after the remap.
+        uint8_t* new_entry_point_pointer =
+            child_mapping_methods.Begin() + offset + (entry_point_pointer - page_start);
+        CopyIfDifferent(new_entry_point_pointer, entry_point_pointer, sizeof(void*));
       }
     }, space->Begin(), kRuntimePointerSize);
 
@@ -1196,10 +1176,13 @@ void Jit::CreateThreadPool() {
   constexpr bool kJitPoolNeedsPeers = true;
   thread_pool_.reset(new ThreadPool("Jit thread pool", 1, kJitPoolNeedsPeers));
 
-  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
+  Runtime* runtime = Runtime::Current();
+  thread_pool_->SetPthreadPriority(
+      runtime->IsZygote()
+          ? options_->GetZygoteThreadPoolPthreadPriority()
+          : options_->GetThreadPoolPthreadPriority());
   Start();
 
-  Runtime* runtime = Runtime::Current();
   if (runtime->IsZygote()) {
     // To speed up class lookups, generate a type lookup table for
     // dex files not backed by oat file.
@@ -1300,7 +1283,9 @@ void Jit::RegisterDexFiles(const std::vector<std::unique_ptr<const DexFile>>& de
   Runtime* runtime = Runtime::Current();
   // If the runtime is debuggable, no need to precompile methods.
   if (runtime->IsSystemServer() &&
-      UseJitCompilation() && HasImageWithProfile() &&
+      UseJitCompilation() &&
+      options_->UseProfiledJitCompilation() &&
+      HasImageWithProfile() &&
       !runtime->IsJavaDebuggable()) {
     thread_pool_->AddTask(Thread::Current(), new JitProfileTask(dex_files, class_loader));
   }
@@ -1329,6 +1314,7 @@ bool Jit::CompileMethodFromProfile(Thread* self,
   const void* entry_point = method->GetEntryPointFromQuickCompiledCode();
   if (class_linker->IsQuickToInterpreterBridge(entry_point) ||
       class_linker->IsQuickGenericJniStub(entry_point) ||
+      (entry_point == interpreter::GetNterpEntryPoint()) ||
       // We explicitly check for the stub. The trampoline is for methods backed by
       // a .oat file that has a compiled version of the method.
       (entry_point == GetQuickResolutionStub())) {
@@ -1723,10 +1709,11 @@ void Jit::PreZygoteFork() {
 }
 
 void Jit::PostZygoteFork() {
+  Runtime* runtime = Runtime::Current();
   if (thread_pool_ == nullptr) {
     // If this is a child zygote, check if we need to remap the boot image
     // methods.
-    if (Runtime::Current()->IsZygote() &&
+    if (runtime->IsZygote() &&
         fd_methods_ != -1 &&
         code_cache_->GetZygoteMap()->IsCompilationNotified()) {
       ScopedSuspendAll ssa(__FUNCTION__);
@@ -1734,8 +1721,7 @@ void Jit::PostZygoteFork() {
     }
     return;
   }
-  if (Runtime::Current()->IsZygote() &&
-      code_cache_->GetZygoteMap()->IsCompilationDoneButNotNotified()) {
+  if (runtime->IsZygote() && code_cache_->GetZygoteMap()->IsCompilationDoneButNotNotified()) {
     // Copy the boot image methods data to the mappings we created to share
     // with the children. We do this here as we are the only thread running and
     // we don't risk other threads concurrently updating the ArtMethod's.
@@ -1744,7 +1730,10 @@ void Jit::PostZygoteFork() {
     CHECK(code_cache_->GetZygoteMap()->IsCompilationNotified());
   }
   thread_pool_->CreateThreads();
-  thread_pool_->SetPthreadPriority(options_->GetThreadPoolPthreadPriority());
+  thread_pool_->SetPthreadPriority(
+      runtime->IsZygote()
+          ? options_->GetZygoteThreadPoolPthreadPriority()
+          : options_->GetThreadPoolPthreadPriority());
 }
 
 void Jit::BootCompleted() {

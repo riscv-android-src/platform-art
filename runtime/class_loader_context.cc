@@ -62,14 +62,12 @@ static constexpr char kInMemoryDexClassLoaderDexLocationMagic[] = "<unknown>";
 
 ClassLoaderContext::ClassLoaderContext()
     : special_shared_library_(false),
-      dex_files_open_attempted_(false),
-      dex_files_open_result_(false),
+      dex_files_state_(ContextDexFilesState::kDexFilesNotOpened),
       owns_the_dex_files_(true) {}
 
 ClassLoaderContext::ClassLoaderContext(bool owns_the_dex_files)
     : special_shared_library_(false),
-      dex_files_open_attempted_(true),
-      dex_files_open_result_(true),
+      dex_files_state_(ContextDexFilesState::kDexFilesOpened),
       owns_the_dex_files_(owns_the_dex_files) {}
 
 // Utility method to add parent and shared libraries of `info` into
@@ -167,10 +165,10 @@ std::unique_ptr<ClassLoaderContext::ClassLoaderInfo> ClassLoaderContext::ParseCl
     if (parse_checksums) {
       // Make sure that OpenDexFiles() will never be attempted on this context
       // because the dex locations of IMC do not correspond to real files.
-      CHECK(!dex_files_open_attempted_ || !dex_files_open_result_)
-          << "Parsing spec not supported when context created from a ClassLoader object";
-      dex_files_open_attempted_ = true;
-      dex_files_open_result_ = false;
+      CHECK(dex_files_state_ == kDexFilesNotOpened || dex_files_state_ == kDexFilesOpenFailed)
+          << "Parsing spec not supported when context created from a ClassLoader object: "
+          << "dex_files_state_=" << dex_files_state_;
+      dex_files_state_ = kDexFilesOpenFailed;
     } else {
       // Checksums are not provided and dex locations themselves have no meaning
       // (although we keep them in the spec to simplify parsing). Treat this as
@@ -401,17 +399,23 @@ ClassLoaderContext::ClassLoaderInfo* ClassLoaderContext::ParseInternal(
 
 // Opens requested class path files and appends them to opened_dex_files. If the dex files have
 // been stripped, this opens them from their oat files (which get added to opened_oat_files).
-bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
-                                      const std::string& classpath_dir,
-                                      const std::vector<int>& fds) {
-  if (dex_files_open_attempted_) {
-    // Do not attempt to re-open the files if we already tried.
-    return dex_files_open_result_;
+bool ClassLoaderContext::OpenDexFiles(const std::string& classpath_dir,
+                                      const std::vector<int>& fds,
+                                      bool only_read_checksums) {
+  switch (dex_files_state_) {
+    case kDexFilesNotOpened: break;  // files not opened, continue.
+    case kDexFilesOpenFailed: return false;  // previous attempt failed.
+    case kDexFilesOpened: return true;  // previous attempt succeed.
+    case kDexFilesChecksumsRead:
+      if (only_read_checksums) {
+        return true;  // we already read the checksums.
+      } else {
+        break;  // we already read the checksums but have to open the dex files; continue.
+      }
   }
 
-  dex_files_open_attempted_ = true;
-  // Assume we can open all dex files. If not, we will set this to false as we go.
-  dex_files_open_result_ = true;
+  // Assume we can open the files. If not, we will adjust as we go.
+  dex_files_state_ = only_read_checksums ? kDexFilesChecksumsRead : kDexFilesOpened;
 
   if (special_shared_library_) {
     // Nothing to open if the context is a special shared library.
@@ -432,7 +436,11 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
     work_list.pop_back();
     DCHECK(info->type != kInMemoryDexClassLoader) << __FUNCTION__ << " not supported for IMC";
 
-    size_t opened_dex_files_index = info->opened_dex_files.size();
+    // Holds the dex locations for the classpath files we've opened.
+    std::vector<std::string> dex_locations;
+    // Holds the checksums for the classpath files we've opened.
+    std::vector<uint32_t> dex_checksums;
+
     for (const std::string& cp_elem : info->classpath) {
       // If path is relative, append it to the provided base directory.
       std::string location = cp_elem;
@@ -441,13 +449,13 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
       }
 
       // If file descriptors were provided for the class loader context dex paths,
-      // get the descriptor which correponds to this dex path. We assume the `fds`
+      // get the descriptor which corresponds to this dex path. We assume the `fds`
       // vector follows the same order as a flattened class loader context.
       int fd = -1;
       if (!fds.empty()) {
         if (dex_file_index >= fds.size()) {
           LOG(WARNING) << "Number of FDs is smaller than number of dex files in the context";
-          dex_files_open_result_ = false;
+          dex_files_state_ = kDexFilesOpenFailed;
           return false;
         }
 
@@ -456,45 +464,39 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
       }
 
       std::string error_msg;
-      // When opening the dex files from the context we expect their checksum to match their
-      // contents. So pass true to verify_checksum.
-      // We don't need to do structural dex file verification, we only need to
-      // check the checksum, so pass false to verify.
-      if (fd < 0) {
+      if (only_read_checksums) {
+        bool zip_file_only_contains_uncompress_dex;
+        if (!dex_file_loader.GetMultiDexChecksums(location.c_str(),
+                                                  &dex_checksums,
+                                                  &dex_locations,
+                                                  &error_msg,
+                                                  fd,
+                                                  &zip_file_only_contains_uncompress_dex)) {
+          LOG(WARNING) << "Could not get dex checksums for location " << location << ", fd=" << fd;
+          dex_files_state_ = kDexFilesOpenFailed;
+        }
+      } else {
+        // When opening the dex files from the context we expect their checksum to match their
+        // contents. So pass true to verify_checksum.
+        // We don't need to do structural dex file verification, we only need to
+        // check the checksum, so pass false to verify.
+        size_t opened_dex_files_index = info->opened_dex_files.size();
         if (!dex_file_loader.Open(location.c_str(),
+                                  fd,
                                   location.c_str(),
                                   /*verify=*/ false,
                                   /*verify_checksum=*/ true,
                                   &error_msg,
                                   &info->opened_dex_files)) {
-          // If we fail to open the dex file because it's been stripped, try to
-          // open the dex file from its corresponding oat file.
-          // This could happen when we need to recompile a pre-build whose dex
-          // code has been stripped (for example, if the pre-build is only
-          // quicken and we want to re-compile it speed-profile).
-          // TODO(calin): Use the vdex directly instead of going through the oat file.
-          OatFileAssistant oat_file_assistant(location.c_str(), isa, false);
-          std::unique_ptr<OatFile> oat_file(oat_file_assistant.GetBestOatFile());
-          std::vector<std::unique_ptr<const DexFile>> oat_dex_files;
-          if (oat_file != nullptr &&
-              OatFileAssistant::LoadDexFiles(*oat_file, location, &oat_dex_files)) {
-            info->opened_oat_files.push_back(std::move(oat_file));
-            info->opened_dex_files.insert(info->opened_dex_files.end(),
-                                          std::make_move_iterator(oat_dex_files.begin()),
-                                          std::make_move_iterator(oat_dex_files.end()));
-          } else {
-            LOG(WARNING) << "Could not open dex files from location: " << location;
-            dex_files_open_result_ = false;
+          LOG(WARNING) << "Could not open dex files for location " << location << ", fd=" << fd;
+          dex_files_state_ = kDexFilesOpenFailed;
+        } else {
+          for (size_t k = opened_dex_files_index; k < info->opened_dex_files.size(); k++) {
+            std::unique_ptr<const DexFile>& dex = info->opened_dex_files[k];
+            dex_locations.push_back(dex->GetLocation());
+            dex_checksums.push_back(dex->GetLocationChecksum());
           }
         }
-      } else if (!dex_file_loader.Open(fd,
-                                       location.c_str(),
-                                       /*verify=*/ false,
-                                       /*verify_checksum=*/ true,
-                                       &error_msg,
-                                       &info->opened_dex_files)) {
-        LOG(WARNING) << "Could not open dex files from fd " << fd << " for location: " << location;
-        dex_files_open_result_ = false;
       }
     }
 
@@ -508,13 +510,9 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
     // location in the class paths.
     // Note that this will also remove the paths that could not be opened.
     info->original_classpath = std::move(info->classpath);
-    info->classpath.clear();
-    info->checksums.clear();
-    for (size_t k = opened_dex_files_index; k < info->opened_dex_files.size(); k++) {
-      std::unique_ptr<const DexFile>& dex = info->opened_dex_files[k];
-      info->classpath.push_back(dex->GetLocation());
-      info->checksums.push_back(dex->GetLocationChecksum());
-    }
+    DCHECK(dex_locations.size() == dex_checksums.size());
+    info->classpath = dex_locations;
+    info->checksums = dex_checksums;
     AddToWorkList(info, work_list);
   }
 
@@ -523,15 +521,15 @@ bool ClassLoaderContext::OpenDexFiles(InstructionSet isa,
   if (dex_file_index != fds.size()) {
     LOG(WARNING) << fds.size() << " FDs provided but only " << dex_file_index
         << " dex files are in the class loader context";
-    dex_files_open_result_ = false;
+    dex_files_state_ = kDexFilesOpenFailed;
   }
 
-  return dex_files_open_result_;
+  return dex_files_state_ != kDexFilesOpenFailed;
 }
 
 bool ClassLoaderContext::RemoveLocationsFromClassPaths(
     const dchecked_vector<std::string>& locations) {
-  CHECK(!dex_files_open_attempted_)
+  CHECK_EQ(dex_files_state_, kDexFilesNotOpened)
       << "RemoveLocationsFromClasspaths cannot be call after OpenDexFiles";
 
   if (class_loader_chain_ == nullptr) {
@@ -940,9 +938,9 @@ const char* ClassLoaderContext::GetClassLoaderTypeName(ClassLoaderType type) {
 }
 
 void ClassLoaderContext::CheckDexFilesOpened(const std::string& calling_method) const {
-  CHECK(dex_files_open_attempted_)
+  CHECK_NE(dex_files_state_, kDexFilesNotOpened)
       << "Dex files were not successfully opened before the call to " << calling_method
-      << "attempt=" << dex_files_open_attempted_ << ", result=" << dex_files_open_result_;
+      << "status=" << dex_files_state_;
 }
 
 // Collects the dex files from the give Java dex_file object. Only the dex files with
@@ -1232,8 +1230,8 @@ ClassLoaderContext::VerificationResult ClassLoaderContext::VerifyClassLoaderCont
     bool verify_names,
     bool verify_checksums) const {
   if (verify_names || verify_checksums) {
-    DCHECK(dex_files_open_attempted_);
-    DCHECK(dex_files_open_result_);
+    DCHECK(dex_files_state_ == kDexFilesChecksumsRead || dex_files_state_ == kDexFilesOpened)
+        << "dex_files_state_=" << dex_files_state_;
   }
 
   ClassLoaderContext expected_context;
@@ -1405,8 +1403,7 @@ bool ClassLoaderContext::ClassLoaderInfoMatch(
 
 std::set<const DexFile*> ClassLoaderContext::CheckForDuplicateDexFiles(
     const std::vector<const DexFile*>& dex_files_to_check) {
-  DCHECK(dex_files_open_attempted_);
-  DCHECK(dex_files_open_result_);
+  DCHECK_EQ(dex_files_state_, kDexFilesOpened);
 
   std::set<const DexFile*> result;
 

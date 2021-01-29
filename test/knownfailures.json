@@ -442,6 +442,7 @@
             ".*method-handle.*",
             ".*varhandle.*",
             ".*var-handle.*",
+            "160-read-barrier-stress",
             "716-jli-jit-samples",
             "1975-hello-structural-transformation",
             "1976-hello-structural-static-methods",
@@ -566,11 +567,12 @@
             "692-vdex-inmem-loader",
             "693-vdex-inmem-loader-evict",
             "944-transform-classloaders",
-            "999-redefine-hiddenapi"
+            "999-redefine-hiddenapi",
+            "2038-hiddenapi-jvmti-ext"
         ],
         "description": [
             "Tests that use custom class loaders or other features not supported ",
-            "by our JVMTI implementation"
+            "by our JVMTI implementation (such as hiddenapi, vdex or bad dex-files)"
         ],
         "variant": "jvmti-stress | redefine-stress"
     },
@@ -1182,7 +1184,8 @@
                   "2012-structural-redefinition-failures-jni-id",
                   "2033-shutdown-mechanics",
                   "2035-structural-native-method",
-                  "2036-structural-subclass-shadow"],
+                  "2036-structural-subclass-shadow",
+                  "2038-hiddenapi-jvmti-ext"],
         "variant": "jvm",
         "description": ["Doesn't run on RI."]
     },
@@ -1275,14 +1278,6 @@
         "description": [ "Fails to eliminate dead reference when debuggable." ]
     },
     {
-        "tests": ["719-dm-verify-redefinition"],
-        "variant": "jvm | speed-profile | interp-ac | target | no-prebuild",
-        "description": ["Doesn't run on RI because of boot class redefintion.",
-                        "Doesn't work with profiles because the run-test is not setup to",
-                        "support both. It also needs full verification, so no interp-ac.",
-                        "Requires zip, which isn't available on device"]
-    },
-    {
         "tests": ["004-ReferenceMap",
                   "449-checker-bce",
                   "466-get-live-vreg",
@@ -1325,7 +1320,8 @@
     },
     {
         "tests": ["175-alloc-big-bignums"],
-        "variant": "interpreter | interp-ac | trace | no-image | debuggable",
+        "variant": "interpreter | interp-ac | trace | no-image | debuggable | prebuild",
+        "bug": "b/174470490",
         "description": "Interpreting BigInteger.add() is too slow (timeouts)"
     },
     {
@@ -1355,5 +1351,15 @@
         "variant": "jvm",
         "bug": "b/154802847",
         "description": ["Failing on RI. Needs further investigating."]
+    },
+    {
+        "tests": ["2232-write-metrics-to-log"],
+        "variant": "jvm",
+        "description": ["RI does not support ART metrics."]
+    },
+    {
+        "tests": ["2232-write-metrics-to-log"],
+        "variant": "target",
+        "description": ["Checks LOG_STREAM output, which cannot be captured on target."]
     }
 ]

@@ -23,7 +23,6 @@
 #endif
 
 #include <string_view>
-#include <unordered_set>
 #include <vector>
 
 #include "android-base/logging.h"
@@ -36,6 +35,7 @@
 #include "base/array_ref.h"
 #include "base/bit_vector.h"
 #include "base/enums.h"
+#include "base/hash_set.h"
 #include "base/logging.h"  // For VLOG
 #include "base/stl_util.h"
 #include "base/string_view_cpp20.h"
@@ -84,7 +84,6 @@
 #include "trampolines/trampoline_compiler.h"
 #include "transaction.h"
 #include "utils/atomic_dex_ref_map-inl.h"
-#include "utils/dex_cache_arrays_layout-inl.h"
 #include "utils/swap_space.h"
 #include "vdex_file.h"
 #include "verifier/class_verifier.h"
@@ -325,6 +324,14 @@ std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateQuickToInterpr
     const {
   CREATE_TRAMPOLINE(QUICK, kQuickAbi, pQuickToInterpreterBridge)
 }
+
+std::unique_ptr<const std::vector<uint8_t>> CompilerDriver::CreateNterpTrampoline()
+    const {
+  // We use QuickToInterpreterBridge to not waste one word in the Thread object.
+  // The Nterp trampoline gets replaced with the nterp entrypoint when loading
+  // an image.
+  CREATE_TRAMPOLINE(QUICK, kQuickAbi, pQuickToInterpreterBridge)
+}
 #undef CREATE_TRAMPOLINE
 
 void CompilerDriver::CompileAll(jobject class_loader,
@@ -355,8 +362,11 @@ static optimizer::DexToDexCompiler::CompilationLevel GetDexToDexCompilationLevel
   if (dex_file.GetContainer() != nullptr && dex_file.GetContainer()->IsReadOnly()) {
     return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
   }
+  if (!driver.GetCompilerOptions().IsQuickeningCompilationEnabled()) {
+    // b/170086509 Quickening compilation is being deprecated.
+    return optimizer::DexToDexCompiler::CompilationLevel::kDontDexToDexCompile;
+  }
   auto* const runtime = Runtime::Current();
-  DCHECK(driver.GetCompilerOptions().IsQuickeningCompilationEnabled());
   const char* descriptor = dex_file.GetClassDescriptor(class_def);
   ClassLinker* class_linker = runtime->GetClassLinker();
   ObjPtr<mirror::Class> klass = class_linker->FindClass(self, descriptor, class_loader);
@@ -681,11 +691,6 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
 
   for (const DexFile* dex_file : dex_files) {
     dex_cache.Assign(class_linker->FindDexCache(soa.Self(), *dex_file));
-    bool added_preresolved_string_array = false;
-    if (only_startup_strings) {
-      // When resolving startup strings, create the preresolved strings array.
-      added_preresolved_string_array = dex_cache->AddPreResolvedStringsArray();
-    }
     TimingLogger::ScopedTiming t("Resolve const-string Strings", timings);
 
     // TODO: Implement a profile-based filter for the boot image. See b/76145463.
@@ -711,7 +716,7 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
         if (profile_compilation_info != nullptr && !is_startup_clinit) {
           ProfileCompilationInfo::MethodHotness hotness =
               profile_compilation_info->GetMethodHotness(method.GetReference());
-          if (added_preresolved_string_array ? !hotness.IsStartup() : !hotness.IsInProfile()) {
+          if (only_startup_strings ? !hotness.IsStartup() : !hotness.IsInProfile()) {
             continue;
           }
         }
@@ -729,10 +734,6 @@ void CompilerDriver::ResolveConstStrings(const std::vector<const DexFile*>& dex_
                   : inst->VRegB_31c());
               ObjPtr<mirror::String> string = class_linker->ResolveString(string_index, dex_cache);
               CHECK(string != nullptr) << "Could not allocate a string when forcing determinism";
-              if (added_preresolved_string_array) {
-                dex_cache->GetPreResolvedStrings()[string_index.index_] =
-                    GcRoot<mirror::String>(string);
-              }
               ++num_instructions;
               break;
             }
@@ -867,6 +868,7 @@ class CreateConflictTablesVisitor : public ClassVisitor {
   }
 
   void FillAllIMTAndConflictTables() REQUIRES_SHARED(Locks::mutator_lock_) {
+    ScopedAssertNoThreadSuspension ants(__FUNCTION__);
     for (Handle<mirror::Class> c : to_visit_) {
       // Create the conflict tables.
       FillIMTAndConflictTables(c.Get());
@@ -879,7 +881,7 @@ class CreateConflictTablesVisitor : public ClassVisitor {
     if (!klass->ShouldHaveImt()) {
       return;
     }
-    if (visited_classes_.find(klass) != visited_classes_.end()) {
+    if (visited_classes_.find(klass.Ptr()) != visited_classes_.end()) {
       return;
     }
     if (klass->HasSuperClass()) {
@@ -888,12 +890,12 @@ class CreateConflictTablesVisitor : public ClassVisitor {
     if (!klass->IsTemp()) {
       Runtime::Current()->GetClassLinker()->FillIMTAndConflictTables(klass);
     }
-    visited_classes_.insert(klass);
+    visited_classes_.insert(klass.Ptr());
   }
 
   VariableSizedHandleScope& hs_;
   std::vector<Handle<mirror::Class>> to_visit_;
-  std::unordered_set<ObjPtr<mirror::Class>, HashObjPtr> visited_classes_;
+  HashSet<mirror::Class*> visited_classes_;
 };
 
 void CompilerDriver::PreCompile(jobject class_loader,
@@ -1396,7 +1398,7 @@ class ClinitImageUpdate {
 
   mutable VariableSizedHandleScope hs_;
   mutable std::vector<Handle<mirror::Class>> to_insert_;
-  mutable std::unordered_set<mirror::Object*> marked_objects_;
+  mutable HashSet<mirror::Object*> marked_objects_;
   HashSet<std::string>* const image_class_descriptors_;
   std::vector<Handle<mirror::Class>> image_classes_;
   Thread* const self_;
@@ -1478,21 +1480,6 @@ bool CompilerDriver::ComputeInstanceFieldInfo(uint32_t field_idx, const DexCompi
     *field_offset = resolved_field->GetOffset();
     return true;
   }
-}
-
-bool CompilerDriver::IsSafeCast(const DexCompilationUnit* mUnit, uint32_t dex_pc) {
-  if (!compiler_options_->IsVerificationEnabled()) {
-    // If we didn't verify, every cast has to be treated as non-safe.
-    return false;
-  }
-  DCHECK(mUnit->GetVerifiedMethod() != nullptr);
-  bool result = mUnit->GetVerifiedMethod()->IsSafeCast(dex_pc);
-  if (result) {
-    stats_->SafeCast();
-  } else {
-    stats_->NotASafeCast();
-  }
-  return result;
 }
 
 class CompilationVisitor {
@@ -1904,9 +1891,6 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
   if (!verifier_deps->ValidateDependencies(
       soa.Self(),
       class_loader,
-      // This returns classpath dex files in no particular order but VerifierDeps
-      // does not care about the order.
-      classpath_classes_.GetDexFiles(),
       &error_msg)) {
     LOG(WARNING) << "Fast verification failed: " << error_msg;
     return false;
@@ -1933,12 +1917,13 @@ bool CompilerDriver::FastVerify(jobject jclass_loader,
           ClassReference ref(dex_file, accessor.GetClassDefIndex());
           const ClassStatus existing = ClassStatus::kNotReady;
           ClassStateTable::InsertResult result =
-             compiled_classes_.Insert(ref, existing, ClassStatus::kVerified);
+             compiled_classes_.Insert(ref, existing, ClassStatus::kVerifiedNeedsAccessChecks);
           CHECK_EQ(result, ClassStateTable::kInsertResultSuccess) << ref.dex_file->GetLocation();
         } else {
           // Update the class status, so later compilation stages know they don't need to verify
           // the class.
-          LoadAndUpdateStatus(accessor, ClassStatus::kVerified, class_loader, soa.Self());
+          LoadAndUpdateStatus(
+              accessor, ClassStatus::kVerifiedNeedsAccessChecks, class_loader, soa.Self());
           // Create `VerifiedMethod`s for each methods, the compiler expects one for
           // quickening or compiling.
           // Note that this means:
@@ -2037,6 +2022,7 @@ class VerifyClassVisitor : public CompilationVisitor {
         hs.NewHandle(soa.Decode<mirror::ClassLoader>(jclass_loader)));
     Handle<mirror::Class> klass(
         hs.NewHandle(class_linker->FindClass(soa.Self(), descriptor, class_loader)));
+    ClassReference ref(manager_->GetDexFile(), class_def_index);
     verifier::FailureKind failure_kind;
     if (klass == nullptr) {
       CHECK(soa.Self()->IsExceptionPending());
@@ -2061,32 +2047,28 @@ class VerifyClassVisitor : public CompilationVisitor {
                                                log_level_,
                                                sdk_version_,
                                                &error_msg);
-      if (failure_kind == verifier::FailureKind::kHardFailure) {
-        LOG(ERROR) << "Verification failed on class " << PrettyDescriptor(descriptor)
-                   << " because: " << error_msg;
-        manager_->GetCompiler()->SetHadHardVerifierFailure();
-      } else if (failure_kind == verifier::FailureKind::kSoftFailure) {
-        manager_->GetCompiler()->AddSoftVerifierFailure();
-      } else {
-        // Force a soft failure for the VerifierDeps. This is a validity measure, as
-        // the vdex file already records that the class hasn't been resolved. It avoids
-        // trying to do future verification optimizations when processing the vdex file.
-        DCHECK(failure_kind == verifier::FailureKind::kNoFailure ||
-               failure_kind == verifier::FailureKind::kAccessChecksFailure) << failure_kind;
-        failure_kind = verifier::FailureKind::kSoftFailure;
+      switch (failure_kind) {
+        case verifier::FailureKind::kHardFailure: {
+          LOG(ERROR) << "Verification failed on class " << PrettyDescriptor(descriptor)
+                     << " because: " << error_msg;
+          manager_->GetCompiler()->SetHadHardVerifierFailure();
+          break;
+        }
+        case verifier::FailureKind::kSoftFailure: {
+          manager_->GetCompiler()->AddSoftVerifierFailure();
+          break;
+        }
+        case verifier::FailureKind::kAccessChecksFailure: {
+          manager_->GetCompiler()->RecordClassStatus(ref, ClassStatus::kVerifiedNeedsAccessChecks);
+          break;
+        }
+        case verifier::FailureKind::kNoFailure: {
+          manager_->GetCompiler()->RecordClassStatus(ref, ClassStatus::kVerified);
+          break;
+        }
       }
     } else if (&klass->GetDexFile() != &dex_file) {
       // Skip a duplicate class (as the resolved class is from another, earlier dex file).
-      // Record the information that we skipped this class in the vdex.
-      // If the class resolved to a dex file not covered by the vdex, e.g. boot class path,
-      // it is considered external, dependencies on it will be recorded and the vdex will
-      // remain usable regardless of whether the class remains redefined or not (in the
-      // latter case, this class will be verify-at-runtime).
-      // On the other hand, if the class resolved to a dex file covered by the vdex, i.e.
-      // a different dex file within the same APK, this class will always be eclipsed by it.
-      // Recording that it was redefined is not necessary but will save class resolution
-      // time during fast-verify.
-      verifier::VerifierDeps::MaybeRecordClassRedefinition(dex_file, class_def);
       return;  // Do not update state.
     } else if (!SkipClass(jclass_loader, dex_file, klass.Get())) {
       CHECK(klass->IsResolved()) << klass->PrettyClass();
@@ -2108,7 +2090,6 @@ class VerifyClassVisitor : public CompilationVisitor {
           << klass->PrettyDescriptor() << ": state=" << klass->GetStatus();
 
       // Class has a meaningful status for the compiler now, record it.
-      ClassReference ref(manager_->GetDexFile(), class_def_index);
       ClassStatus status = klass->GetStatus();
       if (status == ClassStatus::kInitialized) {
         // Initialized classes shall be visibly initialized when loaded from the image.

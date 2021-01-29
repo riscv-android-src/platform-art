@@ -15,12 +15,6 @@
 art_cc_defaults {
     name: "libart-dexlayout-defaults",
     defaults: ["art_defaults"],
-    visibility: [
-        // Visibility for prebuilt binaries from the prebuilt of this module.
-        // TODO(b/155921753): Restrict this when prebuilts are in their proper
-        // locations.
-        "//prebuilts:__subpackages__",
-    ],
     host_supported: true,
     srcs: [
         "compact_dex_writer.cc",
@@ -101,7 +95,7 @@ art_cc_library {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -182,7 +176,7 @@ art_cc_binary {
         "libart-dexlayout",
     ],
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
@@ -270,7 +264,7 @@ art_cc_binary {
         },
     },
     apex_available: [
-        "com.android.art.release",
+        "com.android.art",
         "com.android.art.debug",
     ],
 }
