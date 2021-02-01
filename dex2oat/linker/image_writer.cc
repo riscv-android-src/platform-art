@@ -23,7 +23,6 @@
 
 #include <memory>
 #include <numeric>
-#include <unordered_set>
 #include <vector>
 
 #include "art_field-inl.h"
@@ -73,6 +72,7 @@
 #include "mirror/object_array-alloc-inl.h"
 #include "mirror/object_array-inl.h"
 #include "mirror/string-inl.h"
+#include "nterp_helpers.h"
 #include "oat.h"
 #include "oat_file.h"
 #include "oat_file_manager.h"
@@ -90,6 +90,24 @@ using ::art::mirror::String;
 
 namespace art {
 namespace linker {
+
+// The actual value of `kImageClassTableMinLoadFactor` is irrelevant because image class tables
+// are never resized, but we still need to pass a reasonable value to the constructor.
+constexpr double kImageClassTableMinLoadFactor = 0.5;
+// We use `kImageClassTableMaxLoadFactor` to determine the buffer size for image class tables
+// to make them full. We never insert additional elements to them, so we do not want to waste
+// extra memory. And unlike runtime class tables, we do not want this to depend on runtime
+// properties (see `Runtime::GetHashTableMaxLoadFactor()` checking for low memory mode).
+constexpr double kImageClassTableMaxLoadFactor = 0.7;
+
+// The actual value of `kImageInternTableMinLoadFactor` is irrelevant because image intern tables
+// are never resized, but we still need to pass a reasonable value to the constructor.
+constexpr double kImageInternTableMinLoadFactor = 0.5;
+// We use `kImageInternTableMaxLoadFactor` to determine the buffer size for image intern tables
+// to make them full. We never insert additional elements to them, so we do not want to waste
+// extra memory. And unlike runtime intern tables, we do not want this to depend on runtime
+// properties (see `Runtime::GetHashTableMaxLoadFactor()` checking for low memory mode).
+constexpr double kImageInternTableMaxLoadFactor = 0.7;
 
 static ArrayRef<const uint8_t> MaybeCompressData(ArrayRef<const uint8_t> source,
                                                  ImageHeader::StorageMode image_storage_mode,
@@ -282,27 +300,6 @@ bool ImageWriter::PrepareImageAddressSpace(TimingLogger* timings) {
     CalculateNewObjectOffsets();
   }
 
-  // Obtain class count for debugging purposes
-  if (VLOG_IS_ON(compiler) && compiler_options_.IsAppImage()) {
-    ScopedObjectAccess soa(self);
-
-    size_t app_image_class_count  = 0;
-
-    for (ImageInfo& info : image_infos_) {
-      info.class_table_->Visit([&](ObjPtr<mirror::Class> klass)
-                                   REQUIRES_SHARED(Locks::mutator_lock_) {
-        if (!IsInBootImage(klass.Ptr())) {
-          ++app_image_class_count;
-        }
-
-        // Indicate that we would like to continue visiting classes.
-        return true;
-      });
-    }
-
-    VLOG(compiler) << "Dex2Oat:AppImage:classCount = " << app_image_class_count;
-  }
-
   // This needs to happen after CalculateNewObjectOffsets since it relies on intern_table_bytes_ and
   // bin size sums being calculated.
   TimingLogger::ScopedTiming t("AllocMemory", timings);
@@ -388,10 +385,10 @@ class ImageWriter::ImageFileGuard {
 bool ImageWriter::Write(int image_fd,
                         const std::vector<std::string>& image_filenames,
                         size_t component_count) {
-  // If image_fd or oat_fd are not kInvalidFd then we may have empty strings in image_filenames or
-  // oat_filenames.
+  // If image_fd or oat_fd are not File::kInvalidFd then we may have empty strings in
+  // image_filenames or oat_filenames.
   CHECK(!image_filenames.empty());
-  if (image_fd != kInvalidFd) {
+  if (image_fd != File::kInvalidFd) {
     CHECK_EQ(image_filenames.size(), 1u);
   }
   DCHECK(!oat_filenames_.empty());
@@ -429,7 +426,7 @@ bool ImageWriter::Write(int image_fd,
     const std::string& image_filename = image_filenames[i];
     ImageInfo& image_info = GetImageInfo(i);
     ImageFileGuard image_file;
-    if (image_fd != kInvalidFd) {
+    if (image_fd != File::kInvalidFd) {
       // Ignore image_filename, it is supplied only for better diagnostic.
       image_file.reset(new File(image_fd, unix_file::kCheckSafeUsage));
       // Empty the file in case it already exists.
@@ -627,7 +624,7 @@ void ImageWriter::SetImageBinSlot(mirror::Object* object, BinSlot bin_slot) {
       break;
     case LockWord::kHashCode:
       DCHECK(saved_hashcode_map_.find(object) == saved_hashcode_map_.end());
-      saved_hashcode_map_.emplace(object, lw.GetHashCode());
+      saved_hashcode_map_.insert(std::make_pair(object, lw.GetHashCode()));
       break;
     default:
       LOG(FATAL) << "Unreachable.";
@@ -653,7 +650,7 @@ void ImageWriter::AddMethodPointerArray(ObjPtr<mirror::PointerArray> arr) {
   }
   // kBinArtMethodClean picked arbitrarily, just required to differentiate between ArtFields and
   // ArtMethods.
-  pointer_arrays_.emplace(arr.Ptr(), Bin::kArtMethodClean);
+  method_pointer_arrays_.insert(arr.Ptr());
 }
 
 ImageWriter::Bin ImageWriter::AssignImageBinSlot(mirror::Object* object, size_t oat_index) {
@@ -757,8 +754,12 @@ ImageWriter::Bin ImageWriter::AssignImageBinSlot(mirror::Object* object, size_t 
   }
 
   // Assign the oat index too.
-  DCHECK(oat_index_map_.find(object) == oat_index_map_.end());
-  oat_index_map_.emplace(object, oat_index);
+  if (IsMultiImage()) {
+    DCHECK(oat_index_map_.find(object) == oat_index_map_.end());
+    oat_index_map_.insert(std::make_pair(object, oat_index));
+  } else {
+    DCHECK(oat_index_map_.empty());
+  }
 
   ImageInfo& image_info = GetImageInfo(oat_index);
 
@@ -876,7 +877,7 @@ class ImageWriter::PruneObjectReferenceVisitor {
  public:
   PruneObjectReferenceVisitor(ImageWriter* image_writer,
                         bool* early_exit,
-                        std::unordered_set<mirror::Object*>* visited,
+                        HashSet<mirror::Object*>* visited,
                         bool* result)
       : image_writer_(image_writer), early_exit_(early_exit), visited_(visited), result_(result) {}
 
@@ -912,12 +913,14 @@ class ImageWriter::PruneObjectReferenceVisitor {
           image_writer_->PruneImageClassInternal(ref->AsClass(), early_exit_, visited_);
     } else {
       // Record the object visited in case of circular reference.
-      visited_->emplace(ref);
+      visited_->insert(ref);
       *result_ = *result_ ||
           image_writer_->PruneImageClassInternal(klass, early_exit_, visited_);
       ref->VisitReferences(*this, *this);
       // Clean up before exit for next call of this function.
-      visited_->erase(ref);
+      auto it = visited_->find(ref);
+      DCHECK(it != visited_->end());
+      visited_->erase(it);
     }
   }
 
@@ -930,21 +933,21 @@ class ImageWriter::PruneObjectReferenceVisitor {
  private:
   ImageWriter* image_writer_;
   bool* early_exit_;
-  std::unordered_set<mirror::Object*>* visited_;
+  HashSet<mirror::Object*>* visited_;
   bool* const result_;
 };
 
 
 bool ImageWriter::PruneImageClass(ObjPtr<mirror::Class> klass) {
   bool early_exit = false;
-  std::unordered_set<mirror::Object*> visited;
+  HashSet<mirror::Object*> visited;
   return PruneImageClassInternal(klass, &early_exit, &visited);
 }
 
 bool ImageWriter::PruneImageClassInternal(
     ObjPtr<mirror::Class> klass,
     bool* early_exit,
-    std::unordered_set<mirror::Object*>* visited) {
+    HashSet<mirror::Object*>* visited) {
   DCHECK(early_exit != nullptr);
   DCHECK(visited != nullptr);
   DCHECK(compiler_options_.IsAppImage() || compiler_options_.IsBootImageExtension());
@@ -961,7 +964,7 @@ bool ImageWriter::PruneImageClassInternal(
     *early_exit = true;
     return false;
   }
-  visited->emplace(klass.Ptr());
+  visited->insert(klass.Ptr());
   bool result = IsBootClassLoaderClass(klass);
   std::string temp;
   // Prune if not an image class, this handles any broken sets of image classes such as having a
@@ -1035,7 +1038,7 @@ bool ImageWriter::PruneImageClassInternal(
   // dependencies. If visited is empty then we are the root caller, in this case the cycle was in
   // a child call and we can remember the result.
   if (result == true || !my_early_exit || visited->empty()) {
-    prune_class_memo_[klass.Ptr()] = result;
+    prune_class_memo_.Overwrite(klass.Ptr(), result);
   }
   *early_exit |= my_early_exit;
   return result;
@@ -1099,7 +1102,7 @@ class ImageWriter::PruneClassesVisitor : public ClassVisitor {
  private:
   ImageWriter* const image_writer_;
   const ObjPtr<mirror::ClassLoader> class_loader_;
-  std::unordered_set<mirror::Class*> classes_to_prune_;
+  HashSet<mirror::Class*> classes_to_prune_;
   size_t defined_class_count_;
 };
 
@@ -1255,7 +1258,7 @@ void ImageWriter::DumpImageClasses() {
 
 ObjPtr<mirror::ObjectArray<mirror::Object>> ImageWriter::CollectDexCaches(Thread* self,
                                                                           size_t oat_index) const {
-  std::unordered_set<const DexFile*> image_dex_files;
+  HashSet<const DexFile*> image_dex_files;
   for (auto& pair : dex_file_oat_index_map_) {
     const DexFile* image_dex_file = pair.first;
     size_t image_oat_index = pair.second;
@@ -1354,23 +1357,7 @@ ObjPtr<ObjectArray<Object>> ImageWriter::CreateImageRoots(
 }
 
 void ImageWriter::RecordNativeRelocations(ObjPtr<mirror::Object> obj, size_t oat_index) {
-  if (obj->IsString()) {
-    ObjPtr<mirror::String> str = obj->AsString();
-    InternTable* intern_table = Runtime::Current()->GetInternTable();
-    Thread* const self = Thread::Current();
-    if (intern_table->LookupStrong(self, str) == str) {
-      DCHECK(std::none_of(image_infos_.begin(),
-                          image_infos_.end(),
-                          [=](ImageInfo& info) REQUIRES_SHARED(Locks::mutator_lock_) {
-                            return info.intern_table_->LookupStrong(self, str) != nullptr;
-                          }));
-      ObjPtr<mirror::String> interned =
-          GetImageInfo(oat_index).intern_table_->InternStrongImageString(str);
-      DCHECK_EQ(interned, obj);
-    }
-  } else if (obj->IsDexCache()) {
-    DCHECK_EQ(oat_index, GetOatIndexForDexFile(obj->AsDexCache()->GetDexFile()));
-  } else if (obj->IsClass()) {
+  if (obj->IsClass()) {
     // Visit and assign offsets for fields and field arrays.
     ObjPtr<mirror::Class> as_klass = obj->AsClass();
     DCHECK_EQ(oat_index, GetOatIndexForClass(as_klass));
@@ -1383,44 +1370,22 @@ void ImageWriter::RecordNativeRelocations(ObjPtr<mirror::Object> obj, size_t oat
         as_klass->GetSFieldsPtr(), as_klass->GetIFieldsPtr(),
     };
     ImageInfo& image_info = GetImageInfo(oat_index);
-    if (!compiler_options_.IsAppImage()) {
-      // Note: Avoid locking to prevent lock order violations from root visiting;
-      // image_info.class_table_ is only accessed from the image writer.
-      image_info.class_table_->InsertWithoutLocks(as_klass);
-    }
     for (LengthPrefixedArray<ArtField>* cur_fields : fields) {
       // Total array length including header.
       if (cur_fields != nullptr) {
-        const size_t header_size = LengthPrefixedArray<ArtField>::ComputeSize(0);
         // Forward the entire array at once.
-        auto it = native_object_relocations_.find(cur_fields);
-        CHECK(it == native_object_relocations_.end()) << "Field array " << cur_fields
-                                                << " already forwarded";
         size_t offset = image_info.GetBinSlotSize(Bin::kArtField);
         DCHECK(!IsInBootImage(cur_fields));
-        native_object_relocations_.emplace(
-            cur_fields,
-            NativeObjectRelocation {
-                oat_index, offset, NativeObjectRelocationType::kArtFieldArray
-            });
-        offset += header_size;
-        // Forward individual fields so that we can quickly find where they belong.
-        for (size_t i = 0, count = cur_fields->size(); i < count; ++i) {
-          // Need to forward arrays separate of fields.
-          ArtField* field = &cur_fields->At(i);
-          auto it2 = native_object_relocations_.find(field);
-          CHECK(it2 == native_object_relocations_.end()) << "Field at index=" << i
-              << " already assigned " << field->PrettyField() << " static=" << field->IsStatic();
-          DCHECK(!IsInBootImage(field));
-          native_object_relocations_.emplace(
-              field,
-              NativeObjectRelocation { oat_index,
-                                       offset,
-                                       NativeObjectRelocationType::kArtField });
-          offset += sizeof(ArtField);
-        }
-        image_info.IncrementBinSlotSize(
-            Bin::kArtField, header_size + cur_fields->size() * sizeof(ArtField));
+        bool inserted =
+            native_object_relocations_.insert(std::make_pair(
+                cur_fields,
+                NativeObjectRelocation {
+                    oat_index, offset, NativeObjectRelocationType::kArtFieldArray
+                })).second;
+        CHECK(inserted) << "Field array " << cur_fields << " already forwarded";
+        const size_t size = LengthPrefixedArray<ArtField>::ComputeSize(cur_fields->size());
+        offset += size;
+        image_info.IncrementBinSlotSize(Bin::kArtField, size);
         DCHECK_EQ(offset, image_info.GetBinSlotSize(Bin::kArtField));
       }
     }
@@ -1445,17 +1410,18 @@ void ImageWriter::RecordNativeRelocations(ObjPtr<mirror::Object> obj, size_t oat
                                                                              method_size,
                                                                              method_alignment);
       LengthPrefixedArray<ArtMethod>* array = as_klass->GetMethodsPtr();
-      auto it = native_object_relocations_.find(array);
-      CHECK(it == native_object_relocations_.end())
-          << "Method array " << array << " already forwarded";
       size_t offset = image_info.GetBinSlotSize(bin_type);
       DCHECK(!IsInBootImage(array));
-      native_object_relocations_.emplace(array,
-          NativeObjectRelocation {
-              oat_index,
-              offset,
-              any_dirty ? NativeObjectRelocationType::kArtMethodArrayDirty
-                        : NativeObjectRelocationType::kArtMethodArrayClean });
+      bool inserted =
+          native_object_relocations_.insert(std::make_pair(
+              array,
+              NativeObjectRelocation {
+                  oat_index,
+                  offset,
+                  any_dirty ? NativeObjectRelocationType::kArtMethodArrayDirty
+                            : NativeObjectRelocationType::kArtMethodArrayClean
+              })).second;
+      CHECK(inserted) << "Method array " << array << " already forwarded";
       image_info.IncrementBinSlotSize(bin_type, header_size);
       for (auto& m : as_klass->GetMethods(target_ptr_size_)) {
         AssignMethodOffset(&m, type, oat_index);
@@ -1480,20 +1446,8 @@ void ImageWriter::RecordNativeRelocations(ObjPtr<mirror::Object> obj, size_t oat
         }
       }
     }
-  } else if (obj->IsClassLoader()) {
-    // Register the class loader if it has a class table.
-    // The fake boot class loader should not get registered.
-    ObjPtr<mirror::ClassLoader> class_loader = obj->AsClassLoader();
-    if (class_loader->GetClassTable() != nullptr) {
-      DCHECK(compiler_options_.IsAppImage());
-      if (class_loader == GetAppClassLoader()) {
-        ImageInfo& image_info = GetImageInfo(oat_index);
-        // Note: Avoid locking to prevent lock order violations from root visiting;
-        // image_info.class_table_ table is only accessed from the image writer
-        // and class_loader->GetClassTable() is iterated but not modified.
-        image_info.class_table_->CopyWithoutLocks(*class_loader->GetClassTable());
-      }
-    }
+  } else if (obj->IsDexCache()) {
+    DCHECK_EQ(oat_index, GetOatIndexForDexFile(obj->AsDexCache()->GetDexFile()));
   }
 }
 
@@ -1509,12 +1463,13 @@ bool ImageWriter::TryAssignImTableOffset(ImTable* imt, size_t oat_index) {
   // If the method is a conflict method we also want to assign the conflict table offset.
   ImageInfo& image_info = GetImageInfo(oat_index);
   const size_t size = ImTable::SizeInBytes(target_ptr_size_);
-  native_object_relocations_.emplace(
+  native_object_relocations_.insert(std::make_pair(
       imt,
       NativeObjectRelocation {
           oat_index,
           image_info.GetBinSlotSize(Bin::kImTable),
-          NativeObjectRelocationType::kIMTable});
+          NativeObjectRelocationType::kIMTable
+      }));
   image_info.IncrementBinSlotSize(Bin::kImTable, size);
   return true;
 }
@@ -1528,12 +1483,13 @@ void ImageWriter::TryAssignConflictTableOffset(ImtConflictTable* table, size_t o
   // If the method is a conflict method we also want to assign the conflict table offset.
   ImageInfo& image_info = GetImageInfo(oat_index);
   const size_t size = table->ComputeSize(target_ptr_size_);
-  native_object_relocations_.emplace(
+  native_object_relocations_.insert(std::make_pair(
       table,
       NativeObjectRelocation {
           oat_index,
           image_info.GetBinSlotSize(Bin::kIMTConflictTable),
-          NativeObjectRelocationType::kIMTConflictTable});
+          NativeObjectRelocationType::kIMTConflictTable
+      }));
   image_info.IncrementBinSlotSize(Bin::kIMTConflictTable, size);
 }
 
@@ -1549,7 +1505,8 @@ void ImageWriter::AssignMethodOffset(ArtMethod* method,
   ImageInfo& image_info = GetImageInfo(oat_index);
   Bin bin_type = BinTypeForNativeRelocationType(type);
   size_t offset = image_info.GetBinSlotSize(bin_type);
-  native_object_relocations_.emplace(method, NativeObjectRelocation { oat_index, offset, type });
+  native_object_relocations_.insert(
+      std::make_pair(method, NativeObjectRelocation { oat_index, offset, type }));
   image_info.IncrementBinSlotSize(bin_type, ArtMethod::Size(target_ptr_size_));
 }
 
@@ -1565,8 +1522,7 @@ class ImageWriter::LayoutHelper {
 
   void ProcessDexFileObjects(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
   void ProcessRoots(VariableSizedHandleScope* handles) REQUIRES_SHARED(Locks::mutator_lock_);
-
-  void ProcessWorkQueue() REQUIRES_SHARED(Locks::mutator_lock_);
+  void FinalizeInternTables() REQUIRES_SHARED(Locks::mutator_lock_);
 
   void VerifyImageBinSlotsAssigned() REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1589,6 +1545,9 @@ class ImageWriter::LayoutHelper {
   class CollectStringReferenceVisitor;
   class VisitReferencesVisitor;
 
+  void ProcessInterns(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_);
+  void ProcessWorkQueue() REQUIRES_SHARED(Locks::mutator_lock_);
+
   using WorkQueue = std::deque<std::pair<ObjPtr<mirror::Object>, size_t>>;
 
   void VisitReferences(ObjPtr<mirror::Object> obj, size_t oat_index)
@@ -1605,6 +1564,11 @@ class ImageWriter::LayoutHelper {
   // Objects for individual bins. Indexed by `oat_index` and `bin`.
   // Cannot use ObjPtr<> because of invalidation in Heap::VisitObjects().
   dchecked_vector<dchecked_vector<dchecked_vector<mirror::Object*>>> bin_objects_;
+
+  // Interns that do not have a corresponding StringId in any of the input dex files.
+  // These shall be assigned to individual images based on the `oat_index` that we
+  // see as we visit them during the work queue processing.
+  dchecked_vector<mirror::String*> non_dex_file_interns_;
 };
 
 class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
@@ -1639,11 +1603,11 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
     return true;
   }
 
-  WorkQueue SortAndReleaseClasses()
-      REQUIRES_SHARED(Locks::mutator_lock_) {
+  WorkQueue ProcessCollectedClasses(Thread* self) REQUIRES_SHARED(Locks::mutator_lock_) {
     std::sort(klasses_.begin(), klasses_.end());
 
-    WorkQueue result;
+    ImageWriter* image_writer = image_writer_;
+    WorkQueue work_queue;
     size_t last_dex_file_index = static_cast<size_t>(-1);
     size_t last_oat_index = static_cast<size_t>(-1);
     for (const ClassEntry& entry : klasses_) {
@@ -1652,14 +1616,93 @@ class ImageWriter::LayoutHelper::CollectClassesVisitor : public ClassVisitor {
           last_oat_index = GetDefaultOatIndex();  // Primitive type.
         } else {
           uint32_t dex_file_index = entry.dex_file_index - 1u;  // 0 is for primitive types.
-          last_oat_index = image_writer_->GetOatIndexForDexFile(dex_files_[dex_file_index]);
+          last_oat_index = image_writer->GetOatIndexForDexFile(dex_files_[dex_file_index]);
         }
         last_dex_file_index = entry.dex_file_index;
       }
-      result.emplace_back(entry.klass, last_oat_index);
+      // Count the number of classes for class tables.
+      image_writer->image_infos_[last_oat_index].class_table_size_ += 1u;
+      work_queue.emplace_back(entry.klass, last_oat_index);
     }
     klasses_.clear();
-    return result;
+
+    // Prepare image class tables.
+    std::vector<mirror::Class*> boot_image_classes;
+    if (image_writer->compiler_options_.IsAppImage()) {
+      DCHECK_EQ(image_writer->image_infos_.size(), 1u);
+      ImageInfo& image_info = image_writer->image_infos_[0];
+      // Log the non-boot image class count for app image for debugging purposes.
+      VLOG(compiler) << "Dex2Oat:AppImage:classCount = " << image_info.class_table_size_;
+      // Collect boot image classes referenced by app class loader's class table.
+      ClassTable* app_class_table = image_writer->GetAppClassLoader()->GetClassTable();
+      ReaderMutexLock lock(self, app_class_table->lock_);
+      DCHECK_EQ(app_class_table->classes_.size(), 1u);
+      const ClassTable::ClassSet& app_class_set = app_class_table->classes_[0];
+      DCHECK_GE(app_class_set.size(), image_info.class_table_size_);
+      boot_image_classes.reserve(app_class_set.size() - image_info.class_table_size_);
+      for (const ClassTable::TableSlot& slot : app_class_set) {
+        mirror::Class* klass = slot.Read<kWithoutReadBarrier>().Ptr();
+        if (image_writer->IsInBootImage(klass)) {
+          boot_image_classes.push_back(klass);
+        }
+      }
+      DCHECK_EQ(app_class_set.size() - image_info.class_table_size_, boot_image_classes.size());
+      // Increase the app class table size to include referenced boot image classes.
+      image_info.class_table_size_ = app_class_set.size();
+    }
+    for (ImageInfo& image_info : image_writer->image_infos_) {
+      if (image_info.class_table_size_ != 0u) {
+        // Make sure the class table shall be full by allocating a buffer of the right size.
+        size_t buffer_size = static_cast<size_t>(
+            ceil(image_info.class_table_size_ / kImageClassTableMaxLoadFactor));
+        image_info.class_table_buffer_.reset(new ClassTable::TableSlot[buffer_size]);
+        DCHECK(image_info.class_table_buffer_ != nullptr);
+        image_info.class_table_.emplace(kImageClassTableMinLoadFactor,
+                                        kImageClassTableMaxLoadFactor,
+                                        image_info.class_table_buffer_.get(),
+                                        buffer_size);
+      }
+    }
+    for (const auto& pair : work_queue) {
+      ObjPtr<mirror::Class> klass = pair.first->AsClass();
+      size_t oat_index = pair.second;
+      DCHECK(image_writer->image_infos_[oat_index].class_table_.has_value());
+      ClassTable::ClassSet& class_table = *image_writer->image_infos_[oat_index].class_table_;
+      bool inserted = class_table.insert(ClassTable::TableSlot(klass)).second;
+      DCHECK(inserted) << "Class " << klass->PrettyDescriptor()
+          << " (" << klass.Ptr() << ") already inserted";
+    }
+    if (image_writer->compiler_options_.IsAppImage()) {
+      DCHECK_EQ(image_writer->image_infos_.size(), 1u);
+      ImageInfo& image_info = image_writer->image_infos_[0];
+      if (image_info.class_table_size_ != 0u) {
+        // Insert boot image class references to the app class table.
+        // The order of insertion into the app class loader's ClassTable is non-deterministic,
+        // so sort the boot image classes by the boot image address to get deterministic table.
+        std::sort(boot_image_classes.begin(), boot_image_classes.end());
+        DCHECK(image_info.class_table_.has_value());
+        ClassTable::ClassSet& table = *image_info.class_table_;
+        for (mirror::Class* klass : boot_image_classes) {
+          bool inserted = table.insert(ClassTable::TableSlot(klass)).second;
+          DCHECK(inserted) << "Boot image class " << klass->PrettyDescriptor()
+              << " (" << klass << ") already inserted";
+        }
+        DCHECK_EQ(table.size(), image_info.class_table_size_);
+      }
+    }
+    for (ImageInfo& image_info : image_writer->image_infos_) {
+      DCHECK_EQ(image_info.class_table_bytes_, 0u);
+      if (image_info.class_table_size_ != 0u) {
+        DCHECK(image_info.class_table_.has_value());
+        DCHECK_EQ(image_info.class_table_->size(), image_info.class_table_size_);
+        image_info.class_table_bytes_ = image_info.class_table_->WriteToMemory(nullptr);
+        DCHECK_NE(image_info.class_table_bytes_, 0u);
+      } else {
+        DCHECK(!image_info.class_table_.has_value());
+      }
+    }
+
+    return work_queue;
   }
 
  private:
@@ -1819,34 +1862,18 @@ void ImageWriter::LayoutHelper::ProcessDexFileObjects(Thread* self) {
   CollectClassesVisitor visitor(image_writer_);
   class_linker->VisitClasses(&visitor);
   DCHECK(work_queue_.empty());
-  work_queue_ = visitor.SortAndReleaseClasses();
+  work_queue_ = visitor.ProcessCollectedClasses(self);
   for (const std::pair<ObjPtr<mirror::Object>, size_t>& entry : work_queue_) {
     DCHECK(entry.first->IsClass());
     bool assigned = TryAssignBinSlot(entry.first, entry.second);
     DCHECK(assigned);
   }
 
-  // Assign bin slots to strings and dex caches.
+  // Assign bin slots to dex caches.
   for (const DexFile* dex_file : image_writer_->compiler_options_.GetDexFilesForOatFile()) {
     auto it = image_writer_->dex_file_oat_index_map_.find(dex_file);
     DCHECK(it != image_writer_->dex_file_oat_index_map_.end()) << dex_file->GetLocation();
     const size_t oat_index = it->second;
-    // Assign bin slots for strings defined in this dex file in StringId (lexicographical) order.
-    InternTable* const intern_table = runtime->GetInternTable();
-    for (size_t i = 0, count = dex_file->NumStringIds(); i < count; ++i) {
-      uint32_t utf16_length;
-      const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(dex::StringIndex(i),
-                                                                      &utf16_length);
-      ObjPtr<mirror::String> string = intern_table->LookupStrong(self, utf16_length, utf8_data);
-      if (string != nullptr && !image_writer_->IsInBootImage(string.Ptr())) {
-        // Try to assign bin slot to this string but do not add it to the work list.
-        // The only reference in a String is its class, processed above for the boot image.
-        bool assigned = TryAssignBinSlot(string, oat_index);
-        DCHECK(assigned ||
-               // We could have seen the same string in an earlier dex file.
-               dex_file != image_writer_->compiler_options_.GetDexFilesForOatFile().front());
-      }
-    }
     // Assign bin slot to this file's dex cache and add it to the end of the work queue.
     ObjPtr<mirror::DexCache> dex_cache = class_linker->FindDexCache(self, *dex_file);
     DCHECK(dex_cache != nullptr);
@@ -1854,6 +1881,10 @@ void ImageWriter::LayoutHelper::ProcessDexFileObjects(Thread* self) {
     DCHECK(assigned);
     work_queue_.emplace_back(dex_cache, oat_index);
   }
+
+  // Assign interns to images depending on the first dex file they appear in.
+  // Record those that do not have a StringId in any dex file.
+  ProcessInterns(self);
 
   // Since classes and dex caches have been assigned to their bins, when we process a class
   // we do not follow through the class references or dex caches, so we correctly process
@@ -1877,6 +1908,159 @@ void ImageWriter::LayoutHelper::ProcessRoots(VariableSizedHandleScope* handles) 
     }
   }
   ProcessWorkQueue();
+}
+
+void ImageWriter::LayoutHelper::ProcessInterns(Thread* self) {
+  // String bins are empty at this point.
+  DCHECK(std::all_of(bin_objects_.begin(),
+                     bin_objects_.end(),
+                     [](const auto& bins) {
+                       return bins[enum_cast<size_t>(Bin::kString)].empty();
+                     }));
+
+  // There is only one non-boot image intern table and it's the last one.
+  InternTable* const intern_table = Runtime::Current()->GetInternTable();
+  MutexLock mu(self, *Locks::intern_table_lock_);
+  DCHECK_EQ(std::count_if(intern_table->strong_interns_.tables_.begin(),
+                          intern_table->strong_interns_.tables_.end(),
+                          [](const InternTable::Table::InternalTable& table) {
+                            return !table.IsBootImage();
+                          }),
+            1);
+  DCHECK(!intern_table->strong_interns_.tables_.back().IsBootImage());
+  const InternTable::UnorderedSet& intern_set = intern_table->strong_interns_.tables_.back().set_;
+
+  // Assign bin slots to all interns with a corresponding StringId in one of the input dex files.
+  ImageWriter* image_writer = image_writer_;
+  for (const DexFile* dex_file : image_writer->compiler_options_.GetDexFilesForOatFile()) {
+    auto it = image_writer->dex_file_oat_index_map_.find(dex_file);
+    DCHECK(it != image_writer->dex_file_oat_index_map_.end()) << dex_file->GetLocation();
+    const size_t oat_index = it->second;
+    // Assign bin slots for strings defined in this dex file in StringId (lexicographical) order.
+    auto& string_bin_objects = bin_objects_[oat_index][enum_cast<size_t>(Bin::kString)];
+    for (size_t i = 0, count = dex_file->NumStringIds(); i != count; ++i) {
+      uint32_t utf16_length;
+      const char* utf8_data = dex_file->StringDataAndUtf16LengthByIdx(dex::StringIndex(i),
+                                                                      &utf16_length);
+      int32_t hash = ComputeUtf16HashFromModifiedUtf8(utf8_data, utf16_length);
+      InternTable::Utf8String utf8_string(utf16_length, utf8_data, hash);
+      auto intern_it = intern_set.find(utf8_string);
+      if (intern_it != intern_set.end()) {
+        mirror::String* string = intern_it->Read<kWithoutReadBarrier>();
+        DCHECK(string != nullptr);
+        DCHECK(!image_writer->IsInBootImage(string));
+        if (!image_writer->IsImageBinSlotAssigned(string)) {
+          Bin bin = image_writer->AssignImageBinSlot(string, oat_index);
+          DCHECK_EQ(bin, Bin::kString);
+          string_bin_objects.push_back(string);
+        } else {
+          // We have already seen this string in a previous dex file.
+          DCHECK(dex_file != image_writer->compiler_options_.GetDexFilesForOatFile().front());
+        }
+      }
+    }
+  }
+
+  // String bins have been filled with dex file interns. Record their numbers in image infos.
+  DCHECK_EQ(bin_objects_.size(), image_writer_->image_infos_.size());
+  size_t total_dex_file_interns = 0u;
+  for (size_t oat_index = 0, size = bin_objects_.size(); oat_index != size; ++oat_index) {
+    size_t num_dex_file_interns = bin_objects_[oat_index][enum_cast<size_t>(Bin::kString)].size();
+    ImageInfo& image_info = image_writer_->GetImageInfo(oat_index);
+    DCHECK_EQ(image_info.intern_table_size_, 0u);
+    image_info.intern_table_size_ = num_dex_file_interns;
+    total_dex_file_interns += num_dex_file_interns;
+  }
+
+  // Collect interns that do not have a corresponding StringId in any of the input dex files.
+  non_dex_file_interns_.reserve(intern_set.size() - total_dex_file_interns);
+  for (const GcRoot<mirror::String>& root : intern_set) {
+    mirror::String* string = root.Read<kWithoutReadBarrier>();
+    if (!image_writer->IsImageBinSlotAssigned(string)) {
+      non_dex_file_interns_.push_back(string);
+    }
+  }
+  DCHECK_EQ(intern_set.size(), total_dex_file_interns + non_dex_file_interns_.size());
+}
+
+void ImageWriter::LayoutHelper::FinalizeInternTables() {
+  // Remove interns that do not have a bin slot assigned. These correspond
+  // to the DexCache locations excluded in VerifyImageBinSlotsAssigned().
+  ImageWriter* image_writer = image_writer_;
+  auto retained_end = std::remove_if(
+      non_dex_file_interns_.begin(),
+      non_dex_file_interns_.end(),
+      [=](mirror::String* string) REQUIRES_SHARED(Locks::mutator_lock_) {
+        return !image_writer->IsImageBinSlotAssigned(string);
+      });
+  non_dex_file_interns_.resize(std::distance(non_dex_file_interns_.begin(), retained_end));
+
+  // Sort `non_dex_file_interns_` based on oat index and bin offset.
+  ArrayRef<mirror::String*> non_dex_file_interns(non_dex_file_interns_);
+  std::sort(non_dex_file_interns.begin(),
+            non_dex_file_interns.end(),
+            [=](mirror::String* lhs, mirror::String* rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+              size_t lhs_oat_index = image_writer->GetOatIndex(lhs);
+              size_t rhs_oat_index = image_writer->GetOatIndex(rhs);
+              if (lhs_oat_index != rhs_oat_index) {
+                return lhs_oat_index < rhs_oat_index;
+              }
+              BinSlot lhs_bin_slot = image_writer->GetImageBinSlot(lhs, lhs_oat_index);
+              BinSlot rhs_bin_slot = image_writer->GetImageBinSlot(rhs, rhs_oat_index);
+              return lhs_bin_slot < rhs_bin_slot;
+            });
+
+  // Allocate and fill intern tables.
+  size_t ndfi_index = 0u;
+  DCHECK_EQ(bin_objects_.size(), image_writer->image_infos_.size());
+  for (size_t oat_index = 0, size = bin_objects_.size(); oat_index != size; ++oat_index) {
+    // Find the end of `non_dex_file_interns` for this oat file.
+    size_t ndfi_end = ndfi_index;
+    while (ndfi_end != non_dex_file_interns.size() &&
+           image_writer->GetOatIndex(non_dex_file_interns[ndfi_end]) == oat_index) {
+      ++ndfi_end;
+    }
+
+    // Calculate final intern table size.
+    ImageInfo& image_info = image_writer->GetImageInfo(oat_index);
+    DCHECK_EQ(image_info.intern_table_bytes_, 0u);
+    size_t num_dex_file_interns = image_info.intern_table_size_;
+    size_t num_non_dex_file_interns = ndfi_end - ndfi_index;
+    image_info.intern_table_size_ = num_dex_file_interns + num_non_dex_file_interns;
+    if (image_info.intern_table_size_ != 0u) {
+      // Make sure the intern table shall be full by allocating a buffer of the right size.
+      size_t buffer_size = static_cast<size_t>(
+          ceil(image_info.intern_table_size_ / kImageInternTableMaxLoadFactor));
+      image_info.intern_table_buffer_.reset(new GcRoot<mirror::String>[buffer_size]);
+      DCHECK(image_info.intern_table_buffer_ != nullptr);
+      image_info.intern_table_.emplace(kImageInternTableMinLoadFactor,
+                                       kImageInternTableMaxLoadFactor,
+                                       image_info.intern_table_buffer_.get(),
+                                       buffer_size);
+
+      // Fill the intern table. Dex file interns are at the start of the bin_objects[.][kString].
+      InternTable::UnorderedSet& table = *image_info.intern_table_;
+      const auto& oat_file_strings = bin_objects_[oat_index][enum_cast<size_t>(Bin::kString)];
+      DCHECK_LE(num_dex_file_interns, oat_file_strings.size());
+      ArrayRef<mirror::Object* const> dex_file_interns(
+          oat_file_strings.data(), num_dex_file_interns);
+      for (mirror::Object* string : dex_file_interns) {
+        bool inserted = table.insert(GcRoot<mirror::String>(string->AsString())).second;
+        DCHECK(inserted) << "String already inserted: " << string->AsString()->ToModifiedUtf8();
+      }
+      ArrayRef<mirror::String*> current_non_dex_file_interns =
+          non_dex_file_interns.SubArray(ndfi_index, num_non_dex_file_interns);
+      for (mirror::String* string : current_non_dex_file_interns) {
+        bool inserted = table.insert(GcRoot<mirror::String>(string)).second;
+        DCHECK(inserted) << "String already inserted: " << string->ToModifiedUtf8();
+      }
+
+      // Record the intern table size in bytes.
+      image_info.intern_table_bytes_ = table.WriteToMemory(nullptr);
+    }
+
+    ndfi_index = ndfi_end;
+  }
 }
 
 void ImageWriter::LayoutHelper::ProcessWorkQueue() {
@@ -2204,26 +2388,10 @@ void ImageWriter::CalculateNewObjectOffsets() {
   LayoutHelper layout_helper(this);
   layout_helper.ProcessDexFileObjects(self);
   layout_helper.ProcessRoots(&handles);
+  layout_helper.FinalizeInternTables();
 
   // Verify that all objects have assigned image bin slots.
   layout_helper.VerifyImageBinSlotsAssigned();
-
-  // Calculate the sizes of the intern tables, class tables, and fixup tables.
-  for (ImageInfo& image_info : image_infos_) {
-    // Calculate how big the intern table will be after being serialized.
-    InternTable* const intern_table = image_info.intern_table_.get();
-    CHECK_EQ(intern_table->WeakSize(), 0u) << " should have strong interned all the strings";
-    if (intern_table->StrongSize() != 0u) {
-      image_info.intern_table_bytes_ = intern_table->WriteToMemory(nullptr);
-    }
-
-    // Calculate the size of the class table.
-    ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);
-    DCHECK_EQ(image_info.class_table_->NumReferencedZygoteClasses(), 0u);
-    if (image_info.class_table_->NumReferencedNonZygoteClasses() != 0u) {
-      image_info.class_table_bytes_ += image_info.class_table_->WriteToMemory(nullptr);
-    }
-  }
 
   // Finalize bin slot offsets. This may add padding for regions.
   layout_helper.FinalizeBinSlotOffsets();
@@ -2543,13 +2711,6 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     DCHECK_GE(dest, image_info.image_.Begin() + image_info.image_end_);
     DCHECK(!IsInBootImage(pair.first));
     switch (relocation.type) {
-      case NativeObjectRelocationType::kArtField: {
-        memcpy(dest, pair.first, sizeof(ArtField));
-        CopyAndFixupReference(
-            reinterpret_cast<ArtField*>(dest)->GetDeclaringClassAddressWithoutBarrier(),
-            reinterpret_cast<ArtField*>(pair.first)->GetDeclaringClass());
-        break;
-      }
       case NativeObjectRelocationType::kRuntimeMethod:
       case NativeObjectRelocationType::kArtMethodClean:
       case NativeObjectRelocationType::kArtMethodDirty: {
@@ -2558,14 +2719,23 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
                            oat_index);
         break;
       }
-      // For arrays, copy just the header since the elements will get copied by their corresponding
-      // relocations.
       case NativeObjectRelocationType::kArtFieldArray: {
-        memcpy(dest, pair.first, LengthPrefixedArray<ArtField>::ComputeSize(0));
+        // Copy and fix up the entire field array.
+        auto* src_array = reinterpret_cast<LengthPrefixedArray<ArtField>*>(pair.first);
+        auto* dest_array = reinterpret_cast<LengthPrefixedArray<ArtField>*>(dest);
+        size_t size = src_array->size();
+        memcpy(dest_array, src_array, LengthPrefixedArray<ArtField>::ComputeSize(size));
+        for (size_t i = 0; i != size; ++i) {
+          CopyAndFixupReference(
+              dest_array->At(i).GetDeclaringClassAddressWithoutBarrier(),
+              src_array->At(i).GetDeclaringClass());
+        }
         break;
       }
       case NativeObjectRelocationType::kArtMethodArrayClean:
       case NativeObjectRelocationType::kArtMethodArrayDirty: {
+        // For method arrays, copy just the header since the elements will
+        // get copied by their corresponding relocations.
         size_t size = ArtMethod::Size(target_ptr_size_);
         size_t alignment = ArtMethod::Alignment(target_ptr_size_);
         memcpy(dest, pair.first, LengthPrefixedArray<ArtMethod>::ComputeSize(0, size, alignment));
@@ -2608,10 +2778,11 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
   // Write the intern table into the image.
   if (image_info.intern_table_bytes_ > 0) {
     const ImageSection& intern_table_section = image_header->GetInternedStringsSection();
-    InternTable* const intern_table = image_info.intern_table_.get();
+    DCHECK(image_info.intern_table_.has_value());
+    const InternTable::UnorderedSet& intern_table = *image_info.intern_table_;
     uint8_t* const intern_table_memory_ptr =
         image_info.image_.Begin() + intern_table_section.Offset();
-    const size_t intern_table_bytes = intern_table->WriteToMemory(intern_table_memory_ptr);
+    const size_t intern_table_bytes = intern_table.WriteToMemory(intern_table_memory_ptr);
     CHECK_EQ(intern_table_bytes, image_info.intern_table_bytes_);
     // Fixup the pointers in the newly written intern table to contain image addresses.
     InternTable temp_intern_table;
@@ -2622,46 +2793,48 @@ void ImageWriter::CopyAndFixupNativeData(size_t oat_index) {
     temp_intern_table.AddTableFromMemory(intern_table_memory_ptr,
                                          VoidFunctor(),
                                          /*is_boot_image=*/ false);
-    CHECK_EQ(temp_intern_table.Size(), intern_table->Size());
+    CHECK_EQ(temp_intern_table.Size(), intern_table.size());
     temp_intern_table.VisitRoots(&root_visitor, kVisitRootFlagAllRoots);
-    // Record relocations. (The root visitor does not get to see the slot addresses.)
-    MutexLock lock(Thread::Current(), *Locks::intern_table_lock_);
-    DCHECK(!temp_intern_table.strong_interns_.tables_.empty());
-    DCHECK(!temp_intern_table.strong_interns_.tables_[0].Empty());  // Inserted at the beginning.
+
+    if (kIsDebugBuild) {
+      MutexLock lock(Thread::Current(), *Locks::intern_table_lock_);
+      CHECK(!temp_intern_table.strong_interns_.tables_.empty());
+      // The UnorderedSet was inserted at the beginning.
+      CHECK_EQ(temp_intern_table.strong_interns_.tables_[0].Size(), intern_table.size());
+    }
   }
+
   // Write the class table(s) into the image. class_table_bytes_ may be 0 if there are multiple
   // class loaders. Writing multiple class tables into the image is currently unsupported.
   if (image_info.class_table_bytes_ > 0u) {
     const ImageSection& class_table_section = image_header->GetClassTableSection();
     uint8_t* const class_table_memory_ptr =
         image_info.image_.Begin() + class_table_section.Offset();
-    Thread* self = Thread::Current();
-    ReaderMutexLock mu(self, *Locks::classlinker_classes_lock_);
 
-    ClassTable* table = image_info.class_table_.get();
-    CHECK(table != nullptr);
-    const size_t class_table_bytes = table->WriteToMemory(class_table_memory_ptr);
+    DCHECK(image_info.class_table_.has_value());
+    const ClassTable::ClassSet& table = *image_info.class_table_;
+    CHECK_EQ(table.size(), image_info.class_table_size_);
+    const size_t class_table_bytes = table.WriteToMemory(class_table_memory_ptr);
     CHECK_EQ(class_table_bytes, image_info.class_table_bytes_);
+
     // Fixup the pointers in the newly written class table to contain image addresses. See
     // above comment for intern tables.
     ClassTable temp_class_table;
     temp_class_table.ReadFromMemory(class_table_memory_ptr);
-    CHECK_EQ(temp_class_table.NumReferencedZygoteClasses(),
-             table->NumReferencedNonZygoteClasses() + table->NumReferencedZygoteClasses());
+    CHECK_EQ(temp_class_table.NumReferencedZygoteClasses(), table.size());
     UnbufferedRootVisitor visitor(&root_visitor, RootInfo(kRootUnknown));
     temp_class_table.VisitRoots(visitor);
-    // Record relocations. (The root visitor does not get to see the slot addresses.)
-    // Note that the low bits in the slots contain bits of the descriptors' hash codes
-    // but the relocation works fine for these "adjusted" references.
-    ReaderMutexLock lock(self, temp_class_table.lock_);
-    DCHECK(!temp_class_table.classes_.empty());
-    DCHECK(!temp_class_table.classes_[0].empty());  // The ClassSet was inserted at the beginning.
+
+    if (kIsDebugBuild) {
+      ReaderMutexLock lock(Thread::Current(), temp_class_table.lock_);
+      CHECK(!temp_class_table.classes_.empty());
+      // The ClassSet was inserted at the beginning.
+      CHECK_EQ(temp_class_table.classes_[0].size(), table.size());
+    }
   }
 }
 
-void ImageWriter::FixupPointerArray(mirror::Object* dst,
-                                    mirror::PointerArray* arr,
-                                    Bin array_type) {
+void ImageWriter::FixupMethodPointerArray(mirror::Object* dst, mirror::PointerArray* arr) {
   CHECK(arr->IsIntArray() || arr->IsLongArray()) << arr->GetClass()->PrettyClass() << " " << arr;
   // Fixup int and long pointers for the ArtMethod or ArtField arrays.
   const size_t num_elements = arr->GetLength();
@@ -2673,18 +2846,10 @@ void ImageWriter::FixupPointerArray(mirror::Object* dst,
     if (kIsDebugBuild && elem != nullptr && !IsInBootImage(elem)) {
       auto it = native_object_relocations_.find(elem);
       if (UNLIKELY(it == native_object_relocations_.end())) {
-        if (it->second.IsArtMethodRelocation()) {
-          auto* method = reinterpret_cast<ArtMethod*>(elem);
-          LOG(FATAL) << "No relocation entry for ArtMethod " << method->PrettyMethod() << " @ "
-                     << method << " idx=" << i << "/" << num_elements << " with declaring class "
-                     << Class::PrettyClass(method->GetDeclaringClass());
-        } else {
-          CHECK_EQ(array_type, Bin::kArtField);
-          auto* field = reinterpret_cast<ArtField*>(elem);
-          LOG(FATAL) << "No relocation entry for ArtField " << field->PrettyField() << " @ "
-              << field << " idx=" << i << "/" << num_elements << " with declaring class "
-              << Class::PrettyClass(field->GetDeclaringClass());
-        }
+        auto* method = reinterpret_cast<ArtMethod*>(elem);
+        LOG(FATAL) << "No relocation entry for ArtMethod " << method->PrettyMethod() << " @ "
+                   << method << " idx=" << i << "/" << num_elements << " with declaring class "
+                   << Class::PrettyClass(method->GetDeclaringClass());
         UNREACHABLE();
       }
     }
@@ -2848,13 +3013,6 @@ T* ImageWriter::NativeLocationInImage(T* obj) {
   }
 }
 
-template <typename T>
-T* ImageWriter::NativeCopyLocation(T* obj) {
-  const NativeObjectRelocation relocation = GetNativeRelocation(obj);
-  const ImageInfo& image_info = GetImageInfo(relocation.oat_index);
-  return reinterpret_cast<T*>(image_info.image_.Begin() + relocation.offset);
-}
-
 class ImageWriter::NativeLocationVisitor {
  public:
   explicit NativeLocationVisitor(ImageWriter* image_writer)
@@ -2919,11 +3077,11 @@ void ImageWriter::FixupObject(Object* orig, Object* copy) {
   }
   if (orig->IsIntArray() || orig->IsLongArray()) {
     // Is this a native pointer array?
-    auto it = pointer_arrays_.find(down_cast<mirror::PointerArray*>(orig));
-    if (it != pointer_arrays_.end()) {
+    auto it = method_pointer_arrays_.find(down_cast<mirror::PointerArray*>(orig));
+    if (it != method_pointer_arrays_.end()) {
       // Should only need to fixup every pointer array exactly once.
-      FixupPointerArray(copy, down_cast<mirror::PointerArray*>(orig), it->second);
-      pointer_arrays_.erase(it);
+      FixupMethodPointerArray(copy, down_cast<mirror::PointerArray*>(orig));
+      method_pointer_arrays_.erase(it);
       return;
     }
   }
@@ -2983,6 +3141,8 @@ const uint8_t* ImageWriter::GetOatAddress(StubType type) const {
         return static_cast<const uint8_t*>(header.GetQuickResolutionTrampoline());
       case StubType::kQuickToInterpreterBridge:
         return static_cast<const uint8_t*>(header.GetQuickToInterpreterBridge());
+      case StubType::kNterpTrampoline:
+        return static_cast<const uint8_t*>(header.GetNterpTrampoline());
       default:
         UNREACHABLE();
     }
@@ -3018,9 +3178,13 @@ const uint8_t* ImageWriter::GetQuickCode(ArtMethod* method, const ImageInfo& ima
   if (quick_code == nullptr) {
     // If we don't have code, use generic jni / interpreter bridge.
     // Both perform class initialization check if needed.
-    quick_code = method->IsNative()
-        ? GetOatAddress(StubType::kQuickGenericJNITrampoline)
-        : GetOatAddress(StubType::kQuickToInterpreterBridge);
+    if (method->IsNative()) {
+      quick_code = GetOatAddress(StubType::kQuickGenericJNITrampoline);
+    } else if (CanMethodUseNterp(method, compiler_options_.GetInstructionSet())) {
+      quick_code = GetOatAddress(StubType::kNterpTrampoline);
+    } else {
+      quick_code = GetOatAddress(StubType::kQuickToInterpreterBridge);
+    }
   } else if (NeedsClinitCheckBeforeCall(method) &&
              !method->GetDeclaringClass()->IsVisiblyInitialized()) {
     // If we do have code but the method needs a class initialization check before calling
@@ -3140,7 +3304,6 @@ uint32_t ImageWriter::BinSlot::GetOffset() const {
 
 ImageWriter::Bin ImageWriter::BinTypeForNativeRelocationType(NativeObjectRelocationType type) {
   switch (type) {
-    case NativeObjectRelocationType::kArtField:
     case NativeObjectRelocationType::kArtFieldArray:
       return Bin::kArtField;
     case NativeObjectRelocationType::kArtMethodClean:
@@ -3163,6 +3326,7 @@ ImageWriter::Bin ImageWriter::BinTypeForNativeRelocationType(NativeObjectRelocat
 
 size_t ImageWriter::GetOatIndex(mirror::Object* obj) const {
   if (!IsMultiImage()) {
+    DCHECK(oat_index_map_.empty());
     return GetDefaultOatIndex();
   }
   auto it = oat_index_map_.find(obj);
@@ -3242,6 +3406,8 @@ void ImageWriter::UpdateOatFileHeader(size_t oat_index, const OatHeader& oat_hea
                                  oat_header.GetQuickResolutionTrampolineOffset());
     cur_image_info.SetStubOffset(StubType::kQuickToInterpreterBridge,
                                  oat_header.GetQuickToInterpreterBridgeOffset());
+    cur_image_info.SetStubOffset(StubType::kNterpTrampoline,
+                                 oat_header.GetNterpTrampolineOffset());
   }
 }
 
@@ -3250,7 +3416,7 @@ ImageWriter::ImageWriter(
     uintptr_t image_begin,
     ImageHeader::StorageMode image_storage_mode,
     const std::vector<std::string>& oat_filenames,
-    const std::unordered_map<const DexFile*, size_t>& dex_file_oat_index_map,
+    const HashMap<const DexFile*, size_t>& dex_file_oat_index_map,
     jobject class_loader,
     const HashSet<std::string>* dirty_image_objects)
     : compiler_options_(compiler_options),
@@ -3285,8 +3451,8 @@ ImageWriter::ImageWriter(
 }
 
 ImageWriter::ImageInfo::ImageInfo()
-    : intern_table_(new InternTable),
-      class_table_(new ClassTable) {}
+    : intern_table_(),
+      class_table_() {}
 
 template <typename DestType>
 void ImageWriter::CopyAndFixupReference(DestType* dest, ObjPtr<mirror::Object> src) {

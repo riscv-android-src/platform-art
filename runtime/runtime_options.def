@@ -44,7 +44,7 @@ RUNTIME_OPTIONS_KEY (std::string,         ClassPath)
 RUNTIME_OPTIONS_KEY (std::string,         Image)
 RUNTIME_OPTIONS_KEY (Unit,                CheckJni)
 RUNTIME_OPTIONS_KEY (Unit,                JniOptsForceCopy)
-RUNTIME_OPTIONS_KEY (std::string,         JdwpOptions, "")
+RUNTIME_OPTIONS_KEY (std::string,         JdwpOptions,                    "suspend=n,server=y")
 RUNTIME_OPTIONS_KEY (JdwpProvider,        JdwpProvider,                   JdwpProvider::kUnset)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           MemoryMaximumSize,              gc::Heap::kDefaultMaximumSize)  // -Xmx
 RUNTIME_OPTIONS_KEY (MemoryKiB,           MemoryInitialSize,              gc::Heap::kDefaultInitialSize)  // -Xms
@@ -76,6 +76,7 @@ RUNTIME_OPTIONS_KEY (Unit,                LowMemoryMode)
 RUNTIME_OPTIONS_KEY (bool,                UseTLAB,                        (kUseTlab || kUseReadBarrier))
 RUNTIME_OPTIONS_KEY (bool,                EnableHSpaceCompactForOOM,      true)
 RUNTIME_OPTIONS_KEY (bool,                UseJitCompilation,              true)
+RUNTIME_OPTIONS_KEY (bool,                UseProfiledJitCompilation,      false)
 RUNTIME_OPTIONS_KEY (bool,                DumpNativeStackOnSigQuit,       true)
 RUNTIME_OPTIONS_KEY (bool,                MadviseRandomAccess,            false)
 RUNTIME_OPTIONS_KEY (JniIdType,           OpaqueJniIds,                   JniIdType::kDefault)  // -Xopaque-jni-ids:{true, false, swapable}
@@ -86,6 +87,7 @@ RUNTIME_OPTIONS_KEY (unsigned int,        JITOsrThreshold)
 RUNTIME_OPTIONS_KEY (unsigned int,        JITPriorityThreadWeight)
 RUNTIME_OPTIONS_KEY (unsigned int,        JITInvokeTransitionWeight)
 RUNTIME_OPTIONS_KEY (int,                 JITPoolThreadPthreadPriority,   jit::kJitPoolThreadPthreadDefaultPriority)
+RUNTIME_OPTIONS_KEY (int,                 JITZygotePoolThreadPthreadPriority,   jit::kJitZygotePoolThreadPthreadDefaultPriority)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           JITCodeCacheInitialCapacity,    jit::JitCodeCache::kInitialCapacity)
 RUNTIME_OPTIONS_KEY (MemoryKiB,           JITCodeCacheMaxCapacity,        jit::JitCodeCache::kMaxCapacity)
 RUNTIME_OPTIONS_KEY (MillisecondsToNanoseconds, \
@@ -183,5 +185,8 @@ RUNTIME_OPTIONS_KEY (bool,                PerfettoHprof,                  false)
 
 // Whether to dump ART metrics to logcat
 RUNTIME_OPTIONS_KEY (Unit,                WriteMetricsToLog)
+RUNTIME_OPTIONS_KEY (std::string,         WriteMetricsToFile)
+RUNTIME_OPTIONS_KEY (Unit,                DisableFinalMetricsReport)
+RUNTIME_OPTIONS_KEY (unsigned int,        MetricsReportingPeriod)
 
 #undef RUNTIME_OPTIONS_KEY

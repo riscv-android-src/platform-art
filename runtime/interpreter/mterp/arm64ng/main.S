@@ -383,7 +383,7 @@ END \name
 //
 // Outputs
 // - ip contains the dex registers size
-// - x13 contains the old stack pointer.
+// - x28 contains the old stack pointer.
 // - \code_item is replaced with a pointer to the instructions
 // - if load_ins is 1, w15 contains the ins
 //
@@ -410,10 +410,10 @@ END \name
     add \fp, \refs, ip, lsl #2
 
     // Now setup the stack pointer.
-    mov x13, sp
-    .cfi_def_cfa_register x13
+    mov x28, sp
+    .cfi_def_cfa_register x28
     mov sp, x14
-    str x13, [\refs, #-8]
+    str x28, [\refs, #-8]
     CFI_DEF_CFA_BREG_PLUS_UCONST \cfi_refs, -8, CALLEE_SAVES_SIZE
 
     // Put nulls in reference frame.
@@ -483,14 +483,10 @@ END \name
 .endm
 
 .macro SPILL_ALL_ARGUMENTS
-    INCREASE_FRAME 128
-    // GP arguments.
-    SAVE_TWO_REGS x0, x1, 0
-    SAVE_TWO_REGS x2, x3, 16
-    SAVE_TWO_REGS x4, x5, 32
-    SAVE_TWO_REGS x6, x7, 48
-
-    // FP arguments
+    stp x0, x1, [sp, #-128]!
+    stp x2, x3, [sp, #16]
+    stp x4, x5, [sp, #32]
+    stp x6, x7, [sp, #48]
     stp d0, d1, [sp, #64]
     stp d2, d3, [sp, #80]
     stp d4, d5, [sp, #96]
@@ -498,18 +494,14 @@ END \name
 .endm
 
 .macro RESTORE_ALL_ARGUMENTS
-    // GP arguments.
-    RESTORE_TWO_REGS x0, x1, 0
-    RESTORE_TWO_REGS x2, x3, 16
-    RESTORE_TWO_REGS x4, x5, 32
-    RESTORE_TWO_REGS x6, x7, 48
-
-    // FP arguments
+    ldp x2, x3, [sp, #16]
+    ldp x4, x5, [sp, #32]
+    ldp x6, x7, [sp, #48]
     ldp d0, d1, [sp, #64]
     ldp d2, d3, [sp, #80]
     ldp d4, d5, [sp, #96]
     ldp d6, d7, [sp, #112]
-    DECREASE_FRAME 128
+    ldp x0, x1, [sp], #128
 .endm
 
 // Helper to setup the stack after doing a nterp to nterp call. This will setup:
@@ -862,6 +854,7 @@ END \name
    // - xINST contains shorty (in callee-save to switch over return value after call).
    // - x0 contains method
    // - x1 contains 'this' pointer for instance method.
+   // - for interface calls, x26 contains the interface method.
    add x9, xINST, #1  // shorty + 1  ; ie skip return arg character
    FETCH w11, 2 // arguments
    .if \is_string_init
@@ -903,10 +896,8 @@ END \name
    bl art_quick_invoke_custom
    .else
       .if \is_interface
-      // Setup hidden argument. As we don't have access to the interface method,
-      // just pass the method from the IMT. If the method is the conflict trampoline,
-      // this will make the stub go to runtime, otherwise the hidden argument is unused.
-      mov ip2, x0
+      // Setup hidden argument.
+      mov ip2, x26
       .endif
       ldr lr, [x0, #ART_METHOD_QUICK_CODE_OFFSET_64]
       blr lr
@@ -1102,6 +1093,7 @@ END \name
    // - xINST contains shorty (in callee-save to switch over return value after call).
    // - x0 contains method
    // - x1 contains 'this' pointer for instance method.
+   // - for interface calls, x26 contains the interface method.
    add x9, xINST, #1  // shorty + 1  ; ie skip return arg character
    FETCH w10, 2 // arguments
    .if \is_string_init
@@ -1154,10 +1146,8 @@ END \name
    bl art_quick_invoke_custom
    .else
       .if \is_interface
-      // Setup hidden argument. As we don't have access to the interface method,
-      // just pass the method from the IMT. If the method is the conflict trampoline,
-      // this will make the stub go to runtime, otherwise the hidden argument is unused.
-      mov ip2, x0
+      // Setup hidden argument.
+      mov ip2, x26
       .endif
       ldr lr, [x0, #ART_METHOD_QUICK_CODE_OFFSET_64]
       blr lr
@@ -1189,6 +1179,16 @@ END \name
    GOTO_OPCODE ip
 .endm
 
+.macro WRITE_BARRIER_IF_OBJECT is_object, value, holder, label
+   .if \is_object
+   cbz     \value, \label
+   ldr     ip, [xSELF, #THREAD_CARD_TABLE_OFFSET]
+   lsr     wip2, \holder, #CARD_TABLE_CARD_SHIFT
+   strb    wip, [ip, ip2]
+\label:
+   .endif
+.endm
+
 // Fetch some information from the thread cache.
 // Uses ip and ip2 as temporaries.
 .macro FETCH_FROM_THREAD_CACHE dest_reg, slow_path
@@ -1198,201 +1198,6 @@ END \name
    ldp      ip, \dest_reg, [ip]           // entry key (pc) and value (offset)
    cmp      ip, xPC
    b.ne \slow_path
-.endm
-
-// Helper for static field get.
-.macro OP_SGET load="ldr", volatile_load="ldar", maybe_extend="", wide="0"
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 4f
-1:
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 3f
-2:
-   lsr w2, wINST, #8              // w2 <- A
-   .if \wide
-   ldr x0, [x0, x1]
-   SET_VREG_WIDE x0, w2          // fp[A] <- value
-   .else
-   \load w0, [x0, x1]
-   SET_VREG w0, w2               // fp[A] <- value
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   bl art_quick_read_barrier_mark_reg00
-   b 2b
-4:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_static_field
-   tbz x0, #0, 1b
-   CLEAR_STATIC_VOLATILE_MARKER x0
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 7f
-5:
-   lsr w2, wINST, #8              // w2 <- A
-   add x0, x0, x1
-   .if \wide
-   ldar x0, [x0]
-   SET_VREG_WIDE x0, w2          // fp[A] <- value
-   .else
-   \volatile_load w0, [x0]
-   \maybe_extend
-   SET_VREG w0, w2               // fp[A] <- value
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-7:
-   bl art_quick_read_barrier_mark_reg00
-   b 5b
-.endm
-
-// Helper for static field put.
-.macro OP_SPUT store="str", volatile_store="stlr", wide="0":
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 4f
-1:
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 3f
-2:
-   lsr w2, wINST, #8              // w2 <- A
-   .if \wide
-   GET_VREG_WIDE x2, w2           // x2 <- v[A]
-   \store    x2, [x0, x1]
-   .else
-   GET_VREG w2, w2                // w2 <- v[A]
-   \store    w2, [x0, x1]
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   bl art_quick_read_barrier_mark_reg00
-   b 2b
-4:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_static_field
-   tbz x0, #0, 1b
-   CLEAR_STATIC_VOLATILE_MARKER x0
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 6f
-5:
-   lsr w2, wINST, #8              // w2 <- A
-   add x0, x0, x1
-   .if \wide
-   GET_VREG_WIDE x2, w2           // x2 <- v[A]
-   \volatile_store    x2, [x0]
-   .else
-   GET_VREG w2, w2                // w2 <- v[A]
-   \volatile_store    w2, [x0]
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-6:
-   bl art_quick_read_barrier_mark_reg00
-   b 5b
-.endm
-
-
-// Helper for instance field put.
-.macro OP_IPUT store="str", volatile_store="stlr", wide="0":
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 2f
-1:
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject
-   .if \wide
-   GET_VREG_WIDE x1, w1                // x1<- fp[A]/fp[A+1]
-   \store x1, [x2, x0]
-   .else
-   GET_VREG w1, w1                     // w1 <- v[A]
-   \store w1, [x2, x0]
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-2:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_instance_field_offset
-   tbz w0, #31, 1b
-   CLEAR_INSTANCE_VOLATILE_MARKER w0
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject
-   add x2, x2, x0
-   .if \wide
-   GET_VREG_WIDE x1, w1                // x1<- fp[A]/fp[A+1]
-   \volatile_store x1, [x2]
-   .else
-   GET_VREG w1, w1                     // w1 <- v[A]
-   \volatile_store w1, [x2]
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-.endm
-
-// Helper for instance field get.
-.macro OP_IGET load="ldr", volatile_load="ldar", maybe_extend="", wide="0"
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 2f
-1:
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w3, w2                     // w3<- object we're operating on
-   ubfx    w2, wINST, #8, #4           // w2<- A
-   cbz     w3, common_errNullObject    // object was null
-   .if \wide
-   \load x0, [x3, x0]
-   SET_VREG_WIDE x0, w2                // fp[A] <- value
-   .else
-   \load w0, [x3, x0]
-   SET_VREG w0, w2                     // fp[A] <- value
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-2:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_instance_field_offset
-   tbz w0, #31, 1b
-   CLEAR_INSTANCE_VOLATILE_MARKER w0
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w3, w2                     // w3<- object we're operating on
-   ubfx    w2, wINST, #8, #4           // w2<- A
-   cbz     w3, common_errNullObject    // object was null
-   add x3, x3, x0
-   .if \wide
-   \volatile_load x0, [x3]
-   SET_VREG_WIDE x0, w2                // fp[A] <- value
-   .else
-   \volatile_load w0, [x3]
-   \maybe_extend
-   SET_VREG w0, w2                     // fp[A] <- value
-   .endif
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
 .endm
 
 // Puts the next int/long/object parameter passed in physical register
@@ -1543,16 +1348,7 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     /* Spill callee save regs */
     SPILL_ALL_CALLEE_SAVES
 
-    // TODO: Get shorty in a better way and remove below
-    SPILL_ALL_ARGUMENTS
-
-    bl NterpGetShorty
-    // Save shorty in callee-save xIBASE.
-    mov xIBASE, x0
-
-    RESTORE_ALL_ARGUMENTS
     ldr xPC, [x0, #ART_METHOD_DATA_OFFSET_64]
-
     // Setup the stack for executing the method.
     SETUP_STACK_FRAME xPC, xREFS, xFP, CFI_REFS, load_ins=1
 
@@ -1560,24 +1356,37 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     cbz w15, .Lxmm_setup_finished
 
     sub ip2, ip, x15
-    lsl x8, ip2, #2 // x8 is now the offset for inputs into the registers array.
+    ldr w26, [x0, #ART_METHOD_ACCESS_FLAGS_OFFSET]
+    lsl x21, ip2, #2 // x21 is now the offset for inputs into the registers array.
 
-    // Setup shorty, pointer to inputs in FP and pointer to inputs in REFS
-    add x9, xIBASE, #1  // shorty + 1  ; ie skip return arg character
-    add x10, xFP, x8
-    add x11, xREFS, x8
+    // If the method is not static and there is one argument ('this'), we don't need to fetch the
+    // shorty.
+    tbnz w26, #ART_METHOD_IS_STATIC_FLAG_BIT, .Lsetup_with_shorty
+    str w1, [xFP, x21]
+    str w1, [xREFS, x21]
+    cmp w15, #1
+    b.eq .Lxmm_setup_finished
 
-    ldr wip, [x0, #ART_METHOD_ACCESS_FLAGS_OFFSET]
-    // TODO: could be TBNZ but we'd need a constant for log2(ART_METHOD_IS_STATIC_FLAG).
-    tst wip, #ART_METHOD_IS_STATIC_FLAG
-    b.ne .Lhandle_static_method
-    str w1, [x10], #4
-    str w1, [x11], #4
-    add x13, x13, #4
+.Lsetup_with_shorty:
+    // TODO: Get shorty in a better way and remove below
+    SPILL_ALL_ARGUMENTS
+    bl NterpGetShorty
+    // Save shorty in callee-save xIBASE.
+    mov xIBASE, x0
+    RESTORE_ALL_ARGUMENTS
+
+    // Setup pointer to inputs in FP and pointer to inputs in REFS
+    add x10, xFP, x21
+    add x11, xREFS, x21
     mov x12, #0
+
+    add x9, xIBASE, #1  // shorty + 1  ; ie skip return arg character
+    tbnz w26, #ART_METHOD_IS_STATIC_FLAG_BIT, .Lhandle_static_method
+    add x10, x10, #4
+    add x11, x11, #4
+    add x28, x28, #4
     b .Lcontinue_setup_gprs
 .Lhandle_static_method:
-    mov x12, #0
     LOOP_OVER_SHORTY_STORING_GPRS x1, w1, x9, x12, x10, x11, .Lgpr_setup_finished
 .Lcontinue_setup_gprs:
     LOOP_OVER_SHORTY_STORING_GPRS x2, w2, x9, x12, x10, x11, .Lgpr_setup_finished
@@ -1586,7 +1395,7 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     LOOP_OVER_SHORTY_STORING_GPRS x5, w5, x9, x12, x10, x11, .Lgpr_setup_finished
     LOOP_OVER_SHORTY_STORING_GPRS x6, w6, x9, x12, x10, x11, .Lgpr_setup_finished
     LOOP_OVER_SHORTY_STORING_GPRS x7, w7, x9, x12, x10, x11, .Lgpr_setup_finished
-    LOOP_OVER_INTs x9, x12, x10, x11, x13, .Lgpr_setup_finished
+    LOOP_OVER_INTs x9, x12, x10, x11, x28, .Lgpr_setup_finished
 .Lgpr_setup_finished:
     add x9, xIBASE, #1  // shorty + 1  ; ie skip return arg character
     mov x12, #0  // reset counter
@@ -1598,7 +1407,7 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     LOOP_OVER_SHORTY_STORING_FPS d5, s5, x9, x12, x10, .Lxmm_setup_finished
     LOOP_OVER_SHORTY_STORING_FPS d6, s6, x9, x12, x10, .Lxmm_setup_finished
     LOOP_OVER_SHORTY_STORING_FPS d7, s7, x9, x12, x10, .Lxmm_setup_finished
-    LOOP_OVER_FPs x9, x12, x10, x13, .Lxmm_setup_finished
+    LOOP_OVER_FPs x9, x12, x10, x28, .Lxmm_setup_finished
 .Lxmm_setup_finished:
     CFI_DEFINE_DEX_PC_WITH_OFFSET(CFI_TMP, CFI_DEX, 0)
 
@@ -1625,7 +1434,7 @@ OAT_ENTRY ExecuteNterpImpl, EndExecuteNterpImpl
     .align  2
 
 // Note: mterp also uses the common_* names below for helpers, but that's OK
-// as the C compiler compiled each interpreter separately.
+// as the assembler compiled each interpreter separately.
 common_errDivideByZero:
     EXPORT_PC
     bl art_quick_throw_div_zero
@@ -1677,30 +1486,6 @@ NterpHandleStringInit:
 NterpHandleStringInitRange:
    COMMON_INVOKE_RANGE is_string_init=1, suffix="stringInit"
 
-NterpNewInstance:
-   EXPORT_PC
-   // Fast-path which gets the class from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 2f
-   cbnz wMR, 3f
-4:
-   ldr lr, [xSELF, #THREAD_ALLOC_OBJECT_ENTRYPOINT_OFFSET]
-   blr lr
-1:
-   lsr w1, wINST, #8                    // w1 <- A
-   SET_VREG_OBJECT w0, w1               // fp[A] <- value
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-2:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   bl nterp_get_class_or_allocate_object
-   b 1b
-3:
-   bl art_quick_read_barrier_mark_reg00
-   b 4b
-
 NterpNewArray:
    /* new-array vA, vB, class@CCCC */
    EXPORT_PC
@@ -1725,300 +1510,6 @@ NterpNewArray:
    b 1b
 3:
    bl art_quick_read_barrier_mark_reg00
-   b 1b
-
-NterpPutObjectInstanceField:
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 3f
-1:
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject        // is object null?
-   GET_VREG w1, w1                     // w1 <- v[A]
-   str w1, [x2, x0]
-   cbz w1, 2f
-   ldr x1, [xSELF, #THREAD_CARD_TABLE_OFFSET]
-   lsr w3, w2, #CARD_TABLE_CARD_SHIFT
-   strb w1, [x1, x3]
-2:
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_instance_field_offset
-   tbz w0, #31, 1b
-   CLEAR_INSTANCE_VOLATILE_MARKER w0
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject        // is object null?
-   GET_VREG w1, w1                     // w1 <- v[A]
-   add x3, x2, x0
-   stlr w1, [x3]
-   cbz w1, 2b
-   ldr x1, [xSELF, #THREAD_CARD_TABLE_OFFSET]
-   lsr w3, w2, #CARD_TABLE_CARD_SHIFT
-   strb w1, [x1, x3]
-   b 2b
-
-NterpGetObjectInstanceField:
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 4f
-1:
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject
-   ldr w0, [x2, x0]
-   cbnz wMR, 3f
-2:
-   SET_VREG_OBJECT w0, w1              // fp[A] <- value
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   bl art_quick_read_barrier_mark_reg00
-   b 2b
-4:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_instance_field_offset
-   tbz w0, #31, 1b
-   CLEAR_INSTANCE_VOLATILE_MARKER w0
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w2, w2                     // vB (object we're operating on)
-   cbz w2, common_errNullObject
-   add x2, x2, x0
-   ldar w0, [x2]
-   cbnz wMR, 6f
-5:
-   SET_VREG_OBJECT w0, w1              // fp[A] <- value
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-6:
-   bl art_quick_read_barrier_mark_reg00
-   b 5b
-
-NterpPutObjectStaticField:
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 5f
-1:
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 4f
-2:
-   lsr w2, wINST, #8                    // w2 <- A
-   GET_VREG w2, w2
-   str w2, [x0, x1]
-   cbz w2, 3f
-   ldr x1, [xSELF, #THREAD_CARD_TABLE_OFFSET]
-   lsr w3, w0, #CARD_TABLE_CARD_SHIFT
-   strb w1, [x1, x3]
-3:
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-4:
-   bl art_quick_read_barrier_mark_reg00
-   b 2b
-5:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_static_field
-   tbz x0, #0, 1b
-   CLEAR_STATIC_VOLATILE_MARKER x0
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 7f
-6:
-   lsr w2, wINST, #8                    // w2 <- A
-   GET_VREG w2, w2
-   add ip, x0, x1
-   stlr w2, [ip]
-   cbz w2, 3b
-   ldr x1, [xSELF, #THREAD_CARD_TABLE_OFFSET]
-   lsr w3, w0, #CARD_TABLE_CARD_SHIFT
-   strb w1, [x1, x3]
-   b 3b
-7:
-   bl art_quick_read_barrier_mark_reg00
-   b 6b
-
-NterpGetObjectStaticField:
-   // Fast-path which gets the field from thread-local cache.
-   FETCH_FROM_THREAD_CACHE x0, 4f
-1:
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 3f
-   ldr w0, [x0, x1]
-   // No need to check the marking register, we know it's not set here.
-2:
-   lsr w1, wINST, #8                    // w1 <- A
-   SET_VREG_OBJECT w0, w1               // fp[A] <- value
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   bl art_quick_read_barrier_mark_reg00
-   ldr w0, [x0, x1]
-   // Here, we know the marking register is set.
-   bl art_quick_read_barrier_mark_reg00
-   b 2b
-4:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   EXPORT_PC
-   bl nterp_get_static_field
-   tbz x0, #0, 1b
-   CLEAR_STATIC_VOLATILE_MARKER x0
-   ldr w1, [x0, #ART_FIELD_OFFSET_OFFSET]
-   ldr w0, [x0, #ART_FIELD_DECLARING_CLASS_OFFSET]
-   cbnz wMR, 7f
-5:
-   add x0, x0, x1
-   ldar w0, [x0]
-   cbnz wMR, 8f
-6:
-   lsr w1, wINST, #8                    // w1 <- A
-   SET_VREG_OBJECT w0, w1               // fp[A] <- value
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-7:
-   bl art_quick_read_barrier_mark_reg00
-   b 5b
-8:
-   bl art_quick_read_barrier_mark_reg00
-   b 6b
-
-NterpGetBooleanStaticField:
-  OP_SGET load="ldrb", volatile_load="ldarb", maybe_extend="", wide=0
-
-NterpGetByteStaticField:
-  OP_SGET load="ldrsb", volatile_load="ldarb", maybe_extend="sbfx w0, w0, #0, #8", wide=0
-
-NterpGetCharStaticField:
-  OP_SGET load="ldrh", volatile_load="ldarh", maybe_extend="", wide=0
-
-NterpGetShortStaticField:
-  OP_SGET load="ldrsh", volatile_load="ldarh", maybe_extend="sbfx w0, w0, #0, #16", wide=0
-
-NterpGetWideStaticField:
-  OP_SGET load="ldr", volatile_load="ldar", maybe_extend="", wide=1
-
-NterpGetIntStaticField:
-  OP_SGET load="ldr", volatile_load="ldar", maybe_extend="", wide=0
-
-NterpPutStaticField:
-  OP_SPUT store="str", volatile_store="stlr", wide=0
-
-NterpPutBooleanStaticField:
-NterpPutByteStaticField:
-  OP_SPUT store="strb", volatile_store="stlrb", wide=0
-
-NterpPutCharStaticField:
-NterpPutShortStaticField:
-  OP_SPUT store="strh", volatile_store="stlrh", wide=0
-
-NterpPutWideStaticField:
-  OP_SPUT store="str", volatile_store="stlr", wide=1
-
-NterpPutInstanceField:
-  OP_IPUT store="str", volatile_store="stlr", wide=0
-
-NterpPutBooleanInstanceField:
-NterpPutByteInstanceField:
-  OP_IPUT store="strb", volatile_store="stlrb", wide=0
-
-NterpPutCharInstanceField:
-NterpPutShortInstanceField:
-  OP_IPUT store="strh", volatile_store="stlrh", wide=0
-
-NterpPutWideInstanceField:
-  OP_IPUT store="str", volatile_store="stlr", wide=1
-
-NterpGetBooleanInstanceField:
-  OP_IGET load="ldrb", volatile_load="ldarb", maybe_extend="", wide=0
-
-NterpGetByteInstanceField:
-  OP_IGET load="ldrsb", volatile_load="ldarb", maybe_extend="sbfx w0, w0, #0, #8", wide=0
-
-NterpGetCharInstanceField:
-  OP_IGET load="ldrh", volatile_load="ldarh", maybe_extend="", wide=0
-
-NterpGetShortInstanceField:
-  OP_IGET load="ldrsh", volatile_load="ldarh", maybe_extend="sbfx w0, w0, #0, #16", wide=0
-
-NterpGetWideInstanceField:
-  OP_IGET load="ldr", volatile_load="ldar", maybe_extend="", wide=1
-
-NterpGetInstanceField:
-  OP_IGET load="ldr", volatile_load="ldar", maybe_extend="", wide=0
-
-NterpInstanceOf:
-    /* instance-of vA, vB, class@CCCC */
-   // Fast-path which gets the class from thread-local cache.
-   EXPORT_PC
-   FETCH_FROM_THREAD_CACHE x1, 3f
-   cbnz wMR, 4f
-1:
-   lsr     w2, wINST, #12              // w2<- B
-   GET_VREG w0, w2                     // w0<- vB (object)
-   cbz w0, 2f
-   bl artInstanceOfFromCode
-2:
-   ubfx    w1, wINST, #8, #4           // w1<- A
-   SET_VREG w0, w1
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   bl nterp_get_class_or_allocate_object
-   mov x1, x0
-   b 1b
-4:
-   bl art_quick_read_barrier_mark_reg01
-   b 1b
-
-NterpCheckCast:
-   // Fast-path which gets the class from thread-local cache.
-   EXPORT_PC
-   FETCH_FROM_THREAD_CACHE x1, 3f
-   cbnz wMR, 4f
-1:
-   lsr     w2, wINST, #8               // w2<- A
-   GET_VREG w0, w2                     // w0<- vA (object)
-   cbz w0, 2f
-   bl art_quick_check_instance_of
-2:
-   FETCH_ADVANCE_INST 2
-   GET_INST_OPCODE ip
-   GOTO_OPCODE ip
-3:
-   mov x0, xSELF
-   ldr x1, [sp]
-   mov x2, xPC
-   bl nterp_get_class_or_allocate_object
-   mov x1, x0
-   b 1b
-4:
-   bl art_quick_read_barrier_mark_reg01
    b 1b
 
 NterpHandleHotnessOverflow:
@@ -2084,27 +1575,6 @@ NterpHandleHotnessOverflow:
 
     // Jump to the compiled code.
     br xFP
-
-NterpHandleInvokeInterfaceOnObjectMethodRange:
-   // First argument is the 'this' pointer.
-   FETCH w1, 2
-   GET_VREG w1, w1
-   // Note: x1 is null, this will be handled by our SIGSEGV handler.
-   ldr w2, [x1, #MIRROR_OBJECT_CLASS_OFFSET]
-   add w2, w2, #MIRROR_CLASS_VTABLE_OFFSET_64
-   ldr x0, [x2, w0, sxtw #3]
-   b NterpCommonInvokeInstanceRange
-
-NterpHandleInvokeInterfaceOnObjectMethod:
-   // First argument is the 'this' pointer.
-   FETCH w1, 2
-   and w1, w1, #0xf
-   GET_VREG w1, w1
-   // Note: x1 is null, this will be handled by our SIGSEGV handler.
-   ldr w2, [x1, #MIRROR_OBJECT_CLASS_OFFSET]
-   add w2, w2, #MIRROR_CLASS_VTABLE_OFFSET_64
-   ldr x0, [x2, w0, sxtw #3]
-   b NterpCommonInvokeInstance
 
 // This is the logical end of ExecuteNterpImpl, where the frame info applies.
 // EndExecuteNterpImpl includes the methods below as we want the runtime to
@@ -2184,6 +1654,9 @@ artNterpAsmInstructionEnd:
     .global artNterpAsmInstructionStart
 artNterpAsmInstructionStart = .L_op_nop
     .text
+
+%def default_helper_prefix():
+%  return "nterp_"
 
 %def opcode_start():
     NAME_START nterp_${opcode}

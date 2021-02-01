@@ -104,6 +104,7 @@
 #include "runtime.h"
 #include "runtime_callbacks.h"
 #include "scoped_thread_state_change-inl.h"
+#include "scoped_disable_public_sdk_checker.h"
 #include "stack.h"
 #include "stack_map.h"
 #include "thread-inl.h"
@@ -2571,17 +2572,10 @@ ObjPtr<mirror::Object> Thread::DecodeJObject(jobject obj) const {
     // Local references do not need a read barrier.
     result = locals.Get<kWithoutReadBarrier>(ref);
   } else if (kind == kHandleScopeOrInvalid) {
-    // TODO: make stack indirect reference table lookup more efficient.
-    // Check if this is a local reference in the handle scope.
-    if (LIKELY(HandleScopeContains(obj))) {
-      // Read from handle scope.
-      result = reinterpret_cast<StackReference<mirror::Object>*>(obj)->AsMirrorPtr();
-      VerifyObject(result);
-    } else {
-      tlsPtr_.jni_env->vm_->JniAbortF(nullptr, "use of invalid jobject %p", obj);
-      expect_null = true;
-      result = nullptr;
-    }
+    // Read from handle scope.
+    DCHECK(HandleScopeContains(obj));
+    result = reinterpret_cast<StackReference<mirror::Object>*>(obj)->AsMirrorPtr();
+    VerifyObject(result);
   } else if (kind == kGlobal) {
     result = tlsPtr_.jni_env->vm_->DecodeGlobal(ref);
   } else {
@@ -2594,10 +2588,9 @@ ObjPtr<mirror::Object> Thread::DecodeJObject(jobject obj) const {
     }
   }
 
-  if (UNLIKELY(!expect_null && result == nullptr)) {
-    tlsPtr_.jni_env->vm_->JniAbortF(nullptr, "use of deleted %s %p",
-                                   ToStr<IndirectRefKind>(kind).c_str(), obj);
-  }
+  DCHECK(expect_null || result != nullptr)
+      << "use of deleted " << ToStr<IndirectRefKind>(kind).c_str()
+      << " " << static_cast<const void*>(obj);
   return result;
 }
 
@@ -3198,6 +3191,16 @@ void Thread::ThrowNewWrappedException(const char* exception_class_descriptor,
   DCHECK_EQ(this, Thread::Current());
   ScopedObjectAccessUnchecked soa(this);
   StackHandleScope<3> hs(soa.Self());
+
+  // Disable public sdk checks if we need to throw exceptions.
+  // The checks are only used in AOT compilation and may block (exception) class
+  // initialization if it needs access to private fields (e.g. serialVersionUID).
+  //
+  // Since throwing an exception will EnsureInitialization and the public sdk may
+  // block that, disable the checks. It's ok to do so, because the thrown exceptions
+  // are not part of the application code that needs to verified.
+  ScopedDisablePublicSdkChecker sdpsc;
+
   Handle<mirror::ClassLoader> class_loader(hs.NewHandle(GetCurrentClassLoader(soa.Self())));
   ScopedLocalRef<jobject> cause(GetJniEnv(), soa.AddLocalReference<jobject>(GetException()));
   ClearException();

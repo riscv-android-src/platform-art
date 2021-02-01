@@ -19,6 +19,7 @@
 import argparse
 import collections
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -34,7 +35,7 @@ TARGET = "aosp_art_module"
 ARCHES = ["arm", "arm64", "x86", "x86_64"]
 
 # Where to install the APEX packages
-PACKAGE_PATH = "packages/modules/ArtPrebuilt/module"
+PACKAGE_PATH = "packages/modules/ArtPrebuilt"
 
 # Where to install the SDKs and module exports
 SDK_PATH = "prebuilts/module_sdk/art"
@@ -84,6 +85,81 @@ install_entries = (
 )
 
 
+def rewrite_bp_for_art_module_source_build(bp_path):
+  """Rewrites an Android.bp file to conditionally prefer prebuilts."""
+  print("Rewriting {} for SOONG_CONFIG_art_module_source_build use."
+        .format(bp_path))
+  bp_file = open(bp_path, "r+")
+
+  # TODO(b/174997203): Remove this when we have a proper way to control prefer
+  # flags in Mainline modules.
+
+  header_lines = []
+  for line in bp_file:
+    line = line.rstrip("\n")
+    if not line.startswith("//"):
+      break
+    header_lines.append(line)
+
+  art_module_types = set()
+
+  content_lines = []
+  for line in bp_file:
+    line = line.rstrip("\n")
+    module_header = re.match("([a-z0-9_]+) +{$", line)
+    if not module_header:
+      content_lines.append(line)
+    else:
+      # Iterate over one Soong module.
+      module_start = line
+      soong_config_clause = False
+      module_content = []
+
+      for module_line in bp_file:
+        module_line = module_line.rstrip("\n")
+        if module_line == "}":
+          break
+        if module_line == "    prefer: false,":
+          module_content.extend([
+              ("    // Do not prefer prebuilt if "
+               "SOONG_CONFIG_art_module_source_build is true."),
+              "    prefer: true,",
+              "    soong_config_variables: {",
+              "        source_build: {",
+              "            prefer: false,",
+              "        },",
+              "    },"])
+          soong_config_clause = True
+        else:
+          module_content.append(module_line)
+
+      if soong_config_clause:
+        module_type = "art_prebuilt_" + module_header.group(1)
+        module_start = module_type + " {"
+        art_module_types.add(module_type)
+
+      content_lines.append(module_start)
+      content_lines.extend(module_content)
+      content_lines.append("}")
+
+  header_lines.extend(
+      ["",
+       "// Soong config variable stanza added by {}.".format(SCRIPT_PATH),
+       "soong_config_module_type_import {",
+       "    from: \"prebuilts/module_sdk/art/SoongConfig.bp\",",
+       "    module_types: ["] +
+      ["        \"{}\",".format(art_module)
+       for art_module in sorted(art_module_types)] +
+      ["    ],",
+       "}",
+       ""])
+
+  bp_file.seek(0)
+  bp_file.truncate()
+  bp_file.write("\n".join(header_lines + content_lines))
+  bp_file.close()
+
+
 def check_call(cmd, **kwargs):
   """Proxy for subprocess.check_call with logging."""
   msg = " ".join(cmd) if isinstance(cmd, list) else cmd
@@ -117,11 +193,12 @@ def upload_branch(git_root, branch_name):
   check_call(["repo", "upload", "-t", "--br=" + branch_name, git_root])
 
 
-def remove_files(git_root, subpaths):
-  """Removes files in the work tree, and stages the removals in git."""
-  check_call(["git", "rm", "-qrf", "--ignore-unmatch"] + subpaths, cwd=git_root)
-  # Need a plain rm afterwards because git won't remove directories if they have
-  # non-git files in them.
+def remove_files(git_root, subpaths, stage_removals):
+  """Removes files in the work tree, optionally staging them in git."""
+  if stage_removals:
+    check_call(["git", "rm", "-qrf", "--ignore-unmatch"] + subpaths, cwd=git_root)
+  # Need a plain rm afterwards even if git rm was executed, because git won't
+  # remove directories if they have non-git files in them.
   check_call(["rm", "-rf"] + subpaths, cwd=git_root)
 
 
@@ -242,9 +319,19 @@ def main():
     start_branch(branch_name, install_paths_per_root.keys())
 
   for git_root, subpaths in install_paths_per_root.items():
-    remove_files(git_root, subpaths)
+    remove_files(git_root, subpaths, not args.skip_cls)
   for entry in install_entries:
     install_entry(args.build, args.local_dist, entry)
+
+  # Postprocess the Android.bp files in the SDK snapshot to control prefer flags
+  # on the prebuilts through SOONG_CONFIG_art_module_source_build.
+  # TODO(b/174997203): Replace this with a better way to control prefer flags on
+  # Mainline module prebuilts.
+  for entry in install_entries:
+    if entry.install_unzipped:
+      bp_path = os.path.join(entry.install_path, "Android.bp")
+      if os.path.exists(bp_path):
+        rewrite_bp_for_art_module_source_build(bp_path)
 
   if not args.skip_cls:
     for git_root, subpaths in install_paths_per_root.items():

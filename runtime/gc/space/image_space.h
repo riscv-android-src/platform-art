@@ -128,7 +128,6 @@ class ImageSpace : public MemMapSpace {
       const InstructionSet image_isa,
       bool relocate,
       bool executable,
-      bool is_zygote,
       size_t extra_reservation_size,
       /*out*/std::vector<std::unique_ptr<ImageSpace>>* boot_image_spaces,
       /*out*/MemMap* extra_reservation) REQUIRES_SHARED(Locks::mutator_lock_);
@@ -189,6 +188,11 @@ class ImageSpace : public MemMapSpace {
     return &live_bitmap_;
   }
 
+  // Compute the number of components in the image (contributing jar files).
+  size_t GetComponentCount() const {
+    return GetImageHeader().GetComponentCount();
+  }
+
   void Dump(std::ostream& os) const override;
 
   // Sweeping image spaces is a NOP.
@@ -208,15 +212,11 @@ class ImageSpace : public MemMapSpace {
   static bool FindImageFilename(const char* image_location,
                                 InstructionSet image_isa,
                                 std::string* system_location,
-                                bool* has_system,
-                                std::string* data_location,
-                                bool* dalvik_cache_exists,
-                                bool* has_data,
-                                bool *is_global_cache);
+                                bool* has_system);
 
-  // The leading character in an image checksum part of boot class path checkums.
+  // The leading character in an image checksum part of boot class path checksums.
   static constexpr char kImageChecksumPrefix = 'i';
-  // The leading character in a dex file checksum part of boot class path checkums.
+  // The leading character in a dex file checksum part of boot class path checksums.
   static constexpr char kDexFileChecksumPrefix = 'd';
 
   // Returns the checksums for the boot image, extensions and extra boot class path dex files,
@@ -224,6 +224,9 @@ class ImageSpace : public MemMapSpace {
   // The `image_spaces` must correspond to the head of the `boot_class_path`.
   static std::string GetBootClassPathChecksums(ArrayRef<ImageSpace* const> image_spaces,
                                                ArrayRef<const DexFile* const> boot_class_path);
+
+  // Returns the total number of components (jar files) associated with the image spaces.
+  static size_t GetNumberOfComponents(ArrayRef<gc::space::ImageSpace* const> image_spaces);
 
   // Returns whether the checksums are valid for the given boot class path,
   // image location and ISA (may differ from the ISA of an initialized Runtime).

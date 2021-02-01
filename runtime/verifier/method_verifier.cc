@@ -951,6 +951,39 @@ bool MethodVerifier<kVerifierDebug>::Verify() {
       return false;
     }
 
+    // Test FastNative and CriticalNative annotations. We do this in the
+    // verifier for convenience.
+    if ((method_access_flags_ & kAccNative) != 0) {
+      // Fetch the flags from the annotations: the class linker hasn't processed
+      // them yet.
+      uint32_t native_access_flags = annotations::GetNativeMethodAnnotationAccessFlags(
+          *dex_file_, class_def_, dex_method_idx_);
+      if ((native_access_flags & kAccFastNative) != 0) {
+        if ((method_access_flags_ & kAccSynchronized) != 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "fast native methods cannot be synchronized";
+          return false;
+        }
+      }
+      if ((native_access_flags & kAccCriticalNative) != 0) {
+        if ((method_access_flags_ & kAccSynchronized) != 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "critical native methods cannot be synchronized";
+          return false;
+        }
+        if ((method_access_flags_ & kAccStatic) == 0) {
+          Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "critical native methods must be static";
+          return false;
+        }
+        const char* shorty = dex_file_->GetMethodShorty(method_id);
+        for (size_t i = 0, len = strlen(shorty); i < len; ++i) {
+          if (Primitive::GetType(shorty[i]) == Primitive::kPrimNot) {
+            Fail(VERIFY_ERROR_BAD_CLASS_HARD) <<
+                "critical native methods must not have references as arguments or return type";
+            return false;
+          }
+        }
+      }
+    }
+
     // This should have been rejected by the dex file verifier. Only do in debug build.
     // Note: the above will also be rejected in the dex file verifier, starting in dex version 37.
     if (kIsDebugBuild) {
@@ -2220,7 +2253,8 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyInstruction(uint32_t* start_g
                                               << reg_type;
           } else if (!return_type.IsAssignableFrom(reg_type, this)) {
             if (reg_type.IsUnresolvedTypes() || return_type.IsUnresolvedTypes()) {
-              Fail(api_level_ > 29u ? VERIFY_ERROR_BAD_CLASS_SOFT : VERIFY_ERROR_NO_CLASS)
+              Fail(api_level_ > 29u
+                      ? VERIFY_ERROR_BAD_CLASS_SOFT : VERIFY_ERROR_UNRESOLVED_TYPE_CHECK)
                   << " can't resolve returned type '" << return_type << "' or '" << reg_type << "'";
             } else {
               bool soft_error = false;
@@ -2570,7 +2604,8 @@ bool MethodVerifier<kVerifierDebug>::CodeFlowVerifyInstruction(uint32_t* start_g
         } else if (!res_type.IsReferenceTypes()) {
           Fail(VERIFY_ERROR_BAD_CLASS_HARD) << "thrown value of non-reference type " << res_type;
         } else {
-          Fail(res_type.IsUnresolvedTypes() ? VERIFY_ERROR_NO_CLASS : VERIFY_ERROR_BAD_CLASS_SOFT)
+          Fail(res_type.IsUnresolvedTypes()
+                  ? VERIFY_ERROR_UNRESOLVED_TYPE_CHECK : VERIFY_ERROR_BAD_CLASS_SOFT)
                 << "thrown class " << res_type << " not instanceof Throwable";
         }
       }
@@ -3837,7 +3872,8 @@ bool MethodVerifier<kVerifierDebug>::HandleMoveException(const Instruction* inst
           return std::make_pair(false, unresolved);
         }
         // Soft-fail, but do not handle this with a synthetic throw.
-        Fail(VERIFY_ERROR_NO_CLASS, /*pending_exc=*/ false) << "Unresolved catch handler";
+        Fail(VERIFY_ERROR_UNRESOLVED_TYPE_CHECK, /*pending_exc=*/ false)
+            << "Unresolved catch handler";
         if (common_super != nullptr) {
           unresolved = &unresolved->Merge(*common_super, &reg_types_, this);
         }
@@ -4067,7 +4103,7 @@ ArtMethod* MethodVerifier<kVerifierDebug>::VerifyInvocationArgsFromIterator(
       }
       if (!res_method_class->IsAssignableFrom(adjusted_type, this)) {
         Fail(adjusted_type.IsUnresolvedTypes()
-                 ? VERIFY_ERROR_NO_CLASS
+                 ? VERIFY_ERROR_UNRESOLVED_TYPE_CHECK
                  : VERIFY_ERROR_BAD_CLASS_SOFT)
             << "'this' argument '" << actual_arg_type << "' not instance of '"
             << *res_method_class << "'";
@@ -4739,7 +4775,7 @@ ArtField* MethodVerifier<kVerifierDebug>::GetInstanceField(const RegType& obj_ty
       bool is_aot = IsAotMode();
       if (is_aot && (field_klass.IsUnresolvedTypes() || obj_type.IsUnresolvedTypes())) {
         // Compiler & unresolved types involved, retry at runtime.
-        type = VerifyError::VERIFY_ERROR_NO_CLASS;
+        type = VerifyError::VERIFY_ERROR_UNRESOLVED_TYPE_CHECK;
       } else {
         // Classes known (resolved; and thus assignability check is precise), or we are at runtime
         // and still missing classes. This is a hard failure.
@@ -5136,14 +5172,17 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
 }
 
 // Return whether the runtime knows how to execute a method without needing to
-// re-verify it at runtime (and therefore save on first use of the class). We
-// currently only support it for access checks, where the runtime will mark the
-// methods as needing access checks and have the interpreter execute with them.
+// re-verify it at runtime (and therefore save on first use of the class).
 // The AOT/JIT compiled code is not affected.
 static inline bool CanRuntimeHandleVerificationFailure(uint32_t encountered_failure_types) {
   constexpr uint32_t unresolved_mask =
+      verifier::VerifyError::VERIFY_ERROR_UNRESOLVED_TYPE_CHECK |
+      verifier::VerifyError::VERIFY_ERROR_NO_CLASS |
+      verifier::VerifyError::VERIFY_ERROR_CLASS_CHANGE |
+      verifier::VerifyError::VERIFY_ERROR_INSTANTIATION |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_CLASS |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_FIELD |
+      verifier::VerifyError::VERIFY_ERROR_NO_METHOD |
       verifier::VerifyError::VERIFY_ERROR_ACCESS_METHOD;
   return (encountered_failure_types & (~unresolved_mask)) == 0;
 }
@@ -5201,6 +5240,7 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
     }
 
     bool set_dont_compile = false;
+    bool must_count_locks = false;
     if (verifier.failures_.size() != 0) {
       if (VLOG_IS_ON(verifier)) {
         verifier.DumpFailures(VLOG_STREAM(verifier) << "Soft verification failures in "
@@ -5211,35 +5251,34 @@ MethodVerifier::FailureData MethodVerifier::VerifyMethod(Thread* self,
         verifier.Dump(LOG_STREAM(INFO));
       }
       if (CanRuntimeHandleVerificationFailure(verifier.encountered_failure_types_)) {
-        result.kind = FailureKind::kAccessChecksFailure;
+        if (verifier.encountered_failure_types_ & VERIFY_ERROR_UNRESOLVED_TYPE_CHECK) {
+          result.kind = FailureKind::kTypeChecksFailure;
+        } else {
+          result.kind = FailureKind::kAccessChecksFailure;
+        }
       } else {
         result.kind = FailureKind::kSoftFailure;
       }
-      if (method != nullptr &&
-          !CanCompilerHandleVerificationFailure(verifier.encountered_failure_types_)) {
+      if (!CanCompilerHandleVerificationFailure(verifier.encountered_failure_types_)) {
         set_dont_compile = true;
       }
-    }
-    if (method != nullptr) {
-      if (verifier.HasInstructionThatWillThrow()) {
-        set_dont_compile = true;
-        if (aot_mode && (callbacks != nullptr) && !callbacks->IsBootImage()) {
-          // When compiling apps, make HasInstructionThatWillThrow a soft error to trigger
-          // re-verification at runtime.
-          // The dead code after the throw is not verified and might be invalid. This may cause
-          // the JIT compiler to crash since it assumes that all the code is valid.
-          //
-          // There's a strong assumption that the entire boot image is verified and all its dex
-          // code is valid (even the dead and unverified one). As such this is done only for apps.
-          // (CompilerDriver DCHECKs in VerifyClassVisitor that methods from boot image are
-          // fully verified).
-          result.kind = FailureKind::kSoftFailure;
-        }
-      }
-      bool must_count_locks = false;
       if ((verifier.encountered_failure_types_ & VerifyError::VERIFY_ERROR_LOCKING) != 0) {
         must_count_locks = true;
       }
+    }
+
+    if (verifier.HasInstructionThatWillThrow()) {
+      // The dead code after the throw is not verified and might be invalid. This may cause
+      // the JIT compiler to crash since it assumes that all the code is valid.
+      set_dont_compile = true;
+      if (aot_mode) {
+        // Make HasInstructionThatWillThrow a soft error to trigger
+        // re-verification at runtime.
+        result.kind = FailureKind::kSoftFailure;
+      }
+    }
+
+    if (method != nullptr) {
       verifier_callback->SetDontCompile(method, set_dont_compile);
       verifier_callback->SetMustCountLocks(method, must_count_locks);
     }
@@ -5497,33 +5536,13 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
   if (pending_exc) {
     switch (error) {
       case VERIFY_ERROR_NO_CLASS:
-      case VERIFY_ERROR_NO_FIELD:
+      case VERIFY_ERROR_UNRESOLVED_TYPE_CHECK:
       case VERIFY_ERROR_NO_METHOD:
       case VERIFY_ERROR_ACCESS_CLASS:
       case VERIFY_ERROR_ACCESS_FIELD:
       case VERIFY_ERROR_ACCESS_METHOD:
       case VERIFY_ERROR_INSTANTIATION:
       case VERIFY_ERROR_CLASS_CHANGE:
-      case VERIFY_ERROR_FORCE_INTERPRETER:
-      case VERIFY_ERROR_LOCKING:
-        if (IsAotMode() || !can_load_classes_) {
-          if (error != VERIFY_ERROR_ACCESS_CLASS &&
-              error != VERIFY_ERROR_ACCESS_FIELD &&
-              error != VERIFY_ERROR_ACCESS_METHOD) {
-            // If we're optimistically running verification at compile time, turn NO_xxx,
-            // class change and instantiation errors into soft verification errors so that we
-            // re-verify at runtime. We may fail to find or to agree on access because of not yet
-            // available class loaders, or class loaders that will differ at runtime. In these
-            // cases, we don't want to affect the soundness of the code being compiled. Instead, the
-            // generated code runs "slow paths" that dynamically perform the verification and cause
-            // the behavior to be that akin to an interpreter.
-            error = VERIFY_ERROR_BAD_CLASS_SOFT;
-          }
-        } else {
-          // If we fail again at runtime, mark that this instruction would throw and force this
-          // method to be executed using the interpreter with checks.
-          flags_.have_pending_runtime_throw_failure_ = true;
-        }
         // How to handle runtime failures for instructions that are not flagged kThrow.
         //
         // The verifier may fail before we touch any instruction, for the signature of a method. So
@@ -5546,15 +5565,20 @@ std::ostream& MethodVerifier::Fail(VerifyError error, bool pending_exc) {
         }
         break;
 
-        // Indication that verification should be retried at runtime.
+      case VERIFY_ERROR_FORCE_INTERPRETER:
+      case VERIFY_ERROR_LOCKING:
+        // This will be reported to the runtime as a soft failure.
+        break;
+
+      // Indication that verification should be retried at runtime.
       case VERIFY_ERROR_BAD_CLASS_SOFT:
         if (!allow_soft_failures_) {
           flags_.have_pending_hard_failure_ = true;
         }
         break;
 
-        // Hard verification failures at compile time will still fail at runtime, so the class is
-        // marked as rejected to prevent it from being compiled.
+      // Hard verification failures at compile time will still fail at runtime, so the class is
+      // marked as rejected to prevent it from being compiled.
       case VERIFY_ERROR_BAD_CLASS_HARD: {
         flags_.have_pending_hard_failure_ = true;
         break;

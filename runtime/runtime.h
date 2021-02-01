@@ -30,6 +30,7 @@
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
+#include "base/metrics/metrics.h"
 #include "base/string_view_cpp20.h"
 #include "compat_framework.h"
 #include "deoptimization_kind.h"
@@ -40,7 +41,7 @@
 #include "jdwp_provider.h"
 #include "jni/jni_id_manager.h"
 #include "jni_id_type.h"
-#include "metrics/metrics.h"
+#include "metrics_reporter.h"
 #include "obj_ptr.h"
 #include "offsets.h"
 #include "process_state.h"
@@ -980,6 +981,7 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
+  void InitMetrics(const RuntimeArgumentMap& runtime_options);
 
   void StartDaemonThreads();
   void StartSignalCatcher();

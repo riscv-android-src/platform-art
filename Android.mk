@@ -335,7 +335,11 @@ include $(CLEAR_VARS)
 LOCAL_MODULE := com.android.art-autoselect
 LOCAL_IS_HOST_MODULE := true
 ifneq ($(HOST_OS),darwin)
-  LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
+  # The testing APEX is enabled only when compiling from ART Module sources,
+  # which is controlled by this Soong variable.
+  ifeq (true,$(SOONG_CONFIG_art_module_source_build))
+    LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
+  endif
 endif
 include $(BUILD_PHONY_PACKAGE)
 
@@ -385,18 +389,31 @@ art_apex_manifest_file :=
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-runtime
 
+# Reference the libraries and binaries in the appropriate APEX module, because
+# they don't have platform variants. However if
+# SOONG_CONFIG_art_module_source_build isn't true then the APEX modules are
+# disabled, so Soong won't apply the APEX mutators to them, and then they are
+# available with their plain names.
+ifeq (true,$(SOONG_CONFIG_art_module_source_build))
+  art_module_lib = $(1).com.android.art
+  art_module_debug_lib = $(1).com.android.art.debug
+else
+  art_module_lib = $(1)
+  art_module_debug_lib = $(1)
+endif
+
 # Base requirements.
 LOCAL_REQUIRED_MODULES := \
-    dalvikvm.com.android.art \
-    dex2oat.com.android.art \
-    dexoptanalyzer.com.android.art \
-    libart.com.android.art \
-    libart-compiler.com.android.art \
-    libopenjdkjvm.com.android.art \
-    libopenjdkjvmti.com.android.art \
-    profman.com.android.art \
-    libadbconnection.com.android.art \
-    libperfetto_hprof.com.android.art \
+    $(call art_module_lib,dalvikvm) \
+    $(call art_module_lib,dex2oat) \
+    $(call art_module_lib,dexoptanalyzer) \
+    $(call art_module_lib,libart) \
+    $(call art_module_lib,libart-compiler) \
+    $(call art_module_lib,libopenjdkjvm) \
+    $(call art_module_lib,libopenjdkjvmti) \
+    $(call art_module_lib,profman) \
+    $(call art_module_lib,libadbconnection) \
+    $(call art_module_lib,libperfetto_hprof) \
 
 # Potentially add in debug variants:
 #
@@ -410,19 +427,22 @@ ifneq (,$(filter userdebug eng,$(TARGET_BUILD_VARIANT)))
 endif
 ifeq (true,$(art_target_include_debug_build))
 LOCAL_REQUIRED_MODULES += \
-    dex2oatd.com.android.art.debug \
-    dexoptanalyzerd.com.android.art.debug \
-    libartd.com.android.art.debug \
-    libartd-compiler.com.android.art.debug \
-    libopenjdkd.com.android.art.debug \
-    libopenjdkjvmd.com.android.art.debug \
-    libopenjdkjvmtid.com.android.art.debug \
-    profmand.com.android.art.debug \
-    libadbconnectiond.com.android.art.debug \
-    libperfetto_hprofd.com.android.art.debug \
+    $(call art_module_debug_lib,dex2oatd) \
+    $(call art_module_debug_lib,dexoptanalyzerd) \
+    $(call art_module_debug_lib,libartd) \
+    $(call art_module_debug_lib,libartd-compiler) \
+    $(call art_module_debug_lib,libopenjdkd) \
+    $(call art_module_debug_lib,libopenjdkjvmd) \
+    $(call art_module_debug_lib,libopenjdkjvmtid) \
+    $(call art_module_debug_lib,profmand) \
+    $(call art_module_debug_lib,libadbconnectiond) \
+    $(call art_module_debug_lib,libperfetto_hprofd) \
 
 endif
 endif
+
+art_module_lib :=
+art_module_debug_lib :=
 
 include $(BUILD_PHONY_PACKAGE)
 
@@ -487,8 +507,15 @@ $(HOST_I18N_DATA): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bin/deapexer
 	cp -R $(TARGET_OUT)/apex/$(I18N_APEX)/etc/ $(HOST_OUT)/$(I18N_APEX)/
 	touch $@
 
+$(HOST_TZDATA_DATA): $(TARGET_OUT)/apex/$(TZDATA_APEX).apex $(HOST_OUT)/bin/deapexer
+	$(call extract-from-apex,$(TZDATA_APEX))
+	rm -rf $(HOST_OUT)/$(TZDATA_APEX)
+	mkdir -p $(HOST_OUT)/$(TZDATA_APEX)/
+	cp -R $(TARGET_OUT)/apex/$(TZDATA_APEX)/etc/ $(HOST_OUT)/$(TZDATA_APEX)/
+	touch $@
+
 .PHONY: build-art-host
-build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(HOST_I18N_DATA)
+build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(HOST_I18N_DATA) $(HOST_TZDATA_DATA)
 
 .PHONY: build-art-target
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
@@ -645,7 +672,8 @@ standalone-apex-files: deapexer \
                        $(RELEASE_ART_APEX) \
                        $(RUNTIME_APEX) \
                        $(CONSCRYPT_APEX) \
-                       $(I18N_APEX)
+                       $(I18N_APEX) \
+                       $(TZDATA_APEX)
 	$(call extract-from-apex,$(RELEASE_ART_APEX),\
 	  $(PRIVATE_ART_APEX_DEPENDENCY_LIBS) $(PRIVATE_ART_APEX_DEPENDENCY_FILES))
 	# The Runtime APEX has the Bionic libs in ${LIB}/bionic subdirectories,
@@ -667,6 +695,7 @@ standalone-apex-files: deapexer \
 	  $(PRIVATE_CONSCRYPT_APEX_DEPENDENCY_LIBS))
 	$(call extract-from-apex,$(I18N_APEX),\
 	  $(PRIVATE_I18N_APEX_DEPENDENCY_LIBS))
+	$(call extract-from-apex,$(TZDATA_APEX),)
 
 ########################################################################
 # Phony target for only building what go/lem requires for pushing ART on /data.
@@ -680,20 +709,6 @@ standalone-apex-files: deapexer \
 #
 # TODO(b/129332183): Remove this when Golem has full support for the
 # ART APEX.
-
-# Also include:
-# - a copy of the time zone data prebuilt files in
-#   /system/etc/tzdata_module/etc/tz and /system/etc/tzdata_module/etc/icu
-#   on target, (see modules `tzdata-art-test-tzdata`,
-#   `tzlookup.xml-art-test-tzdata`, and `tz_version-art-test-tzdata`, and
-#   `icu_overlay-art-test-tzdata`)
-# so that they can be found even if the Time Zone Data APEX is not available,
-# by setting the environment variable `ART_TEST_ANDROID_TZDATA_ROOT`
-# to "/system/etc/tzdata_module" on device. This is a temporary change needed
-# until Golem fully supports the Time Zone Data APEX.
-#
-# TODO(b/129332183): Remove this when Golem has full support for the
-# ART APEX (and TZ Data APEX).
 
 ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES := \
@@ -710,8 +725,6 @@ build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX
                         $(TARGET_OUT_SHARED_LIBRARIES)/libz.so \
                         $(TARGET_OUT_SHARED_LIBRARIES)/liblz4.so \
                         libartpalette-system \
-                        tzdata-art-test-tzdata tzlookup.xml-art-test-tzdata \
-                        tz_version-art-test-tzdata icu_overlay-art-test-tzdata \
                         standalone-apex-files
 	# remove debug libraries from public.libraries.txt because golem builds
 	# won't have it.
