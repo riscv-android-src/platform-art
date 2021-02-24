@@ -37,6 +37,7 @@
 #include "handle.h"
 #include "jni.h"
 #include "mirror/class.h"
+#include "mirror/object.h"
 #include "verifier/verifier_enums.h"
 
 namespace art {
@@ -92,9 +93,6 @@ class MethodHandlesLookup;
 class MethodType;
 template<class T> class ObjectArray;
 class StackTraceElement;
-template <typename T> struct NativeDexCachePair;
-using MethodDexCachePair = NativeDexCachePair<ArtMethod>;
-using MethodDexCacheType = std::atomic<MethodDexCachePair>;
 }  // namespace mirror
 
 class ClassVisitor {
@@ -556,8 +554,9 @@ class ClassLinker {
       verifier::HardFailLogMode log_level = verifier::HardFailLogMode::kLogNone)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
-  bool VerifyClassUsingOatFile(const DexFile& dex_file,
-                               ObjPtr<mirror::Class> klass,
+  bool VerifyClassUsingOatFile(Thread* self,
+                               const DexFile& dex_file,
+                               Handle<mirror::Class> klass,
                                ClassStatus& oat_file_class_status)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
@@ -950,7 +949,7 @@ class ClassLinker {
   // Used for tests and AppendToBootClassPath.
   ObjPtr<mirror::DexCache> AllocAndInitializeDexCache(Thread* self,
                                                       const DexFile& dex_file,
-                                                      LinearAlloc* linear_alloc)
+                                                      ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_)
       REQUIRES(!Roles::uninterruptible_);
@@ -1366,6 +1365,10 @@ class ClassLinker {
 
   // Well known mirror::Class roots.
   GcRoot<mirror::ObjectArray<mirror::Class>> class_roots_;
+
+  // Method hashes for virtual methods from java.lang.Object used
+  // to avoid recalculating them for each class we link.
+  uint32_t object_virtual_method_hashes_[mirror::Object::kVTableLength];
 
   // A cache of the last FindArrayClass results. The cache serves to avoid creating array class
   // descriptors for the sake of performing FindClass.

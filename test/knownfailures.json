@@ -42,7 +42,6 @@
     },
     {
         "tests": ["002-sleep",
-                  "053-wait-some",
                   "055-enum-performance",
                   "133-static-invoke-super"],
         "description": ["Tests that are timing sensitive and flaky on heavily",
@@ -1011,6 +1010,7 @@
           "802-deoptimization",
           "804-class-extends-itself",
           "816-illegal-new-array",
+          "819-verification-runtime",
           "900-hello-plugin",
           "901-hello-ti-agent",
           "903-hello-tagging",
@@ -1138,6 +1138,7 @@
                   "809-checker-invoke-super-bss",
                   "810-checker-invoke-super-default",
                   "811-checker-invoke-super-secondary",
+                  "817-hiddenapi",
                   "999-redefine-hiddenapi",
                   "1000-non-moving-space-stress",
                   "1001-app-image-regions",
@@ -1354,6 +1355,11 @@
         "description": ["Failing on RI. Needs further investigating."]
     },
     {
+        "tests": ["122-npe", "160-read-barrier-stress"],
+        "variant": "jvm",
+        "description": ["Reference.refersTo() not supported on old version of RI."]
+    },
+    {
         "tests": ["2232-write-metrics-to-log"],
         "variant": "jvm",
         "description": ["RI does not support ART metrics."]
@@ -1362,5 +1368,18 @@
         "tests": ["2232-write-metrics-to-log"],
         "variant": "target",
         "description": ["Checks LOG_STREAM output, which cannot be captured on target."]
+    },
+    {
+        "tests": ["053-wait-some"],
+        "env_vars": {"ART_TEST_DEBUG_GC": "true"},
+        "bug": "b/175435088",
+        "description": ["Test is time-sensitive and fails on debug-gc configuration."]
+    },
+    {
+        "tests": ["053-wait-some"],
+        "variant": "interp-ac",
+        "bug": "b/175435088",
+        "description": ["Test is time-sensitive and fails on interpreter-access-checks",
+                        "configuration."]
     }
 ]

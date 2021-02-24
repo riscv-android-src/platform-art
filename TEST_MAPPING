@@ -3,6 +3,39 @@
   "mainline-presubmit": [
     {
       "name": "art-run-test-001-HelloWorld[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-001-Main[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-002-sleep[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-004-InterfaceTest[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-006-args[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-007-count10[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-009-instanceof[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-010-instance[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-011-array-copy[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-012-math[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-013-math2[com.google.android.art.apex]"
+    },
+    {
+      "name": "art-run-test-014-math3[com.google.android.art.apex]"
     }
   ],
   "presubmit": [
@@ -12,11 +45,12 @@
     {
       "name": "BootImageProfileTest"
     },
-    // ART gtests.
+    {
+      "name": "ArtServiceTests"
+    },
     {
       "name": "ArtGtestsTarget"
     },
-    // ART run-tests.
     {
       "name": "art-run-test-001-HelloWorld"
     },
@@ -205,10 +239,7 @@
     },
     {
       "name": "art-run-test-090-loop-formation"
-    }
-  ],
-  "postsubmit": [
-    // ART run-tests.
+    },
     {
       "name": "art-run-test-092-locale"
     },
@@ -345,10 +376,13 @@
       "name": "art-run-test-176-app-image-string"
     },
     {
+      "name": "art-run-test-201-built-in-except-detail-messages"
+    },
+    {
       "name": "art-run-test-2019-constantcalculationsinking"
     },
     {
-      "name": "art-run-test-201-built-in-except-detail-messages"
+      "name": "art-run-test-202-thread-oome"
     },
     {
       "name": "art-run-test-2020-InvokeVirtual-Inlining"
@@ -381,9 +415,6 @@
       "name": "art-run-test-2029-contended-monitors"
     },
     {
-      "name": "art-run-test-202-thread-oome"
-    },
-    {
       "name": "art-run-test-2030-long-running-child"
     },
     {
@@ -403,7 +434,9 @@
     },
     {
       "name": "art-run-test-401-optimizing-compiler"
-    },
+    }
+  ],
+  "postsubmit": [
     {
       "name": "art-run-test-402-optimizing-control-flow"
     },
@@ -781,6 +814,9 @@
     },
     {
       "name": "art-run-test-815-invokeinterface-default"
+    },
+    {
+      "name": "art-run-test-818-clinit-nterp"
     },
     {
       "name": "art-run-test-963-default-range-smali"

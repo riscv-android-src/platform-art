@@ -132,6 +132,7 @@ class Runtime {
 
   bool EnsurePluginLoaded(const char* plugin_name, std::string* error_msg);
   bool EnsurePerfettoPlugin(std::string* error_msg);
+  bool EnsurePerfettoJavaHeapProfPlugin(std::string* error_msg);
 
   // IsAotCompiler for compilers that don't have a running runtime. Only dex2oat currently.
   bool IsAotCompiler() const {
@@ -602,6 +603,14 @@ class Runtime {
     return core_platform_api_policy_;
   }
 
+  void SetTestApiEnforcementPolicy(hiddenapi::EnforcementPolicy policy) {
+    test_api_policy_ = policy;
+  }
+
+  hiddenapi::EnforcementPolicy GetTestApiEnforcementPolicy() const {
+    return test_api_policy_;
+  }
+
   void SetHiddenApiExemptions(const std::vector<std::string>& exemptions) {
     hidden_api_exemptions_ = exemptions;
   }
@@ -805,14 +814,6 @@ class Runtime {
     return dump_native_stack_on_sig_quit_;
   }
 
-  bool GetPrunedDalvikCache() const {
-    return pruned_dalvik_cache_;
-  }
-
-  void SetPrunedDalvikCache(bool pruned) {
-    pruned_dalvik_cache_ = pruned;
-  }
-
   void UpdateProcessState(ProcessState process_state);
 
   // Returns true if we currently care about long mutator pause.
@@ -955,6 +956,10 @@ class Runtime {
 
   bool IsPerfettoHprofEnabled() const {
     return perfetto_hprof_enabled_;
+  }
+
+  bool IsPerfettoJavaHeapStackProfEnabled() const {
+    return perfetto_javaheapprof_enabled_;
   }
 
   // Return true if we should load oat files as executable or not.
@@ -1234,6 +1239,9 @@ class Runtime {
   // Whether access checks on core platform API should be performed.
   hiddenapi::EnforcementPolicy core_platform_api_policy_;
 
+  // Whether access checks on test API should be performed.
+  hiddenapi::EnforcementPolicy test_api_policy_;
+
   // List of signature prefixes of methods that have been removed from the blacklist, and treated
   // as if whitelisted.
   std::vector<std::string> hidden_api_exemptions_;
@@ -1254,9 +1262,6 @@ class Runtime {
 
   // Whether threads should dump their native stack on SIGQUIT.
   bool dump_native_stack_on_sig_quit_;
-
-  // Whether the dalvik cache was pruned when initializing the runtime.
-  bool pruned_dalvik_cache_;
 
   // Whether or not we currently care about pause times.
   ProcessState process_state_;
@@ -1311,6 +1316,7 @@ class Runtime {
 
   bool verifier_missing_kthrow_fatal_;
   bool perfetto_hprof_enabled_;
+  bool perfetto_javaheapprof_enabled_;
 
   metrics::ArtMetrics metrics_;
   std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;

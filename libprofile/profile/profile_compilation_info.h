@@ -44,12 +44,18 @@ struct ProfileMethodInfo {
   struct ProfileInlineCache {
     ProfileInlineCache(uint32_t pc,
                        bool missing_types,
-                       const std::vector<TypeReference>& profile_classes)
-        : dex_pc(pc), is_missing_types(missing_types), classes(profile_classes) {}
+                       const std::vector<TypeReference>& profile_classes,
+                       // Only used by profman for creating profiles from text
+                       bool megamorphic = false)
+        : dex_pc(pc),
+          is_missing_types(missing_types),
+          classes(profile_classes),
+          is_megamorphic(megamorphic) {}
 
     const uint32_t dex_pc;
     const bool is_missing_types;
     const std::vector<TypeReference> classes;
+    const bool is_megamorphic;
   };
 
   explicit ProfileMethodInfo(MethodReference reference) : ref(reference) {}
@@ -100,7 +106,8 @@ class ProfileCompilationInfo {
 
     bool MatchesDex(const DexFile* dex_file) const {
       return dex_checksum == dex_file->GetLocationChecksum() &&
-           profile_key == GetProfileDexFileBaseKey(dex_file->GetLocation());
+             GetBaseKeyFromAugmentedKey(profile_key) ==
+                 GetProfileDexFileBaseKey(dex_file->GetLocation());
     }
 
     std::string profile_key;
