@@ -68,7 +68,7 @@ const OatFile* OatFileManager::RegisterOatFile(std::unique_ptr<const OatFile> oa
   // Use class_linker vlog to match the log for dex file registration.
   VLOG(class_linker) << "Registered oat file " << oat_file->GetLocation();
   PaletteHooks* hooks = nullptr;
-  if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
     hooks->NotifyOatFileLoaded(oat_file->GetLocation().c_str());
   }
 
@@ -185,6 +185,11 @@ static bool ClassLoaderContextMatches(
   DCHECK(error_msg != nullptr);
   DCHECK(context != nullptr);
 
+  if (oat_file->IsBackedByVdexOnly()) {
+    // Only a vdex file, we don't depend on the class loader context.
+    return true;
+  }
+
   if (!CompilerFilter::IsVerificationEnabled(oat_file->GetCompilerFilter())) {
     // If verification is not enabled we don't need to check if class loader context matches
     // as the oat file is either extracted or assumed verified.
@@ -222,7 +227,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
     jobjectArray dex_elements,
     const OatFile** out_oat_file,
     std::vector<std::string>* error_msgs) {
-  ScopedTrace trace(__FUNCTION__);
+  ScopedTrace trace(StringPrintf("%s(%s)", __FUNCTION__, dex_location));
   CHECK(dex_location != nullptr);
   CHECK(error_msgs != nullptr);
 
@@ -248,23 +253,56 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
                                         runtime->GetOatFilesExecutable(),
                                         only_use_system_oat_files_);
 
-    // Get the oat file on disk.
+    // Get the current optimization status for trace debugging.
+    // Implementation detail note: GetOptimizationStatus will select the same
+    // oat file as GetBestOatFile used below, and in doing so it already pre-populates
+    // some OatFileAssistant internal fields.
+    std::string odex_location;
+    std::string compilation_filter;
+    std::string compilation_reason;
+    std::string odex_status;
+    oat_file_assistant.GetOptimizationStatus(
+        &odex_location,
+        &compilation_filter,
+        &compilation_reason,
+        &odex_status);
+
+    ScopedTrace odex_loading(StringPrintf(
+        "location=%s status=%s filter=%s reason=%s",
+        odex_location.c_str(),
+        odex_status.c_str(),
+        compilation_filter.c_str(),
+        compilation_reason.c_str()));
+
+    // Proceed with oat file loading.
     std::unique_ptr<const OatFile> oat_file(oat_file_assistant.GetBestOatFile().release());
     VLOG(oat) << "OatFileAssistant(" << dex_location << ").GetBestOatFile()="
-              << reinterpret_cast<uintptr_t>(oat_file.get())
+              << (oat_file != nullptr ? oat_file->GetLocation() : "")
               << " (executable=" << (oat_file != nullptr ? oat_file->IsExecutable() : false) << ")";
+
+    CHECK(oat_file == nullptr || odex_location == oat_file->GetLocation())
+        << "OatFileAssistant non-determinism in choosing best oat files. "
+        << "optimization-status-location=" << odex_location
+        << " best_oat_file-location=" << oat_file->GetLocation();
 
     const OatFile* source_oat_file = nullptr;
     std::string error_msg;
     bool is_special_shared_library = false;
     bool class_loader_context_matches = false;
-    if (oat_file != nullptr &&
-        context != nullptr &&
-        ClassLoaderContextMatches(oat_file.get(),
-                                  context.get(),
-                                  /*out*/ &is_special_shared_library,
-                                  /*out*/ &error_msg)) {
-      class_loader_context_matches = true;
+    bool check_context = oat_file != nullptr && context != nullptr;
+    if (check_context) {
+        class_loader_context_matches =
+            ClassLoaderContextMatches(oat_file.get(),
+                                      context.get(),
+                                      /*out*/ &is_special_shared_library,
+                                      /*out*/ &error_msg);
+    }
+    ScopedTrace context_results(StringPrintf(
+        "check_context=%s contex-ok=%s",
+        check_context ? "true" : "false",
+        class_loader_context_matches ? "true" : "false"));
+
+    if (class_loader_context_matches) {
       // Load the dex files from the oat file.
       bool added_image_space = false;
       if (oat_file->IsExecutable()) {
@@ -295,8 +333,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
               runtime->GetHeap()->AddSpace(image_space.get());
             }
             {
-              ScopedTrace image_space_timing(
-                  StringPrintf("Adding image space for location %s", dex_location));
+              ScopedTrace image_space_timing("Adding image space");
               added_image_space = runtime->GetClassLinker()->AddImageSpace(image_space.get(),
                                                                            h_loader,
                                                                            /*out*/&dex_files,
@@ -350,6 +387,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
         }
       }
       if (dex_files.empty()) {
+        ScopedTrace failed_to_open_dex_files("FailedToOpenDexFilesFromOat");
         error_msgs->push_back("Failed to open dex files from " + oat_file->GetLocation());
       } else {
         // Opened dex files from an oat file, madvise them to their loaded state.
@@ -373,6 +411,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
       std::set<const DexFile*> already_exists_in_classpath =
           context->CheckForDuplicateDexFiles(MakeNonOwningPointerVector(dex_files));
       if (!already_exists_in_classpath.empty()) {
+        ScopedTrace duplicate_dex_files("DuplicateDexFilesInContext");
         auto duplicate_it = already_exists_in_classpath.begin();
         std::string duplicates = (*duplicate_it)->GetLocation();
         for (duplicate_it++ ; duplicate_it != already_exists_in_classpath.end(); duplicate_it++) {
@@ -414,6 +453,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat(
                               kVerifyChecksum,
                               /*out*/ &error_msg,
                               &dex_files)) {
+      ScopedTrace fail_to_open_dex_from_apk("FailedToOpenDexFilesFromApk");
       LOG(WARNING) << error_msg;
       error_msgs->push_back("Failed to open dex files from " + std::string(dex_location)
                             + " because: " + error_msg);
@@ -491,12 +531,10 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat_
   const std::vector<const DexFile::Header*> dex_headers = GetDexFileHeaders(dex_mem_maps);
 
   // Determine dex/vdex locations and the combined location checksum.
-  uint32_t location_checksum;
   std::string dex_location;
   std::string vdex_path;
   bool has_vdex = OatFileAssistant::AnonymousDexVdexLocation(dex_headers,
                                                              kRuntimeISA,
-                                                             &location_checksum,
                                                              &dex_location,
                                                              &vdex_path);
 
@@ -524,7 +562,7 @@ std::vector<std::unique_ptr<const DexFile>> OatFileManager::OpenDexFilesFromOat_
     const ArtDexFileLoader dex_file_loader;
     std::unique_ptr<const DexFile> dex_file(dex_file_loader.Open(
         DexFileLoader::GetMultiDexLocation(i, dex_location.c_str()),
-        location_checksum,
+        dex_headers[i]->checksum_,
         std::move(dex_mem_maps[i]),
         /* verify= */ (vdex_file == nullptr) && Runtime::Current()->IsVerificationEnabled(),
         kVerifyChecksum,
@@ -766,12 +804,10 @@ void OatFileManager::RunBackgroundVerification(const std::vector<const DexFile*>
     return;
   }
 
-  uint32_t location_checksum;
   std::string dex_location;
   std::string vdex_path;
   if (OatFileAssistant::AnonymousDexVdexLocation(GetDexFileHeaders(dex_files),
                                                  kRuntimeISA,
-                                                 &location_checksum,
                                                  &dex_location,
                                                  &vdex_path)) {
     if (verification_thread_pool_ == nullptr) {

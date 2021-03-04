@@ -14,6 +14,15 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "art_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["art_license"],
+}
+
 cc_defaults {
     name: "libartbase_defaults",
     defaults: ["art_defaults"],
@@ -24,6 +33,7 @@ cc_defaults {
         "base/arena_allocator.cc",
         "base/arena_bit_vector.cc",
         "base/bit_vector.cc",
+        "base/compiler_filter.cc",
         "base/enums.cc",
         "base/file_magic.cc",
         "base/file_utils.cc",
@@ -36,6 +46,7 @@ cc_defaults {
         "base/memory_region.cc",
         "base/mem_map.cc",
         // "base/mem_map_fuchsia.cc", put in target when fuchsia supported by soong
+        "base/metrics/metrics_common.cc",
         "base/os_linux.cc",
         "base/runtime_debug.cc",
         "base/safe_copy.cc",
@@ -242,6 +253,7 @@ art_cc_test {
         "base/bit_table_test.cc",
         "base/bit_utils_test.cc",
         "base/bit_vector_test.cc",
+        "base/compiler_filter_test.cc",
         "base/file_utils_test.cc",
         "base/hash_map_test.cc",
         "base/hash_set_test.cc",
@@ -255,6 +267,7 @@ art_cc_test {
         "base/membarrier_test.cc",
         "base/memory_region_test.cc",
         "base/mem_map_test.cc",
+        "base/metrics/metrics_test.cc",
         "base/safe_copy_test.cc",
         "base/scoped_flock_test.cc",
         "base/time_utils_test.cc",

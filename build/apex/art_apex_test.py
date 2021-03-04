@@ -540,6 +540,8 @@ class ReleaseChecker:
     self._checker.check_native_library('libart-disassembler')
     self._checker.check_native_library('libartbase')
     self._checker.check_native_library('libartpalette')
+    self._checker.check_native_library('libartservice')
+    self._checker.check_native_library('libarttools')
     self._checker.check_native_library('libdexfile')
     self._checker.check_native_library('libdexfile_support')
     self._checker.check_native_library('libdt_fd_forward')
@@ -547,6 +549,9 @@ class ReleaseChecker:
     self._checker.check_native_library('libopenjdkjvmti')
     self._checker.check_native_library('libprofile')
     self._checker.check_native_library('libsigchain')
+
+    # Check internal Java libraries
+    self._checker.check_java_library("artservice")
 
     # Check java libraries for Managed Core Library.
     self._checker.check_java_library('apache-xml')
@@ -614,9 +619,9 @@ class ReleaseTargetChecker:
     # removed in Android R.
 
     # Check binaries for ART.
-    self._checker.check_executable("compile_bcp.sh")
-    self._checker.check_executable('oatdump')
     self._checker.check_multilib_executable('dex2oat')
+    self._checker.check_executable('oatdump')
+    self._checker.check_executable("odrefresh")
 
     # Check internal libraries for ART.
     self._checker.check_native_library('libperfetto_hprof')
@@ -641,6 +646,7 @@ class ReleaseHostChecker:
     self._checker.check_executable('hprof-conv')
     self._checker.check_symlinked_first_executable('dex2oatd')
     self._checker.check_symlinked_first_executable('dex2oat')
+    self._checker.check_executable("odrefresh")
 
     # Check exported native libraries for Managed Core Library.
     self._checker.check_native_library('libicu')
@@ -742,10 +748,13 @@ class TestingTargetChecker:
     self._checker.check_art_test_executable('art_imgdiag_tests')
     self._checker.check_art_test_executable('art_libartbase_tests')
     self._checker.check_art_test_executable('art_libartpalette_tests')
+    self._checker.check_art_test_executable('art_libartservice_tests')
+    self._checker.check_art_test_executable('art_libarttools_tests')
     self._checker.check_art_test_executable('art_libdexfile_support_tests')
     self._checker.check_art_test_executable('art_libdexfile_tests')
     self._checker.check_art_test_executable('art_libprofile_tests')
     self._checker.check_art_test_executable('art_oatdump_tests')
+    self._checker.check_art_test_executable('art_odrefresh_tests')
     self._checker.check_art_test_executable('art_profman_tests')
     self._checker.check_art_test_executable('art_runtime_compiler_tests')
     self._checker.check_art_test_executable('art_runtime_tests')

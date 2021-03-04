@@ -44,23 +44,49 @@ namespace art {
 
 class OatFileAssistantTest : public DexoptTest {
  public:
-  void VerifyOptimizationStatus(const std::string& file,
+  void VerifyOptimizationStatus(OatFileAssistant* assistant,
+                                const std::string& file,
                                 const std::string& expected_filter,
-                                const std::string& expected_reason) {
-    std::string compilation_filter;
-    std::string compilation_reason;
-    OatFileAssistant::GetOptimizationStatus(
-        file, kRuntimeISA, &compilation_filter, &compilation_reason);
+                                const std::string& expected_reason,
+                                const std::string& expected_odex_status) {
+    // Verify the static methods (called from PM for dexOptNeeded).
+    std::string compilation_filter1;
+    std::string compilation_reason1;
 
-    ASSERT_EQ(expected_filter, compilation_filter);
-    ASSERT_EQ(expected_reason, compilation_reason);
+    OatFileAssistant::GetOptimizationStatus(
+        file, kRuntimeISA, &compilation_filter1, &compilation_reason1);
+
+    ASSERT_EQ(expected_filter, compilation_filter1);
+    ASSERT_EQ(expected_reason, compilation_reason1);
+
+    // Verify the instance methods (called at runtime for systrace).
+    std::string odex_location2;  // ignored
+    std::string compilation_filter2;
+    std::string compilation_reason2;
+    std::string odex_status2;
+
+    assistant->GetOptimizationStatus(
+        &odex_location2,
+        &compilation_filter2,
+        &compilation_reason2,
+        &odex_status2);
+
+    ASSERT_EQ(expected_filter, compilation_filter2);
+    ASSERT_EQ(expected_reason, compilation_reason2);
+    ASSERT_EQ(expected_odex_status, odex_status2);
   }
 
-  void VerifyOptimizationStatus(const std::string& file,
+  void VerifyOptimizationStatus(OatFileAssistant* assistant,
+                                const std::string& file,
                                 CompilerFilter::Filter expected_filter,
-                                const std::string& expected_reason) {
+                                const std::string& expected_reason,
+                                const std::string& expected_odex_status) {
       VerifyOptimizationStatus(
-          file, CompilerFilter::NameOfFilter(expected_filter), expected_reason);
+          assistant,
+          file,
+          CompilerFilter::NameOfFilter(expected_filter),
+          expected_reason,
+          expected_odex_status);
   }
 
   void InsertNewBootClasspathEntry() {
@@ -244,7 +270,12 @@ TEST_F(OatFileAssistantTest, DexNoOat) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
 
-  VerifyOptimizationStatus(dex_location, "run-from-apk", "unknown");
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      "run-from-apk",
+      "unknown",
+      "io-error-no-oat");
 }
 
 // Case: We have no DEX file and no OAT file.
@@ -289,7 +320,12 @@ TEST_F(OatFileAssistantTest, OdexUpToDate) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
 
-  VerifyOptimizationStatus(dex_location, CompilerFilter::kSpeed, "install");
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      CompilerFilter::kSpeed,
+      "install",
+      "up-to-date");
 }
 
 // Case: We have an ODEX file compiled against partial boot image.
@@ -321,7 +357,12 @@ TEST_F(OatFileAssistantTest, OdexUpToDatePartialBootImage) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
 
-  VerifyOptimizationStatus(dex_location, CompilerFilter::kSpeed, "install");
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      CompilerFilter::kSpeed,
+      "install",
+      "up-to-date");
 }
 
 // Case: We have a DEX file and a PIC ODEX file, but no OAT file. We load the dex
@@ -390,7 +431,12 @@ TEST_F(OatFileAssistantTest, OatUpToDate) {
   EXPECT_EQ(OatFileAssistant::kOatUpToDate, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
 
-  VerifyOptimizationStatus(dex_location, CompilerFilter::kSpeed, "unknown");
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      CompilerFilter::kSpeed,
+      "unknown",
+      "up-to-date");
 }
 
 // Case: Passing valid file descriptors of updated odex/vdex files along with the dex file.
@@ -455,13 +501,15 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithInvalidOdexFd) {
                                       vdex_fd.get(),
                                       /* oat_fd= */ -1,
                                       zip_fd.get());
-  EXPECT_EQ(-OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(-OatFileAssistant::kNoDexOptNeeded,
+      GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kVerify));
+  EXPECT_EQ(-OatFileAssistant::kDex2OatForFilter,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kSpeed));
-  EXPECT_EQ(-OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(-OatFileAssistant::kDex2OatForFilter,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kEverything));
 
   EXPECT_FALSE(oat_file_assistant.IsInBootClassPath());
-  EXPECT_EQ(OatFileAssistant::kOatBootImageOutOfDate, oat_file_assistant.OdexFileStatus());
+  EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
 }
@@ -518,7 +566,7 @@ TEST_F(OatFileAssistantTest, GetDexOptNeededWithInvalidOdexVdexFd) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OatFileStatus());
 }
 
-// Case: We have a DEX file and up-to-date (ODEX) VDEX file for it, but no
+// Case: We have a DEX file and up-to-date VDEX file for it, but no
 // ODEX file.
 TEST_F(OatFileAssistantTest, VdexUpToDateNoOdex) {
   std::string dex_location = GetScratchDir() + "/VdexUpToDateNoOdex.jar";
@@ -533,19 +581,21 @@ TEST_F(OatFileAssistantTest, VdexUpToDateNoOdex) {
 
   OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
 
-  // Even though the vdex file is up to date, because we don't have the oat
-  // file, we can't know that the vdex depends on the boot image and is up to
-  // date with respect to the boot image. Instead we must assume the vdex file
-  // depends on the boot image and is out of date with respect to the boot
-  // image.
-  EXPECT_EQ(-OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(-OatFileAssistant::kNoDexOptNeeded,
+      GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kVerify));
+  EXPECT_EQ(-OatFileAssistant::kDex2OatForFilter,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kSpeed));
 
   // Make sure we don't crash in this case when we dump the status. We don't
   // care what the actual dumped value is.
   oat_file_assistant.GetStatusDump();
 
-  VerifyOptimizationStatus(dex_location, "run-from-apk", "unknown");
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      "verify",
+      "unknown",
+      "up-to-date");
 }
 
 // Case: We have a DEX file and empty VDEX and ODEX files.
@@ -586,12 +636,7 @@ TEST_F(OatFileAssistantTest, VdexUpToDateNoOat) {
   ASSERT_TRUE(scoped_non_writable.IsSuccessful());
   OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
 
-  // Even though the vdex file is up to date, because we don't have the oat
-  // file, we can't know that the vdex depends on the boot image and is up to
-  // date with respect to the boot image. Instead we must assume the vdex file
-  // depends on the boot image and is out of date with respect to the boot
-  // image.
-  EXPECT_EQ(OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(OatFileAssistant::kDex2OatForFilter,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kSpeed));
 }
 
@@ -717,6 +762,13 @@ TEST_F(OatFileAssistantTest, OatDexOutOfDate) {
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatDexOutOfDate, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
+
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      "run-from-apk-fallback",
+      "unknown",
+      "apk-more-recent");
 }
 
 // Case: We have a DEX file and an (ODEX) VDEX file out of date with respect
@@ -773,17 +825,24 @@ TEST_F(OatFileAssistantTest, OatImageOutOfDate) {
   ASSERT_TRUE(scoped_non_writable.IsSuccessful());
 
   OatFileAssistant oat_file_assistant(dex_location.c_str(), kRuntimeISA, false);
-  EXPECT_EQ(OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(OatFileAssistant::kNoDexOptNeeded,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kExtract));
-  EXPECT_EQ(OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(OatFileAssistant::kNoDexOptNeeded,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kVerify));
-  EXPECT_EQ(OatFileAssistant::kDex2OatForBootImage,
+  EXPECT_EQ(OatFileAssistant::kDex2OatForFilter,
       GetDexOptNeeded(&oat_file_assistant, CompilerFilter::kSpeed));
 
   EXPECT_FALSE(oat_file_assistant.IsInBootClassPath());
   EXPECT_EQ(OatFileAssistant::kOatCannotOpen, oat_file_assistant.OdexFileStatus());
   EXPECT_EQ(OatFileAssistant::kOatBootImageOutOfDate, oat_file_assistant.OatFileStatus());
   EXPECT_TRUE(oat_file_assistant.HasDexFiles());
+
+  VerifyOptimizationStatus(
+      &oat_file_assistant,
+      dex_location,
+      "verify",
+      "unknown",
+      "up-to-date");
 }
 
 // Case: We have a DEX file and a verify-at-runtime OAT file out of date with
@@ -1389,9 +1448,12 @@ TEST_F(OatFileAssistantTest, SystemFrameworkDir) {
   odex_dir = odex_dir + std::string(GetInstructionSetString(kRuntimeISA));
   mkdir(odex_dir.c_str(), 0700);
   std::string oat_location = odex_dir + "/" + filebase + ".odex";
+  std::string vdex_location = odex_dir + "/" + filebase + ".vdex";
   std::string art_location = odex_dir + "/" + filebase + ".art";
   // Clean up in case previous run crashed.
   remove(oat_location.c_str());
+  remove(vdex_location.c_str());
+  remove(art_location.c_str());
 
   // Start the runtime to initialize the system's class loader.
   Thread::Current()->TransitionFromSuspendedToRunnable();

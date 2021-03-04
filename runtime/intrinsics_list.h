@@ -156,6 +156,7 @@
   V(MathRint, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "rint", "(D)D") \
   V(MathRoundDouble, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "round", "(D)J") \
   V(MathRoundFloat, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "round", "(F)I") \
+  V(MathMultiplyHigh, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Math;", "multiplyHigh", "(JJ)J") \
   V(SystemArrayCopyChar, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "([CI[CII)V") \
   V(SystemArrayCopy, kStatic, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/System;", "arraycopy", "(Ljava/lang/Object;ILjava/lang/Object;II)V") \
   V(ThreadCurrentThread, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Thread;", "currentThread", "()Ljava/lang/Thread;") \
@@ -231,6 +232,7 @@
   V(UnsafeStoreFence, kVirtual, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Lsun/misc/Unsafe;", "storeFence", "()V") \
   V(UnsafeFullFence, kVirtual, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Lsun/misc/Unsafe;", "fullFence", "()V") \
   V(ReferenceGetReferent, kDirect, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/ref/Reference;", "getReferent", "()Ljava/lang/Object;") \
+  V(ReferenceRefersTo, kVirtual, kNeedsEnvironment, kAllSideEffects, kCanThrow, "Ljava/lang/ref/Reference;", "refersTo", "(Ljava/lang/Object;)Z") \
   V(IntegerValueOf, kStatic, kNeedsEnvironment, kNoSideEffects, kNoThrow, "Ljava/lang/Integer;", "valueOf", "(I)Ljava/lang/Integer;") \
   V(ThreadInterrupted, kStatic, kNeedsEnvironment, kAllSideEffects, kNoThrow, "Ljava/lang/Thread;", "interrupted", "()Z") \
   V(VarHandleFullFence, kStatic, kNeedsEnvironment, kWriteSideEffects, kNoThrow, "Ljava/lang/invoke/VarHandle;", "fullFence", "()V") \

@@ -22,19 +22,24 @@
 
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
+#include "base/compiler_filter.h"
 #include "base/file_utils.h"
 #include "base/logging.h"  // For InitLogging.
 #include "base/mutex.h"
 #include "base/os.h"
 #include "base/string_view_cpp20.h"
 #include "base/utils.h"
-#include "compiler_filter.h"
+#include "class_linker.h"
 #include "class_loader_context.h"
 #include "dex/dex_file.h"
+#include "gc/heap.h"
+#include "gc/space/image_space.h"
 #include "noop_compiler_callbacks.h"
+#include "oat.h"
 #include "oat_file_assistant.h"
 #include "runtime.h"
 #include "thread-inl.h"
+#include "vdex_file.h"
 
 namespace art {
 namespace dexoptanalyzer {
@@ -117,6 +122,9 @@ NO_RETURN static void Usage(const char *fmt, ...) {
   UsageError("      print a colon-separated list of its dex files to standard output. Dexopt");
   UsageError("      needed analysis is not performed when this option is set.");
   UsageError("");
+  UsageError("  --validate-bcp: validates the boot class path files (.art, .oat, .vdex).");
+  UsageError("      Requires --isa and --image options to locate artifacts.");
+  UsageError("");
   UsageError("Return code:");
   UsageError("  To make it easier to integrate with the internal tools this command will make");
   UsageError("    available its result (dexoptNeeded) as the exit/return code. i.e. it will not");
@@ -141,6 +149,7 @@ class DexoptAnalyzer final {
  public:
   DexoptAnalyzer() :
       only_flatten_context_(false),
+      only_validate_bcp_(false),
       assume_profile_changed_(false),
       downgrade_(false) {}
 
@@ -220,6 +229,8 @@ class DexoptAnalyzer final {
         }
       } else if (option == "--flatten-class-loader-context") {
         only_flatten_context_ = true;
+      } else if (option == "--validate-bcp") {
+        only_validate_bcp_ = true;
       } else {
         Usage("Unknown argument '%s'", raw_option);
       }
@@ -308,7 +319,7 @@ class DexoptAnalyzer final {
                                                            assume_profile_changed_,
                                                            downgrade_);
 
-    // Convert OatFileAssitant codes to dexoptanalyzer codes.
+    // Convert OatFileAssistant codes to dexoptanalyzer codes.
     switch (dexoptNeeded) {
       case OatFileAssistant::kNoDexOptNeeded: return ReturnCode::kNoDexOptNeeded;
       case OatFileAssistant::kDex2OatFromScratch: return ReturnCode::kDex2OatFromScratch;
@@ -321,6 +332,79 @@ class DexoptAnalyzer final {
         LOG(ERROR) << "Unknown dexoptNeeded " << dexoptNeeded;
         return ReturnCode::kErrorUnknownDexOptNeeded;
     }
+  }
+
+  // Validates the boot classpath and boot classpath extensions by checking the image checksums,
+  // the oat files and the vdex files.
+  //
+  // Returns `ReturnCode::kNoDexOptNeeded` when all the files are up-to-date,
+  // `ReturnCode::kDex2OatFromScratch` if any of the files are missing or out-of-date, and
+  // `ReturnCode::kErrorCannotCreateRuntime` if the files could not be tested due to problem
+  // creating a runtime.
+  ReturnCode ValidateBcp() const {
+    using ImageSpace = gc::space::ImageSpace;
+
+    if (!CreateRuntime()) {
+      return ReturnCode::kErrorCannotCreateRuntime;
+    }
+    std::unique_ptr<Runtime> runtime(Runtime::Current());
+
+    auto dex_files = ArrayRef<const DexFile* const>(runtime->GetClassLinker()->GetBootClassPath());
+    auto boot_image_spaces = ArrayRef<ImageSpace* const>(runtime->GetHeap()->GetBootImageSpaces());
+    const std::string checksums = ImageSpace::GetBootClassPathChecksums(boot_image_spaces,
+                                                                        dex_files);
+
+    std::string error_msg;
+    const std::vector<std::string>& bcp = runtime->GetBootClassPath();
+    const std::vector<std::string>& bcp_locations = runtime->GetBootClassPathLocations();
+    const std::string bcp_locations_path = android::base::Join(bcp_locations, ':');
+    if (!ImageSpace::VerifyBootClassPathChecksums(checksums,
+                                                  bcp_locations_path,
+                                                  runtime->GetImageLocation(),
+                                                  ArrayRef<const std::string>(bcp_locations),
+                                                  ArrayRef<const std::string>(bcp),
+                                                  runtime->GetInstructionSet(),
+                                                  &error_msg)) {
+      LOG(INFO) << "Failed to verify boot class path checksums: " << error_msg;
+      return ReturnCode::kDex2OatFromScratch;
+    }
+
+    const auto& image_spaces = runtime->GetHeap()->GetBootImageSpaces();
+    size_t bcp_component_count = 0;
+    for (const auto& image_space : image_spaces) {
+      if (!image_space->GetImageHeader().IsValid()) {
+        LOG(INFO) << "Image header is not valid: " << image_space->GetImageFilename();
+        return ReturnCode::kDex2OatFromScratch;
+      }
+      const OatFile* oat_file = image_space->GetOatFile();
+      if (oat_file == nullptr) {
+        const std::string oat_path = ReplaceFileExtension(image_space->GetImageFilename(), "oat");
+        LOG(INFO) << "Oat file missing: " << oat_path;
+        return ReturnCode::kDex2OatFromScratch;
+      }
+      if (!oat_file->GetOatHeader().IsValid() ||
+          !ImageSpace::ValidateOatFile(*oat_file, &error_msg)) {
+        LOG(INFO) << "Oat file is not valid: " << oat_file->GetLocation() << " " << error_msg;
+        return ReturnCode::kDex2OatFromScratch;
+      }
+      const VdexFile* vdex_file = oat_file->GetVdexFile();
+      if (vdex_file == nullptr || !vdex_file->IsValid()) {
+        LOG(INFO) << "Vdex file is not valid : " << oat_file->GetLocation();
+        return ReturnCode::kDex2OatFromScratch;
+      }
+      bcp_component_count += image_space->GetComponentCount();
+    }
+
+    // If the number of components encountered in the image spaces does not match the number
+    // of components expected from the boot classpath locations then something is missing.
+    if (bcp_component_count != bcp_locations.size()) {
+      for (size_t i = bcp_component_count; i < bcp_locations.size(); ++i) {
+        LOG(INFO) << "Missing image file for " << bcp_locations[i];
+      }
+      return ReturnCode::kDex2OatFromScratch;
+    }
+
+    return ReturnCode::kNoDexOptNeeded;
   }
 
   ReturnCode FlattenClassLoaderContext() const {
@@ -341,6 +425,8 @@ class DexoptAnalyzer final {
   ReturnCode Run() const {
     if (only_flatten_context_) {
       return FlattenClassLoaderContext();
+    } else if (only_validate_bcp_) {
+      return ValidateBcp();
     } else {
       return GetDexOptNeeded();
     }
@@ -352,6 +438,7 @@ class DexoptAnalyzer final {
   CompilerFilter::Filter compiler_filter_;
   std::string context_str_;
   bool only_flatten_context_;
+  bool only_validate_bcp_;
   bool assume_profile_changed_;
   bool downgrade_;
   std::string image_;

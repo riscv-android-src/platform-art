@@ -98,19 +98,25 @@ TEST_ART_ADB_ROOT_AND_REMOUNT := \
 
 # "mm test-art" to build and run all tests on host and device
 .PHONY: test-art
-test-art: test-art-host test-art-target
+test-art:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 .PHONY: test-art-gtest
-test-art-gtest: test-art-host-gtest test-art-target-gtest
+test-art-gtest:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 .PHONY: test-art-run-test
-test-art-run-test: test-art-host-run-test test-art-target-run-test
+test-art-run-test:
 	$(hide) $(call ART_TEST_PREREQ_FINISHED,$@)
 
 ########################################################################
 # host test rules
+
+ifeq (true,$(my_art_module_source_build))
+
+test-art: test-art-host
+test-art-gtest: test-art-host-gtest
+test-art-run-test: test-art-host-run-test
 
 VIXL_TEST_DEPENDENCY :=
 # We can only run the vixl tests on 64-bit hosts (vixl testing issue) when its a
@@ -201,8 +207,14 @@ endif
 test-art-host-dexdump: $(addprefix $(HOST_OUT_EXECUTABLES)/, dexdump dexlist)
 	ANDROID_HOST_OUT=$(realpath $(HOST_OUT)) art/test/dexdump/run-all-tests
 
+endif # ifeq (true,$(my_art_module_source_build))
+
 ########################################################################
 # target test rules
+
+test-art: test-art-target
+test-art-gtest: test-art-target-gtest
+test-art-run-test: test-art-target-run-test
 
 # "mm test-art-target" to build and run all target tests.
 .PHONY: test-art-target
@@ -281,68 +293,6 @@ endif
 # "include $(BUILD_...)".
 LOCAL_PATH := $(art_path)
 
-#######################
-# ART APEX autoselect
-
-include $(CLEAR_VARS)
-
-# The ART APEX comes in three flavors:
-# - the release module (`com.android.art`), containing only "release"
-#   artifacts;
-# - the debug module (`com.android.art.debug`), containing both
-#   "release" and "debug" artifacts, as well as additional tools;
-# - the testing module (`com.android.art.testing`), containing
-#   both "release" and "debug" artifacts, as well as additional tools
-#   and ART gtests).
-#
-# `com.android.art-autoselect` is an "alias" for either the release or the debug
-# module. By default, "user" build variants contain the release module, while
-# "eng" build variant contain the debug module. However, if
-# `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is defined, it overrides the previous
-# logic:
-# - if `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is set to `false`, the
-#   build will include the release module (whatever the build
-#   variant);
-# - if `PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD` is set to `true`, the
-#   build will include the debug module (whatever the build variant).
-
-art_target_include_debug_build := $(PRODUCT_ART_TARGET_INCLUDE_DEBUG_BUILD)
-ifneq (false,$(art_target_include_debug_build))
-  ifneq (,$(filter eng,$(TARGET_BUILD_VARIANT)))
-    art_target_include_debug_build := true
-  endif
-endif
-ifeq (true,$(art_target_include_debug_build))
-  # Module with both release and debug variants, as well as
-  # additional tools.
-  TARGET_ART_APEX := $(DEBUG_ART_APEX)
-  APEX_TEST_MODULE := art-check-debug-apex-gen-fakebin
-else
-  # Release module (without debug variants nor tools).
-  TARGET_ART_APEX := $(RELEASE_ART_APEX)
-  APEX_TEST_MODULE := art-check-release-apex-gen-fakebin
-endif
-
-LOCAL_MODULE := com.android.art-autoselect
-LOCAL_REQUIRED_MODULES := $(TARGET_ART_APEX)
-
-# Clear locally used variable.
-art_target_include_debug_build :=
-
-include $(BUILD_PHONY_PACKAGE)
-
-include $(CLEAR_VARS)
-LOCAL_MODULE := com.android.art-autoselect
-LOCAL_IS_HOST_MODULE := true
-ifneq ($(HOST_OS),darwin)
-  # The testing APEX is enabled only when compiling from ART Module sources,
-  # which is controlled by this Soong variable.
-  ifeq (true,$(SOONG_CONFIG_art_module_source_build))
-    LOCAL_REQUIRED_MODULES += $(APEX_TEST_MODULE)
-  endif
-endif
-include $(BUILD_PHONY_PACKAGE)
-
 # Create canonical name -> file name symlink in the symbol directory for the
 # debug APEX. The symbol files for it are installed to
 # $(TARGET_OUT_UNSTRIPPED)/apex/com.android.art.debug. However, since it's
@@ -388,6 +338,9 @@ art_apex_manifest_file :=
 
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-runtime
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 
 # Reference the libraries and binaries in the appropriate APEX module, because
 # they don't have platform variants. However if
@@ -411,6 +364,7 @@ LOCAL_REQUIRED_MODULES := \
     $(call art_module_lib,libart-compiler) \
     $(call art_module_lib,libopenjdkjvm) \
     $(call art_module_lib,libopenjdkjvmti) \
+    $(call art_module_lib,odrefresh) \
     $(call art_module_lib,profman) \
     $(call art_module_lib,libadbconnection) \
     $(call art_module_lib,libperfetto_hprof) \
@@ -452,6 +406,9 @@ include $(BUILD_PHONY_PACKAGE)
 ifneq ($(HOST_OS),darwin)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-tools
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 LOCAL_IS_HOST_MODULE := true
 LOCAL_REQUIRED_MODULES := \
     ahat \
@@ -487,6 +444,9 @@ ifneq ($(HOST_OS),darwin)
 ifeq ($(ART_BUILD_HOST_DEBUG),true)
 include $(CLEAR_VARS)
 LOCAL_MODULE := art-libartd-libopenjdkd-host-dependency
+LOCAL_LICENSE_KINDS := SPDX-license-identifier-Apache-2.0 SPDX-license-identifier-BSD SPDX-license-identifier-GPL-2.0
+LOCAL_LICENSE_CONDITIONS := notice restricted
+LOCAL_NOTICE_FILE := $(LOCAL_PATH)/NOTICE
 LOCAL_MULTILIB := both
 LOCAL_REQUIRED_MODULES := libopenjdkd
 LOCAL_IS_HOST_MODULE := true
@@ -497,7 +457,10 @@ endif # HOST_OS != darwin
 ########################################################################
 # "m build-art" for quick minimal build
 .PHONY: build-art
-build-art: build-art-host build-art-target
+
+ifeq (true,$(my_art_module_source_build))
+
+build-art: build-art-host
 
 # For host, we extract the ICU data from the apex and install it to HOST_OUT/I18N_APEX.
 $(HOST_I18N_DATA): $(TARGET_OUT)/apex/$(I18N_APEX).apex $(HOST_OUT)/bin/deapexer
@@ -516,6 +479,10 @@ $(HOST_TZDATA_DATA): $(TARGET_OUT)/apex/$(TZDATA_APEX).apex $(HOST_OUT)/bin/deap
 
 .PHONY: build-art-host
 build-art-host:   $(HOST_OUT_EXECUTABLES)/art $(ART_HOST_DEPENDENCIES) $(HOST_CORE_IMG_OUTS) $(HOST_I18N_DATA) $(HOST_TZDATA_DATA)
+
+endif # ifeq (true,$(my_art_module_source_build))
+
+build-art: build-art-target
 
 .PHONY: build-art-target
 build-art-target: $(TARGET_OUT_EXECUTABLES)/art $(ART_TARGET_DEPENDENCIES) $(TARGET_CORE_IMG_OUTS)
@@ -714,6 +681,7 @@ ART_TARGET_SHARED_LIBRARY_BENCHMARK := $(TARGET_OUT_SHARED_LIBRARIES)/libartbenc
 ART_TARGET_SHARED_LIBRARY_PALETTE_DEPENDENCIES := \
     $(TARGET_OUT_SHARED_LIBRARIES)/libcutils.so \
     $(TARGET_OUT_SHARED_LIBRARIES)/libprocessgroup.so \
+    $(TARGET_OUT_SHARED_LIBRARIES)/libselinux.so \
     $(TARGET_OUT_SHARED_LIBRARIES)/libtombstoned_client.so
 
 build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX) \
@@ -735,12 +703,17 @@ build-art-target-golem: $(RELEASE_ART_APEX) com.android.runtime $(CONSCRYPT_APEX
 
 ########################################################################
 # Phony target for building what go/lem requires on host.
+
+ifeq (true,$(my_art_module_source_build))
+
 .PHONY: build-art-host-golem
 # Also include libartbenchmark, we always include it when running golem.
 ART_HOST_SHARED_LIBRARY_BENCHMARK := $(ART_HOST_OUT_SHARED_LIBRARIES)/libartbenchmark.so
 build-art-host-golem: build-art-host \
                       $(ART_HOST_SHARED_LIBRARY_BENCHMARK) \
                       $(HOST_OUT_EXECUTABLES)/dex2oat_wrapper
+
+endif # ifeq (true,$(my_art_module_source_build))
 
 ########################################################################
 # Phony target for building what go/lem requires for syncing /system to target.
@@ -751,8 +724,12 @@ build-art-unbundled-golem: art-runtime linker oatdump $(art_apex_jars) conscrypt
 ########################################################################
 # Rules for building all dependencies for tests.
 
+ifeq (true,$(my_art_module_source_build))
+
 .PHONY: build-art-host-tests
 build-art-host-tests:   build-art-host $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_RUN_TEST_DEPENDENCIES) $(ART_TEST_HOST_GTEST_DEPENDENCIES) | $(TEST_ART_RUN_TEST_ORDERONLY_DEPENDENCIES)
+
+endif # ifeq (true,$(my_art_module_source_build))
 
 .PHONY: build-art-target-tests
 build-art-target-tests:   build-art-target $(TEST_ART_RUN_TEST_DEPENDENCIES) $(ART_TEST_TARGET_RUN_TEST_DEPENDENCIES) $(ART_TEST_TARGET_GTEST_DEPENDENCIES) | $(TEST_ART_RUN_TEST_ORDERONLY_DEPENDENCIES)
@@ -920,4 +897,3 @@ public_sdk_stubs: $(STUB_ZIP_FILES)
 
 MIN_SDK_VERSION :=
 SDK_VERSIONS :=
-

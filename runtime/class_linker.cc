@@ -43,6 +43,7 @@
 #include "base/hash_set.h"
 #include "base/leb128.h"
 #include "base/logging.h"
+#include "base/metrics/metrics.h"
 #include "base/mutex-inl.h"
 #include "base/os.h"
 #include "base/quasi_atomic.h"
@@ -145,6 +146,7 @@
 #include "thread_list.h"
 #include "trace.h"
 #include "transaction.h"
+#include "vdex_file.h"
 #include "verifier/class_verifier.h"
 #include "well_known_classes.h"
 
@@ -1133,6 +1135,18 @@ void ClassLinker::RunRootClinits(Thread* self) {
   }
 }
 
+static void InitializeObjectVirtualMethodHashes(ObjPtr<mirror::Class> java_lang_Object,
+                                                PointerSize pointer_size,
+                                                /*out*/ ArrayRef<uint32_t> virtual_method_hashes)
+    REQUIRES_SHARED(Locks::mutator_lock_) {
+  ArraySlice<ArtMethod> virtual_methods = java_lang_Object->GetVirtualMethods(pointer_size);
+  DCHECK_EQ(virtual_method_hashes.size(), virtual_methods.size());
+  for (size_t i = 0; i != virtual_method_hashes.size(); ++i) {
+    const char* name = virtual_methods[i].GetName();
+    virtual_method_hashes[i] = ComputeModifiedUtf8Hash(name);
+  }
+}
+
 struct TrampolineCheckData {
   const void* quick_resolution_trampoline;
   const void* quick_imt_conflict_trampoline;
@@ -1299,6 +1313,9 @@ bool ClassLinker::InitFromBootImage(std::string* error_msg) {
   for (const std::unique_ptr<const DexFile>& dex_file : boot_dex_files_) {
     OatDexFile::MadviseDexFile(*dex_file, MadviseState::kMadviseStateAtLoad);
   }
+  InitializeObjectVirtualMethodHashes(GetClassRoot<mirror::Object>(this),
+                                      image_pointer_size_,
+                                      ArrayRef<uint32_t>(object_virtual_method_hashes_));
   FinishInit(self);
 
   VLOG(startup) << __FUNCTION__ << " exiting";
@@ -1979,6 +1996,8 @@ bool ClassLinker::AddImageSpace(
       // nterp entry point.
       if (method.GetEntryPointFromQuickCompiledCode() == nterp_trampoline_) {
         if (can_use_nterp) {
+          DCHECK(!NeedsClinitCheckBeforeCall(&method) ||
+                 method.GetDeclaringClass()->IsVisiblyInitialized());
           method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpEntryPoint());
         } else {
           method.SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
@@ -3047,6 +3066,7 @@ ObjPtr<mirror::Class> ClassLinker::DefineClass(Thread* self,
                                                const dex::ClassDef& dex_class_def) {
   ScopedDefiningClass sdc(self);
   StackHandleScope<3> hs(self);
+  metrics::AutoTimer timer{GetMetrics()->ClassLoadingTotalTime()};
   auto klass = hs.NewHandle<mirror::Class>(nullptr);
 
   // Load the class from the dex file.
@@ -4054,7 +4074,7 @@ ObjPtr<mirror::DexCache> ClassLinker::RegisterDexFile(const DexFile& dex_file,
   }
   PaletteHooks* hooks = nullptr;
   VLOG(class_linker) << "Registered dex file " << dex_file.GetLocation();
-  if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
+  if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
     hooks->NotifyDexFileLoaded(dex_file.GetLocation().c_str());
   }
   return h_dex_cache.Get();
@@ -4606,7 +4626,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
   // Try to use verification information from the oat file, otherwise do runtime verification.
   const DexFile& dex_file = *klass->GetDexCache()->GetDexFile();
   ClassStatus oat_file_class_status(ClassStatus::kNotReady);
-  bool preverified = VerifyClassUsingOatFile(dex_file, klass.Get(), oat_file_class_status);
+  bool preverified = VerifyClassUsingOatFile(self, dex_file, klass, oat_file_class_status);
 
   VLOG(class_linker) << "Class preverified status for class "
                      << klass->PrettyDescriptor()
@@ -4655,12 +4675,14 @@ verifier::FailureKind ClassLinker::VerifyClass(
       }
     } else {
       CHECK(verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kTypeChecksFailure ||
             verifier_failure == verifier::FailureKind::kAccessChecksFailure);
       // Soft failures at compile time should be retried at runtime. Soft
       // failures at runtime will be handled by slow paths in the generated
       // code. Set status accordingly.
       if (Runtime::Current()->IsAotCompiler()) {
-        if (verifier_failure == verifier::FailureKind::kSoftFailure) {
+        if (verifier_failure == verifier::FailureKind::kSoftFailure ||
+            verifier_failure == verifier::FailureKind::kTypeChecksFailure) {
           mirror::Class::SetStatus(klass, ClassStatus::kRetryVerificationAtRuntime, self);
         } else {
           mirror::Class::SetStatus(klass, ClassStatus::kVerifiedNeedsAccessChecks, self);
@@ -4719,8 +4741,9 @@ verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
                                               error_msg);
 }
 
-bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
-                                          ObjPtr<mirror::Class> klass,
+bool ClassLinker::VerifyClassUsingOatFile(Thread* self,
+                                          const DexFile& dex_file,
+                                          Handle<mirror::Class> klass,
                                           ClassStatus& oat_file_class_status) {
   // If we're compiling, we can only verify the class using the oat file if
   // we are not compiling the image or if the class we're verifying is not part of
@@ -4729,7 +4752,7 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
   if (Runtime::Current()->IsAotCompiler()) {
     CompilerCallbacks* callbacks = Runtime::Current()->GetCompilerCallbacks();
     // We are compiling an app (not the image).
-    if (!callbacks->CanUseOatStatusForVerification(klass.Ptr())) {
+    if (!callbacks->CanUseOatStatusForVerification(klass.Get())) {
       return false;
     }
   }
@@ -4750,6 +4773,16 @@ bool ClassLinker::VerifyClassUsingOatFile(const DexFile& dex_file,
     // check the class status to ensure we run with access checks.
     return true;
   }
+
+  // Check the class status with the vdex file.
+  const OatFile* oat_file = oat_dex_file->GetOatFile();
+  if (oat_file != nullptr) {
+    oat_file_class_status = oat_file->GetVdexFile()->ComputeClassStatus(self, klass);
+    if (oat_file_class_status >= ClassStatus::kVerifiedNeedsAccessChecks) {
+      return true;
+    }
+  }
+
   // If we only verified a subset of the classes at compile time, we can end up with classes that
   // were resolved by the verifier.
   if (oat_file_class_status == ClassStatus::kResolved) {
@@ -5370,14 +5403,14 @@ bool ClassLinker::InitializeClass(Thread* self,
     for (size_t i = 0; i < num_static_fields; ++i) {
       ArtField* field = klass->GetStaticField(i);
       const uint32_t field_idx = field->GetDexFieldIndex();
-      ArtField* resolved_field = dex_cache->GetResolvedField(field_idx, image_pointer_size_);
+      ArtField* resolved_field = dex_cache->GetResolvedField(field_idx);
       if (resolved_field == nullptr) {
         // Populating cache of a dex file which defines `klass` should always be allowed.
         DCHECK(!hiddenapi::ShouldDenyAccessToMember(
             field,
             hiddenapi::AccessContext(class_loader.Get(), dex_cache.Get()),
             hiddenapi::AccessMethod::kNone));
-        dex_cache->SetResolvedField(field_idx, field, image_pointer_size_);
+        dex_cache->SetResolvedField(field_idx, field);
       } else {
         DCHECK_EQ(field, resolved_field);
       }
@@ -6327,10 +6360,9 @@ class LinkVirtualHashTable {
     hash_table_[index] = virtual_method_index;
   }
 
-  uint32_t FindAndRemove(MethodNameAndSignatureComparator* comparator)
+  uint32_t FindAndRemove(MethodNameAndSignatureComparator* comparator, uint32_t hash)
       REQUIRES_SHARED(Locks::mutator_lock_) {
-    const char* name = comparator->GetName();
-    uint32_t hash = ComputeModifiedUtf8Hash(name);
+    DCHECK_EQ(hash, ComputeModifiedUtf8Hash(comparator->GetName()));
     size_t index = hash % hash_size_;
     while (true) {
       const uint32_t value = hash_table_[index];
@@ -6500,7 +6532,10 @@ bool ClassLinker::LinkVirtualMethods(
           super_method->GetInterfaceMethodIfProxy(image_pointer_size_));
       // We remove the method so that subsequent lookups will be faster by making the hash-map
       // smaller as we go on.
-      uint32_t hash_index = hash_table.FindAndRemove(&super_method_name_comparator);
+      uint32_t hash = (j < mirror::Object::kVTableLength)
+          ? object_virtual_method_hashes_[j]
+          : ComputeModifiedUtf8Hash(super_method_name_comparator.GetName());
+      uint32_t hash_index = hash_table.FindAndRemove(&super_method_name_comparator, hash);
       if (hash_index != hash_table.GetNotFoundIndex()) {
         ArtMethod* virtual_method = klass->GetVirtualMethodDuringLinking(
             hash_index, image_pointer_size_);
@@ -6611,6 +6646,9 @@ bool ClassLinker::LinkVirtualMethods(
       virtual_method->SetMethodIndex(i & 0xFFFF);
     }
     klass->SetVTable(vtable);
+    InitializeObjectVirtualMethodHashes(klass.Get(),
+                                        image_pointer_size_,
+                                        ArrayRef<uint32_t>(object_virtual_method_hashes_));
   }
   return true;
 }
@@ -7604,7 +7642,7 @@ class ClassLinker::LinkInterfaceMethodsHelper {
       // Check that there are no stale methods are in the dex cache array.
       auto* resolved_methods = klass_->GetDexCache()->GetResolvedMethods();
       for (size_t i = 0, count = klass_->GetDexCache()->NumResolvedMethods(); i < count; ++i) {
-        auto pair = mirror::DexCache::GetNativePairPtrSize(resolved_methods, i, pointer_size);
+        auto pair = mirror::DexCache::GetNativePair(resolved_methods, i);
         ArtMethod* m = pair.object;
         CHECK(move_table_.find(m) == move_table_.end() ||
               // The original versions of copied methods will still be present so allow those too.
@@ -8285,19 +8323,34 @@ bool ClassLinker::LinkInterfaceMethods(
   return true;
 }
 
-bool ClassLinker::LinkInstanceFields(Thread* self, Handle<mirror::Class> klass) {
-  CHECK(klass != nullptr);
-  return LinkFields(self, klass, false, nullptr);
-}
+class ClassLinker::LinkFieldsHelper {
+ public:
+  static bool LinkFields(ClassLinker* class_linker,
+                         Thread* self,
+                         Handle<mirror::Class> klass,
+                         bool is_static,
+                         size_t* class_size)
+      REQUIRES_SHARED(Locks::mutator_lock_);
 
-bool ClassLinker::LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size) {
-  CHECK(klass != nullptr);
-  return LinkFields(self, klass, true, class_size);
-}
+ private:
+  enum class FieldTypeOrder : uint16_t;
+  class FieldGaps;
+
+  struct FieldTypeOrderAndIndex {
+    FieldTypeOrder field_type_order;
+    uint16_t field_index;
+  };
+
+  static FieldTypeOrder FieldTypeOrderFromFirstDescriptorCharacter(char first_char);
+
+  template <size_t kSize>
+  static MemberOffset AssignFieldOffset(ArtField* field, MemberOffset field_offset)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+};
 
 // We use the following order of field types for assigning offsets.
 // Some fields can be shuffled forward to fill gaps, see `ClassLinker::LinkFields()`.
-enum class FieldTypeOrder {
+enum class ClassLinker::LinkFieldsHelper::FieldTypeOrder : uint16_t {
   kReference = 0u,
   kLong,
   kDouble,
@@ -8314,11 +8367,9 @@ enum class FieldTypeOrder {
 };
 
 ALWAYS_INLINE
-static FieldTypeOrder FieldTypeOrderFromFirstDescriptorCharacter(char first_char) {
+ClassLinker::LinkFieldsHelper::FieldTypeOrder
+ClassLinker::LinkFieldsHelper::FieldTypeOrderFromFirstDescriptorCharacter(char first_char) {
   switch (first_char) {
-    default:
-      DCHECK(first_char == 'L' || first_char == '[') << first_char;
-      return FieldTypeOrder::kReference;
     case 'J':
       return FieldTypeOrder::kLong;
     case 'D':
@@ -8335,11 +8386,14 @@ static FieldTypeOrder FieldTypeOrderFromFirstDescriptorCharacter(char first_char
       return FieldTypeOrder::kBoolean;
     case 'B':
       return FieldTypeOrder::kByte;
+    default:
+      DCHECK(first_char == 'L' || first_char == '[') << first_char;
+      return FieldTypeOrder::kReference;
   }
 }
 
 // Gaps where we can insert fields in object layout.
-class FieldGaps {
+class ClassLinker::LinkFieldsHelper::FieldGaps {
  public:
   template <uint32_t kSize>
   ALWAYS_INLINE MemberOffset AlignFieldOffset(MemberOffset field_offset) {
@@ -8441,18 +8495,20 @@ class FieldGaps {
 };
 
 template <size_t kSize>
-ALWAYS_INLINE static MemberOffset AssignFieldOffset(ArtField* field, MemberOffset field_offset)
-    REQUIRES_SHARED(Locks::mutator_lock_) {
+ALWAYS_INLINE
+MemberOffset ClassLinker::LinkFieldsHelper::AssignFieldOffset(ArtField* field,
+                                                              MemberOffset field_offset) {
   DCHECK_ALIGNED(field_offset.Uint32Value(), kSize);
   DCHECK_EQ(Primitive::ComponentSize(field->GetTypeAsPrimitiveType()), kSize);
   field->SetOffset(field_offset);
   return MemberOffset(field_offset.Uint32Value() + kSize);
 }
 
-bool ClassLinker::LinkFields(Thread* self,
-                             Handle<mirror::Class> klass,
-                             bool is_static,
-                             size_t* class_size) {
+bool ClassLinker::LinkFieldsHelper::LinkFields(ClassLinker* class_linker,
+                                               Thread* self,
+                                               Handle<mirror::Class> klass,
+                                               bool is_static,
+                                               size_t* class_size) {
   self->AllowThreadSuspension();
   const size_t num_fields = is_static ? klass->NumStaticFields() : klass->NumInstanceFields();
   LengthPrefixedArray<ArtField>* const fields = is_static ? klass->GetSFieldsPtr() :
@@ -8461,7 +8517,8 @@ bool ClassLinker::LinkFields(Thread* self,
   // Initialize field_offset
   MemberOffset field_offset(0);
   if (is_static) {
-    field_offset = klass->GetFirstReferenceStaticFieldOffsetDuringLinking(image_pointer_size_);
+    field_offset = klass->GetFirstReferenceStaticFieldOffsetDuringLinking(
+        class_linker->GetImagePointerSize());
   } else {
     ObjPtr<mirror::Class> super_class = klass->GetSuperClass();
     if (super_class != nullptr) {
@@ -8487,6 +8544,10 @@ bool ClassLinker::LinkFields(Thread* self,
   // 8) All java boolean (8-bit) integer fields, sorted alphabetically.
   // 9) All java byte (8-bit) integer fields, sorted alphabetically.
   //
+  // (References are first to increase the chance of reference visiting
+  // being able to take a fast path using a bitmap of references at the
+  // start of the object, see `Class::reference_instance_offsets_`.)
+  //
   // Once the fields are sorted in this order we will attempt to fill any gaps
   // that might be present in the memory layout of the structure.
   // Note that we shall not fill gaps between the superclass fields.
@@ -8494,82 +8555,89 @@ bool ClassLinker::LinkFields(Thread* self,
   // Collect fields and their "type order index" (see numbered points above).
   const char* old_no_suspend_cause = self->StartAssertNoThreadSuspension(
       "Using plain ArtField references");
-  using Entry = std::pair<ArtField*, FieldTypeOrder>;
-  constexpr size_t kStackBufferEntries = 16;  // Avoid allocations for small number of fields.
-  Entry stack_buffer[kStackBufferEntries];
-  std::vector<Entry> heap_buffer;
-  ArrayRef<Entry> sorted_fields;
+  constexpr size_t kStackBufferEntries = 64;  // Avoid allocations for small number of fields.
+  FieldTypeOrderAndIndex stack_buffer[kStackBufferEntries];
+  std::vector<FieldTypeOrderAndIndex> heap_buffer;
+  ArrayRef<FieldTypeOrderAndIndex> sorted_fields;
   if (num_fields <= kStackBufferEntries) {
-    sorted_fields = ArrayRef<Entry>(stack_buffer, num_fields);
+    sorted_fields = ArrayRef<FieldTypeOrderAndIndex>(stack_buffer, num_fields);
   } else {
     heap_buffer.resize(num_fields);
-    sorted_fields = ArrayRef<Entry>(heap_buffer);
+    sorted_fields = ArrayRef<FieldTypeOrderAndIndex>(heap_buffer);
   }
   size_t num_reference_fields = 0;
   size_t primitive_fields_start = num_fields;
+  DCHECK_LE(num_fields, 1u << 16);
   for (size_t i = 0; i != num_fields; ++i) {
     ArtField* field = &fields->At(i);
     const char* descriptor = field->GetTypeDescriptor();
-    FieldTypeOrder type_order_index = FieldTypeOrderFromFirstDescriptorCharacter(descriptor[0]);
+    FieldTypeOrder field_type_order = FieldTypeOrderFromFirstDescriptorCharacter(descriptor[0]);
+    uint16_t field_index = dchecked_integral_cast<uint16_t>(i);
     // Insert references to the start, other fields to the end.
     DCHECK_LT(num_reference_fields, primitive_fields_start);
-    if (type_order_index == FieldTypeOrder::kReference) {
-      sorted_fields[num_reference_fields] = std::make_pair(field, type_order_index);
+    if (field_type_order == FieldTypeOrder::kReference) {
+      sorted_fields[num_reference_fields] = { field_type_order, field_index };
       ++num_reference_fields;
     } else {
       --primitive_fields_start;
-      sorted_fields[primitive_fields_start] = std::make_pair(field, type_order_index);
+      sorted_fields[primitive_fields_start] = { field_type_order, field_index };
     }
   }
   DCHECK_EQ(num_reference_fields, primitive_fields_start);
 
-  // Reference fields are already sorted.
+  // Reference fields are already sorted by field index (and dex field index).
   DCHECK(std::is_sorted(
       sorted_fields.begin(),
       sorted_fields.begin() + num_reference_fields,
-      [](const Entry& lhs, const Entry& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
-        CHECK_EQ(lhs.first->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
-        CHECK_EQ(rhs.first->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
-        return lhs.first->GetDexFieldIndex() < rhs.first->GetDexFieldIndex();
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        CHECK_EQ(lhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(rhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex(),
+                 lhs.field_index < rhs.field_index);
+        return lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex();
       }));
-  // Primitive fields were stored in reverse order of their dex field index (and addresses).
+  // Primitive fields were stored in reverse order of their field index (and dex field index).
   DCHECK(std::is_sorted(
       sorted_fields.begin() + primitive_fields_start,
       sorted_fields.end(),
-      [](const Entry& lhs, const Entry& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
-        CHECK_NE(lhs.first->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
-        CHECK_NE(rhs.first->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
-        CHECK_EQ(lhs.first->GetDexFieldIndex() > rhs.first->GetDexFieldIndex(),
-                 lhs.first > rhs.first);
-        return lhs.first > rhs.first;
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        CHECK_NE(lhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_NE(rhs_field->GetTypeAsPrimitiveType(), Primitive::kPrimNot);
+        CHECK_EQ(lhs_field->GetDexFieldIndex() > rhs_field->GetDexFieldIndex(),
+                 lhs.field_index > rhs.field_index);
+        return lhs.field_index > rhs.field_index;
       }));
   // Sort the primitive fields by the field type order, then field index.
   std::sort(sorted_fields.begin() + primitive_fields_start,
             sorted_fields.end(),
-            [](const Entry& lhs, const Entry& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
-              if (lhs.second != rhs.second) {
-                return lhs.second < rhs.second;
+            [](const auto& lhs, const auto& rhs) {
+              if (lhs.field_type_order != rhs.field_type_order) {
+                return lhs.field_type_order < rhs.field_type_order;
               } else {
-                DCHECK_EQ(lhs.first->GetDexFieldIndex() < rhs.first->GetDexFieldIndex(),
-                          lhs.first < rhs.first);
-                return lhs.first < rhs.first;
+                return lhs.field_index < rhs.field_index;
               }
             });
   // Primitive fields are now sorted by field size (descending), then type, then field index.
   DCHECK(std::is_sorted(
       sorted_fields.begin() + primitive_fields_start,
       sorted_fields.end(),
-      [](const Entry& lhs, const Entry& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
-        Primitive::Type lhs_type = lhs.first->GetTypeAsPrimitiveType();
+      [fields](const auto& lhs, const auto& rhs) REQUIRES_SHARED(Locks::mutator_lock_) {
+        ArtField* lhs_field = &fields->At(lhs.field_index);
+        ArtField* rhs_field = &fields->At(rhs.field_index);
+        Primitive::Type lhs_type = lhs_field->GetTypeAsPrimitiveType();
         CHECK_NE(lhs_type, Primitive::kPrimNot);
-        Primitive::Type rhs_type = rhs.first->GetTypeAsPrimitiveType();
+        Primitive::Type rhs_type = rhs_field->GetTypeAsPrimitiveType();
         CHECK_NE(rhs_type, Primitive::kPrimNot);
         if (lhs_type != rhs_type) {
           size_t lhs_size = Primitive::ComponentSize(lhs_type);
           size_t rhs_size = Primitive::ComponentSize(rhs_type);
           return (lhs_size != rhs_size) ? (lhs_size > rhs_size) : (lhs_type < rhs_type);
         } else {
-          return lhs.first->GetDexFieldIndex() < rhs.first->GetDexFieldIndex();
+          return lhs_field->GetDexFieldIndex() < rhs_field->GetDexFieldIndex();
         }
       }));
 
@@ -8580,64 +8648,73 @@ bool ClassLinker::LinkFields(Thread* self,
     constexpr size_t kReferenceSize = sizeof(mirror::HeapReference<mirror::Object>);
     field_offset = field_gaps.AlignFieldOffset<kReferenceSize>(field_offset);
     for (; index != num_reference_fields; ++index) {
-      ArtField* field = sorted_fields[index].first;
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       field_offset = AssignFieldOffset<kReferenceSize>(field, field_offset);
     }
   }
   // Process 64-bit fields.
-  if (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast64BitType) {
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast64BitType) {
     field_offset = field_gaps.AlignFieldOffset<8u>(field_offset);
-    while (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast64BitType) {
-      ArtField* field = sorted_fields[index].first;
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast64BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       field_offset = AssignFieldOffset<8u>(field, field_offset);
       ++index;
     }
   }
   // Process 32-bit fields.
-  if (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast32BitType) {
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast32BitType) {
     field_offset = field_gaps.AlignFieldOffset<4u>(field_offset);
     if (field_gaps.HasGap<4u>()) {
-      ArtField* field = sorted_fields[index].first;
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       AssignFieldOffset<4u>(field, field_gaps.ReleaseGap<4u>());  // Ignore return value.
       ++index;
       DCHECK(!field_gaps.HasGap<4u>());  // There can be only one gap for a 32-bit field.
     }
-    while (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast32BitType) {
-      ArtField* field = sorted_fields[index].first;
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast32BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       field_offset = AssignFieldOffset<4u>(field, field_offset);
       ++index;
     }
   }
   // Process 16-bit fields.
-  if (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast16BitType) {
+  if (index != num_fields &&
+      sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType) {
     field_offset = field_gaps.AlignFieldOffset<2u>(field_offset);
     while (index != num_fields &&
-           sorted_fields[index].second <= FieldTypeOrder::kLast16BitType &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType &&
            field_gaps.HasGap<2u>()) {
-      ArtField* field = sorted_fields[index].first;
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       AssignFieldOffset<2u>(field, field_gaps.ReleaseGap<2u>());  // Ignore return value.
       ++index;
     }
-    while (index != num_fields && sorted_fields[index].second <= FieldTypeOrder::kLast16BitType) {
-      ArtField* field = sorted_fields[index].first;
+    while (index != num_fields &&
+           sorted_fields[index].field_type_order <= FieldTypeOrder::kLast16BitType) {
+      ArtField* field = &fields->At(sorted_fields[index].field_index);
       field_offset = AssignFieldOffset<2u>(field, field_offset);
       ++index;
     }
   }
   // Process 8-bit fields.
   for (; index != num_fields && field_gaps.HasGap<1u>(); ++index) {
-    ArtField* field = sorted_fields[index].first;
+    ArtField* field = &fields->At(sorted_fields[index].field_index);
     AssignFieldOffset<1u>(field, field_gaps.ReleaseGap<1u>());  // Ignore return value.
   }
   for (; index != num_fields; ++index) {
-    ArtField* field = sorted_fields[index].first;
+    ArtField* field = &fields->At(sorted_fields[index].field_index);
     field_offset = AssignFieldOffset<1u>(field, field_offset);
   }
 
   self->EndAssertNoThreadSuspension(old_no_suspend_cause);
 
   // We lie to the GC about the java.lang.ref.Reference.referent field, so it doesn't scan it.
-  if (!is_static && klass->DescriptorEquals("Ljava/lang/ref/Reference;")) {
+  DCHECK(!class_linker->init_done_ || !klass->DescriptorEquals("Ljava/lang/ref/Reference;"));
+  if (!is_static &&
+      UNLIKELY(!class_linker->init_done_) &&
+      klass->DescriptorEquals("Ljava/lang/ref/Reference;")) {
     // We know there are no non-reference fields in the Reference classes, and we know
     // that 'referent' is alphabetically last, so this is easy...
     CHECK_EQ(num_reference_fields, num_fields) << klass->PrettyClass();
@@ -8694,7 +8771,7 @@ bool ClassLinker::LinkFields(Thread* self,
     // Make sure that the fields array is ordered by name but all reference
     // offsets are at the beginning as far as alignment allows.
     MemberOffset start_ref_offset = is_static
-        ? klass->GetFirstReferenceStaticFieldOffsetDuringLinking(image_pointer_size_)
+        ? klass->GetFirstReferenceStaticFieldOffsetDuringLinking(class_linker->image_pointer_size_)
         : klass->GetFirstReferenceInstanceFieldOffset();
     MemberOffset end_ref_offset(start_ref_offset.Uint32Value() +
                                 num_reference_fields *
@@ -8736,6 +8813,16 @@ bool ClassLinker::LinkFields(Thread* self,
     CHECK_EQ(current_ref_offset.Uint32Value(), end_ref_offset.Uint32Value());
   }
   return true;
+}
+
+bool ClassLinker::LinkInstanceFields(Thread* self, Handle<mirror::Class> klass) {
+  CHECK(klass != nullptr);
+  return LinkFieldsHelper::LinkFields(this, self, klass, false, nullptr);
+}
+
+bool ClassLinker::LinkStaticFields(Thread* self, Handle<mirror::Class> klass, size_t* class_size) {
+  CHECK(klass != nullptr);
+  return LinkFieldsHelper::LinkFields(this, self, klass, true, class_size);
 }
 
 //  Set the bitmap of reference instance field offsets.
@@ -8878,6 +8965,38 @@ ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
   return resolved;
 }
 
+// Return the first accessible method from the list of interfaces implemented by
+// `klass`. For knowing if a method is accessible, we call through
+// `hiddenapi::ShouldDenyAccessToMember`.
+static ArtMethod* FindAccessibleInterfaceMethod(ObjPtr<mirror::Class> klass,
+                                                ObjPtr<mirror::DexCache> dex_cache,
+                                                ObjPtr<mirror::ClassLoader> class_loader,
+                                                ArtMethod* resolved_method,
+                                                PointerSize pointer_size)
+      REQUIRES_SHARED(Locks::mutator_lock_) {
+  ObjPtr<mirror::IfTable> iftable = klass->GetIfTable();
+  for (int32_t i = 0, iftable_count = iftable->Count(); i < iftable_count; ++i) {
+    ObjPtr<mirror::PointerArray> methods = iftable->GetMethodArrayOrNull(i);
+    if (methods == nullptr) {
+      continue;
+    }
+    for (size_t j = 0, count = iftable->GetMethodArrayCount(i); j < count; ++j) {
+      if (resolved_method == methods->GetElementPtrSize<ArtMethod*>(j, pointer_size)) {
+        ObjPtr<mirror::Class> iface = iftable->GetInterface(i);
+        ArtMethod* interface_method = &iface->GetVirtualMethodsSlice(pointer_size)[j];
+        // Pass AccessMethod::kNone instead of kLinking to not warn on the
+        // access. We'll only warn later if we could not find a visible method.
+        if (!hiddenapi::ShouldDenyAccessToMember(interface_method,
+                                                 hiddenapi::AccessContext(class_loader, dex_cache),
+                                                 hiddenapi::AccessMethod::kNone)) {
+          return interface_method;
+        }
+      }
+    }
+  }
+  return nullptr;
+}
+
 ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
                                            ObjPtr<mirror::DexCache> dex_cache,
                                            ObjPtr<mirror::ClassLoader> class_loader,
@@ -8893,10 +9012,32 @@ ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
   }
   DCHECK(resolved == nullptr || resolved->GetDeclaringClassUnchecked() != nullptr);
   if (resolved != nullptr &&
+      // We pass AccessMethod::kNone instead of kLinking to not warn yet on the
+      // access, as we'll be looking if the method can be accessed through an
+      // interface.
       hiddenapi::ShouldDenyAccessToMember(resolved,
                                           hiddenapi::AccessContext(class_loader, dex_cache),
-                                          hiddenapi::AccessMethod::kLinking)) {
-    resolved = nullptr;
+                                          hiddenapi::AccessMethod::kNone)) {
+    // The resolved method that we have found cannot be accessed due to
+    // hiddenapi (typically it is declared up the hierarchy and is not an SDK
+    // method). Try to find an interface method from the implemented interfaces which is
+    // accessible.
+    ArtMethod* itf_method = FindAccessibleInterfaceMethod(klass,
+                                                          dex_cache,
+                                                          class_loader,
+                                                          resolved,
+                                                          image_pointer_size_);
+    if (itf_method == nullptr) {
+      // No interface method. Call ShouldDenyAccessToMember again but this time
+      // with AccessMethod::kLinking to ensure that an appropriate warning is
+      // logged.
+      hiddenapi::ShouldDenyAccessToMember(resolved,
+                                          hiddenapi::AccessContext(class_loader, dex_cache),
+                                          hiddenapi::AccessMethod::kLinking);
+      resolved = nullptr;
+    } else {
+      // We found an interface method that is accessible, continue with the resolved method.
+    }
   }
   if (resolved != nullptr) {
     // In case of jmvti, the dex file gets verified before being registered, so first
@@ -8907,7 +9048,7 @@ ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
         << "DexFile referrer: " << dex_file.GetLocation()
         << " ClassLoader: " << DescribeLoaders(class_loader, "");
     // Be a good citizen and update the dex cache to speed subsequent calls.
-    dex_cache->SetResolvedMethod(method_idx, resolved, image_pointer_size_);
+    dex_cache->SetResolvedMethod(method_idx, resolved);
     // Disable the following invariant check as the verifier breaks it. b/73760543
     // const DexFile::MethodId& method_id = dex_file.GetMethodId(method_idx);
     // DCHECK(LookupResolvedType(method_id.class_idx_, dex_cache, class_loader) != nullptr)
@@ -8960,8 +9101,7 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
   DCHECK(dex_cache != nullptr);
   DCHECK(referrer == nullptr || !referrer->IsProxyMethod());
   // Check for hit in the dex cache.
-  PointerSize pointer_size = image_pointer_size_;
-  ArtMethod* resolved = dex_cache->GetResolvedMethod(method_idx, pointer_size);
+  ArtMethod* resolved = dex_cache->GetResolvedMethod(method_idx);
   Thread::PoisonObjectPointersIfDebug();
   DCHECK(resolved == nullptr || !resolved->IsRuntimeMethod());
   bool valid_dex_cache_method = resolved != nullptr;
@@ -9051,7 +9191,7 @@ ArtMethod* ClassLinker::ResolveMethod(uint32_t method_idx,
 ArtMethod* ClassLinker::ResolveMethodWithoutInvokeType(uint32_t method_idx,
                                                        Handle<mirror::DexCache> dex_cache,
                                                        Handle<mirror::ClassLoader> class_loader) {
-  ArtMethod* resolved = dex_cache->GetResolvedMethod(method_idx, image_pointer_size_);
+  ArtMethod* resolved = dex_cache->GetResolvedMethod(method_idx);
   Thread::PoisonObjectPointersIfDebug();
   if (resolved != nullptr) {
     DCHECK(!resolved->IsRuntimeMethod());
@@ -9105,7 +9245,7 @@ ArtField* ClassLinker::ResolveField(uint32_t field_idx,
                                     bool is_static) {
   DCHECK(dex_cache != nullptr);
   DCHECK(!Thread::Current()->IsExceptionPending()) << Thread::Current()->GetException()->Dump();
-  ArtField* resolved = dex_cache->GetResolvedField(field_idx, image_pointer_size_);
+  ArtField* resolved = dex_cache->GetResolvedField(field_idx);
   Thread::PoisonObjectPointersIfDebug();
   if (resolved != nullptr) {
     return resolved;
@@ -9131,7 +9271,7 @@ ArtField* ClassLinker::ResolveFieldJLS(uint32_t field_idx,
                                        Handle<mirror::DexCache> dex_cache,
                                        Handle<mirror::ClassLoader> class_loader) {
   DCHECK(dex_cache != nullptr);
-  ArtField* resolved = dex_cache->GetResolvedField(field_idx, image_pointer_size_);
+  ArtField* resolved = dex_cache->GetResolvedField(field_idx);
   Thread::PoisonObjectPointersIfDebug();
   if (resolved != nullptr) {
     return resolved;
@@ -9181,7 +9321,7 @@ ArtField* ClassLinker::FindResolvedField(ObjPtr<mirror::Class> klass,
   }
 
   if (resolved != nullptr) {
-    dex_cache->SetResolvedField(field_idx, resolved, image_pointer_size_);
+    dex_cache->SetResolvedField(field_idx, resolved);
   }
 
   return resolved;
@@ -9208,7 +9348,7 @@ ArtField* ClassLinker::FindResolvedFieldJLS(ObjPtr<mirror::Class> klass,
   }
 
   if (resolved != nullptr) {
-    dex_cache->SetResolvedField(field_idx, resolved, image_pointer_size_);
+    dex_cache->SetResolvedField(field_idx, resolved);
   }
 
   return resolved;

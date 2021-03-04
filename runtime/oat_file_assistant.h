@@ -22,11 +22,11 @@
 #include <sstream>
 #include <string>
 
+#include "base/compiler_filter.h"
 #include "arch/instruction_set.h"
 #include "base/os.h"
 #include "base/scoped_flock.h"
 #include "base/unix_file/fd_file.h"
-#include "compiler_filter.h"
 #include "class_loader_context.h"
 #include "oat_file.h"
 
@@ -165,13 +165,22 @@ class OatFileAssistant {
 
   // Computes the optimization status of the given dex file. The result is
   // returned via the two output parameters.
+  //   - out_odex_location: the location of the (best) odex that will be used
+  //        for loading. See GetBestInfo().
   //   - out_compilation_filter: the level of optimizations (compiler filter)
   //   - out_compilation_reason: the optimization reason. The reason might
   //        be "unknown" if the compiler artifacts were not annotated during optimizations.
+  //   - out_odex_status: a human readable refined status of the validity of the odex file.
+  //        E.g. up-to-date, boot-image-more-recent, apk-more-recent.
   //
   // This method will try to mimic the runtime effect of loading the dex file.
   // For example, if there is no usable oat file, the compiler filter will be set
   // to "run-from-apk".
+  void GetOptimizationStatus(std::string* out_odex_location,
+                             std::string* out_compilation_filter,
+                             std::string* out_compilation_reason,
+                             std::string* out_odex_status);
+
   static void GetOptimizationStatus(const std::string& filename,
                                     InstructionSet isa,
                                     std::string* out_compilation_filter,
@@ -240,14 +249,12 @@ class OatFileAssistant {
                                        std::string* oat_filename,
                                        std::string* error_msg);
 
-  // Computes the location checksum, dex location and vdex filename by combining
-  // the checksums of the individual dex files. If the data directory of the process
+  // Computes the dex location and vdex filename. If the data directory of the process
   // is known, creates an absolute path in that directory and tries to infer path
   // of a corresponding vdex file. Otherwise only creates a basename dex_location
   // from the combined checksums. Returns true if all out-arguments have been set.
   static bool AnonymousDexVdexLocation(const std::vector<const DexFile::Header*>& dex_headers,
                                        InstructionSet isa,
-                                       /* out */ uint32_t* location_checksum,
                                        /* out */ std::string* dex_location,
                                        /* out */ std::string* vdex_filename);
 
@@ -423,8 +430,18 @@ class OatFileAssistant {
   bool required_dex_checksums_found_;
   bool has_original_dex_files_;
 
+  // The AOT-compiled file of an app when the APK of the app is in /data.
   OatFileInfo odex_;
+  // The AOT-compiled file of an app when the APK of the app is on a read-only partition
+  // (for example /system).
   OatFileInfo oat_;
+
+  // The vdex-only file next to `odex_` when `odex_' cannot be used (for example
+  // it is out of date).
+  OatFileInfo vdex_for_odex_;
+  // The vdex-only file next to 'oat_` when `oat_' cannot be used (for example
+  // it is out of date).
+  OatFileInfo vdex_for_oat_;
 
   // File descriptor corresponding to apk, dex file, or zip.
   int zip_fd_;

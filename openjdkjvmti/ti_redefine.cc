@@ -1630,6 +1630,7 @@ bool Redefiner::ClassRedefinition::CheckVerification(const RedefinitionDataIter&
       return true;
     case art::verifier::FailureKind::kSoftFailure:
     case art::verifier::FailureKind::kAccessChecksFailure:
+    case art::verifier::FailureKind::kTypeChecksFailure:
       // Soft failures might require interpreter on some methods. It won't prevent redefinition but
       // it does mean we need to run the verifier again and potentially update method flags after
       // performing the swap.
@@ -2486,9 +2487,11 @@ jvmtiError Redefiner::Run() {
   // At this point we can no longer fail without corrupting the runtime state.
   for (RedefinitionDataIter data = holder.begin(); data != holder.end(); ++data) {
     art::ClassLinker* cl = runtime_->GetClassLinker();
-    cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     if (data.GetSourceClassLoader() == nullptr) {
+      // AppendToBootClassPath includes dex file registration.
       cl->AppendToBootClassPath(self_, &data.GetRedefinition().GetDexFile());
+    } else {
+      cl->RegisterExistingDexCache(data.GetNewDexCache(), data.GetSourceClassLoader());
     }
   }
   UnregisterAllBreakpoints();

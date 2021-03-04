@@ -37,6 +37,7 @@
 #include "handle.h"
 #include "jni.h"
 #include "mirror/class.h"
+#include "mirror/object.h"
 #include "verifier/verifier_enums.h"
 
 namespace art {
@@ -556,8 +557,9 @@ class ClassLinker {
       verifier::HardFailLogMode log_level = verifier::HardFailLogMode::kLogNone)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
-  bool VerifyClassUsingOatFile(const DexFile& dex_file,
-                               ObjPtr<mirror::Class> klass,
+  bool VerifyClassUsingOatFile(Thread* self,
+                               const DexFile& dex_file,
+                               Handle<mirror::Class> klass,
                                ClassStatus& oat_file_class_status)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!Locks::dex_lock_);
@@ -861,6 +863,7 @@ class ClassLinker {
   virtual bool IsUpdatableBootClassPathDescriptor(const char* descriptor);
 
  private:
+  class LinkFieldsHelper;
   class LinkInterfaceMethodsHelper;
   class MethodTranslation;
   class VisiblyInitializedCallback;
@@ -1217,8 +1220,6 @@ class ClassLinker {
       REQUIRES_SHARED(Locks::mutator_lock_);
   bool LinkInstanceFields(Thread* self, Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  bool LinkFields(Thread* self, Handle<mirror::Class> klass, bool is_static, size_t* class_size)
-      REQUIRES_SHARED(Locks::mutator_lock_);
   void CreateReferenceInstanceOffsets(Handle<mirror::Class> klass)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
@@ -1367,6 +1368,10 @@ class ClassLinker {
 
   // Well known mirror::Class roots.
   GcRoot<mirror::ObjectArray<mirror::Class>> class_roots_;
+
+  // Method hashes for virtual methods from java.lang.Object used
+  // to avoid recalculating them for each class we link.
+  uint32_t object_virtual_method_hashes_[mirror::Object::kVTableLength];
 
   // A cache of the last FindArrayClass results. The cache serves to avoid creating array class
   // descriptors for the sake of performing FindClass.

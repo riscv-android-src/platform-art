@@ -40,6 +40,7 @@
 #include "android-base/parseint.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
+#include "android-base/unique_fd.h"
 
 #include "aot_class_linker.h"
 #include "arch/instruction_set_features.h"
@@ -517,7 +518,6 @@ class Dex2Oat final {
       input_vdex_file_(nullptr),
       dm_fd_(-1),
       zip_fd_(-1),
-      zip_dup_fd_(-1),
       image_fd_(-1),
       have_multi_image_arg_(false),
       multi_image_(false),
@@ -1331,11 +1331,20 @@ class Dex2Oat final {
           LOG(WARNING) << "Could not open vdex file in DexMetadata archive: " << error_msg;
         } else {
           input_vdex_file_ = std::make_unique<VdexFile>(std::move(input_file));
-          if (input_vdex_file_->HasDexSection()) {
-            LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
-            return false;
+          if (!input_vdex_file_->IsValid()) {
+            // Ideally we would do this validation at the framework level but the framework
+            // has not knowledge of the .vdex format and adding new APIs just for it is
+            // overkill.
+            // TODO(calin): include this in dex2oat metrics.
+            LOG(WARNING) << "The dex metadata .vdex is not valid. Ignoring it.";
+            input_vdex_file_ = nullptr;
+          } else {
+            if (input_vdex_file_->HasDexSection()) {
+              LOG(ERROR) << "The dex metadata is not allowed to contain dex files";
+              return false;
+            }
+            VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
           }
-          VLOG(verifier) << "Doing fast verification with vdex from DexMetadata archive";
         }
       }
     }
@@ -1395,19 +1404,6 @@ class Dex2Oat final {
   // boot class path.
   dex2oat::ReturnCode Setup() {
     TimingLogger::ScopedTiming t("dex2oat Setup", timings_);
-
-    // At this point, file descriptors have been setup. Report that we're starting the compilation.
-    PaletteHooks* hooks = nullptr;
-    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
-      // We dup the zip file descriptor, as the oat writer will close it in
-      // OatWriter::CloseSources (we still want to close it there for
-      // consistency with other kinds of inputs).
-      zip_dup_fd_ = DupCloexec(zip_fd_);
-      hooks->NotifyStartDex2oatCompilation(zip_dup_fd_,
-                                           IsAppImage() ? app_image_fd_ : image_fd_,
-                                           oat_fd_,
-                                           output_vdex_fd_);
-    }
 
     if (!PrepareDirtyObjects()) {
       return dex2oat::ReturnCode::kOther;
@@ -2152,17 +2148,6 @@ class Dex2Oat final {
       }
     }
 
-    // Now that the files have been written to, report that we've ended the
-    // compilation.
-    PaletteHooks* hooks = nullptr;
-    if (PaletteGetHooks(&hooks) == PaletteStatus::kOkay) {
-      hooks->NotifyEndDex2oatCompilation(zip_dup_fd_,
-                                         IsAppImage() ? app_image_fd_ : image_fd_,
-                                         oat_fd_,
-                                         output_vdex_fd_);
-      close(zip_dup_fd_);
-    }
-
     return true;
   }
 
@@ -2351,6 +2336,68 @@ class Dex2Oat final {
 
     return true;
   }
+
+  class ScopedDex2oatReporting {
+   public:
+    explicit ScopedDex2oatReporting(const Dex2Oat& dex2oat) {
+      PaletteHooks* hooks = nullptr;
+      if (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK) {
+        if (dex2oat.zip_fd_ != -1) {
+          zip_dup_fd_.reset(DupCloexecOrError(dex2oat.zip_fd_));
+          if (zip_dup_fd_ < 0) {
+            return;
+          }
+        }
+        int image_fd = dex2oat.IsAppImage() ? dex2oat.app_image_fd_ : dex2oat.image_fd_;
+        if (image_fd != -1) {
+          image_dup_fd_.reset(DupCloexecOrError(image_fd));
+          if (image_dup_fd_ < 0) {
+            return;
+          }
+        }
+        oat_dup_fd_.reset(DupCloexecOrError(dex2oat.oat_fd_));
+        if (oat_dup_fd_ < 0) {
+          return;
+        }
+        vdex_dup_fd_.reset(DupCloexecOrError(dex2oat.output_vdex_fd_));
+        if (vdex_dup_fd_ < 0) {
+          return;
+        }
+        hooks->NotifyStartDex2oatCompilation(zip_dup_fd_,
+                                             image_dup_fd_,
+                                             oat_dup_fd_,
+                                             vdex_dup_fd_);
+      }
+      error_reporting_ = false;
+    }
+
+    ~ScopedDex2oatReporting() {
+      PaletteHooks* hooks = nullptr;
+      if (!error_reporting_ && (PaletteGetHooks(&hooks) == PALETTE_STATUS_OK)) {
+        hooks->NotifyEndDex2oatCompilation(zip_dup_fd_,
+                                           image_dup_fd_,
+                                           oat_dup_fd_,
+                                           vdex_dup_fd_);
+      }
+    }
+
+    bool ErrorReporting() const { return error_reporting_; }
+
+   private:
+    int DupCloexecOrError(int fd) {
+      int dup_fd = DupCloexec(fd);
+      if (dup_fd < 0) {
+        LOG(ERROR) << "Error dup'ing a file descriptor " << strerror(errno);
+        error_reporting_ = true;
+      }
+      return dup_fd;
+    }
+    android::base::unique_fd oat_dup_fd_;
+    android::base::unique_fd vdex_dup_fd_;
+    android::base::unique_fd zip_dup_fd_;
+    android::base::unique_fd image_dup_fd_;
+    bool error_reporting_ = false;
+  };
 
  private:
   bool UseSwap(bool is_image, const std::vector<const DexFile*>& dex_files) {
@@ -2791,7 +2838,6 @@ class Dex2Oat final {
   std::vector<std::string> dex_filenames_;
   std::vector<std::string> dex_locations_;
   int zip_fd_;
-  int zip_dup_fd_;  // A dup of the zip fd in case we report it to Palette.
   std::string zip_location_;
   std::string boot_image_filename_;
   std::vector<const char*> runtime_args_;
@@ -2903,7 +2949,7 @@ class ScopedGlobalRef {
   jobject obj_;
 };
 
-static dex2oat::ReturnCode CompileImage(Dex2Oat& dex2oat) {
+static dex2oat::ReturnCode DoCompilation(Dex2Oat& dex2oat) {
   dex2oat.LoadClassProfileDescriptors();
   jobject class_loader = dex2oat.Compile();
   // Keep the class loader that was used for compilation live for the rest of the compilation
@@ -2915,7 +2961,7 @@ static dex2oat::ReturnCode CompileImage(Dex2Oat& dex2oat) {
     return dex2oat::ReturnCode::kOther;
   }
 
-  // Flush boot.oat.  Keep it open as we might still modify it later (strip it).
+  // Flush output files.  Keep them open as we might still modify them later (strip them).
   if (!dex2oat.FlushOutputFiles()) {
     dex2oat.EraseOutputFiles();
     return dex2oat::ReturnCode::kOther;
@@ -2935,51 +2981,13 @@ static dex2oat::ReturnCode CompileImage(Dex2Oat& dex2oat) {
     return dex2oat::ReturnCode::kNoFailure;
   }
 
-  // Copy stripped to unstripped location, if necessary.
-  if (!dex2oat.CopyOatFilesToSymbolsDirectoryAndStrip()) {
-    return dex2oat::ReturnCode::kOther;
-  }
-
-  // FlushClose again, as stripping might have re-opened the oat files.
-  if (!dex2oat.FlushCloseOutputFiles()) {
-    return dex2oat::ReturnCode::kOther;
-  }
-
-  dex2oat.DumpTiming();
-  return dex2oat::ReturnCode::kNoFailure;
-}
-
-static dex2oat::ReturnCode CompileApp(Dex2Oat& dex2oat) {
-  jobject class_loader = dex2oat.Compile();
-  // Keep the class loader that was used for compilation live for the rest of the compilation
-  // process.
-  ScopedGlobalRef global_ref(class_loader);
-
-  if (!dex2oat.WriteOutputFiles(class_loader)) {
-    dex2oat.EraseOutputFiles();
-    return dex2oat::ReturnCode::kOther;
-  }
-
-  // Do not close the oat files here. We might have gotten the output file by file descriptor,
-  // which we would lose.
-
-  // When given --host, finish early without stripping.
-  if (dex2oat.IsHost()) {
-    if (!dex2oat.FlushCloseOutputFiles()) {
-      return dex2oat::ReturnCode::kOther;
-    }
-
-    dex2oat.DumpTiming();
-    return dex2oat::ReturnCode::kNoFailure;
-  }
-
   // Copy stripped to unstripped location, if necessary. This will implicitly flush & close the
   // stripped versions. If this is given, we expect to be able to open writable files by name.
   if (!dex2oat.CopyOatFilesToSymbolsDirectoryAndStrip()) {
     return dex2oat::ReturnCode::kOther;
   }
 
-  // Flush and close the files.
+  // FlushClose again, as stripping might have re-opened the oat files.
   if (!dex2oat.FlushCloseOutputFiles()) {
     return dex2oat::ReturnCode::kOther;
   }
@@ -3036,6 +3044,13 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
     LOG(INFO) << StrippedCommandLine();
   }
 
+  Dex2Oat::ScopedDex2oatReporting sdr(*dex2oat.get());
+
+  if (sdr.ErrorReporting()) {
+    dex2oat->EraseOutputFiles();
+    return dex2oat::ReturnCode::kOther;
+  }
+
   dex2oat::ReturnCode setup_code = dex2oat->Setup();
   if (setup_code != dex2oat::ReturnCode::kNoFailure) {
     dex2oat->EraseOutputFiles();
@@ -3059,12 +3074,7 @@ static dex2oat::ReturnCode Dex2oat(int argc, char** argv) {
   // instance. Used by tools/bisection_search/bisection_search.py.
   VLOG(compiler) << "Running dex2oat (parent PID = " << getppid() << ")";
 
-  dex2oat::ReturnCode result;
-  if (dex2oat->IsImage()) {
-    result = CompileImage(*dex2oat);
-  } else {
-    result = CompileApp(*dex2oat);
-  }
+  dex2oat::ReturnCode result = DoCompilation(*dex2oat);
 
   return result;
 }
