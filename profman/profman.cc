@@ -209,7 +209,7 @@ static const std::string kClassAllMethods = "*";  // NOLINT [runtime/string] [4]
 static constexpr char kAnnotationStart = '{';
 static constexpr char kAnnotationEnd = '}';
 static constexpr char kProfileParsingInlineChacheSep = '+';
-static constexpr char kProfileParsingInlineChacheTargetSep = '[';
+static constexpr char kProfileParsingInlineChacheTargetSep = ']';
 static constexpr char kProfileParsingTypeSep = ',';
 static constexpr char kProfileParsingFirstCharInSignature = '(';
 static constexpr char kMethodFlagStringHot = 'H';
@@ -767,11 +767,13 @@ class ProfMan final {
                                  const dex::MethodId& id,
                                  const DexFile* dex_file,
                                  uint16_t dex_method_idx) {
-    auto method_info = profile_info.GetHotMethodInfo(MethodReference(dex_file, dex_method_idx));
-    if (method_info == nullptr || method_info->inline_caches->empty()) {
+    ProfileCompilationInfo::MethodHotness hotness =
+        profile_info.GetMethodHotness(MethodReference(dex_file, dex_method_idx));
+    DCHECK(!hotness.IsHot() || hotness.GetInlineCacheMap() != nullptr);
+    if (!hotness.IsHot() || hotness.GetInlineCacheMap()->empty()) {
       return "";
     }
-    const ProfileCompilationInfo::InlineCacheMap* inline_caches = method_info->inline_caches;
+    const ProfileCompilationInfo::InlineCacheMap* inline_caches = hotness.GetInlineCacheMap();
     struct IcLineInfo {
       bool is_megamorphic_ = false;
       bool is_missing_types_ = false;
@@ -799,14 +801,13 @@ class ProfMan final {
         val->second.is_missing_types_ = true;
       }
       for (auto cls : ic_data.classes) {
-        auto it = std::find_if(dex_files->begin(), dex_files->end(), [&](const auto& d) {
-          return method_info->dex_references[cls.dex_profile_index].MatchesDex(&*d);
-        });
-        if (it == dex_files->end()) {
+        const DexFile* class_dex_file =
+            profile_info.FindDexFileForProfileIndex(cls.dex_profile_index, *dex_files);
+        if (class_dex_file == nullptr) {
           val->second.is_missing_types_ = true;
           continue;
         }
-        val->second.classes_.insert({ it->get(), cls.type_index });
+        val->second.classes_.insert({ class_dex_file, cls.type_index });
       }
     }
     if (ics.empty()) {
@@ -1255,9 +1256,9 @@ class ProfMan final {
   // "LTestInline;->inlinePolymorphic(LSuper;)I+LSubA;,LSubB;,invalid_class".
   // "LTestInline;->inlineMissingTypes(LSuper;)I+missing_types".
   // // Note no ',' after [LTarget;
-  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+[LTarget1;LResA;,LResB;[LTarget2;LResC;,LResD;".
-  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+[LTarget1;LResA;,invalid_class[LTarget2;LResC;,LResD;".
-  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+[LTarget1;missing_types[LTarget2;LResC;,LResD;".
+  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;LResA;,LResB;]LTarget2;LResC;,LResD;".
+  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;LResA;,invalid_class]LTarget2;LResC;,LResD;".
+  // "LTestInline;->multiInlinePolymorphic(LSuper;)I+]LTarget1;missing_types]LTarget2;LResC;,LResD;".
   // "{annotation}LTestInline;->inlineNoInlineCaches(LSuper;)I".
   // "LTestInline;->*".
   // "invalid_class".

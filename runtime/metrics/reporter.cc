@@ -14,10 +14,11 @@
  * limitations under the License.
  */
 
-#include "metrics_reporter.h"
+#include "reporter.h"
 
 #include "runtime.h"
 #include "runtime_options.h"
+#include "statsd.h"
 #include "thread-current-inl.h"
 
 #pragma clang diagnostic push
@@ -36,12 +37,25 @@ MetricsReporter::MetricsReporter(ReportingConfig config, Runtime* runtime)
 
 MetricsReporter::~MetricsReporter() { MaybeStopBackgroundThread(); }
 
-void MetricsReporter::MaybeStartBackgroundThread(SessionData session_data) {
+bool MetricsReporter::IsPeriodicReportingEnabled() const {
+  return config_.periodic_report_seconds.has_value();
+}
+
+void MetricsReporter::SetReportingPeriod(unsigned int period_seconds) {
+  DCHECK(!thread_.has_value()) << "The reporting period should not be changed after the background "
+                                  "reporting thread is started.";
+
+  config_.periodic_report_seconds = period_seconds;
+}
+
+bool MetricsReporter::MaybeStartBackgroundThread(SessionData session_data) {
+  if (!config_.ReportingEnabled()) {
+    return false;
+  }
   CHECK(!thread_.has_value());
-
   thread_.emplace(&MetricsReporter::BackgroundThreadRun, this);
-
   messages_.SendMessage(BeginSessionMessage{session_data});
+  return true;
 }
 
 void MetricsReporter::MaybeStopBackgroundThread() {
@@ -54,6 +68,15 @@ void MetricsReporter::MaybeStopBackgroundThread() {
 void MetricsReporter::NotifyStartupCompleted() {
   if (thread_.has_value()) {
     messages_.SendMessage(StartupCompletedMessage{});
+  }
+}
+
+void MetricsReporter::RequestMetricsReport(bool synchronous) {
+  if (thread_.has_value()) {
+    messages_.SendMessage(RequestMetricsReportMessage{synchronous});
+    if (synchronous) {
+      thread_to_host_messages_.ReceiveMessage();
+    }
   }
 }
 
@@ -75,6 +98,12 @@ void MetricsReporter::BackgroundThreadRun() {
   if (config_.dump_to_file.has_value()) {
     backends_.emplace_back(new FileBackend(config_.dump_to_file.value()));
   }
+  if (config_.dump_to_statsd) {
+    auto backend = CreateStatsdBackend();
+    if (backend != nullptr) {
+      backends_.emplace_back(std::move(backend));
+    }
+  }
 
   MaybeResetTimeout();
 
@@ -94,6 +123,13 @@ void MetricsReporter::BackgroundThreadRun() {
           // Do one final metrics report, if enabled.
           if (config_.report_metrics_on_shutdown) {
             ReportMetrics();
+          }
+        },
+        [&](RequestMetricsReportMessage message) {
+          LOG_STREAM(DEBUG) << "Explicit report request received";
+          ReportMetrics();
+          if (message.synchronous) {
+            thread_to_host_messages_.SendMessage(ReportCompletedMessage{});
           }
         },
         [&]([[maybe_unused]] TimeoutExpiredMessage message) {
@@ -133,6 +169,7 @@ ReportingConfig ReportingConfig::FromRuntimeArguments(const RuntimeArgumentMap& 
   using M = RuntimeArgumentMap;
   return {
       .dump_to_logcat = args.Exists(M::WriteMetricsToLog),
+      .dump_to_statsd = args.GetOrDefault(M::WriteMetricsToStatsd),
       .dump_to_file = args.GetOptional(M::WriteMetricsToFile),
       .report_metrics_on_shutdown = !args.Exists(M::DisableFinalMetricsReport),
       .periodic_report_seconds = args.GetOptional(M::MetricsReportingPeriod),

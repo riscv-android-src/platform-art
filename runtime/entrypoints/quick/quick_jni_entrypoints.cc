@@ -68,14 +68,14 @@ extern uint32_t JniMethodStart(Thread* self) {
   DCHECK(env != nullptr);
   uint32_t saved_local_ref_cookie = bit_cast<uint32_t>(env->GetLocalRefCookie());
   env->SetLocalRefCookie(env->GetLocalsSegmentState());
-  ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
-  // TODO: Introduce special entrypoint for synchronized @FastNative methods?
-  //       Or ban synchronized @FastNative outright to avoid the extra check here?
-  DCHECK(!native_method->IsFastNative() || native_method->IsSynchronized());
-  if (!native_method->IsFastNative()) {
-    // When not fast JNI we transition out of runnable.
-    self->TransitionFromRunnableToSuspended(kNative);
+
+  if (kIsDebugBuild) {
+    ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
+    CHECK(!native_method->IsFastNative()) << native_method->PrettyMethod();
   }
+
+  // Transition out of runnable.
+  self->TransitionFromRunnableToSuspended(kNative);
   return saved_local_ref_cookie;
 }
 
@@ -86,13 +86,12 @@ extern uint32_t JniMethodStartSynchronized(jobject to_lock, Thread* self) {
 
 // TODO: NO_THREAD_SAFETY_ANALYSIS due to different control paths depending on fast JNI.
 static void GoToRunnable(Thread* self) NO_THREAD_SAFETY_ANALYSIS {
-  ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
-  bool is_fast = native_method->IsFastNative();
-  if (!is_fast) {
-    self->TransitionFromSuspendedToRunnable();
-  } else {
-    GoToRunnableFast(self);
+  if (kIsDebugBuild) {
+    ArtMethod* native_method = *self->GetManagedStack()->GetTopQuickFrame();
+    CHECK(!native_method->IsFastNative()) << native_method->PrettyMethod();
   }
+
+  self->TransitionFromSuspendedToRunnable();
 }
 
 ALWAYS_INLINE static inline void GoToRunnableFast(Thread* self) {
@@ -222,9 +221,12 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
   bool fast_native = called->IsFastNative();
   bool normal_native = !critical_native && !fast_native;
 
-  // @Fast and @CriticalNative do not do a state transition.
+  // @CriticalNative does not do a state transition. @FastNative usually does not do a state
+  // transition either but it performs a suspend check that may do state transitions.
   if (LIKELY(normal_native)) {
     GoToRunnable(self);
+  } else if (fast_native) {
+    GoToRunnableFast(self);
   }
   // We need the mutator lock (i.e., calling GoToRunnable()) before accessing the shorty or the
   // locked object.
