@@ -276,7 +276,17 @@ bool OatFileBase::ShouldUnquickenVDex() const {
   // We sometimes load oat files without a runtime (eg oatdump) and don't want to do anything in
   // that case. If we are debuggable there are no -quick opcodes to unquicken. If the runtime is not
   // debuggable we don't care whether there are -quick opcodes or not so no need to do anything.
-  return Runtime::Current() != nullptr && !IsDebuggable() && Runtime::Current()->IsJavaDebuggable();
+  Runtime* runtime = Runtime::Current();
+  return (runtime != nullptr && runtime->IsJavaDebuggable()) &&
+         // Note: This is called before `OatFileBase::Setup()` where we validate the
+         // oat file contents. Check that we have at least a valid header, including
+         // oat file version, to avoid parsing the key-value store for a different
+         // version (out-of-date oat file) which can lead to crashes. b/179221298.
+         // TODO: While this is a poor workaround and the correct solution would be
+         // to postpone the unquickening check until after `OatFileBase::Setup()`,
+         // we prefer to avoid larger rewrites because quickening is deprecated and
+         // should be removed completely anyway. b/170086509
+         (GetOatHeader().IsValid() && !IsDebuggable());
 }
 
 bool OatFileBase::LoadVdex(const std::string& vdex_filename,
@@ -1693,6 +1703,17 @@ OatFile* OatFile::Open(int zip_fd,
                                                                  reservation,
                                                                  error_msg);
   if (with_dlopen != nullptr) {
+    Runtime* runtime = Runtime::Current();
+    // The runtime might not be available at this point if we're running
+    // dex2oat or oatdump.
+    if (runtime != nullptr) {
+      size_t madvise_size_limit = runtime->GetMadviseWillNeedSizeOdex();
+      Runtime::MadviseFileForRange(madvise_size_limit,
+                                   with_dlopen->Size(),
+                                   with_dlopen->Begin(),
+                                   with_dlopen->End(),
+                                   oat_location);
+    }
     return with_dlopen;
   }
   if (kPrintDlOpenErrorMessage) {

@@ -293,11 +293,7 @@ class OatTest : public CommonCompilerDriverTest {
     }
     const VdexFile::DexSectionHeader &vdex_header =
         opened_oat_file->GetVdexFile()->GetDexSectionHeader();
-    if (!compiler_driver_->GetCompilerOptions().IsQuickeningCompilationEnabled()) {
-      // If quickening is enabled we will always write the table since there is no special logic
-      // that checks for all methods not being quickened (not worth the complexity).
-      ASSERT_EQ(vdex_header.GetQuickeningInfoSize(), 0u);
-    }
+    ASSERT_EQ(vdex_header.GetQuickeningInfoSize(), 0u);
 
     int64_t actual_vdex_size = vdex_file.GetFile()->GetLength();
     ASSERT_GE(actual_vdex_size, 0);
@@ -511,7 +507,7 @@ TEST_F(OatTest, OatHeaderSizeCheck) {
   // it is time to update OatHeader::kOatVersion
   EXPECT_EQ(64U, sizeof(OatHeader));
   EXPECT_EQ(4U, sizeof(OatMethodOffsets));
-  EXPECT_EQ(8U, sizeof(OatQuickMethodHeader));
+  EXPECT_EQ(4U, sizeof(OatQuickMethodHeader));
   EXPECT_EQ(169 * static_cast<size_t>(GetInstructionSetPointerSize(kRuntimeISA)),
             sizeof(QuickEntryPoints));
 }
