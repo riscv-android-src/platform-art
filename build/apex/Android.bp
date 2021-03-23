@@ -246,6 +246,7 @@ apex_defaults {
     compile_multilib: "both",
     manifest: "manifest-art.json",
     boot_images: ["art-boot-image"],
+    compat_configs: ["libcore-platform-compat-config"],
     java_libs: libcore_java_libs + art_java_libs,
     native_shared_libs: art_runtime_base_native_shared_libs +
         art_runtime_base_native_device_only_shared_libs +
@@ -311,7 +312,6 @@ art_apex {
     name: "com.android.art",
     defaults: ["com.android.art-device-defaults"],
     certificate: ":com.android.art.certificate",
-    updatable: false,
 }
 
 // "Debug" version of the ART APEX module (containing both release and
@@ -321,7 +321,6 @@ art_apex {
     name: "com.android.art.debug",
     defaults: ["com.android.art-devel-defaults"],
     certificate: ":com.android.art.certificate",
-    updatable: false,
 }
 
 // ART gtests with dependencies on internal ART APEX libraries.
