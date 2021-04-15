@@ -83,9 +83,12 @@ static constexpr uint32_t kAccPreviouslyWarm =        0x00800000;  // method (ru
 // Set by the verifier for a method we do not want the compiler to compile.
 static constexpr uint32_t kAccCompileDontBother =     0x02000000;  // method (runtime)
 
-// Used in conjunction with kAccCompileDontBother to mark the method as pre
-// compiled by the JIT compiler.
-static constexpr uint32_t kAccPreCompiled =           0x00100000;  // method (runtime)
+// Used in conjunction with kAccCompileDontBother to mark the method as pre compiled
+// by the JIT compiler. We are reusing the value of the kAccPreviouslyWarm flag which
+// is meaningless for other methods with kAccCompileDontBother as we do not collect
+// samples for such methods.
+static constexpr uint32_t kAccPreCompiled =           0x00800000;  // method (runtime)
+static_assert(kAccPreCompiled == kAccPreviouslyWarm);
 
 // Set by the verifier for a method that could not be verified to follow structured locking.
 static constexpr uint32_t kAccMustCountLocks =        0x04000000;  // method (runtime)
@@ -93,6 +96,12 @@ static constexpr uint32_t kAccMustCountLocks =        0x04000000;  // method (ru
 // Set by the class linker for a method that has only one implementation for a
 // virtual call.
 static constexpr uint32_t kAccSingleImplementation =  0x08000000;  // method (runtime)
+
+// Whether nterp can take a fast path when entering this method (runtime; non-native)
+static constexpr uint32_t kAccNterpEntryPointFastPathFlag = 0x00100000;
+// Set by the class linker to mark that a method does not have floating points
+// or longs in its shorty.
+static constexpr uint32_t kAccNterpInvokeFastPathFlag     = 0x00200000;  // method (runtime)
 
 static constexpr uint32_t kAccPublicApi =             0x10000000;  // field, method
 static constexpr uint32_t kAccCorePlatformApi =       0x20000000;  // field, method

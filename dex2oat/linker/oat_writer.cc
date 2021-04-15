@@ -300,7 +300,6 @@ class OatWriter::OatDexFile {
  public:
   OatDexFile(const char* dex_file_location,
              DexFileSource source,
-             CreateTypeLookupTable create_type_lookup_table,
              uint32_t dex_file_location_checksun,
              size_t dex_file_size);
   OatDexFile(OatDexFile&& src) = default;
@@ -319,9 +318,6 @@ class OatWriter::OatDexFile {
 
   // The source of the dex file.
   DexFileSource source_;
-
-  // Whether to create the type lookup table.
-  CreateTypeLookupTable create_type_lookup_table_;
 
   // Dex file size. Passed in the constructor, but could be
   // overwritten by LayoutDexFile.
@@ -400,6 +396,7 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     vdex_dex_shared_data_offset_(0u),
     vdex_verifier_deps_offset_(0u),
     vdex_quickening_info_offset_(0u),
+    vdex_lookup_tables_offset_(0u),
     oat_checksum_(adler32(0L, Z_NULL, 0)),
     code_size_(0u),
     oat_size_(0u),
@@ -430,6 +427,8 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     size_verifier_deps_alignment_(0),
     size_quickening_info_(0),
     size_quickening_info_alignment_(0),
+    size_vdex_lookup_table_alignment_(0),
+    size_vdex_lookup_table_(0),
     size_interpreter_to_interpreter_bridge_(0),
     size_interpreter_to_compiled_code_bridge_(0),
     size_jni_dlsym_lookup_trampoline_(0),
@@ -463,8 +462,6 @@ OatWriter::OatWriter(const CompilerOptions& compiler_options,
     size_oat_dex_file_public_type_bss_mapping_offset_(0),
     size_oat_dex_file_package_type_bss_mapping_offset_(0),
     size_oat_dex_file_string_bss_mapping_offset_(0),
-    size_oat_lookup_table_alignment_(0),
-    size_oat_lookup_table_(0),
     size_oat_class_offsets_alignment_(0),
     size_oat_class_offsets_(0),
     size_oat_class_type_(0),
@@ -521,9 +518,7 @@ static const UnalignedDexFileHeader* GetDexFileHeader(File* file,
   return AsUnalignedDexFileHeader(raw_header);
 }
 
-bool OatWriter::AddDexFileSource(const char* filename,
-                                 const char* location,
-                                 CreateTypeLookupTable create_type_lookup_table) {
+bool OatWriter::AddDexFileSource(const char* filename, const char* location) {
   DCHECK(write_state_ == WriteState::kAddingDexFileSources);
   File fd(filename, O_RDONLY, /* check_usage= */ false);
   if (fd.Fd() == -1) {
@@ -531,14 +526,12 @@ bool OatWriter::AddDexFileSource(const char* filename,
     return false;
   }
 
-  return AddDexFileSource(std::move(fd), location, create_type_lookup_table);
+  return AddDexFileSource(std::move(fd), location);
 }
 
 // Add dex file source(s) from a file specified by a file handle.
 // Note: The `dex_file_fd` specifies a plain dex file or a zip file.
-bool OatWriter::AddDexFileSource(File&& dex_file_fd,
-                                 const char* location,
-                                 CreateTypeLookupTable create_type_lookup_table) {
+bool OatWriter::AddDexFileSource(File&& dex_file_fd, const char* location) {
   DCHECK(write_state_ == WriteState::kAddingDexFileSources);
   std::string error_msg;
   uint32_t magic;
@@ -560,7 +553,6 @@ bool OatWriter::AddDexFileSource(File&& dex_file_fd,
     oat_dex_files_.emplace_back(/* OatDexFile */
         location,
         DexFileSource(raw_dex_files_.back().get()),
-        create_type_lookup_table,
         header->checksum_,
         header->file_size_);
   } else if (IsZipMagic(magic)) {
@@ -584,7 +576,6 @@ bool OatWriter::AddDexFileSource(File&& dex_file_fd,
       oat_dex_files_.emplace_back(/* OatDexFile */
           full_location,
           DexFileSource(zipped_dex_files_.back().get()),
-          create_type_lookup_table,
           zipped_dex_files_.back()->GetCrc32(),
           zipped_dex_files_.back()->GetUncompressedLength());
     }
@@ -600,14 +591,13 @@ bool OatWriter::AddDexFileSource(File&& dex_file_fd,
 }
 
 // Add dex file source(s) from a vdex file specified by a file handle.
-bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file,
-                                      const char* location,
-                                      CreateTypeLookupTable create_type_lookup_table) {
+bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file, const char* location) {
   DCHECK(write_state_ == WriteState::kAddingDexFileSources);
   DCHECK(vdex_file.HasDexSection());
   const uint8_t* current_dex_data = nullptr;
-  for (size_t i = 0; i < vdex_file.GetVerifierDepsHeader().GetNumberOfDexFiles(); ++i) {
-    current_dex_data = vdex_file.GetNextDexFileData(current_dex_data);
+  size_t i = 0;
+  for (; i < vdex_file.GetNumberOfDexFiles(); ++i) {
+    current_dex_data = vdex_file.GetNextDexFileData(current_dex_data, i);
     if (current_dex_data == nullptr) {
       LOG(ERROR) << "Unexpected number of dex files in vdex " << location;
       return false;
@@ -624,12 +614,11 @@ bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file,
     oat_dex_files_.emplace_back(/* OatDexFile */
         full_location,
         DexFileSource(current_dex_data),
-        create_type_lookup_table,
         vdex_file.GetLocationChecksum(i),
         header->file_size_);
   }
 
-  if (vdex_file.GetNextDexFileData(current_dex_data) != nullptr) {
+  if (vdex_file.GetNextDexFileData(current_dex_data, i) != nullptr) {
     LOG(ERROR) << "Unexpected number of dex files in vdex " << location;
     return false;
   }
@@ -644,8 +633,7 @@ bool OatWriter::AddVdexDexFilesSource(const VdexFile& vdex_file,
 // Add dex file source from raw memory.
 bool OatWriter::AddRawDexFileSource(const ArrayRef<const uint8_t>& data,
                                     const char* location,
-                                    uint32_t location_checksum,
-                                    CreateTypeLookupTable create_type_lookup_table) {
+                                    uint32_t location_checksum) {
   DCHECK(write_state_ == WriteState::kAddingDexFileSources);
   if (data.size() < sizeof(DexFile::Header)) {
     LOG(ERROR) << "Provided data is shorter than dex file header. size: "
@@ -665,7 +653,6 @@ bool OatWriter::AddRawDexFileSource(const ArrayRef<const uint8_t>& data,
   oat_dex_files_.emplace_back(/* OatDexFile */
       location,
       DexFileSource(data.data()),
-      create_type_lookup_table,
       location_checksum,
       header->file_size_);
   return true;
@@ -693,9 +680,10 @@ bool OatWriter::WriteAndOpenDexFiles(
     /*out*/ std::vector<std::unique_ptr<const DexFile>>* opened_dex_files) {
   CHECK(write_state_ == WriteState::kAddingDexFileSources);
 
-  // Reserve space for Vdex header and checksums.
-  vdex_size_ = sizeof(VdexFile::VerifierDepsHeader) +
-      oat_dex_files_.size() * sizeof(VdexFile::VdexChecksum);
+  size_vdex_header_ = sizeof(VdexFile::VdexFileHeader) +
+      VdexSection::kNumberOfSections * sizeof(VdexFile::VdexSectionHeader);
+  // Reserve space for Vdex header, sections, and checksums.
+  vdex_size_ = size_vdex_header_ + oat_dex_files_.size() * sizeof(VdexFile::VdexChecksum);
 
   // Write DEX files into VDEX, mmap and open them.
   std::vector<MemMap> dex_files_map;
@@ -707,6 +695,8 @@ bool OatWriter::WriteAndOpenDexFiles(
 
   *opened_dex_files_map = std::move(dex_files_map);
   *opened_dex_files = std::move(dex_files);
+  // Create type lookup tables to speed up lookups during compilation.
+  InitializeTypeLookupTables(*opened_dex_files);
   write_state_ = WriteState::kStartRoData;
   return true;
 }
@@ -729,11 +719,6 @@ bool OatWriter::StartRoData(const std::vector<const DexFile*>& dex_files,
                             key_value_store);
 
   ChecksumUpdatingOutputStream checksum_updating_rodata(oat_rodata, this);
-
-  // Write type lookup tables into the oat file.
-  if (!WriteTypeLookupTables(&checksum_updating_rodata, dex_files)) {
-    return false;
-  }
 
   // Write dex layout sections into the oat file.
   if (!WriteDexLayoutSections(&checksum_updating_rodata, dex_files)) {
@@ -2639,6 +2624,8 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
     DO_STAT(size_dex_file_);
     DO_STAT(size_verifier_deps_);
     DO_STAT(size_verifier_deps_alignment_);
+    DO_STAT(size_vdex_lookup_table_);
+    DO_STAT(size_vdex_lookup_table_alignment_);
     DO_STAT(size_quickening_info_);
     DO_STAT(size_quickening_info_alignment_);
     DO_STAT(size_interpreter_to_interpreter_bridge_);
@@ -2674,8 +2661,6 @@ bool OatWriter::CheckOatSize(OutputStream* out, size_t file_offset, size_t relat
     DO_STAT(size_oat_dex_file_public_type_bss_mapping_offset_);
     DO_STAT(size_oat_dex_file_package_type_bss_mapping_offset_);
     DO_STAT(size_oat_dex_file_string_bss_mapping_offset_);
-    DO_STAT(size_oat_lookup_table_alignment_);
-    DO_STAT(size_oat_lookup_table_);
     DO_STAT(size_oat_class_offsets_alignment_);
     DO_STAT(size_oat_class_offsets_);
     DO_STAT(size_oat_class_type_);
@@ -3133,8 +3118,6 @@ bool OatWriter::WriteDexFiles(File* file,
   }
 
   if (extract_dex_files_into_vdex_) {
-    // Add the dex section header.
-    vdex_size_ += sizeof(VdexFile::DexSectionHeader);
     vdex_dex_files_offset_ = vdex_size_;
 
     // Perform dexlayout if requested.
@@ -3155,8 +3138,6 @@ bool OatWriter::WriteDexFiles(File* file,
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       // Dex files are required to be 4 byte aligned.
       vdex_size_with_dex_files = RoundUp(vdex_size_with_dex_files, 4u);
-      // Leave extra room for the quicken table offset.
-      vdex_size_with_dex_files += sizeof(VdexFile::QuickeningTableOffsetType);
       // Record offset for the dex file.
       oat_dex_file.dex_file_offset_ = vdex_size_with_dex_files;
       // Add the size of the dex file.
@@ -3236,18 +3217,9 @@ bool OatWriter::WriteDexFiles(File* file,
     // Write dex files.
     for (OatDexFile& oat_dex_file : oat_dex_files_) {
       // Dex files are required to be 4 byte aligned.
-      size_t quickening_table_offset_offset = RoundUp(vdex_size_, 4u);
-      if (!update_input_vdex) {
-        // Clear the padding.
-        memset(vdex_begin_ + vdex_size_, 0, quickening_table_offset_offset - vdex_size_);
-        // Initialize the quickening table offset to 0.
-        auto* quickening_table_offset = reinterpret_cast<VdexFile::QuickeningTableOffsetType*>(
-            vdex_begin_ + quickening_table_offset_offset);
-        *quickening_table_offset = 0u;
-      }
-      size_dex_file_alignment_ += quickening_table_offset_offset - vdex_size_;
-      size_quickening_table_offset_ += sizeof(VdexFile::QuickeningTableOffsetType);
-      vdex_size_ = quickening_table_offset_offset + sizeof(VdexFile::QuickeningTableOffsetType);
+      size_t old_vdex_size = vdex_size_;
+      vdex_size_ = RoundUp(vdex_size_, 4u);
+      size_dex_file_alignment_ += vdex_size_ - old_vdex_size;
       // Write the actual dex file.
       if (!WriteDexFile(file, &oat_dex_file, update_input_vdex)) {
         return false;
@@ -3577,87 +3549,29 @@ bool OatWriter::OpenDexFiles(
   return true;
 }
 
-bool OatWriter::WriteTypeLookupTables(OutputStream* oat_rodata,
-                                      const std::vector<const DexFile*>& opened_dex_files) {
-  TimingLogger::ScopedTiming split("WriteTypeLookupTables", timings_);
-
-  uint32_t expected_offset = oat_data_offset_ + oat_size_;
-  off_t actual_offset = oat_rodata->Seek(expected_offset, kSeekSet);
-  if (static_cast<uint32_t>(actual_offset) != expected_offset) {
-    PLOG(ERROR) << "Failed to seek to TypeLookupTable section. Actual: " << actual_offset
-                << " Expected: " << expected_offset << " File: " << oat_rodata->GetLocation();
-    return false;
-  }
-
+void OatWriter::InitializeTypeLookupTables(
+    const std::vector<std::unique_ptr<const DexFile>>& opened_dex_files) {
+  TimingLogger::ScopedTiming split("InitializeTypeLookupTables", timings_);
   DCHECK_EQ(opened_dex_files.size(), oat_dex_files_.size());
   for (size_t i = 0, size = opened_dex_files.size(); i != size; ++i) {
     OatDexFile* oat_dex_file = &oat_dex_files_[i];
     DCHECK_EQ(oat_dex_file->lookup_table_offset_, 0u);
 
-    if (oat_dex_file->create_type_lookup_table_ != CreateTypeLookupTable::kCreate ||
-        oat_dex_file->class_offsets_.empty()) {
-      continue;
-    }
-
     size_t table_size = TypeLookupTable::RawDataLength(oat_dex_file->class_offsets_.size());
     if (table_size == 0u) {
+      // We want a 1:1 mapping between `dex_files_` and `type_lookup_table_oat_dex_files_`,
+      // to simplify `WriteTypeLookupTables`. We push a null entry to notify
+      // that the dex file at index `i` does not have a type lookup table.
+      type_lookup_table_oat_dex_files_.push_back(nullptr);
       continue;
     }
 
-    // Create the lookup table. When `nullptr` is given as the storage buffer,
-    // TypeLookupTable allocates its own and OatDexFile takes ownership.
-    // TODO: Create the table in an mmap()ed region of the output file to reduce dirty memory.
-    // (We used to do that when dex files were still copied into the oat file.)
-    const DexFile& dex_file = *opened_dex_files[i];
-    {
-      TypeLookupTable type_lookup_table = TypeLookupTable::Create(dex_file);
-      type_lookup_table_oat_dex_files_.push_back(
-          std::make_unique<art::OatDexFile>(std::move(type_lookup_table)));
-      dex_file.SetOatDexFile(type_lookup_table_oat_dex_files_.back().get());
-    }
-    const TypeLookupTable& table = type_lookup_table_oat_dex_files_.back()->GetTypeLookupTable();
-    DCHECK(table.Valid());
-
-    // Type tables are required to be 4 byte aligned.
-    size_t initial_offset = oat_size_;
-    size_t rodata_offset = RoundUp(initial_offset, 4);
-    size_t padding_size = rodata_offset - initial_offset;
-
-    if (padding_size != 0u) {
-      std::vector<uint8_t> buffer(padding_size, 0u);
-      if (!oat_rodata->WriteFully(buffer.data(), padding_size)) {
-        PLOG(ERROR) << "Failed to write lookup table alignment padding."
-                    << " File: " << oat_dex_file->GetLocation()
-                    << " Output: " << oat_rodata->GetLocation();
-        return false;
-      }
-    }
-
-    DCHECK_EQ(oat_data_offset_ + rodata_offset,
-              static_cast<size_t>(oat_rodata->Seek(0u, kSeekCurrent)));
-    DCHECK_EQ(table_size, table.RawDataLength());
-
-    if (!oat_rodata->WriteFully(table.RawData(), table_size)) {
-      PLOG(ERROR) << "Failed to write lookup table."
-                  << " File: " << oat_dex_file->GetLocation()
-                  << " Output: " << oat_rodata->GetLocation();
-      return false;
-    }
-
-    oat_dex_file->lookup_table_offset_ = rodata_offset;
-
-    oat_size_ += padding_size + table_size;
-    size_oat_lookup_table_ += table_size;
-    size_oat_lookup_table_alignment_ += padding_size;
+    const DexFile& dex_file = *opened_dex_files[i].get();
+    TypeLookupTable type_lookup_table = TypeLookupTable::Create(dex_file);
+    type_lookup_table_oat_dex_files_.push_back(
+        std::make_unique<art::OatDexFile>(std::move(type_lookup_table)));
+    dex_file.SetOatDexFile(type_lookup_table_oat_dex_files_.back().get());
   }
-
-  if (!oat_rodata->Flush()) {
-    PLOG(ERROR) << "Failed to flush stream after writing type lookup tables."
-                << " File: " << oat_rodata->GetLocation();
-    return false;
-  }
-
-  return true;
 }
 
 bool OatWriter::WriteDexLayoutSections(OutputStream* oat_rodata,
@@ -3723,13 +3637,56 @@ bool OatWriter::WriteDexLayoutSections(OutputStream* oat_rodata,
   return true;
 }
 
+void OatWriter::WriteTypeLookupTables(/*out*/std::vector<uint8_t>* buffer) {
+  TimingLogger::ScopedTiming split("WriteTypeLookupTables", timings_);
+  size_t type_lookup_table_size = 0u;
+  for (const DexFile* dex_file : *dex_files_) {
+    type_lookup_table_size +=
+        sizeof(uint32_t) + TypeLookupTable::RawDataLength(dex_file->NumClassDefs());
+  }
+  // Reserve the space to avoid reallocations later on.
+  buffer->reserve(buffer->size() + type_lookup_table_size);
+
+  // Align the start of the first type lookup table.
+  size_t initial_offset = vdex_size_;
+  size_t table_offset = RoundUp(initial_offset, 4);
+  size_t padding_size = table_offset - initial_offset;
+
+  size_vdex_lookup_table_alignment_ += padding_size;
+  for (uint32_t j = 0; j < padding_size; ++j) {
+    buffer->push_back(0);
+  }
+  vdex_size_ += padding_size;
+  vdex_lookup_tables_offset_ = vdex_size_;
+  for (size_t i = 0, size = type_lookup_table_oat_dex_files_.size(); i != size; ++i) {
+    OatDexFile* oat_dex_file = &oat_dex_files_[i];
+    if (type_lookup_table_oat_dex_files_[i] == nullptr) {
+      buffer->insert(buffer->end(), {0u, 0u, 0u, 0u});
+      size_vdex_lookup_table_ += sizeof(uint32_t);
+      vdex_size_ += sizeof(uint32_t);
+      oat_dex_file->lookup_table_offset_ = 0u;
+    } else {
+      oat_dex_file->lookup_table_offset_ = vdex_size_ + sizeof(uint32_t);
+      const TypeLookupTable& table = type_lookup_table_oat_dex_files_[i]->GetTypeLookupTable();
+      uint32_t table_size = table.RawDataLength();
+      DCHECK_NE(0u, table_size);
+      DCHECK_ALIGNED(table_size, 4);
+      size_t old_buffer_size = buffer->size();
+      buffer->resize(old_buffer_size + table.RawDataLength() + sizeof(uint32_t), 0u);
+      memcpy(buffer->data() + old_buffer_size, &table_size, sizeof(uint32_t));
+      memcpy(buffer->data() + old_buffer_size + sizeof(uint32_t), table.RawData(), table_size);
+      vdex_size_ += table_size + sizeof(uint32_t);
+      size_vdex_lookup_table_ += table_size + sizeof(uint32_t);
+    }
+  }
+}
+
 bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier_deps) {
   size_t old_vdex_size = vdex_size_;
   std::vector<uint8_t> buffer;
   buffer.reserve(64 * KB);
   WriteVerifierDeps(verifier_deps, &buffer);
-  DCHECK_EQ(vdex_size_, old_vdex_size + buffer.size());
-  WriteQuickeningInfo(&buffer);
+  WriteTypeLookupTables(&buffer);
   DCHECK_EQ(vdex_size_, old_vdex_size + buffer.size());
 
   // Resize the vdex file.
@@ -3788,7 +3745,7 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
   }
 
   // Write checksums
-  off_t checksums_offset = sizeof(VdexFile::VerifierDepsHeader);
+  off_t checksums_offset = VdexFile::GetChecksumsOffset();
   VdexFile::VdexChecksum* checksums_data =
       reinterpret_cast<VdexFile::VdexChecksum*>(vdex_begin + checksums_offset);
   for (size_t i = 0, size = oat_dex_files_.size(); i != size; ++i) {
@@ -3797,24 +3754,35 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
     size_vdex_checksums_ += sizeof(VdexFile::VdexChecksum);
   }
 
-  // Maybe write dex section header.
-  DCHECK_NE(vdex_verifier_deps_offset_, 0u);
-  DCHECK_NE(vdex_quickening_info_offset_, 0u);
+  // Write sections.
+  uint8_t* ptr = vdex_begin + sizeof(VdexFile::VdexFileHeader);
 
-  bool has_dex_section = extract_dex_files_into_vdex_;
-  if (has_dex_section) {
-    DCHECK_NE(vdex_dex_files_offset_, 0u);
-    size_t dex_section_size = vdex_dex_shared_data_offset_ - vdex_dex_files_offset_;
-    size_t dex_shared_data_size = vdex_verifier_deps_offset_ - vdex_dex_shared_data_offset_;
-    size_t quickening_info_section_size = vdex_size_ - vdex_quickening_info_offset_;
+  // Checksums section.
+  new (ptr) VdexFile::VdexSectionHeader(VdexSection::kChecksumSection,
+                                        checksums_offset,
+                                        size_vdex_checksums_);
+  ptr += sizeof(VdexFile::VdexSectionHeader);
 
-    void* dex_section_header_storage = checksums_data + oat_dex_files_.size();
-    new (dex_section_header_storage) VdexFile::DexSectionHeader(dex_section_size,
-                                                                dex_shared_data_size,
-                                                                quickening_info_section_size);
-    size_vdex_header_ += sizeof(VdexFile::DexSectionHeader);
-  }
+  // Dex section.
+  new (ptr) VdexFile::VdexSectionHeader(
+      VdexSection::kDexFileSection,
+      extract_dex_files_into_vdex_ ? vdex_dex_files_offset_ : 0u,
+      extract_dex_files_into_vdex_ ? vdex_verifier_deps_offset_ - vdex_dex_files_offset_ : 0u);
+  ptr += sizeof(VdexFile::VdexSectionHeader);
 
+  // VerifierDeps section.
+  new (ptr) VdexFile::VdexSectionHeader(VdexSection::kVerifierDepsSection,
+                                        vdex_verifier_deps_offset_,
+                                        size_verifier_deps_);
+  ptr += sizeof(VdexFile::VdexSectionHeader);
+
+  // TypeLookupTable section.
+  new (ptr) VdexFile::VdexSectionHeader(VdexSection::kTypeLookupTableSection,
+                                        vdex_lookup_tables_offset_,
+                                        vdex_size_ - vdex_lookup_tables_offset_);
+
+  // All the contents (except the header) of the vdex file has been emitted in memory. Flush it
+  // to disk.
   {
     TimingLogger::ScopedTiming split("VDEX flush contents", timings_);
     // Sync the data to the disk while the header is invalid. We do not want to end up with
@@ -3833,14 +3801,10 @@ bool OatWriter::FinishVdexFile(File* vdex_file, verifier::VerifierDeps* verifier
     }
   }
 
-  // Write header.
-  // TODO: Use `size_quickening_info_` instead of `verifier_deps_section_size` which
-  // includes `size_quickening_info_alignment_`, adjust code in VdexFile.
-  size_t verifier_deps_section_size = vdex_quickening_info_offset_ - vdex_verifier_deps_offset_;
-
-  new (vdex_begin) VdexFile::VerifierDepsHeader(
-      oat_dex_files_.size(), verifier_deps_section_size, has_dex_section);
-  size_vdex_header_ += sizeof(VdexFile::VerifierDepsHeader);
+  // Now that we know all contents have been flushed to disk, we can write
+  // the header which will mke the vdex usable.
+  bool has_dex_section = extract_dex_files_into_vdex_;
+  new (vdex_begin) VdexFile::VdexFileHeader(has_dex_section);
 
   // Note: If `extract_dex_files_into_vdex_`, we passed the ownership of the vdex dex file
   // MemMap to the caller, so we need to use msync() for the range explicitly.
@@ -3882,11 +3846,9 @@ void OatWriter::SetMultiOatRelativePatcherAdjustment() {
 
 OatWriter::OatDexFile::OatDexFile(const char* dex_file_location,
                                   DexFileSource source,
-                                  CreateTypeLookupTable create_type_lookup_table,
                                   uint32_t dex_file_location_checksum,
                                   size_t dex_file_size)
     : source_(std::move(source)),
-      create_type_lookup_table_(create_type_lookup_table),
       dex_file_size_(dex_file_size),
       offset_(0),
       dex_file_location_size_(strlen(dex_file_location)),

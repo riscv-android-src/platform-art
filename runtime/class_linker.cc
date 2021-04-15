@@ -3842,6 +3842,30 @@ void ClassLinker::LoadMethod(const DexFile& dex_file,
     dst->SetDataPtrSize(nullptr, image_pointer_size_);
     DCHECK_EQ(method.GetCodeItemOffset(), 0u);
   }
+
+  // Set optimization flags related to the shorty.
+  const char* shorty = dst->GetShorty();
+  bool all_parameters_are_reference = true;
+  bool all_parameters_are_reference_or_int = true;
+  bool return_type_is_fp = (shorty[0] == 'F' || shorty[0] == 'D');
+
+  for (size_t i = 1, e = strlen(shorty); i < e; ++i) {
+    if (shorty[i] != 'L') {
+      all_parameters_are_reference = false;
+      if (shorty[i] == 'F' || shorty[i] == 'D' || shorty[i] == 'J') {
+        all_parameters_are_reference_or_int = false;
+        break;
+      }
+    }
+  }
+
+  if (!dst->IsNative() && all_parameters_are_reference) {
+    dst->SetNterpEntryPointFastPathFlag();
+  }
+
+  if (!return_type_is_fp && all_parameters_are_reference_or_int) {
+    dst->SetNterpInvokeFastPathFlag();
+  }
 }
 
 void ClassLinker::AppendToBootClassPath(Thread* self, const DexFile* dex_file) {
@@ -4464,6 +4488,7 @@ void ClassLinker::LookupClasses(const char* descriptor,
 }
 
 bool ClassLinker::AttemptSupertypeVerification(Thread* self,
+                                               verifier::VerifierDeps* verifier_deps,
                                                Handle<mirror::Class> klass,
                                                Handle<mirror::Class> supertype) {
   DCHECK(self != nullptr);
@@ -4471,7 +4496,7 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   DCHECK(supertype != nullptr);
 
   if (!supertype->IsVerified() && !supertype->IsErroneous()) {
-    VerifyClass(self, supertype);
+    VerifyClass(self, verifier_deps, supertype);
   }
 
   if (supertype->IsVerified()
@@ -4508,8 +4533,10 @@ bool ClassLinker::AttemptSupertypeVerification(Thread* self,
   return false;
 }
 
-verifier::FailureKind ClassLinker::VerifyClass(
-    Thread* self, Handle<mirror::Class> klass, verifier::HardFailLogMode log_level) {
+verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
+                                               verifier::VerifierDeps* verifier_deps,
+                                               Handle<mirror::Class> klass,
+                                               verifier::HardFailLogMode log_level) {
   {
     // TODO: assert that the monitor on the Class is held
     ObjectLock<mirror::Class> lock(self, klass);
@@ -4577,7 +4604,8 @@ verifier::FailureKind ClassLinker::VerifyClass(
   StackHandleScope<2> hs(self);
   MutableHandle<mirror::Class> supertype(hs.NewHandle(klass->GetSuperClass()));
   // If we have a superclass and we get a hard verification failure we can return immediately.
-  if (supertype != nullptr && !AttemptSupertypeVerification(self, klass, supertype)) {
+  if (supertype != nullptr &&
+      !AttemptSupertypeVerification(self, verifier_deps, klass, supertype)) {
     CHECK(self->IsExceptionPending()) << "Verification error should be pending.";
     return verifier::FailureKind::kHardFailure;
   }
@@ -4603,7 +4631,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
       // We only care if we have default interfaces and can skip if we are already verified...
       if (LIKELY(!iface->HasDefaultMethods() || iface->IsVerified())) {
         continue;
-      } else if (UNLIKELY(!AttemptSupertypeVerification(self, klass, iface))) {
+      } else if (UNLIKELY(!AttemptSupertypeVerification(self, verifier_deps, klass, iface))) {
         // We had a hard failure while verifying this interface. Just return immediately.
         CHECK(self->IsExceptionPending()) << "Verification error should be pending.";
         return verifier::FailureKind::kHardFailure;
@@ -4643,7 +4671,7 @@ verifier::FailureKind ClassLinker::VerifyClass(
   std::string error_msg;
   verifier::FailureKind verifier_failure = verifier::FailureKind::kNoFailure;
   if (!preverified) {
-    verifier_failure = PerformClassVerification(self, klass, log_level, &error_msg);
+    verifier_failure = PerformClassVerification(self, verifier_deps, klass, log_level, &error_msg);
   }
 
   // Verification is done, grab the lock again.
@@ -4728,11 +4756,13 @@ verifier::FailureKind ClassLinker::VerifyClass(
 }
 
 verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
+                                                            verifier::VerifierDeps* verifier_deps,
                                                             Handle<mirror::Class> klass,
                                                             verifier::HardFailLogMode log_level,
                                                             std::string* error_msg) {
   Runtime* const runtime = Runtime::Current();
   return verifier::ClassVerifier::VerifyClass(self,
+                                              verifier_deps,
                                               klass.Get(),
                                               runtime->GetCompilerCallbacks(),
                                               runtime->IsAotCompiler(),
@@ -5233,7 +5263,7 @@ bool ClassLinker::InitializeClass(Thread* self,
         << klass->PrettyClass() << ": state=" << klass->GetStatus();
 
     if (!klass->IsVerified()) {
-      VerifyClass(self, klass);
+      VerifyClass(self, /*verifier_deps= */ nullptr, klass);
       if (!klass->IsVerified()) {
         // We failed to verify, expect either the klass to be erroneous or verification failed at
         // compile time.
@@ -5832,6 +5862,10 @@ bool ClassLinker::EnsureInitialized(Thread* self,
   if (!success) {
     if (can_init_fields && can_init_parents) {
       CHECK(self->IsExceptionPending()) << c->PrettyClass();
+    } else {
+      // There may or may not be an exception pending. If there is, clear it.
+      // We propagate the exception only if we can initialize fields and parents.
+      self->ClearException();
     }
   } else {
     self->AssertNoPendingException();
@@ -8970,38 +9004,6 @@ ObjPtr<mirror::Class> ClassLinker::DoResolveType(dex::TypeIndex type_idx,
   return resolved;
 }
 
-// Return the first accessible method from the list of interfaces implemented by
-// `klass`. For knowing if a method is accessible, we call through
-// `hiddenapi::ShouldDenyAccessToMember`.
-static ArtMethod* FindAccessibleInterfaceMethod(ObjPtr<mirror::Class> klass,
-                                                ObjPtr<mirror::DexCache> dex_cache,
-                                                ObjPtr<mirror::ClassLoader> class_loader,
-                                                ArtMethod* resolved_method,
-                                                PointerSize pointer_size)
-      REQUIRES_SHARED(Locks::mutator_lock_) {
-  ObjPtr<mirror::IfTable> iftable = klass->GetIfTable();
-  for (int32_t i = 0, iftable_count = iftable->Count(); i < iftable_count; ++i) {
-    ObjPtr<mirror::PointerArray> methods = iftable->GetMethodArrayOrNull(i);
-    if (methods == nullptr) {
-      continue;
-    }
-    for (size_t j = 0, count = iftable->GetMethodArrayCount(i); j < count; ++j) {
-      if (resolved_method == methods->GetElementPtrSize<ArtMethod*>(j, pointer_size)) {
-        ObjPtr<mirror::Class> iface = iftable->GetInterface(i);
-        ArtMethod* interface_method = &iface->GetVirtualMethodsSlice(pointer_size)[j];
-        // Pass AccessMethod::kNone instead of kLinking to not warn on the
-        // access. We'll only warn later if we could not find a visible method.
-        if (!hiddenapi::ShouldDenyAccessToMember(interface_method,
-                                                 hiddenapi::AccessContext(class_loader, dex_cache),
-                                                 hiddenapi::AccessMethod::kNone)) {
-          return interface_method;
-        }
-      }
-    }
-  }
-  return nullptr;
-}
-
 ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
                                            ObjPtr<mirror::DexCache> dex_cache,
                                            ObjPtr<mirror::ClassLoader> class_loader,
@@ -9026,12 +9028,8 @@ ArtMethod* ClassLinker::FindResolvedMethod(ObjPtr<mirror::Class> klass,
     // The resolved method that we have found cannot be accessed due to
     // hiddenapi (typically it is declared up the hierarchy and is not an SDK
     // method). Try to find an interface method from the implemented interfaces which is
-    // accessible.
-    ArtMethod* itf_method = FindAccessibleInterfaceMethod(klass,
-                                                          dex_cache,
-                                                          class_loader,
-                                                          resolved,
-                                                          image_pointer_size_);
+    // part of the SDK.
+    ArtMethod* itf_method = klass->FindAccessibleInterfaceMethod(resolved, image_pointer_size_);
     if (itf_method == nullptr) {
       // No interface method. Call ShouldDenyAccessToMember again but this time
       // with AccessMethod::kLinking to ensure that an appropriate warning is

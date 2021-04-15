@@ -94,9 +94,6 @@ class PACKED(4) OatMethodOffsets {
 
 class OatFile {
  public:
-  // Special classpath that skips shared library check.
-  static constexpr const char* kSpecialSharedLibrary = "&";
-
   // Open an oat file. Returns null on failure.
   // The `dex_filenames` argument, if provided, overrides the dex locations
   // from oat file when opening the dex files if they are not embedded in the
@@ -547,9 +544,6 @@ class OatDexFile final {
     return dex_file_pointer_;
   }
 
-  ArrayRef<const uint8_t> GetQuickenedInfoOf(const DexFile& dex_file,
-                                             uint32_t dex_method_idx) const;
-
   // Looks up a class definition by its class descriptor. Hash must be
   // ComputeModifiedUtf8Hash(descriptor).
   static const dex::ClassDef* FindClassDef(const DexFile& dex_file,
@@ -594,9 +588,11 @@ class OatDexFile final {
              const uint8_t* dex_file_pointer,
              uint32_t dex_file_checksum,
              const std::string& dex_file_location,
-             const std::string& canonical_dex_file_location);
+             const std::string& canonical_dex_file_location,
+             const uint8_t* lookup_table_data);
 
   bool IsBackedByVdexOnly() const;
+  void InitializeTypeLookupTable();
 
   static void AssertAotCompiler();
 

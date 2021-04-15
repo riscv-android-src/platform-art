@@ -94,11 +94,14 @@ ArtMethod* ArtMethod::GetNonObsoleteMethod() {
 }
 
 ArtMethod* ArtMethod::GetSingleImplementation(PointerSize pointer_size) {
-  if (!IsAbstract()) {
-    // A non-abstract's single implementation is itself.
+  if (IsInvokable()) {
+    // An invokable method single implementation is itself.
     return this;
   }
-  return reinterpret_cast<ArtMethod*>(GetDataPtrSize(pointer_size));
+  DCHECK(!IsDefaultConflicting());
+  ArtMethod* m = reinterpret_cast<ArtMethod*>(GetDataPtrSize(pointer_size));
+  CHECK(m == nullptr || !m->IsDefaultConflicting());
+  return m;
 }
 
 ArtMethod* ArtMethod::FromReflectedMethod(const ScopedObjectAccessAlreadyRunnable& soa,
@@ -532,33 +535,6 @@ bool ArtMethod::EqualParameters(Handle<mirror::ObjectArray<mirror::Class>> param
   return true;
 }
 
-ArrayRef<const uint8_t> ArtMethod::GetQuickenedInfo() {
-  const DexFile& dex_file = *GetDexFile();
-  const OatDexFile* oat_dex_file = dex_file.GetOatDexFile();
-  if (oat_dex_file == nullptr) {
-    return ArrayRef<const uint8_t>();
-  }
-  return oat_dex_file->GetQuickenedInfoOf(dex_file, GetDexMethodIndex());
-}
-
-uint16_t ArtMethod::GetIndexFromQuickening(uint32_t dex_pc) {
-  ArrayRef<const uint8_t> data = GetQuickenedInfo();
-  if (data.empty()) {
-    return DexFile::kDexNoIndex16;
-  }
-  QuickenInfoTable table(data);
-  uint32_t quicken_index = 0;
-  for (const DexInstructionPcPair& pair : DexInstructions()) {
-    if (pair.DexPc() == dex_pc) {
-      return table.GetData(quicken_index);
-    }
-    if (QuickenInfoTable::NeedsIndexForInstruction(&pair.Inst())) {
-      ++quicken_index;
-    }
-  }
-  return DexFile::kDexNoIndex16;
-}
-
 const OatQuickMethodHeader* ArtMethod::GetOatQuickMethodHeader(uintptr_t pc) {
   // Our callers should make sure they don't pass the instrumentation exit pc,
   // as this method does not look at the side instrumentation stack.
@@ -763,9 +739,9 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
           image_pointer_size);
     }
   }
-    if (interpreter::IsNterpSupported() &&
-        (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
-            interpreter::GetNterpEntryPoint())) {
+  if (interpreter::IsNterpSupported() &&
+      (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
+          interpreter::GetNterpEntryPoint())) {
     // If the entrypoint is nterp, it's too early to check if the new method
     // will support it. So for simplicity, use the interpreter bridge.
     SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);

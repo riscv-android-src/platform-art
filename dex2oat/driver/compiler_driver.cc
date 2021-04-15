@@ -1899,6 +1899,7 @@ class VerifyClassVisitor : public CompilationVisitor {
       std::string error_msg;
       failure_kind =
           verifier::ClassVerifier::VerifyClass(soa.Self(),
+                                               soa.Self()->GetVerifierDeps(),
                                                &dex_file,
                                                dex_cache,
                                                class_loader,
@@ -1938,7 +1939,10 @@ class VerifyClassVisitor : public CompilationVisitor {
       return;  // Do not update state.
     } else if (!SkipClass(jclass_loader, dex_file, klass.Get())) {
       CHECK(klass->IsResolved()) << klass->PrettyClass();
-      failure_kind = class_linker->VerifyClass(soa.Self(), klass, log_level_);
+      failure_kind = class_linker->VerifyClass(soa.Self(),
+                                               soa.Self()->GetVerifierDeps(),
+                                               klass,
+                                               log_level_);
 
       if (klass->IsErroneous()) {
         // ClassLinker::VerifyClass throws, which isn't useful in the compiler.
@@ -1994,7 +1998,10 @@ class VerifyClassVisitor : public CompilationVisitor {
       // Make the skip a soft failure, essentially being considered as verify at runtime.
       failure_kind = verifier::FailureKind::kSoftFailure;
     }
-    verifier::VerifierDeps::MaybeRecordVerificationStatus(dex_file, class_def, failure_kind);
+    verifier::VerifierDeps::MaybeRecordVerificationStatus(soa.Self()->GetVerifierDeps(),
+                                                          dex_file,
+                                                          class_def,
+                                                          failure_kind);
     soa.Self()->AssertNoPendingException();
   }
 
@@ -2112,7 +2119,7 @@ class InitializeClassVisitor : public CompilationVisitor {
 
     if (klass != nullptr) {
       if (!SkipClass(manager_->GetClassLoader(), dex_file, klass.Get())) {
-        TryInitializeClass(klass, class_loader);
+        TryInitializeClass(soa.Self(), klass, class_loader);
       }
       manager_->GetCompiler()->stats_->AddClassStatus(klass->GetStatus());
     }
@@ -2121,14 +2128,15 @@ class InitializeClassVisitor : public CompilationVisitor {
   }
 
   // A helper function for initializing klass.
-  void TryInitializeClass(Handle<mirror::Class> klass, Handle<mirror::ClassLoader>& class_loader)
+  void TryInitializeClass(Thread* self,
+                          Handle<mirror::Class> klass,
+                          Handle<mirror::ClassLoader>& class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_) {
     const DexFile& dex_file = klass->GetDexFile();
     const dex::ClassDef* class_def = klass->GetClassDef();
     const dex::TypeId& class_type_id = dex_file.GetTypeId(class_def->class_idx_);
     const char* descriptor = dex_file.StringDataByIdx(class_type_id.descriptor_idx_);
-    ScopedObjectAccessUnchecked soa(Thread::Current());
-    StackHandleScope<3> hs(soa.Self());
+    StackHandleScope<3> hs(self);
     ClassLinker* const class_linker = manager_->GetClassLinker();
     Runtime* const runtime = Runtime::Current();
     const CompilerOptions& compiler_options = manager_->GetCompiler()->GetCompilerOptions();
@@ -2153,7 +2161,8 @@ class InitializeClassVisitor : public CompilationVisitor {
     if (klass->IsVerified()) {
       // Attempt to initialize the class but bail if we either need to initialize the super-class
       // or static fields.
-      class_linker->EnsureInitialized(soa.Self(), klass, false, false);
+      class_linker->EnsureInitialized(self, klass, false, false);
+      DCHECK(!self->IsExceptionPending());
       old_status = klass->GetStatus();
       if (!klass->IsInitialized()) {
         // We don't want non-trivial class initialization occurring on multiple threads due to
@@ -2165,18 +2174,16 @@ class InitializeClassVisitor : public CompilationVisitor {
         // We need to use an ObjectLock due to potential suspension in the interpreting code. Rather
         // than use a special Object for the purpose we use the Class of java.lang.Class.
         Handle<mirror::Class> h_klass(hs.NewHandle(klass->GetClass()));
-        ObjectLock<mirror::Class> lock(soa.Self(), h_klass);
+        ObjectLock<mirror::Class> lock(self, h_klass);
         // Attempt to initialize allowing initialization of parent classes but still not static
         // fields.
         // Initialize dependencies first only for app or boot image extension,
         // to make TryInitializeClass() recursive.
         bool try_initialize_with_superclasses =
-            is_boot_image ? true : InitializeDependencies(klass, class_loader, soa.Self());
+            is_boot_image ? true : InitializeDependencies(klass, class_loader, self);
         if (try_initialize_with_superclasses) {
-          class_linker->EnsureInitialized(soa.Self(), klass, false, true);
-          // It's OK to clear the exception here since the compiler is supposed to be fault
-          // tolerant and will silently not initialize classes that have exceptions.
-          soa.Self()->ClearException();
+          class_linker->EnsureInitialized(self, klass, false, true);
+          DCHECK(!self->IsExceptionPending());
         }
         // Otherwise it's in app image or boot image extension but superclasses
         // cannot be initialized, no need to proceed.
@@ -2207,10 +2214,10 @@ class InitializeClassVisitor : public CompilationVisitor {
             // <clinit> at compile time.
             can_init_static_fields =
                 ClassLinker::kAppImageMayContainStrings &&
-                !soa.Self()->IsExceptionPending() &&
+                !self->IsExceptionPending() &&
                 !compiler_options.GetDebuggable() &&
                 (compiler_options.InitializeAppImageClasses() ||
-                 NoClinitInDependency(klass, soa.Self(), &class_loader));
+                 NoClinitInDependency(klass, self, &class_loader));
             // TODO The checking for clinit can be removed since it's already
             // checked when init superclass. Currently keep it because it contains
             // processing of intern strings. Will be removed later when intern strings
@@ -2229,17 +2236,17 @@ class InitializeClassVisitor : public CompilationVisitor {
             // TransactionAbortError is not initialized ant not in boot image, needed only by
             // compiler and will be pruned by ImageWriter.
             Handle<mirror::Class> exception_class =
-                hs.NewHandle(class_linker->FindClass(soa.Self(),
-                                                     Transaction::kAbortExceptionSignature,
+                hs.NewHandle(class_linker->FindClass(self,
+                                                     Transaction::kAbortExceptionDescriptor,
                                                      class_loader));
             bool exception_initialized =
-                class_linker->EnsureInitialized(soa.Self(), exception_class, true, true);
+                class_linker->EnsureInitialized(self, exception_class, true, true);
             DCHECK(exception_initialized);
 
             // Run the class initializer in transaction mode.
             runtime->EnterTransactionMode(is_app_image, klass.Get());
 
-            bool success = class_linker->EnsureInitialized(soa.Self(), klass, true, true);
+            bool success = class_linker->EnsureInitialized(self, klass, true, true);
             // TODO we detach transaction from runtime to indicate we quit the transactional
             // mode which prevents the GC from visiting objects modified during the transaction.
             // Ensure GC is not run so don't access freed objects when aborting transaction.
@@ -2258,8 +2265,8 @@ class InitializeClassVisitor : public CompilationVisitor {
                   old_status = klass->GetStatus();
                 }
               } else {
-                CHECK(soa.Self()->IsExceptionPending());
-                mirror::Throwable* exception = soa.Self()->GetException();
+                CHECK(self->IsExceptionPending());
+                mirror::Throwable* exception = self->GetException();
                 VLOG(compiler) << "Initialization of " << descriptor << " aborted because of "
                                << exception->Dump();
                 std::ostream* file_log = manager_->GetCompiler()->
@@ -2268,7 +2275,7 @@ class InitializeClassVisitor : public CompilationVisitor {
                   *file_log << descriptor << "\n";
                   *file_log << exception->Dump() << "\n";
                 }
-                soa.Self()->ClearException();
+                self->ClearException();
                 runtime->RollbackAllTransactions();
                 CHECK_EQ(old_status, klass->GetStatus()) << "Previous class status not restored";
               }
@@ -2291,16 +2298,16 @@ class InitializeClassVisitor : public CompilationVisitor {
         // Clear exception in case EnsureInitialized has caused one in the code above.
         // It's OK to clear the exception here since the compiler is supposed to be fault
         // tolerant and will silently not initialize classes that have exceptions.
-        soa.Self()->ClearException();
+        self->ClearException();
 
         // If the class still isn't initialized, at least try some checks that initialization
         // would do so they can be skipped at runtime.
         if (!klass->IsInitialized() && class_linker->ValidateSuperClassDescriptors(klass)) {
           old_status = ClassStatus::kSuperclassValidated;
         } else {
-          soa.Self()->ClearException();
+          self->ClearException();
         }
-        soa.Self()->AssertNoPendingException();
+        self->AssertNoPendingException();
       }
     }
     if (old_status == ClassStatus::kInitialized) {
@@ -2312,6 +2319,11 @@ class InitializeClassVisitor : public CompilationVisitor {
     // Back up the status before doing initialization for static encoded fields,
     // because the static encoded branch wants to keep the status to uninitialized.
     manager_->GetCompiler()->RecordClassStatus(ref, old_status);
+
+    if (kIsDebugBuild) {
+      // Make sure the class initialization did not leave any local references.
+      self->GetJniEnv()->AssertLocalsEmpty();
+    }
   }
 
  private:
@@ -2431,7 +2443,7 @@ class InitializeClassVisitor : public CompilationVisitor {
       StackHandleScope<1> hs(self);
       Handle<mirror::Class> super_class = hs.NewHandle(klass->GetSuperClass());
       if (!super_class->IsInitialized()) {
-        this->TryInitializeClass(super_class, class_loader);
+        this->TryInitializeClass(self, super_class, class_loader);
         if (!super_class->IsInitialized()) {
           return false;
         }
@@ -2444,7 +2456,7 @@ class InitializeClassVisitor : public CompilationVisitor {
         StackHandleScope<1> hs(self);
         Handle<mirror::Class> iface = hs.NewHandle(klass->GetIfTable()->GetInterface(i));
         if (iface->HasDefaultMethods() && !iface->IsInitialized()) {
-          TryInitializeClass(iface, class_loader);
+          TryInitializeClass(self, iface, class_loader);
           if (!iface->IsInitialized()) {
             return false;
           }

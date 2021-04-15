@@ -232,12 +232,13 @@ class ArtMethod final {
   }
 
   bool IsPreCompiled() const {
-    if (IsIntrinsic()) {
-      // kAccCompileDontBother overlaps with kAccIntrinsicBits.
-      return false;
-    }
-    uint32_t expected = (kAccPreCompiled | kAccCompileDontBother);
-    return (GetAccessFlags() & expected) == expected;
+    // kAccCompileDontBother and kAccPreCompiled overlap with kAccIntrinsicBits.
+    // Intrinsics should be compiled in primary boot image, not pre-compiled by JIT.
+    static_assert((kAccCompileDontBother & kAccIntrinsicBits) != 0);
+    static_assert((kAccPreCompiled & kAccIntrinsicBits) != 0);
+    static constexpr uint32_t kMask = kAccIntrinsic | kAccCompileDontBother | kAccPreCompiled;
+    static constexpr uint32_t kValue = kAccCompileDontBother | kAccPreCompiled;
+    return (GetAccessFlags() & kMask) == kValue;
   }
 
   void SetPreCompiled() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -391,6 +392,20 @@ class ArtMethod final {
   void SetMustCountLocks() REQUIRES_SHARED(Locks::mutator_lock_) {
     AddAccessFlags(kAccMustCountLocks);
     ClearAccessFlags(kAccSkipAccessChecks);
+  }
+
+  bool HasNterpEntryPointFastPathFlag() const {
+    constexpr uint32_t mask = kAccNative | kAccNterpEntryPointFastPathFlag;
+    return (GetAccessFlags() & mask) == kAccNterpEntryPointFastPathFlag;
+  }
+
+  void SetNterpEntryPointFastPathFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
+    DCHECK(!IsNative());
+    AddAccessFlags(kAccNterpEntryPointFastPathFlag);
+  }
+
+  void SetNterpInvokeFastPathFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
+    AddAccessFlags(kAccNterpInvokeFastPathFlag);
   }
 
   // Returns true if this method could be overridden by a default method.
@@ -706,9 +721,6 @@ class ArtMethod final {
   static constexpr MemberOffset HotnessCountOffset() {
     return MemberOffset(OFFSETOF_MEMBER(ArtMethod, hotness_count_));
   }
-
-  ArrayRef<const uint8_t> GetQuickenedInfo() REQUIRES_SHARED(Locks::mutator_lock_);
-  uint16_t GetIndexFromQuickening(uint32_t dex_pc) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Returns the method header for the compiled code containing 'pc'. Note that runtime
   // methods will return null for this method, as they are not oat based.

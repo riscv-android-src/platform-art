@@ -327,6 +327,7 @@ libart_cc_defaults {
                 "interpreter/mterp/mterp.cc",
                 "interpreter/mterp/nterp_stub.cc",
                 ":libart_mterp.x86",
+                "arch/x86/__x86.get_pc_thunk.S",
                 "arch/x86/context_x86.cc",
                 "arch/x86/entrypoints_init_x86.cc",
                 "arch/x86/jni_entrypoints_x86.S",
@@ -547,8 +548,6 @@ art_cc_library {
     shared_libs: [
         "libartbase",
         "libdexfile",
-        // We need to eagerly load it so libdexfile_support used from libunwindstack can find it.
-        "libdexfile_external",
         "libprofile",
     ],
     export_shared_lib_headers: [
@@ -581,9 +580,6 @@ art_cc_library {
     shared_libs: [
         "libartbased",
         "libdexfiled",
-        // We need to eagerly preload it, so that libunwindstack can find it.
-        // Otherwise, it would try to load the non-debug version with dlopen.
-        "libdexfiled_external",
         "libprofiled",
     ],
     export_shared_lib_headers: [
@@ -591,6 +587,10 @@ art_cc_library {
     ],
     apex_available: [
         "com.android.art.debug",
+        // TODO(b/183882457): This lib doesn't go into com.android.art, but
+        // apex_available lists need to be the same for internal libs to avoid
+        // stubs, and this depends on libsigchain.
+        "com.android.art",
     ],
 }
 
@@ -878,12 +878,9 @@ genrule {
 
 cc_library_static {
     name: "libstatslog_art",
+    defaults: ["art_defaults"],
     generated_sources: ["statslog_art.cpp"],
     generated_headers: ["statslog_art.h"],
-    cflags: [
-        "-Wall",
-        "-Werror",
-    ],
     export_generated_headers: ["statslog_art.h"],
     shared_libs: [
         "liblog",
@@ -894,7 +891,6 @@ cc_library_static {
         "com.android.art",
         "com.android.art.debug",
     ],
-    min_sdk_version: "S",
 }
 
 genrule {

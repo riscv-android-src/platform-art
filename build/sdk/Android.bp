@@ -65,7 +65,7 @@ art_module_sdk {
 
             native_shared_libs: [
                 "libandroidio",
-                "libdexfile_external",
+                "libdexfile",
                 "libnativebridge",
                 "libnativehelper",
                 "libnativeloader",
@@ -77,7 +77,7 @@ art_module_sdk {
             ],
 
             native_static_libs: [
-                "libdexfile_external_static",
+                "libdexfile_static",
                 "libnativehelper_lazy",
             ],
         },
@@ -85,6 +85,13 @@ art_module_sdk {
         android: {
             boot_images: [
                 "art-boot-image",
+            ],
+            bootclasspath_fragments: [
+                "art-bootclasspath-fragment",
+            ],
+
+            compat_configs: [
+                "libcore-platform-compat-config",
             ],
 
             // Create placeholder java_import prebuilts for the java boot libraries so that Soong
@@ -207,6 +214,12 @@ art_module_exports {
                 "hiddenapi",
                 "dex2oat",
                 "dex2oatd",
+                "profman",
+            ],
+            native_libs: [
+                "libdexfile", // libdexfile_external dependency
+                "libartpalette", // libdexfile dependency
+                "libartbase", // libdexfile dependency
             ],
         },
 

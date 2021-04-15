@@ -45,8 +45,39 @@ constexpr std::optional<int32_t> EncodeDatumId(DatumId datum_id) {
     case DatumId::kJitMethodCompileTime:
       return std::make_optional(
           statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_JIT_METHOD_COMPILE_TIME);
-    default:
-      return std::nullopt;
+    case DatumId::kClassLoadingTotalTime:
+      return std::make_optional(statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_CLASS_LOADING_TIME);
+    case DatumId::kClassVerificationCount:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_CLASS_VERIFICATION_COUNT);
+    case DatumId::kMutatorPauseTimeDuringGC:
+      return std::make_optional(statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_MUTATOR_PAUSE_TIME);
+    case DatumId::kYoungGcCount:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_YOUNG_GENERATION_COLLECTION_COUNT);
+    case DatumId::kFullGcCount:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_FULL_HEAP_COLLECTION_COUNT);
+    case DatumId::kTotalBytesAllocated:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_TOTAL_BYTES_ALLOCATED);
+    case DatumId::kTotalGcMetaDataSize:
+      return std::make_optional(statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_TOTAL_METADATA_SIZE);
+    case DatumId::kYoungGcCollectionTime:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_YOUNG_GENERATION_COLLECTION_TIME);
+    case DatumId::kFullGcCollectionTime:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_FULL_HEAP_COLLECTION_TIME);
+    case DatumId::kYoungGcThroughput:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_YOUNG_GENERATION_COLLECTION_THROUGHPUT);
+    case DatumId::kFullGcThroughput:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_GC_FULL_HEAP_COLLECTION_THROUGHPUT);
+    case DatumId::kJitMethodCompileCount:
+      return std::make_optional(
+          statsd::ART_DATUM_REPORTED__KIND__ART_DATUM_JIT_METHOD_COMPILE_COUNT);
   }
 }
 
@@ -86,8 +117,6 @@ constexpr int32_t EncodeCompilationReason(CompilationReason reason) {
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_AB_OTA;
     case CompilationReason::kBgDexopt:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BG_DEXOPT;
-    case CompilationReason::kBoot:
-      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BOOT;
     case CompilationReason::kError:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_ERROR;
     case CompilationReason::kFirstBoot:
@@ -101,6 +130,23 @@ constexpr int32_t EncodeCompilationReason(CompilationReason reason) {
           ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_WITH_DEX_METADATA;
     case CompilationReason::kShared:
       return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_SHARED;
+    case CompilationReason::kPostBoot:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_POST_BOOT;
+    case CompilationReason::kInstallBulk:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK;
+    case CompilationReason::kInstallBulkSecondary:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_SECONDARY;
+    case CompilationReason::kInstallBulkDowngraded:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_DOWNGRADED;
+    case CompilationReason::kInstallBulkSecondaryDowngraded:
+      return statsd::
+          ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_BULK_SECONDARY_DOWNGRADED;
+    case CompilationReason::kBootAfterOTA:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_BOOT_AFTER_OTA;
+    case CompilationReason::kInstallFast:
+      return statsd::ART_DATUM_REPORTED__COMPILATION_REASON__ART_COMPILATION_REASON_INSTALL_FAST;
   }
 }
 
@@ -127,7 +173,9 @@ class StatsdBackend : public MetricsBackend {
                               // constant is not present in all branches)
           datum_id.value(),
           static_cast<int64_t>(value),
-          /*dex_metadata_type=*/0);  // Update the value once the enum is changed
+          statsd::ART_DATUM_REPORTED__DEX_METADATA_TYPE__ART_DEX_METADATA_TYPE_UNKNOWN,
+          statsd::ART_DATUM_REPORTED__APK_TYPE__ART_APK_TYPE_UNKNOWN,
+          statsd::ART_DATUM_REPORTED__ISA__ART_ISA_UNKNOWN);
     }
   }
 

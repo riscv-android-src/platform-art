@@ -1068,9 +1068,10 @@ void Runtime::InitNonZygoteOrPostFork(
     thread_pool_->StartWorkers(Thread::Current());
   }
 
-  // Reset the gc performance data at zygote fork so that the GCs
+  // Reset the gc performance data and metrics at zygote fork so that the events from
   // before fork aren't attributed to an app.
   heap_->ResetGcPerformanceInfo();
+  GetMetrics()->Reset();
 
   if (metrics_reporter_ != nullptr) {
     if (IsSystemServer() && !metrics_reporter_->IsPeriodicReportingEnabled()) {
@@ -2957,27 +2958,6 @@ void Runtime::DeoptimizeBootImage() {
       jit->GetCodeCache()->TransitionToDebuggable();
     }
   }
-  // Also de-quicken all -quick opcodes. We do this for both BCP and non-bcp so if we are swapping
-  // debuggable during startup by a plugin (eg JVMTI) even non-BCP code has its vdex files deopted.
-  std::unordered_set<const VdexFile*> vdexs;
-  GetClassLinker()->VisitKnownDexFiles(Thread::Current(), [&](const art::DexFile* df) {
-    const OatDexFile* odf = df->GetOatDexFile();
-    if (odf == nullptr) {
-      return;
-    }
-    const OatFile* of = odf->GetOatFile();
-    if (of == nullptr || of->IsDebuggable()) {
-      // no Oat or already debuggable so no -quick.
-      return;
-    }
-    vdexs.insert(of->GetVdexFile());
-  });
-  LOG(INFO) << "Unquickening " << vdexs.size() << " vdex files!";
-  for (const VdexFile* vf : vdexs) {
-    vf->AllowWriting(true);
-    vf->UnquickenInPlace(/*decompile_return_instruction=*/true);
-    vf->AllowWriting(false);
-  }
 }
 
 Runtime::ScopedThreadPoolUsage::ScopedThreadPoolUsage()
@@ -3083,6 +3063,14 @@ void Runtime::NotifyStartupCompleted() {
   ProfileSaver::NotifyStartupCompleted();
 
   if (metrics_reporter_ != nullptr) {
+    const OatFile* primary_oat_file = oat_file_manager_->GetPrimaryOatFile();
+    if (primary_oat_file != nullptr) {
+      const char* compilation_reason = primary_oat_file->GetCompilationReason();
+      metrics_reporter_->SetCompilationInfo(
+          compilation_reason != nullptr ? metrics::CompilationReasonFromName(compilation_reason) :
+                                          metrics::CompilationReason::kUnknown,
+          primary_oat_file->GetCompilerFilter());
+    }
     metrics_reporter_->NotifyStartupCompleted();
   }
 }
