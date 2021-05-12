@@ -83,29 +83,13 @@ art_module_sdk {
         },
 
         android: {
-            boot_images: [
-                "art-boot-image",
-            ],
             bootclasspath_fragments: [
+                // Adds the fragment and its contents to the sdk.
                 "art-bootclasspath-fragment",
             ],
 
             compat_configs: [
                 "libcore-platform-compat-config",
-            ],
-
-            // Create placeholder java_import prebuilts for the java boot libraries so that Soong
-            // can retrieve their dex implementation jars from the associated prebuilt_apex. All
-            // libraries listed in the exported_java_libs property of the ART apex (see
-            // packages/modules/ArtPrebuilt) must have a prebuilt provided by this sdk or one of
-            // the ART module_exports. Those java boot libraries which do not require a prebuilt for
-            // another reason, e.g. test, are listed here.
-            java_boot_libs: [
-                "apache-xml",
-                "bouncycastle",
-                "core-libart",
-                "core-oj",
-                "okhttp",
             ],
 
             java_header_libs: [
@@ -156,9 +140,6 @@ art_module_sdk {
                 "libnativehelper_compat_libc++",
                 "libnativeloader_lazy",
             ],
-            native_static_libs: [
-                "libctstiagent",
-            ],
         },
 
         linux_bionic: {
@@ -174,8 +155,6 @@ art_module_sdk {
 art_module_exports {
     name: "art-module-host-exports",
     host_supported: true,
-    // TODO(b/173186484) - remove once art-notices-for-framework-stubs-jar has been removed.
-    device_supported: true,
 
     // Enable if SOONG_CONFIG_art_module_source_build is true.
     enabled: false,
@@ -188,14 +167,6 @@ art_module_exports {
     prebuilt_visibility: prebuilt_visibility,
 
     target: {
-        android: {
-            java_libs: [
-                // TODO(b/173186484) - embed notices in stubs and remove this.
-                // Needed for android_stubs_current et al.
-                "art-notices-for-framework-stubs-jar",
-            ],
-        },
-
         host: {
             // Set in target.host because the top level compile_multilib
             // property is fixed to "both" in the sdk/module_exports
@@ -215,7 +186,6 @@ art_module_exports {
                 "profman",
             ],
             native_libs: [
-                "libdexfile", // libdexfile_external dependency
                 "libartpalette", // libdexfile dependency
                 "libartbase", // libdexfile dependency
             ],
@@ -288,5 +258,8 @@ art_module_exports {
 
     native_shared_libs: [
         "libjavacoretests",
+    ],
+    native_static_libs: [
+        "libctstiagent",
     ],
 }
