@@ -14,20 +14,31 @@
  * limitations under the License.
  */
 
-#include "block_namer.h"
-
-#include "nodes.h"
-
-namespace art {
-
-std::ostream& BlockNamer::PrintName(std::ostream& os, HBasicBlock* blk) const {
-  os << "B";
-  if (blk != nullptr) {
-    os << blk->GetBlockId();
-  } else {
-    os << "<none>";
+class SuperClass {
+  public int doInvoke() {
+    synchronized (this) {
+      return 42;
+    }
   }
-  return os;
 }
 
-}  // namespace art
+public class Main extends SuperClass {
+
+  public static void main(String[] args) {
+    Main m = new Main();
+    int value = doInvokeTypedSuperClass(m);
+    if (value != 43) {
+      throw new Error("Expected 43, got " + value);
+    }
+  }
+
+  public static int doInvokeTypedSuperClass(SuperClass sc) {
+    return sc.doInvoke();
+  }
+
+  public int doInvoke() {
+    synchronized (this) {
+      return super.doInvoke() + 1;
+    }
+  }
+}
