@@ -28,7 +28,6 @@
 #include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/macros.h>
-#include <android-base/properties.h>
 #include <android-base/result.h>
 #include <android-base/strings.h>
 #include <nativehelper/scoped_utf_chars.h>
@@ -122,16 +121,18 @@ void LibraryNamespaces::Initialize() {
     return;
   }
 
-  // android_init_namespaces() expects all the public libraries
-  // to be loaded so that they can be found by soname alone.
+  // Load the preloadable public libraries. Since libnativeloader is in the
+  // com_android_art namespace, use OpenSystemLibrary rather than dlopen to
+  // ensure the libraries are loaded in the system namespace.
   //
   // TODO(dimitry): this is a bit misleading since we do not know
   // if the vendor public library is going to be opened from /vendor/lib
   // we might as well end up loading them from /system/lib or /product/lib
   // For now we rely on CTS test to catch things like this but
   // it should probably be addressed in the future.
-  for (const auto& soname : android::base::Split(preloadable_public_libraries(), ":")) {
-    LOG_ALWAYS_FATAL_IF(dlopen(soname.c_str(), RTLD_NOW | RTLD_NODELETE) == nullptr,
+  for (const std::string& soname : android::base::Split(preloadable_public_libraries(), ":")) {
+    void* handle = OpenSystemLibrary(soname.c_str(), RTLD_NOW | RTLD_NODELETE);
+    LOG_ALWAYS_FATAL_IF(handle == nullptr,
                         "Error preloading public library %s: %s", soname.c_str(), dlerror());
   }
 }
@@ -305,7 +306,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     return system_ns.error();
   }
 
-  auto linked = app_ns->Link(*system_ns, system_exposed_libraries);
+  auto linked = app_ns->Link(&system_ns.value(), system_exposed_libraries);
   if (!linked.ok()) {
     return linked.error();
   }
@@ -314,7 +315,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     auto ns = NativeLoaderNamespace::GetExportedNamespace(apex_ns_name, is_bridged);
     // Even if APEX namespace is visible, it may not be available to bridged.
     if (ns.ok()) {
-      linked = app_ns->Link(*ns, public_libs);
+      linked = app_ns->Link(&ns.value(), public_libs);
       if (!linked.ok()) {
         return linked.error();
       }
@@ -325,7 +326,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   if (unbundled_app_origin == APK_ORIGIN_VENDOR && !vndksp_libraries_vendor().empty()) {
     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkNamespaceName, is_bridged);
     if (vndk_ns.ok()) {
-      linked = app_ns->Link(*vndk_ns, vndksp_libraries_vendor());
+      linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_vendor());
       if (!linked.ok()) {
         return linked.error();
       }
@@ -336,7 +337,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
   if (unbundled_app_origin == APK_ORIGIN_PRODUCT && !vndksp_libraries_product().empty()) {
     auto vndk_ns = NativeLoaderNamespace::GetExportedNamespace(kVndkProductNamespaceName, is_bridged);
     if (vndk_ns.ok()) {
-      linked = app_ns->Link(*vndk_ns, vndksp_libraries_product());
+      linked = app_ns->Link(&vndk_ns.value(), vndksp_libraries_product());
       if (!linked.ok()) {
         return linked.error();
       }
@@ -349,7 +350,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     if (jni_libs != "") {
       auto apex_ns = NativeLoaderNamespace::GetExportedNamespace(*apex_ns_name, is_bridged);
       if (apex_ns.ok()) {
-        linked = app_ns->Link(*apex_ns, jni_libs);
+        linked = app_ns->Link(&apex_ns.value(), jni_libs);
         if (!linked.ok()) {
           return linked.error();
         }
@@ -364,7 +365,7 @@ Result<NativeLoaderNamespace*> LibraryNamespaces::Create(JNIEnv* env, uint32_t t
     // when vendor_ns is not configured, link to the system namespace
     auto target_ns = vendor_ns.ok() ? vendor_ns : system_ns;
     if (target_ns.ok()) {
-      linked = app_ns->Link(*target_ns, vendor_libs);
+      linked = app_ns->Link(&target_ns.value(), vendor_libs);
       if (!linked.ok()) {
         return linked.error();
       }

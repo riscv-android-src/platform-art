@@ -148,6 +148,7 @@
 #include "transaction.h"
 #include "vdex_file.h"
 #include "verifier/class_verifier.h"
+#include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
 
 #include "interpreter/interpreter_mterp_impl.h"
@@ -2093,11 +2094,6 @@ bool ClassLinker::AddImageSpace(
   return true;
 }
 
-bool ClassLinker::ClassInClassTable(ObjPtr<mirror::Class> klass) {
-  ClassTable* const class_table = ClassTableForClassLoader(klass->GetClassLoader());
-  return class_table != nullptr && class_table->Contains(klass);
-}
-
 void ClassLinker::VisitClassRoots(RootVisitor* visitor, VisitRootFlags flags) {
   // Acquire tracing_enabled before locking class linker lock to prevent lock order violation. Since
   // enabling tracing requires the mutator lock, there are no race conditions here.
@@ -2800,31 +2796,31 @@ ObjPtr<mirror::Class> ClassLinker::FindClassInBaseDexClassLoaderClassPath(
          IsDelegateLastClassLoader(soa, class_loader))
       << "Unexpected class loader for descriptor " << descriptor;
 
+  const DexFile* dex_file = nullptr;
+  const dex::ClassDef* class_def = nullptr;
   ObjPtr<mirror::Class> ret;
-  auto define_class = [&](const DexFile* cp_dex_file) REQUIRES_SHARED(Locks::mutator_lock_) {
-    const dex::ClassDef* dex_class_def = OatDexFile::FindClassDef(*cp_dex_file, descriptor, hash);
-    if (dex_class_def != nullptr) {
-      ObjPtr<mirror::Class> klass = DefineClass(soa.Self(),
-                                                descriptor,
-                                                hash,
-                                                class_loader,
-                                                *cp_dex_file,
-                                                *dex_class_def);
-      if (klass == nullptr) {
-        CHECK(soa.Self()->IsExceptionPending()) << descriptor;
-        FilterDexFileCaughtExceptions(soa.Self(), this);
-        // TODO: Is it really right to break here, and not check the other dex files?
-      } else {
-        DCHECK(!soa.Self()->IsExceptionPending());
-      }
-      ret = klass;
-      return false;  // Found a Class (or error == nullptr), stop visit.
+  auto find_class_def = [&](const DexFile* cp_dex_file) REQUIRES_SHARED(Locks::mutator_lock_) {
+    const dex::ClassDef* cp_class_def = OatDexFile::FindClassDef(*cp_dex_file, descriptor, hash);
+    if (cp_class_def != nullptr) {
+      dex_file = cp_dex_file;
+      class_def = cp_class_def;
+      return false;  // Found a class definition, stop visit.
     }
     return true;  // Continue with the next DexFile.
   };
+  VisitClassLoaderDexFiles(soa, class_loader, find_class_def);
 
-  VisitClassLoaderDexFiles(soa, class_loader, define_class);
-  return ret;
+  ObjPtr<mirror::Class> klass = nullptr;
+  if (class_def != nullptr) {
+    klass = DefineClass(soa.Self(), descriptor, hash, class_loader, *dex_file, *class_def);
+    if (UNLIKELY(klass == nullptr)) {
+      CHECK(soa.Self()->IsExceptionPending()) << descriptor;
+      FilterDexFileCaughtExceptions(soa.Self(), this);
+    } else {
+      DCHECK(!soa.Self()->IsExceptionPending());
+    }
+  }
+  return klass;
 }
 
 ObjPtr<mirror::Class> ClassLinker::FindClass(Thread* self,
@@ -4565,6 +4561,22 @@ verifier::FailureKind ClassLinker::VerifyClass(Thread* self,
     // Don't attempt to re-verify if already verified.
     if (klass->IsVerified()) {
       EnsureSkipAccessChecksMethods(klass, image_pointer_size_);
+      if (verifier_deps != nullptr &&
+          verifier_deps->ContainsDexFile(klass->GetDexFile()) &&
+          !verifier_deps->HasRecordedVerifiedStatus(klass->GetDexFile(), *klass->GetClassDef()) &&
+          !Runtime::Current()->IsAotCompiler()) {
+        // If the klass is verified, but `verifier_deps` did not record it, this
+        // means we are running background verification of a secondary dex file.
+        // Re-run the verifier to populate `verifier_deps`.
+        // No need to run the verification when running on the AOT Compiler, as
+        // the driver handles those multithreaded cases already.
+        std::string error_msg;
+        verifier::FailureKind failure =
+            PerformClassVerification(self, verifier_deps, klass, log_level, &error_msg);
+        // We could have soft failures, so just check that we don't have a hard
+        // failure.
+        DCHECK_NE(failure, verifier::FailureKind::kHardFailure) << error_msg;
+      }
       return verifier::FailureKind::kNoFailure;
     }
 
@@ -8936,6 +8948,16 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
                                                         ObjPtr<mirror::ClassLoader> class_loader) {
   const DexFile& dex_file = *dex_cache->GetDexFile();
   const char* descriptor = dex_file.StringByTypeIdx(type_idx);
+  ObjPtr<mirror::Class> type = LookupResolvedType(descriptor, class_loader);
+  if (type != nullptr) {
+    DCHECK(type->IsResolved());
+    dex_cache->SetResolvedType(type_idx, type);
+  }
+  return type;
+}
+
+ObjPtr<mirror::Class> ClassLinker::LookupResolvedType(const char* descriptor,
+                                                      ObjPtr<mirror::ClassLoader> class_loader) {
   DCHECK_NE(*descriptor, '\0') << "descriptor is empty string";
   ObjPtr<mirror::Class> type = nullptr;
   if (descriptor[1] == '\0') {
@@ -8949,14 +8971,7 @@ ObjPtr<mirror::Class> ClassLinker::DoLookupResolvedType(dex::TypeIndex type_idx,
     // Find the class in the loaded classes table.
     type = LookupClass(self, descriptor, hash, class_loader);
   }
-  if (type != nullptr) {
-    if (type->IsResolved()) {
-      dex_cache->SetResolvedType(type_idx, type);
-    } else {
-      type = nullptr;
-    }
-  }
-  return type;
+  return (type != nullptr && type->IsResolved()) ? type : nullptr;
 }
 
 template <typename RefType>

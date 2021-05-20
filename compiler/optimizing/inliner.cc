@@ -342,7 +342,7 @@ static inline ObjPtr<mirror::Class> GetMonomorphicType(
   return classes.GetReference(0)->AsClass();
 }
 
-ArtMethod* HInliner::TryCHADevirtualization(ArtMethod* resolved_method) {
+ArtMethod* HInliner::FindMethodFromCHA(ArtMethod* resolved_method) {
   if (!resolved_method->HasSingleImplementation()) {
     return nullptr;
   }
@@ -421,7 +421,6 @@ static bool AlwaysThrows(const CompilerOptions& compiler_options, ArtMethod* met
       case Instruction::RETURN_VOID:
       case Instruction::RETURN_WIDE:
       case Instruction::RETURN_OBJECT:
-      case Instruction::RETURN_VOID_NO_BARRIER:
         return false;  // found regular control flow back
       case Instruction::THROW:
         throw_seen = true;
@@ -431,27 +430,6 @@ static bool AlwaysThrows(const CompilerOptions& compiler_options, ArtMethod* met
     }
   }
   return throw_seen;
-}
-
-ArtMethod* HInliner::FindActualCallTarget(HInvoke* invoke_instruction, bool* cha_devirtualize) {
-  ArtMethod* actual_method = nullptr;
-  if (invoke_instruction->IsInvokeStaticOrDirect()) {
-    actual_method = invoke_instruction->GetResolvedMethod();
-  } else {
-    // Check if we can statically find the method.
-    actual_method = FindVirtualOrInterfaceTarget(invoke_instruction);
-  }
-
-  if (actual_method == nullptr) {
-    ArtMethod* method = TryCHADevirtualization(invoke_instruction->GetResolvedMethod());
-    if (method != nullptr) {
-      *cha_devirtualize = true;
-      actual_method = method;
-      LOG_NOTE() << "Try CHA-based inlining of " << actual_method->PrettyMethod();
-    }
-  }
-
-  return actual_method;
 }
 
 bool HInliner::TryInline(HInvoke* invoke_instruction) {
@@ -481,40 +459,66 @@ bool HInliner::TryInline(HInvoke* invoke_instruction) {
     return false;
   }
 
-  bool cha_devirtualize = false;
-  ArtMethod* actual_method = FindActualCallTarget(invoke_instruction, &cha_devirtualize);
+  ArtMethod* actual_method = invoke_instruction->IsInvokeStaticOrDirect()
+      ? invoke_instruction->GetResolvedMethod()
+      : FindVirtualOrInterfaceTarget(invoke_instruction);
 
-  // If we didn't find a method, see if we can inline from the inline caches.
-  if (actual_method == nullptr) {
-    DCHECK(!invoke_instruction->IsInvokeStaticOrDirect());
-    return TryInlineFromInlineCache(invoke_instruction);
-  }
-
-  // Single target.
-  bool result = TryInlineAndReplace(invoke_instruction,
-                                    actual_method,
-                                    ReferenceTypeInfo::CreateInvalid(),
-                                    /* do_rtp= */ true,
-                                    cha_devirtualize);
-  if (result) {
-    // Successfully inlined.
-    if (!invoke_instruction->IsInvokeStaticOrDirect()) {
-      if (cha_devirtualize) {
-        // Add dependency due to devirtualization. We've assumed resolved_method
-        // has single implementation.
-        outermost_graph_->AddCHASingleImplementationDependency(resolved_method);
-        MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
+  if (actual_method != nullptr) {
+    // Single target.
+    bool result = TryInlineAndReplace(invoke_instruction,
+                                      actual_method,
+                                      ReferenceTypeInfo::CreateInvalid(),
+                                      /* do_rtp= */ true);
+    if (result) {
+      MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+    } else {
+      HInvoke* invoke_to_analyze = nullptr;
+      if (TryDevirtualize(invoke_instruction, actual_method, &invoke_to_analyze)) {
+        // Consider devirtualization as inlining.
+        result = true;
+        MaybeRecordStat(stats_, MethodCompilationStat::kDevirtualized);
       } else {
-        MaybeRecordStat(stats_, MethodCompilationStat::kInlinedInvokeVirtualOrInterface);
+        invoke_to_analyze = invoke_instruction;
+      }
+      // Set always throws property for non-inlined method call with single
+      // target.
+      if (AlwaysThrows(codegen_->GetCompilerOptions(), actual_method)) {
+        invoke_to_analyze->SetAlwaysThrows(true);
       }
     }
-  } else if (!cha_devirtualize && AlwaysThrows(codegen_->GetCompilerOptions(), actual_method)) {
-    // Set always throws property for non-inlined method call with single target
-    // (unless it was obtained through CHA, because that would imply we have
-    // to add the CHA dependency, which seems not worth it).
-    invoke_instruction->SetAlwaysThrows(true);
+    return result;
   }
-  return result;
+
+  DCHECK(!invoke_instruction->IsInvokeStaticOrDirect());
+
+  if (TryInlineFromCHA(invoke_instruction)) {
+    return true;
+  }
+  return TryInlineFromInlineCache(invoke_instruction);
+}
+
+bool HInliner::TryInlineFromCHA(HInvoke* invoke_instruction) {
+  ArtMethod* method = FindMethodFromCHA(invoke_instruction->GetResolvedMethod());
+  if (method == nullptr) {
+    return false;
+  }
+  LOG_NOTE() << "Try CHA-based inlining of " << method->PrettyMethod();
+
+  uint32_t dex_pc = invoke_instruction->GetDexPc();
+  HInstruction* cursor = invoke_instruction->GetPrevious();
+  HBasicBlock* bb_cursor = invoke_instruction->GetBlock();
+  if (!TryInlineAndReplace(invoke_instruction,
+                           method,
+                           ReferenceTypeInfo::CreateInvalid(),
+                           /* do_rtp= */ true)) {
+    return false;
+  }
+  AddCHAGuard(invoke_instruction, dex_pc, cursor, bb_cursor);
+  // Add dependency due to devirtualization: we are assuming the resolved method
+  // has a single implementation.
+  outermost_graph_->AddCHASingleImplementationDependency(invoke_instruction->GetResolvedMethod());
+  MaybeRecordStat(stats_, MethodCompilationStat::kCHAInline);
+  return true;
 }
 
 bool HInliner::UseOnlyPolymorphicInliningWithNoDeopt() {
@@ -662,58 +666,23 @@ HInliner::InlineCacheType HInliner::GetInlineCacheAOT(
   }
   DCHECK_LE(dex_pc_data.classes.size(), InlineCache::kIndividualCacheSize);
 
-  Thread* self = Thread::Current();
-  // We need to resolve the class relative to the containing dex file.
-  // So first, build a mapping from the index of dex file in the profile to
-  // its dex cache. This will avoid repeating the lookup when walking over
-  // the inline cache types.
-  ScopedArenaAllocator allocator(graph_->GetArenaStack());
-  ScopedArenaVector<ObjPtr<mirror::DexCache>> dex_profile_index_to_dex_cache(
-        pci->GetNumberOfDexFiles(), nullptr, allocator.Adapter(kArenaAllocMisc));
-  const std::vector<const DexFile*>& dex_files =
-      codegen_->GetCompilerOptions().GetDexFilesForOatFile();
-  for (const ProfileCompilationInfo::ClassReference& class_ref : dex_pc_data.classes) {
-    if (dex_profile_index_to_dex_cache[class_ref.dex_profile_index] == nullptr) {
-      ProfileCompilationInfo::ProfileIndexType profile_index = class_ref.dex_profile_index;
-      const DexFile* dex_file = pci->FindDexFileForProfileIndex(profile_index, dex_files);
-      if (dex_file == nullptr) {
-        VLOG(compiler) << "Could not find profiled dex file: "
-            << pci->DumpDexReference(profile_index);
-        return kInlineCacheMissingTypes;
-      }
-      dex_profile_index_to_dex_cache[class_ref.dex_profile_index] =
-          caller_compilation_unit_.GetClassLinker()->FindDexCache(self, *dex_file);
-      DCHECK(dex_profile_index_to_dex_cache[class_ref.dex_profile_index] != nullptr);
-    }
-  }
-
-  // Walk over the classes and resolve them. If we cannot find a type we return
-  // kInlineCacheMissingTypes.
-  for (const ProfileCompilationInfo::ClassReference& class_ref : dex_pc_data.classes) {
-    ObjPtr<mirror::DexCache> dex_cache =
-        dex_profile_index_to_dex_cache[class_ref.dex_profile_index];
-    DCHECK(dex_cache != nullptr);
-
-    if (!dex_cache->GetDexFile()->IsTypeIndexValid(class_ref.type_index)) {
-      VLOG(compiler) << "Profile data corrupt: type index " << class_ref.type_index
-            << "is invalid in location" << dex_cache->GetDexFile()->GetLocation();
-      return kInlineCacheNoData;
-    }
-    ObjPtr<mirror::Class> clazz = caller_compilation_unit_.GetClassLinker()->LookupResolvedType(
-          class_ref.type_index,
-          dex_cache,
-          caller_compilation_unit_.GetClassLoader().Get());
-    if (clazz != nullptr) {
-      DCHECK_NE(classes->RemainingSlots(), 0u);
-      classes->NewHandle(clazz);
-    } else {
-      VLOG(compiler) << "Could not resolve class from inline cache in AOT mode "
+  // Walk over the class descriptors and look up the actual classes.
+  // If we cannot find a type we return kInlineCacheMissingTypes.
+  ClassLinker* class_linker = caller_compilation_unit_.GetClassLinker();
+  for (const dex::TypeIndex& type_index : dex_pc_data.classes) {
+    const DexFile* dex_file = caller_compilation_unit_.GetDexFile();
+    const char* descriptor = pci->GetTypeDescriptor(dex_file, type_index);
+    ObjPtr<mirror::ClassLoader> class_loader = caller_compilation_unit_.GetClassLoader().Get();
+    ObjPtr<mirror::Class> clazz = class_linker->LookupResolvedType(descriptor, class_loader);
+    if (clazz == nullptr) {
+      VLOG(compiler) << "Could not find class from inline cache in AOT mode "
           << invoke_instruction->GetMethodReference().PrettyMethod()
           << " : "
-          << caller_compilation_unit_
-              .GetDexFile()->StringByTypeIdx(class_ref.type_index);
+          << descriptor;
       return kInlineCacheMissingTypes;
     }
+    DCHECK_NE(classes->RemainingSlots(), 0u);
+    classes->NewHandle(clazz);
   }
 
   return GetInlineCacheType(*classes);
@@ -804,8 +773,7 @@ bool HInliner::TryInlineMonomorphicCall(
   if (!TryInlineAndReplace(invoke_instruction,
                            resolved_method,
                            ReferenceTypeInfo::Create(monomorphic_type, /* is_exact= */ true),
-                           /* do_rtp= */ false,
-                           /* cha_devirtualize= */ false)) {
+                           /* do_rtp= */ false)) {
     return false;
   }
 
@@ -929,6 +897,14 @@ HInstruction* HInliner::AddTypeGuard(HInstruction* receiver,
   return compare;
 }
 
+static void MaybeReplaceAndRemove(HInstruction* new_instruction, HInstruction* old_instruction) {
+  DCHECK(new_instruction != old_instruction);
+  if (new_instruction != nullptr) {
+    old_instruction->ReplaceWith(new_instruction);
+  }
+  old_instruction->GetBlock()->RemoveInstruction(old_instruction);
+}
+
 bool HInliner::TryInlinePolymorphicCall(
     HInvoke* invoke_instruction,
     const StackHandleScope<InlineCache::kIndividualCacheSize>& classes) {
@@ -993,13 +969,7 @@ bool HInliner::TryInlinePolymorphicCall(
                                            invoke_instruction,
                                            deoptimize);
       if (deoptimize) {
-        if (return_replacement != nullptr) {
-          invoke_instruction->ReplaceWith(return_replacement);
-        }
-        invoke_instruction->GetBlock()->RemoveInstruction(invoke_instruction);
-        // Because the inline cache data can be populated concurrently, we force the end of the
-        // iteration. Otherwise, we could see a new receiver type.
-        break;
+        MaybeReplaceAndRemove(return_replacement, invoke_instruction);
       } else {
         CreateDiamondPatternForPolymorphicInline(compare, return_replacement, invoke_instruction);
       }
@@ -1202,11 +1172,8 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
         invoke_instruction->GetDexPc());
     bb_cursor->InsertInstructionAfter(deoptimize, compare);
     deoptimize->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
-    if (return_replacement != nullptr) {
-      invoke_instruction->ReplaceWith(return_replacement);
-    }
+    MaybeReplaceAndRemove(return_replacement, invoke_instruction);
     receiver->ReplaceUsesDominatedBy(deoptimize, deoptimize);
-    invoke_instruction->GetBlock()->RemoveInstruction(invoke_instruction);
     deoptimize->SetReferenceTypeInfo(receiver->GetReferenceTypeInfo());
   }
 
@@ -1223,134 +1190,108 @@ bool HInliner::TryInlinePolymorphicCallToSameTarget(
   return true;
 }
 
-bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
-                                   ArtMethod* method,
-                                   ReferenceTypeInfo receiver_type,
-                                   bool do_rtp,
-                                   bool cha_devirtualize) {
-  DCHECK(!invoke_instruction->IsIntrinsic());
-  HInstruction* return_replacement = nullptr;
-  uint32_t dex_pc = invoke_instruction->GetDexPc();
-  HInstruction* cursor = invoke_instruction->GetPrevious();
-  HBasicBlock* bb_cursor = invoke_instruction->GetBlock();
-  bool should_remove_invoke_instruction = false;
-
-  // If invoke_instruction is devirtualized to a different method, give intrinsics
-  // another chance before we try to inline it.
-  if (invoke_instruction->GetResolvedMethod() != method && method->IsIntrinsic()) {
-    MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
-    if (invoke_instruction->IsInvokeInterface()) {
-      // We don't intrinsify an invoke-interface directly.
-      // Replace the invoke-interface with an invoke-virtual.
-      HInvokeVirtual* new_invoke = new (graph_->GetAllocator()) HInvokeVirtual(
-          graph_->GetAllocator(),
-          invoke_instruction->GetNumberOfArguments(),
-          invoke_instruction->GetType(),
-          invoke_instruction->GetDexPc(),
-          invoke_instruction->GetMethodReference(),  // Use interface method's reference.
-          method,
-          MethodReference(method->GetDexFile(), method->GetDexMethodIndex()),
-          method->GetMethodIndex());
-      DCHECK_NE(new_invoke->GetIntrinsic(), Intrinsics::kNone);
-      HInputsRef inputs = invoke_instruction->GetInputs();
-      for (size_t index = 0; index != inputs.size(); ++index) {
-        new_invoke->SetArgumentAt(index, inputs[index]);
-      }
-      invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
-      new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
-      if (invoke_instruction->GetType() == DataType::Type::kReference) {
-        new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
-      }
-      return_replacement = new_invoke;
-      // invoke_instruction is replaced with new_invoke.
-      should_remove_invoke_instruction = true;
-    } else {
-      invoke_instruction->SetResolvedMethod(method);
-    }
-  } else if (!TryBuildAndInline(invoke_instruction, method, receiver_type, &return_replacement)) {
-    if (invoke_instruction->IsInvokeInterface()) {
-      DCHECK(!method->IsProxyMethod());
-      // Turn an invoke-interface into an invoke-virtual. An invoke-virtual is always
-      // better than an invoke-interface because:
-      // 1) In the best case, the interface call has one more indirection (to fetch the IMT).
-      // 2) We will not go to the conflict trampoline with an invoke-virtual.
-      // TODO: Consider sharpening once it is not dependent on the compiler driver.
-
-      if (method->IsDefault() && !method->IsCopied()) {
-        // Changing to invoke-virtual cannot be done on an original default method
-        // since it's not in any vtable. Devirtualization by exact type/inline-cache
-        // always uses a method in the iftable which is never an original default
-        // method.
-        // On the other hand, inlining an original default method by CHA is fine.
-        DCHECK(cha_devirtualize);
-        return false;
-      }
-
-      if (kIsDebugBuild && method->IsDefaultConflicting()) {
-        CHECK(!cha_devirtualize) << "CHA cannot have a default conflict method as target";
-        // Devirtualization by exact type/inline-cache always uses a method in the vtable,
-        // so it's OK to change this invoke into a HInvokeVirtual.
-        ObjPtr<mirror::Class> receiver_class = receiver_type.GetTypeHandle().Get();
-        CHECK(!receiver_class->IsInterface());
-        PointerSize pointer_size = Runtime::Current()->GetClassLinker()->GetImagePointerSize();
-        CHECK(method == receiver_class->GetVTableEntry(method->GetMethodIndex(), pointer_size));
-      }
-
-      uint32_t dex_method_index = FindMethodIndexIn(
-          method,
-          *invoke_instruction->GetMethodReference().dex_file,
-          invoke_instruction->GetMethodReference().index);
-      if (dex_method_index == dex::kDexNoIndex) {
-        return false;
-      }
-      HInvokeVirtual* new_invoke = new (graph_->GetAllocator()) HInvokeVirtual(
-          graph_->GetAllocator(),
-          invoke_instruction->GetNumberOfArguments(),
-          invoke_instruction->GetType(),
-          invoke_instruction->GetDexPc(),
-          MethodReference(invoke_instruction->GetMethodReference().dex_file, dex_method_index),
-          method,
-          MethodReference(method->GetDexFile(), method->GetDexMethodIndex()),
-          method->GetMethodIndex());
-      HInputsRef inputs = invoke_instruction->GetInputs();
-      for (size_t index = 0; index != inputs.size(); ++index) {
-        new_invoke->SetArgumentAt(index, inputs[index]);
-      }
-      invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
-      new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
-      if (invoke_instruction->GetType() == DataType::Type::kReference) {
-        new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
-      }
-      return_replacement = new_invoke;
-      // invoke_instruction is replaced with new_invoke.
-      should_remove_invoke_instruction = true;
-    } else {
-      // TODO: Consider sharpening an invoke virtual once it is not dependent on the
-      // compiler driver.
-      return false;
-    }
-  } else {
-    // invoke_instruction is inlined.
-    should_remove_invoke_instruction = true;
-  }
-
-  if (cha_devirtualize) {
-    AddCHAGuard(invoke_instruction, dex_pc, cursor, bb_cursor);
-  }
-  if (return_replacement != nullptr) {
-    invoke_instruction->ReplaceWith(return_replacement);
-  }
-  if (should_remove_invoke_instruction) {
-    invoke_instruction->GetBlock()->RemoveInstruction(invoke_instruction);
-  }
-  FixUpReturnReferenceType(method, return_replacement);
-  if (do_rtp && ReturnTypeMoreSpecific(invoke_instruction, return_replacement)) {
+void HInliner::MaybeRunReferenceTypePropagation(HInstruction* replacement,
+                                                HInvoke* invoke_instruction) {
+  if (ReturnTypeMoreSpecific(replacement, invoke_instruction)) {
     // Actual return value has a more specific type than the method's declared
     // return type. Run RTP again on the outer graph to propagate it.
     ReferenceTypePropagation(graph_,
                              outer_compilation_unit_.GetClassLoader(),
                              outer_compilation_unit_.GetDexCache(),
                              /* is_first_run= */ false).Run();
+  }
+}
+
+bool HInliner::TryDevirtualize(HInvoke* invoke_instruction,
+                               ArtMethod* method,
+                               HInvoke** replacement) {
+  DCHECK(invoke_instruction != *replacement);
+  if (!invoke_instruction->IsInvokeInterface() && !invoke_instruction->IsInvokeVirtual()) {
+    return false;
+  }
+
+  // Don't bother trying to call directly a default conflict method. It
+  // doesn't have a proper MethodReference, but also `GetCanonicalMethod`
+  // will return an actual default implementation.
+  if (method->IsDefaultConflicting()) {
+    return false;
+  }
+  DCHECK(!method->IsProxyMethod());
+  ClassLinker* cl = Runtime::Current()->GetClassLinker();
+  PointerSize pointer_size = cl->GetImagePointerSize();
+  // The sharpening logic assumes the caller isn't passing a copied method.
+  method = method->GetCanonicalMethod(pointer_size);
+  uint32_t dex_method_index = FindMethodIndexIn(
+      method,
+      *invoke_instruction->GetMethodReference().dex_file,
+      invoke_instruction->GetMethodReference().index);
+  if (dex_method_index == dex::kDexNoIndex) {
+    return false;
+  }
+  HInvokeStaticOrDirect::DispatchInfo dispatch_info =
+      HSharpening::SharpenLoadMethod(method,
+                                     /* has_method_id= */ true,
+                                     /* for_interface_call= */ false,
+                                     codegen_);
+  DCHECK_NE(dispatch_info.code_ptr_location, CodePtrLocation::kCallCriticalNative);
+  if (dispatch_info.method_load_kind == MethodLoadKind::kRuntimeCall) {
+    // If sharpening returns that we need to load the method at runtime, keep
+    // the virtual/interface call which will be faster.
+    // Also, the entrypoints for runtime calls do not handle devirtualized
+    // calls.
+    return false;
+  }
+
+  HInvokeStaticOrDirect* new_invoke = new (graph_->GetAllocator()) HInvokeStaticOrDirect(
+      graph_->GetAllocator(),
+      invoke_instruction->GetNumberOfArguments(),
+      invoke_instruction->GetType(),
+      invoke_instruction->GetDexPc(),
+      MethodReference(invoke_instruction->GetMethodReference().dex_file, dex_method_index),
+      method,
+      dispatch_info,
+      kDirect,
+      MethodReference(method->GetDexFile(), method->GetDexMethodIndex()),
+      HInvokeStaticOrDirect::ClinitCheckRequirement::kNone);
+  HInputsRef inputs = invoke_instruction->GetInputs();
+  DCHECK_EQ(inputs.size(), invoke_instruction->GetNumberOfArguments());
+  for (size_t index = 0; index != inputs.size(); ++index) {
+    new_invoke->SetArgumentAt(index, inputs[index]);
+  }
+  if (HInvokeStaticOrDirect::NeedsCurrentMethodInput(dispatch_info)) {
+    new_invoke->SetRawInputAt(new_invoke->GetCurrentMethodIndexUnchecked(),
+                              graph_->GetCurrentMethod());
+  }
+  invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
+  new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
+  if (invoke_instruction->GetType() == DataType::Type::kReference) {
+    new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
+  }
+  *replacement = new_invoke;
+
+  MaybeReplaceAndRemove(*replacement, invoke_instruction);
+  // No need to call MaybeRunReferenceTypePropagation, as we know the return type
+  // cannot be more specific.
+  DCHECK(!ReturnTypeMoreSpecific(*replacement, invoke_instruction));
+  return true;
+}
+
+
+bool HInliner::TryInlineAndReplace(HInvoke* invoke_instruction,
+                                   ArtMethod* method,
+                                   ReferenceTypeInfo receiver_type,
+                                   bool do_rtp) {
+  DCHECK(!invoke_instruction->IsIntrinsic());
+  HInstruction* return_replacement = nullptr;
+
+  if (!TryBuildAndInline(invoke_instruction, method, receiver_type, &return_replacement)) {
+    return false;
+  }
+
+  MaybeReplaceAndRemove(return_replacement, invoke_instruction);
+  FixUpReturnReferenceType(method, return_replacement);
+  if (do_rtp) {
+    MaybeRunReferenceTypePropagation(return_replacement, invoke_instruction);
   }
   return true;
 }
@@ -1468,6 +1409,35 @@ bool HInliner::TryBuildAndInline(HInvoke* invoke_instruction,
                                  ArtMethod* method,
                                  ReferenceTypeInfo receiver_type,
                                  HInstruction** return_replacement) {
+  // If invoke_instruction is devirtualized to a different method, give intrinsics
+  // another chance before we try to inline it.
+  if (invoke_instruction->GetResolvedMethod() != method && method->IsIntrinsic()) {
+    MaybeRecordStat(stats_, MethodCompilationStat::kIntrinsicRecognized);
+    // For simplicity, always create a new instruction to replace the existing
+    // invoke.
+    HInvokeVirtual* new_invoke = new (graph_->GetAllocator()) HInvokeVirtual(
+        graph_->GetAllocator(),
+        invoke_instruction->GetNumberOfArguments(),
+        invoke_instruction->GetType(),
+        invoke_instruction->GetDexPc(),
+        invoke_instruction->GetMethodReference(),  // Use existing invoke's method's reference.
+        method,
+        MethodReference(method->GetDexFile(), method->GetDexMethodIndex()),
+        method->GetMethodIndex());
+    DCHECK_NE(new_invoke->GetIntrinsic(), Intrinsics::kNone);
+    HInputsRef inputs = invoke_instruction->GetInputs();
+    for (size_t index = 0; index != inputs.size(); ++index) {
+      new_invoke->SetArgumentAt(index, inputs[index]);
+    }
+    invoke_instruction->GetBlock()->InsertInstructionBefore(new_invoke, invoke_instruction);
+    new_invoke->CopyEnvironmentFrom(invoke_instruction->GetEnvironment());
+    if (invoke_instruction->GetType() == DataType::Type::kReference) {
+      new_invoke->SetReferenceTypeInfo(invoke_instruction->GetReferenceTypeInfo());
+    }
+    *return_replacement = new_invoke;
+    return true;
+  }
+
   // Check whether we're allowed to inline. The outermost compilation unit is the relevant
   // dex file here (though the transitivity of an inline chain would allow checking the caller).
   if (!MayInline(codegen_->GetCompilerOptions(),
@@ -2147,8 +2117,8 @@ bool HInliner::ArgumentTypesMoreSpecific(HInvoke* invoke_instruction, ArtMethod*
   return false;
 }
 
-bool HInliner::ReturnTypeMoreSpecific(HInvoke* invoke_instruction,
-                                      HInstruction* return_replacement) {
+bool HInliner::ReturnTypeMoreSpecific(HInstruction* return_replacement,
+                                      HInvoke* invoke_instruction) {
   // Check the integrity of reference types and run another type propagation if needed.
   if (return_replacement != nullptr) {
     if (return_replacement->GetType() == DataType::Type::kReference) {

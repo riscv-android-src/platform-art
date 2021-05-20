@@ -30,6 +30,7 @@
 #include "mirror/class-inl.h"
 #include "mirror/class_loader.h"
 #include "profile/profile_compilation_info.h"
+#include "profile/profile_test_helper.h"
 #include "scoped_thread_state_change-inl.h"
 
 namespace art {
@@ -207,7 +208,6 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethods) {
 
   // Check that what we saved is in the profile (methods form Main and Second).
   ProfileCompilationInfo info2;
-  ASSERT_TRUE(profile.GetFile()->ResetOffset());
   ASSERT_TRUE(info2.Load(GetFd(profile)));
   ASSERT_EQ(info2.GetNumberOfMethods(), main_methods.size() + second_methods.size());
   {
@@ -260,7 +260,8 @@ TEST_F(ProfileCompilationInfoTest, SaveArtMethodsWithInlineCaches) {
       const ProfileMethodInfo& pmi = profile_methods_map.find(m)->second;
       ProfileCompilationInfo::MethodHotness offline_hotness = info.GetMethodHotness(method_ref);
       ASSERT_TRUE(offline_hotness.IsHot());
-      ASSERT_TRUE(EqualInlineCaches(pmi.inline_caches, offline_hotness, info));
+      ASSERT_TRUE(ProfileTestHelper::EqualInlineCaches(
+                      pmi.inline_caches, method_ref.dex_file, offline_hotness, info));
     }
   }
 }

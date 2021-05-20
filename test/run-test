@@ -563,7 +563,7 @@ function err_echo() {
 # Cannot use readlink -m, as it does not exist on Mac.
 # Fallback to nuclear option:
 noncanonical_tmp_dir=$tmp_dir
-tmp_dir="`cd $oldwd ; python -c "import os; import sys; sys.stdout.write(os.path.realpath('$tmp_dir'))"`"
+tmp_dir="`cd $oldwd ; python3 -c "import os; import sys; sys.stdout.write(os.path.realpath('$tmp_dir'))"`"
 if [ -z $tmp_dir ] ; then
   err_echo "Failed to resolve $tmp_dir"
   exit 1
@@ -686,6 +686,10 @@ elif [ "$runtime" = "art" ]; then
         run_args+=(--runtime-option "-Djava.library.path=${host_lib_root}/lib${suffix64}:${host_lib_root}/nativetest${suffix64}")
     else
         guess_target_arch_name
+        # Note that libarttest(d).so and other test libraries that depend on ART
+        # internal libraries must not be in this path for JNI libraries - they
+        # need to be loaded through LD_LIBRARY_PATH and
+        # NATIVELOADER_DEFAULT_NAMESPACE_LIBS instead.
         run_args+=(--runtime-option "-Djava.library.path=/data/nativetest${suffix64}/art/${target_arch_name}")
         run_args+=(--boot "/apex/com.android.art/javalib/boot.art")
     fi

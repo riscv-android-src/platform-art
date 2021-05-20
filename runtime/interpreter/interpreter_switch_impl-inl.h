@@ -237,16 +237,18 @@ class InstructionHandler {
     if (UNLIKELY(Instrumentation()->HasBranchListeners())) {
       Instrumentation()->Branch(Self(), shadow_frame_.GetMethod(), DexPC(), offset);
     }
-    // TODO: Do OSR only on back-edges and check if OSR code is ready here.
-    JValue result;
-    if (jit::Jit::MaybeDoOnStackReplacement(Self(),
-                                            shadow_frame_.GetMethod(),
-                                            DexPC(),
-                                            offset,
-                                            &result)) {
-      ctx_->result = result;
-      ExitInterpreterLoop();
-      return false;
+    if (!transaction_active) {
+      // TODO: Do OSR only on back-edges and check if OSR code is ready here.
+      JValue result;
+      if (jit::Jit::MaybeDoOnStackReplacement(Self(),
+                                              shadow_frame_.GetMethod(),
+                                              DexPC(),
+                                              offset,
+                                              &result)) {
+        ctx_->result = result;
+        ExitInterpreterLoop();
+        return false;
+      }
     }
     SetNextInstruction(inst_->RelativeAt(offset));
     if (offset <= 0) {  // Back-edge.
@@ -438,11 +440,6 @@ class InstructionHandler {
     SetVRegReference(A(), exception);
     Self()->ClearException();
     return true;
-  }
-
-  HANDLER_ATTRIBUTES bool RETURN_VOID_NO_BARRIER() {
-    JValue result;
-    return HandleReturn(result);
   }
 
   HANDLER_ATTRIBUTES bool RETURN_VOID() {
@@ -1625,6 +1622,10 @@ class InstructionHandler {
   }
 
   HANDLER_ATTRIBUTES bool UNUSED_43() {
+    return HandleUnused();
+  }
+
+  HANDLER_ATTRIBUTES bool UNUSED_73() {
     return HandleUnused();
   }
 

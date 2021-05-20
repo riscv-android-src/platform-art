@@ -308,6 +308,13 @@ void VerifierDeps::RecordClassVerified(const DexFile& dex_file, const dex::Class
   dex_deps->verified_classes_[dex_file.GetIndexForClassDef(class_def)] = true;
 }
 
+bool VerifierDeps::HasRecordedVerifiedStatus(const DexFile& dex_file,
+                                             const dex::ClassDef& class_def) {
+  DexFileDeps* dex_deps = GetDexFileDeps(dex_file);
+  DCHECK_EQ(dex_deps->verified_classes_.size(), dex_file.NumClassDefs());
+  return dex_deps->verified_classes_[dex_file.GetIndexForClassDef(class_def)];
+}
+
 void VerifierDeps::MaybeRecordAssignability(VerifierDeps* verifier_deps,
                                             const DexFile& dex_file,
                                             const dex::ClassDef& class_def,
@@ -509,13 +516,13 @@ static inline bool DecodeStringVector(const uint8_t** cursor,
 
 void VerifierDeps::Encode(const std::vector<const DexFile*>& dex_files,
                           std::vector<uint8_t>* buffer) const {
-  uint32_t offset = buffer->size();
-  buffer->resize(buffer->size() + dex_files.size() * sizeof(uint32_t));
+  DCHECK(buffer->empty());
+  buffer->resize(dex_files.size() * sizeof(uint32_t));
   uint32_t dex_file_index = 0;
   for (const DexFile* dex_file : dex_files) {
     // Four byte alignment before encoding the data.
     buffer->resize(RoundUp(buffer->size(), sizeof(uint32_t)));
-    (reinterpret_cast<uint32_t*>(buffer->data() + offset))[dex_file_index++] = buffer->size();
+    (reinterpret_cast<uint32_t*>(buffer->data()))[dex_file_index++] = buffer->size();
     const DexFileDeps& deps = *GetDexFileDeps(*dex_file);
     EncodeSetVector(buffer, deps.assignable_types_, deps.verified_classes_);
     // Four byte alignment before encoding strings.
