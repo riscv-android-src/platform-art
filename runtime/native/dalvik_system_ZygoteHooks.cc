@@ -144,7 +144,7 @@ enum {
   DEBUG_NATIVE_DEBUGGABLE             = 1 << 7,
   DEBUG_JAVA_DEBUGGABLE               = 1 << 8,
   DISABLE_VERIFIER                    = 1 << 9,
-  ONLY_USE_SYSTEM_OAT_FILES           = 1 << 10,
+  ONLY_USE_TRUSTED_OAT_FILES          = 1 << 10,  // Formerly ONLY_USE_SYSTEM_OAT_FILES
   DEBUG_GENERATE_MINI_DEBUG_INFO      = 1 << 11,
   HIDDEN_API_ENFORCEMENT_POLICY_MASK  = (1 << 12)
                                       | (1 << 13),
@@ -153,6 +153,7 @@ enum {
   USE_APP_IMAGE_STARTUP_CACHE         = 1 << 16,
   DEBUG_IGNORE_APP_SIGNAL_HANDLER     = 1 << 17,
   DISABLE_TEST_API_ENFORCEMENT_POLICY = 1 << 18,
+  PROFILEABLE                         = 1 << 24,
 
   // bits to shift (flags & HIDDEN_API_ENFORCEMENT_POLICY_MASK) by to get a value
   // corresponding to hiddenapi::EnforcementPolicy
@@ -245,6 +246,8 @@ static uint32_t EnableDebugFeatures(uint32_t runtime_flags) {
 
   runtime->SetProfileableFromShell((runtime_flags & PROFILE_FROM_SHELL) != 0);
   runtime_flags &= ~PROFILE_FROM_SHELL;
+  runtime->SetProfileable((runtime_flags & PROFILEABLE) != 0);
+  runtime_flags &= ~PROFILEABLE;
 
   return runtime_flags;
 }
@@ -266,6 +269,9 @@ static void ZygoteHooks_nativePostZygoteFork(JNIEnv*, jclass) {
 static void ZygoteHooks_nativePostForkSystemServer(JNIEnv* env ATTRIBUTE_UNUSED,
                                                    jclass klass ATTRIBUTE_UNUSED,
                                                    jint runtime_flags) {
+  // Reload the current flags first. In case we need to take actions based on them.
+  Runtime::Current()->ReloadAllFlags(__FUNCTION__);
+
   // Set the runtime state as the first thing, in case JIT and other services
   // start querying it.
   Runtime::Current()->SetAsSystemServer();
@@ -293,7 +299,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
                                             jboolean is_zygote,
                                             jstring instruction_set) {
   DCHECK(!(is_system_server && is_zygote));
-  // Set the runtime state as the first thing, in case JIT and other services
+  // Reload the current flags first. In case we need to take any updated actions.
+  Runtime::Current()->ReloadAllFlags(__FUNCTION__);
+  // Then, set the runtime state, in case JIT and other services
   // start querying it.
   Runtime::Current()->SetAsZygoteChild(is_system_server, is_zygote);
 
@@ -310,9 +318,9 @@ static void ZygoteHooks_nativePostForkChild(JNIEnv* env,
     runtime_flags &= ~DISABLE_VERIFIER;
   }
 
-  if ((runtime_flags & ONLY_USE_SYSTEM_OAT_FILES) != 0 || is_system_server) {
-    runtime->GetOatFileManager().SetOnlyUseSystemOatFiles();
-    runtime_flags &= ~ONLY_USE_SYSTEM_OAT_FILES;
+  if ((runtime_flags & ONLY_USE_TRUSTED_OAT_FILES) != 0 || is_system_server) {
+    runtime->GetOatFileManager().SetOnlyUseTrustedOatFiles();
+    runtime_flags &= ~ONLY_USE_TRUSTED_OAT_FILES;
   }
 
   api_enforcement_policy = hiddenapi::EnforcementPolicyFromInt(

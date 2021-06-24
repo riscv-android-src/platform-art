@@ -81,7 +81,7 @@ namespace helper {
 class ApiList {
  private:
   // Number of bits reserved for Value in dex flags, and the corresponding bit mask.
-  static constexpr uint32_t kValueBitSize = 3;
+  static constexpr uint32_t kValueBitSize = 4;
   static constexpr uint32_t kValueBitMask = helper::BitMask(kValueBitSize);
 
   enum class Value : uint32_t {
@@ -141,6 +141,10 @@ class ApiList {
     "max-target-r",
   };
 
+  // A magic marker used by tests to mimic a hiddenapi list which doesn't exist
+  // yet.
+  static constexpr const char* kFutureValueName = "max-target-future";
+
   // Names corresponding to DomainApis.
   static constexpr const char* kDomainApiNames[] {
     "core-platform-api",
@@ -172,9 +176,11 @@ class ApiList {
     // Treat all ones as invalid value
     if (value == helper::ToUint(Value::kInvalid)) {
       return Value::kInvalid;
+    } else if (value > helper::ToUint(Value::kMax)) {
+      // For future unknown flag values, return unsupported.
+      return Value::kUnsupported;
     } else {
       DCHECK_GE(value, helper::ToUint(Value::kMin));
-      DCHECK_LE(value, helper::ToUint(Value::kMax));
       return static_cast<Value>(value);
     }
   }
@@ -216,6 +222,10 @@ class ApiList {
         return ApiList(helper::GetEnumAt<DomainApi>(i));
       }
     }
+    if (str == kFutureValueName) {
+      static_assert(helper::ToUint(Value::kMax) + 1 < helper::ToUint(Value::kInvalid));
+      return ApiList(helper::ToUint(Value::kMax) + 1);
+    }
     return ApiList();
   }
 
@@ -244,9 +254,26 @@ class ApiList {
     return true;
   }
 
+  // Clamp a max-target-* up to the given maxSdk; if the given api list is higher than
+  // maxSdk, return unsupported instead.
+  static std::string CoerceAtMost(const std::string& name, const std::string& maxSdk) {
+    const auto apiListToClamp = FromName(name);
+    // If the api list is a domain instead, return it unmodified.
+    if (!apiListToClamp.IsValid()) {
+      return name;
+    }
+    const auto maxApiList = FromName(maxSdk);
+    CHECK(maxApiList.IsValid()) << "invalid api list name " << maxSdk;
+    if (apiListToClamp > maxApiList) {
+      return kValueNames[Unsupported().GetIntValue()];
+    }
+    return name;
+  }
+
   bool operator==(const ApiList& other) const { return dex_flags_ == other.dex_flags_; }
   bool operator!=(const ApiList& other) const { return !(*this == other); }
   bool operator<(const ApiList& other) const { return dex_flags_ < other.dex_flags_; }
+  bool operator>(const ApiList& other) const { return dex_flags_ > other.dex_flags_; }
 
   // Returns true if combining this ApiList with `other` will succeed.
   bool CanCombineWith(const ApiList& other) const {

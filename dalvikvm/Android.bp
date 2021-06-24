@@ -25,22 +25,21 @@ package {
 
 art_cc_binary {
     name: "dalvikvm",
+    defaults: ["art_defaults"],
     host_supported: true,
     compile_multilib: "both",
 
     srcs: ["dalvikvm.cc"],
-    cflags: [
-        "-Wall",
-        "-Werror",
-        "-Wextra",
-    ],
     shared_libs: [
+        "liblog",
         "libnativehelper",
+    ],
+    header_libs: [
+        "art_libartbase_headers", // For base/fast_exit.h
     ],
     target: {
         android: {
             shared_libs: [
-                "liblog",
                 "libsigchain",
             ],
         },
@@ -51,9 +50,6 @@ art_cc_binary {
             // TODO(b/183102427): this seems to help asan on host, but libsgichain should
             // really be in shared_libs.
             whole_static_libs: ["libsigchain"],
-        },
-        darwin: {
-            enabled: false,
         },
     },
 
@@ -72,5 +68,4 @@ art_cc_binary {
         "com.android.art",
         "com.android.art.debug",
     ],
-    min_sdk_version: "S",
 }

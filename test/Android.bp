@@ -25,10 +25,31 @@ package {
     default_applicable_licenses: ["art_license"],
 }
 
-art_cc_defaults {
+soong_config_module_type_import {
+    from: "art/build/SoongConfig.bp",
+    module_types: [
+        "art_module_cc_defaults",
+    ],
+}
+
+art_module_cc_defaults {
     name: "art_test_defaults",
     host_supported: true,
+    soong_config_variables: {
+        source_build: {
+            target: {
+                android: {
+                    test_for: [
+                        "com.android.art",
+                        "com.android.art.debug",
+                    ],
+                },
+            },
+        },
+    },
     target: {
+        // The following set of relative_install_paths installs the library in a
+        // location that will be available as java.library.path in run tests.
         android_arm: {
             relative_install_path: "art/arm",
         },
@@ -48,9 +69,37 @@ art_cc_defaults {
     cflags: [
         "-Wno-frame-larger-than=",
     ],
+    // Tests aren't generally included in any APEX, but this is necessary to
+    // avoid duplicate install rules for them by making them unavailable to platform.
     apex_available: [
         "com.android.art.debug",
     ],
+}
+
+// Variant of art_test_defaults that installs the library in a location which
+// will be added to the default namespace, and hence also the com_android_art
+// namespace. That allows the library to have shared_libs dependencies on all
+// ART internal libraries.
+//
+// Currently this only works for run tests where run-test-jar sets
+// LD_LIBRARY_PATH and NATIVELOADER_DEFAULT_NAMESPACE_LIBS.
+art_cc_defaults {
+    name: "art_test_internal_library_defaults",
+    defaults: ["art_test_defaults"],
+    target: {
+        android_arm: {
+            relative_install_path: "com.android.art/lib",
+        },
+        android_arm64: {
+            relative_install_path: "com.android.art/lib64",
+        },
+        android_x86: {
+            relative_install_path: "com.android.art/lib",
+        },
+        android_x86_64: {
+            relative_install_path: "com.android.art/lib64",
+        },
+    },
 }
 
 art_cc_defaults {
@@ -71,13 +120,13 @@ art_cc_defaults {
     shared_libs: [
         "libartd",
         "libartd-disassembler",
-        "libvixld",
         "libart-gtest",
         "libdexfiled",
         "libprofiled",
         "libartbased",
 
         "libbase",
+        "liblog",
         "libnativehelper",
         "libz",
     ],
@@ -102,11 +151,6 @@ art_cc_defaults {
         host: {
             shared_libs: [
                 "libziparchive",
-            ],
-        },
-        android: {
-            shared_libs: [
-                "liblog",
             ],
         },
     },
@@ -151,6 +195,10 @@ art_cc_defaults {
     },
     apex_available: [
         "com.android.art.debug",
+        // TODO(b/183882457): This lib doesn't go into com.android.art, but
+        // apex_available lists need to be the same for internal libs to avoid
+        // stubs, and this depends on libdexfiled and others.
+        "com.android.art",
     ],
 }
 
@@ -187,6 +235,10 @@ art_cc_library {
     },
     apex_available: [
         "com.android.art.debug",
+        // TODO(b/183882457): This lib doesn't go into com.android.art, but
+        // apex_available lists need to be the same for internal libs to avoid
+        // stubs, and this depends on libdexfiled and others.
+        "com.android.art",
     ],
 }
 
@@ -298,12 +350,13 @@ art_cc_test_library {
 cc_defaults {
     name: "libartagent-defaults",
     defaults: [
-        "art_test_defaults",
+        "art_test_internal_library_defaults",
         "art_defaults",
     ],
     shared_libs: [
         "libbacktrace",
         "libbase",
+        "liblog",
         "libnativehelper",
     ],
 }
@@ -338,7 +391,7 @@ art_cc_test_library {
 art_cc_defaults {
     name: "libtiagent-base-defaults",
     defaults: [
-        "art_test_defaults",
+        "art_test_internal_library_defaults",
         "art_defaults",
         // Not derived from libartagent-defaults for NDK.
     ],
@@ -504,6 +557,14 @@ art_cc_test_library {
 cc_library_static {
     name: "libctstiagent",
     defaults: ["libtiagent-base-defaults"],
+
+    // TODO(b/187288515): Providing this as a prebuilt introduces an issue with
+    // sdk_version propagation. Temporarily use the source library instead,
+    // which means we need to override the logic inherited from art_defaults and
+    // art_test_internal_library_defaults that disables sources when not
+    // building ART from sources.
+    enabled: true,
+
     visibility: [
         "//cts/hostsidetests/jvmti:__subpackages__",
     ],
@@ -603,7 +664,7 @@ art_cc_test_library {
 cc_defaults {
     name: "libarttest-defaults",
     defaults: [
-        "art_test_defaults",
+        "art_test_internal_library_defaults",
         "art_defaults",
     ],
     srcs: [
@@ -669,12 +730,14 @@ cc_defaults {
         "2033-shutdown-mechanics/native_shutdown.cc",
         "2036-jni-filechannel/jni_filechannel.cc",
         "2037-thread-name-inherit/thread_name_inherit.cc",
+        "2040-huge-native-alloc/huge_native_buf.cc",
         "common/runtime_state.cc",
         "common/stack_inspect.cc",
     ],
     shared_libs: [
         "libbacktrace",
         "libbase",
+        "liblog",
         "libnativehelper",
     ],
 }
@@ -1035,6 +1098,10 @@ art_cc_test {
             suffix: "64",
         },
     },
+    test_for: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
 }
 
 art_cc_test {
@@ -1051,6 +1118,10 @@ art_cc_test {
     ],
     test_suites: ["general-tests"],
     test_config: "art-gtests-target-chroot.xml",
+    test_for: [
+        "com.android.art",
+        "com.android.art.debug",
+    ],
 }
 
 filegroup {

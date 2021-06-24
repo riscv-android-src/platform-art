@@ -140,7 +140,9 @@ class Heap {
   static constexpr size_t kDefaultMaxFree = 2 * MB;
   static constexpr size_t kDefaultMinFree = kDefaultMaxFree / 4;
   static constexpr size_t kDefaultLongPauseLogThreshold = MsToNs(5);
+  static constexpr size_t kDefaultLongPauseLogThresholdGcStress = MsToNs(50);
   static constexpr size_t kDefaultLongGCLogThreshold = MsToNs(100);
+  static constexpr size_t kDefaultLongGCLogThresholdGcStress = MsToNs(1000);
   static constexpr size_t kDefaultTLABSize = 32 * KB;
   static constexpr double kDefaultTargetUtilization = 0.75;
   static constexpr double kDefaultHeapGrowthMultiplier = 2.0;
@@ -199,7 +201,8 @@ class Heap {
        size_t non_moving_space_capacity,
        const std::vector<std::string>& boot_class_path,
        const std::vector<std::string>& boot_class_path_locations,
-       const std::string& image_file_name,
+       const std::vector<int>& boot_class_path_fds,
+       const std::vector<std::string>& image_file_names,
        InstructionSet image_instruction_set,
        CollectorType foreground_collector_type,
        CollectorType background_collector_type,
@@ -259,11 +262,14 @@ class Heap {
                !*backtrace_lock_,
                !process_state_update_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented>(self,
-                                                   klass,
-                                                   num_bytes,
-                                                   GetCurrentNonMovingAllocator(),
-                                                   pre_fence_visitor);
+    mirror::Object* obj = AllocObjectWithAllocator<kInstrumented>(self,
+                                                                  klass,
+                                                                  num_bytes,
+                                                                  GetCurrentNonMovingAllocator(),
+                                                                  pre_fence_visitor);
+    // Java Heap Profiler check and sample allocation.
+    JHPCheckNonTlabSampleAllocation(self, obj, num_bytes);
+    return obj;
   }
 
   template <bool kInstrumented = true, bool kCheckLargeObject = true, typename PreFenceVisitor>
@@ -285,6 +291,11 @@ class Heap {
 
   AllocatorType GetCurrentNonMovingAllocator() const {
     return current_non_moving_allocator_;
+  }
+
+  AllocatorType GetUpdatedAllocator(AllocatorType old_allocator) {
+    return (old_allocator == kAllocatorTypeNonMoving) ?
+        GetCurrentNonMovingAllocator() : GetCurrentAllocator();
   }
 
   // Visit all of the live objects in the heap.
@@ -376,13 +387,14 @@ class Heap {
       REQUIRES(Locks::heap_bitmap_lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Initiates an explicit garbage collection.
+  // Initiates an explicit garbage collection. Guarantees that a GC started after this call has
+  // completed.
   void CollectGarbage(bool clear_soft_references, GcCause cause = kGcCauseExplicit)
       REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !process_state_update_lock_);
 
-  // Does a concurrent GC, should only be called by the GC daemon thread
-  // through runtime.
-  void ConcurrentGC(Thread* self, GcCause cause, bool force_full)
+  // Does a concurrent GC, provided the GC numbered requested_gc_num has not already been
+  // completed. Should only be called by the GC daemon thread through runtime.
+  void ConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t requested_gc_num)
       REQUIRES(!Locks::runtime_shutdown_lock_, !*gc_complete_lock_,
                !*pending_task_lock_, !process_state_update_lock_);
 
@@ -452,7 +464,8 @@ class Heap {
   void SetIdealFootprint(size_t max_allowed_footprint);
 
   // Blocks the caller until the garbage collector becomes idle and returns the type of GC we
-  // waited for.
+  // waited for. Only waits for running collections, ignoring a requested but unstarted GC. Only
+  // heuristic, since a new GC may have started by the time we return.
   collector::GcType WaitForGcToComplete(GcCause cause, Thread* self) REQUIRES(!*gc_complete_lock_);
 
   // Update the heap's process state to a new value, may cause compaction to occur.
@@ -815,8 +828,19 @@ class Heap {
   // Request an asynchronous trim.
   void RequestTrim(Thread* self) REQUIRES(!*pending_task_lock_);
 
-  // Request asynchronous GC.
-  void RequestConcurrentGC(Thread* self, GcCause cause, bool force_full)
+  // Retrieve the current GC number, i.e. the number n such that we completed n GCs so far.
+  // Provides acquire ordering, so that if we read this first, and then check whether a GC is
+  // required, we know that the GC number read actually preceded the test.
+  uint32_t GetCurrentGcNum() {
+    return gcs_completed_.load(std::memory_order_acquire);
+  }
+
+  // Request asynchronous GC. Observed_gc_num is the value of GetCurrentGcNum() when we started to
+  // evaluate the GC triggering condition. If a GC has been completed since then, we consider our
+  // job done. If we return true, then we ensured that gcs_completed_ will eventually be
+  // incremented beyond observed_gc_num. We return false only in corner cases in which we cannot
+  // ensure that.
+  bool RequestConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t observed_gc_num)
       REQUIRES(!*pending_task_lock_);
 
   // Whether or not we may use a garbage collector, used so that we only create collectors we need.
@@ -834,6 +858,9 @@ class Heap {
   uint64_t GetBlockingGcTime() const;
   void DumpGcCountRateHistogram(std::ostream& os) const REQUIRES(!*gc_complete_lock_);
   void DumpBlockingGcCountRateHistogram(std::ostream& os) const REQUIRES(!*gc_complete_lock_);
+  uint64_t GetTotalTimeWaitingForGC() const {
+    return total_wait_time_;
+  }
 
   // Perfetto Art Heap Profiler Support.
   HeapSampler& GetHeapSampler() {
@@ -844,6 +871,8 @@ class Heap {
   int CheckPerfettoJHPEnabled();
   // In NonTlab case: Check whether we should report a sample allocation and if so report it.
   // Also update state (bytes_until_sample).
+  // By calling JHPCheckNonTlabSampleAllocation from different functions for Large allocations and
+  // non-moving allocations we are able to use the stack to identify these allocations separately.
   void JHPCheckNonTlabSampleAllocation(Thread* self,
                                        mirror::Object* ret,
                                        size_t alloc_size);
@@ -1002,11 +1031,6 @@ class Heap {
   // Checks whether we should garbage collect:
   ALWAYS_INLINE bool ShouldConcurrentGCForJava(size_t new_num_bytes_allocated);
   float NativeMemoryOverTarget(size_t current_native_bytes, bool is_gc_concurrent);
-  ALWAYS_INLINE void CheckConcurrentGCForJava(Thread* self,
-                                              size_t new_num_bytes_allocated,
-                                              ObjPtr<mirror::Object>* obj)
-      REQUIRES_SHARED(Locks::mutator_lock_)
-      REQUIRES(!*pending_task_lock_, !*gc_complete_lock_);
   void CheckGCForNative(Thread* self)
       REQUIRES(!*pending_task_lock_, !*gc_complete_lock_, !process_state_update_lock_);
 
@@ -1024,8 +1048,10 @@ class Heap {
       REQUIRES(!*gc_complete_lock_, !*pending_task_lock_,
                !*backtrace_lock_, !process_state_update_lock_);
 
-  // Handles Allocate()'s slow allocation path with GC involved after
-  // an initial allocation attempt failed.
+  // Handles Allocate()'s slow allocation path with GC involved after an initial allocation
+  // attempt failed.
+  // Called with thread suspension disallowed, but re-enables it, and may suspend, internally.
+  // Returns null if instrumentation or the allocator changed.
   mirror::Object* AllocateInternalWithGc(Thread* self,
                                          AllocatorType allocator,
                                          bool instrumented,
@@ -1092,16 +1118,25 @@ class Heap {
   void RequestCollectorTransition(CollectorType desired_collector_type, uint64_t delta_time)
       REQUIRES(!*pending_task_lock_);
 
-  void RequestConcurrentGCAndSaveObject(Thread* self, bool force_full, ObjPtr<mirror::Object>* obj)
+  void RequestConcurrentGCAndSaveObject(Thread* self,
+                                        bool force_full,
+                                        uint32_t observed_gc_num,
+                                        ObjPtr<mirror::Object>* obj)
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!*pending_task_lock_);
-  bool IsGCRequestPending() const;
+
+  static constexpr uint32_t GC_NUM_ANY = std::numeric_limits<uint32_t>::max();
 
   // Sometimes CollectGarbageInternal decides to run a different Gc than you requested. Returns
-  // which type of Gc was actually ran.
+  // which type of Gc was actually run.
+  // We pass in the intended GC sequence number to ensure that multiple approximately concurrent
+  // requests result in a single GC; clearly redundant request will be pruned.  A requested_gc_num
+  // of GC_NUM_ANY indicates that we should not prune redundant requests.  (In the unlikely case
+  // that gcs_completed_ gets this big, we just accept a potential extra GC or two.)
   collector::GcType CollectGarbageInternal(collector::GcType gc_plan,
                                            GcCause gc_cause,
-                                           bool clear_soft_references)
+                                           bool clear_soft_references,
+                                           uint32_t requested_gc_num)
       REQUIRES(!*gc_complete_lock_, !Locks::heap_bitmap_lock_, !Locks::thread_suspend_count_lock_,
                !*pending_task_lock_, !process_state_update_lock_);
 
@@ -1168,7 +1203,6 @@ class Heap {
       REQUIRES_SHARED(Locks::mutator_lock_)
       REQUIRES(!*gc_complete_lock_, !*pending_task_lock_, !process_state_update_lock_);
 
-  void ClearConcurrentGCRequest();
   void ClearPendingTrim(Thread* self) REQUIRES(!*pending_task_lock_);
   void ClearPendingCollectorTransition(Thread* self) REQUIRES(!*pending_task_lock_);
 
@@ -1550,8 +1584,16 @@ class Heap {
   // Count for performed homogeneous space compaction.
   Atomic<size_t> count_performed_homogeneous_space_compaction_;
 
-  // Whether or not a concurrent GC is pending.
-  Atomic<bool> concurrent_gc_pending_;
+  // The number of garbage collections (either young or full, not trims or the like) we have
+  // completed since heap creation. We include requests that turned out to be impossible
+  // because they were disabled. We guard against wrapping, though that's unlikely.
+  // Increment is guarded by gc_complete_lock_.
+  Atomic<uint32_t> gcs_completed_;
+
+  // The number of the last garbage collection that has been requested.  A value of gcs_completed
+  // + 1 indicates that another collection is needed or in progress. A value of gcs_completed_ or
+  // (logically) less means that no new GC has been requested.
+  Atomic<uint32_t> max_gc_requested_;
 
   // Active tasks which we can modify (change target time, desired collector type, etc..).
   CollectorTransitionTask* pending_collector_transition_ GUARDED_BY(pending_task_lock_);

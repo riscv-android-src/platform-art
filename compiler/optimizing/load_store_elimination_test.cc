@@ -1233,7 +1233,8 @@ TEST_F(LoadStoreEliminationTest, DefaultShadowMonitor) {
 //   return t;
 // }
 TEST_F(LoadStoreEliminationTest, ArrayLoopOverlap) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blocks(graph_,
                             GetAllocator(),
@@ -1361,7 +1362,8 @@ TEST_F(LoadStoreEliminationTest, ArrayLoopOverlap) {
 //   return t;
 // }
 TEST_F(LoadStoreEliminationTest, ArrayLoopOverlap2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blocks(graph_,
                             GetAllocator(),
@@ -1500,7 +1502,8 @@ TEST_F(LoadStoreEliminationTest, ArrayLoopOverlap2) {
 }
 
 TEST_F(LoadStoreEliminationTest, ArrayNonLoopPhi) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blocks(graph_,
                             GetAllocator(),
@@ -1594,7 +1597,8 @@ TEST_F(LoadStoreEliminationTest, ArrayNonLoopPhi) {
 }
 
 TEST_F(LoadStoreEliminationTest, ArrayMergeDefault) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blocks(graph_,
                             GetAllocator(),
@@ -1677,6 +1681,198 @@ TEST_F(LoadStoreEliminationTest, ArrayMergeDefault) {
   EXPECT_INS_REMOVED(right_set_1);
   EXPECT_INS_REMOVED(right_set_2);
   EXPECT_INS_REMOVED(alloc_w);
+}
+
+// Regression test for b/187487955.
+// We previusly failed to consider aliasing between an array location
+// with index `idx` defined in the loop (such as a loop Phi) and another
+// array location with index `idx + constant`. This could have led to
+// replacing the load with, for example, the default value 0.
+TEST_F(LoadStoreEliminationTest, ArrayLoopAliasing1) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blocks(graph_,
+                            GetAllocator(),
+                            "entry",
+                            "exit",
+                            { { "entry", "preheader" },
+                              { "preheader", "loop" },
+                              { "loop", "body" },
+                              { "body", "loop" },
+                              { "loop", "ret" },
+                              { "ret", "exit" } });
+#define GET_BLOCK(name) HBasicBlock* name = blocks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(preheader);
+  GET_BLOCK(loop);
+  GET_BLOCK(body);
+  GET_BLOCK(ret);
+  GET_BLOCK(exit);
+#undef GET_BLOCK
+  HInstruction* n = MakeParam(DataType::Type::kInt32);
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* c1 = graph_->GetIntConstant(1);
+
+  // entry
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* array = new (GetAllocator()) HNewArray(
+      cls, n, /*dex_pc=*/ 0u, DataType::SizeShift(DataType::Type::kInt32));
+  HInstruction* entry_goto = new (GetAllocator()) HGoto();
+  entry->AddInstruction(cls);
+  entry->AddInstruction(array);
+  entry->AddInstruction(entry_goto);
+  ManuallyBuildEnvFor(cls, {});
+  ManuallyBuildEnvFor(array, {});
+
+  HInstruction* preheader_goto = new (GetAllocator()) HGoto();
+  preheader->AddInstruction(preheader_goto);
+
+  // loop
+  HPhi* i_phi = new (GetAllocator()) HPhi(GetAllocator(), 0, 0, DataType::Type::kInt32);
+  HInstruction* loop_suspend_check = new (GetAllocator()) HSuspendCheck();
+  HInstruction* loop_cond = new (GetAllocator()) HLessThan(i_phi, n);
+  HIf* loop_if = new (GetAllocator()) HIf(loop_cond);
+  loop->AddPhi(i_phi);
+  loop->AddInstruction(loop_suspend_check);
+  loop->AddInstruction(loop_cond);
+  loop->AddInstruction(loop_if);
+  CHECK(loop_if->IfTrueSuccessor() == body);
+  ManuallyBuildEnvFor(loop_suspend_check, {});
+
+  // body
+  HInstruction* body_set =
+      new (GetAllocator()) HArraySet(array, i_phi, i_phi, DataType::Type::kInt32, /*dex_pc=*/ 0u);
+  HInstruction* body_add = new (GetAllocator()) HAdd(DataType::Type::kInt32, i_phi, c1);
+  HInstruction* body_goto = new (GetAllocator()) HGoto();
+  body->AddInstruction(body_set);
+  body->AddInstruction(body_add);
+  body->AddInstruction(body_goto);
+
+  // i_phi inputs
+  i_phi->AddInput(c0);
+  i_phi->AddInput(body_add);
+
+  // ret
+  HInstruction* ret_sub = new (GetAllocator()) HSub(DataType::Type::kInt32, i_phi, c1);
+  HInstruction* ret_get =
+      new (GetAllocator()) HArrayGet(array, ret_sub, DataType::Type::kInt32, /*dex_pc=*/ 0);
+  HInstruction* ret_return = new (GetAllocator()) HReturn(ret_get);
+  ret->AddInstruction(ret_sub);
+  ret->AddInstruction(ret_get);
+  ret->AddInstruction(ret_return);
+
+  // exit
+  SetupExit(exit);
+
+  graph_->ClearDominanceInformation();
+  graph_->ClearLoopInformation();
+  PerformLSE();
+
+  EXPECT_INS_RETAINED(cls);
+  EXPECT_INS_RETAINED(array);
+  EXPECT_INS_RETAINED(body_set);
+  EXPECT_INS_RETAINED(ret_get);
+}
+
+// Regression test for b/187487955.
+// Similar to the `ArrayLoopAliasing1` test above but with additional load
+// that marks a loop Phi placeholder as kept which used to trigger a DCHECK().
+// There is also an LSE run-test for this but it relies on BCE eliminating
+// BoundsCheck instructions and adds extra code in loop body to avoid
+// loop unrolling. This gtest does not need to jump through those hoops
+// as we do not unnecessarily run those optimization passes.
+TEST_F(LoadStoreEliminationTest, ArrayLoopAliasing2) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blocks(graph_,
+                            GetAllocator(),
+                            "entry",
+                            "exit",
+                            { { "entry", "preheader" },
+                              { "preheader", "loop" },
+                              { "loop", "body" },
+                              { "body", "loop" },
+                              { "loop", "ret" },
+                              { "ret", "exit" } });
+#define GET_BLOCK(name) HBasicBlock* name = blocks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(preheader);
+  GET_BLOCK(loop);
+  GET_BLOCK(body);
+  GET_BLOCK(ret);
+  GET_BLOCK(exit);
+#undef GET_BLOCK
+  HInstruction* n = MakeParam(DataType::Type::kInt32);
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* c1 = graph_->GetIntConstant(1);
+
+  // entry
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* array = new (GetAllocator()) HNewArray(
+      cls, n, /*dex_pc=*/ 0u, DataType::SizeShift(DataType::Type::kInt32));
+  HInstruction* entry_goto = new (GetAllocator()) HGoto();
+  entry->AddInstruction(cls);
+  entry->AddInstruction(array);
+  entry->AddInstruction(entry_goto);
+  ManuallyBuildEnvFor(cls, {});
+  ManuallyBuildEnvFor(array, {});
+
+  HInstruction* preheader_goto = new (GetAllocator()) HGoto();
+  preheader->AddInstruction(preheader_goto);
+
+  // loop
+  HPhi* i_phi = new (GetAllocator()) HPhi(GetAllocator(), 0, 0, DataType::Type::kInt32);
+  HInstruction* loop_suspend_check = new (GetAllocator()) HSuspendCheck();
+  HInstruction* loop_cond = new (GetAllocator()) HLessThan(i_phi, n);
+  HIf* loop_if = new (GetAllocator()) HIf(loop_cond);
+  loop->AddPhi(i_phi);
+  loop->AddInstruction(loop_suspend_check);
+  loop->AddInstruction(loop_cond);
+  loop->AddInstruction(loop_if);
+  CHECK(loop_if->IfTrueSuccessor() == body);
+  ManuallyBuildEnvFor(loop_suspend_check, {});
+
+  // body
+  HInstruction* body_set =
+      new (GetAllocator()) HArraySet(array, i_phi, i_phi, DataType::Type::kInt32, /*dex_pc=*/ 0u);
+  HInstruction* body_add = new (GetAllocator()) HAdd(DataType::Type::kInt32, i_phi, c1);
+  HInstruction* body_goto = new (GetAllocator()) HGoto();
+  body->AddInstruction(body_set);
+  body->AddInstruction(body_add);
+  body->AddInstruction(body_goto);
+
+  // i_phi inputs
+  i_phi->AddInput(c0);
+  i_phi->AddInput(body_add);
+
+  // ret
+  HInstruction* ret_sub = new (GetAllocator()) HSub(DataType::Type::kInt32, i_phi, c1);
+  HInstruction* ret_get1 =
+      new (GetAllocator()) HArrayGet(array, ret_sub, DataType::Type::kInt32, /*dex_pc=*/ 0);
+  HInstruction* ret_get2 =
+      new (GetAllocator()) HArrayGet(array, i_phi, DataType::Type::kInt32, /*dex_pc=*/ 0);
+  HInstruction* ret_add = new (GetAllocator()) HAdd(DataType::Type::kInt32, ret_get1, ret_get2);
+  HInstruction* ret_return = new (GetAllocator()) HReturn(ret_add);
+  ret->AddInstruction(ret_sub);
+  ret->AddInstruction(ret_get1);
+  ret->AddInstruction(ret_get2);
+  ret->AddInstruction(ret_add);
+  ret->AddInstruction(ret_return);
+
+  // exit
+  SetupExit(exit);
+
+  graph_->ClearDominanceInformation();
+  graph_->ClearLoopInformation();
+  PerformLSE();
+
+  EXPECT_INS_RETAINED(cls);
+  EXPECT_INS_RETAINED(array);
+  EXPECT_INS_RETAINED(body_set);
+  EXPECT_INS_RETAINED(ret_get1);
+  EXPECT_INS_RETAINED(ret_get2);
 }
 
 // // ENTRY
@@ -1853,7 +2049,8 @@ TEST_F(LoadStoreEliminationTest, PartialUnknownMerge) {
 // EXIT
 // return PHI(foo_l, foo_r)
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit_REAL",
@@ -1929,7 +2126,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination) {
 // return obj.field
 // This test runs with partial LSE disabled.
 TEST_F(LoadStoreEliminationTest, PartialLoadPreserved) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit_REAL",
@@ -2000,7 +2198,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadPreserved) {
 // return obj.field
 // NB This test is for non-partial LSE flow. Normally the obj.field writes will be removed
 TEST_F(LoadStoreEliminationTest, PartialLoadPreserved2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit_REAL",
@@ -2088,7 +2287,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadPreserved2) {
 // ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2196,7 +2396,8 @@ typename Iter::value_type FindOrNull(Iter begin, Iter end, Func func) {
 // // first = phi[out.foo, 13]
 // return first + new_inst.foo;
 TEST_F(LoadStoreEliminationTest, PartialPhiPropagation) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2355,7 +2556,8 @@ TEST_F(LoadStoreEliminationTest, PartialPhiPropagation) {
 // return select(param3, obj1.foo, obj2.foo);
 // EXIT
 TEST_P(OrderDependentTestGroup, PredicatedUse) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2522,7 +2724,8 @@ TEST_P(OrderDependentTestGroup, PredicatedUse) {
 // return obj1.foo + obj2.foo;
 // EXIT
 TEST_P(OrderDependentTestGroup, PredicatedEnvUse) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2670,7 +2873,8 @@ TEST_P(OrderDependentTestGroup, PredicatedEnvUse) {
 // predicated-ELIMINATE
 // return obj1.field + obj2.field
 TEST_P(OrderDependentTestGroup, FieldSetOrderEnv) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2841,7 +3045,8 @@ TEST_P(OrderDependentTestGroup, FieldSetOrderEnv) {
 // // EXIT
 // return;
 TEST_P(OrderDependentTestGroup, MaterializationMovedUse) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -2951,7 +3156,8 @@ INSTANTIATE_TEST_SUITE_P(LoadStoreEliminationTest,
 // } else {}
 // EXIT
 TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -3036,7 +3242,8 @@ TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc) {
 // noescape();
 // return a + b + c
 TEST_F(LoadStoreEliminationTest, MutiPartialLoadStore) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -3195,7 +3402,8 @@ TEST_F(LoadStoreEliminationTest, MutiPartialLoadStore) {
 // EXIT
 // return a + b + c + obj.foo
 TEST_F(LoadStoreEliminationTest, MutiPartialLoadStore2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   // Need to have an actual entry block since we check env-layout and the way we
   // add constants would screw this up otherwise.
@@ -3362,7 +3570,8 @@ TEST_F(LoadStoreEliminationTest, MutiPartialLoadStore2) {
 // }
 // EXIT
 TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -3473,7 +3682,8 @@ TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc2) {
 // return obj.a;
 // EXIT
 TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -3591,7 +3801,8 @@ TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc3) {
 // return obj.a;
 // EXIT
 TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   // Break the critical edge between entry and set_two with the
   // set_two_critical_break node. Graph simplification would do this for us if
@@ -3723,7 +3934,8 @@ TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc4) {
 // return obj.a;
 // EXIT
 TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc5) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   // Break the critical edge between entry and set_two with the
   // set_two_critical_break node. Graph simplification would do this for us if
@@ -3854,7 +4066,8 @@ TEST_F(LoadStoreEliminationTest, MovePredicatedAlloc5) {
 // }
 // EXIT
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
@@ -3931,7 +4144,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination3) {
 // }
 // EXIT
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4033,7 +4247,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination4) {
 // ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination5) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4116,7 +4331,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination5) {
 // ELIMINATE
 // return obj.fid
 TEST_F(LoadStoreEliminationTest, PartialLoadElimination6) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4208,7 +4424,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadElimination6) {
 // return obj.field;
 // EXIT
 TEST_F(LoadStoreEliminationTest, PartialLoadPreserved3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4316,7 +4533,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadPreserved3) {
 // return obj.field;
 // EXIT
 TEST_F(LoadStoreEliminationTest, PartialLoadPreserved4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4421,7 +4639,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadPreserved4) {
 // ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoadPreserved5) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4599,7 +4818,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoadPreserved6) {
 // PREDICATED GET
 // return obj.field
 TEST_P(PartialComparisonTestGroup, PartialComparisonBeforeCohort) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4727,7 +4947,8 @@ TEST_P(PartialComparisonTestGroup, PartialComparisonBeforeCohort) {
 // PREDICATED GET
 // return obj.field
 TEST_P(PartialComparisonTestGroup, PartialComparisonInCohortBeforeEscape) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4856,7 +5077,8 @@ TEST_P(PartialComparisonTestGroup, PartialComparisonInCohortBeforeEscape) {
 // PREDICATED GET
 // return obj.field
 TEST_P(PartialComparisonTestGroup, PartialComparisonAfterCohort) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -4986,7 +5208,8 @@ TEST_P(PartialComparisonTestGroup, PartialComparisonAfterCohort) {
 // return obj.field
 TEST_P(PartialComparisonTestGroup, PartialComparisonInCohortAfterEscape) {
   PartialComparisonKind kind = GetParam();
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5145,7 +5368,8 @@ INSTANTIATE_TEST_SUITE_P(
 // predicated-ELIMINATE
 // obj.field = 3;
 TEST_F(LoadStoreEliminationTest, PredicatedStore1) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   InitGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5233,7 +5457,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedStore1) {
 // predicated-ELIMINATE
 // obj.field = 4;
 TEST_F(LoadStoreEliminationTest, PredicatedStore2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5344,7 +5569,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedStore2) {
 // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PredicatedLoad1) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5445,7 +5671,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedLoad1) {
 // predicated-ELIMINATE
 // return obj1.field + obj2.field
 TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad1) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5597,7 +5824,8 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad1) {
 // predicated-ELIMINATE
 // return obj1.field + obj2.field
 TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5761,7 +5989,8 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad2) {
 // // allow us to entirely remove the allocation in this test.
 // return obj.foo;
 TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5866,6 +6095,153 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad3) {
   EXPECT_INS_EQ(bottom_phi->InputAt(1), moved_ni2);
 }
 
+// // ENTRY
+// obj = new Obj();
+// if (param1) {
+//   obj.field = 3;
+//   noescape();
+// } else {
+//   obj.field = 2;
+//   noescape();
+// }
+// int abc;
+// if (parameter_value) {
+//   // LEFT
+//   abc = 4;
+//   escape(obj);
+// } else {
+//   // RIGHT
+//   // ELIMINATE
+//   noescape();
+//   abc = obj.field + 4;
+// }
+// abc = phi
+// EXIT
+// predicated-ELIMINATE
+// return obj.field + abc
+TEST_F(LoadStoreEliminationTest, PredicatedLoad4) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(/*handles=*/&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "start_left"},
+                                                  {"entry", "start_right"},
+                                                  {"start_left", "mid"},
+                                                  {"start_right", "mid"},
+                                                  {"mid", "left"},
+                                                  {"mid", "right"},
+                                                  {"left", "breturn"},
+                                                  {"right", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(exit);
+  GET_BLOCK(breturn);
+  GET_BLOCK(left);
+  GET_BLOCK(right);
+  GET_BLOCK(mid);
+  GET_BLOCK(start_left);
+  GET_BLOCK(start_right);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(breturn, {left, right});
+  EnsurePredecessorOrder(mid, {start_left, start_right});
+  HInstruction* bool_value = MakeParam(DataType::Type::kBool);
+  HInstruction* bool_value2 = MakeParam(DataType::Type::kBool);
+  HInstruction* null_const = graph_->GetNullConstant();
+  HInstruction* c2 = graph_->GetIntConstant(2);
+  HInstruction* c3 = graph_->GetIntConstant(3);
+  HInstruction* c4 = graph_->GetIntConstant(4);
+
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* if_inst = new (GetAllocator()) HIf(bool_value);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(if_inst);
+  ManuallyBuildEnvFor(cls, {});
+  new_inst->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* write_start_left = MakeIFieldSet(new_inst, c3, MemberOffset(32));
+  HInstruction* call_start_left = MakeInvoke(DataType::Type::kVoid, { });
+  start_left->AddInstruction(write_start_left);
+  start_left->AddInstruction(call_start_left);
+  start_left->AddInstruction(new (GetAllocator()) HGoto());
+  call_start_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* write_start_right = MakeIFieldSet(new_inst, c2, MemberOffset(32));
+  HInstruction* call_start_right = MakeInvoke(DataType::Type::kVoid, { });
+  start_right->AddInstruction(write_start_right);
+  start_right->AddInstruction(call_start_right);
+  start_right->AddInstruction(new (GetAllocator()) HGoto());
+  call_start_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  mid->AddInstruction(new (GetAllocator()) HIf(bool_value2));
+
+  HInstruction* call_left = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* goto_left = new (GetAllocator()) HGoto();
+  left->AddInstruction(call_left);
+  left->AddInstruction(goto_left);
+  call_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_right = MakeInvoke(DataType::Type::kVoid, { });
+  HInstruction* read_right = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_right = new (GetAllocator()) HAdd(DataType::Type::kInt32, read_right, c4);
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(call_right);
+  right->AddInstruction(read_right);
+  right->AddInstruction(add_right);
+  right->AddInstruction(goto_right);
+  call_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HPhi* phi_bottom = MakePhi({c4, add_right});
+  HInstruction* read_bottom = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_bottom =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, read_bottom, phi_bottom);
+  HInstruction* return_exit = new (GetAllocator()) HReturn(add_bottom);
+  breturn->AddPhi(phi_bottom);
+  breturn->AddInstruction(read_bottom);
+  breturn->AddInstruction(add_bottom);
+  breturn->AddInstruction(return_exit);
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSEWithPartial();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_REMOVED(read_bottom);
+  EXPECT_INS_REMOVED(read_right);
+  EXPECT_INS_RETAINED(call_left);
+  EXPECT_INS_RETAINED(call_right);
+  EXPECT_INS_RETAINED(call_start_left);
+  EXPECT_INS_RETAINED(call_start_right);
+  std::vector<HPhi*> merges;
+  HPredicatedInstanceFieldGet* pred_get =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  std::tie(merges) = FindAllInstructions<HPhi>(graph_, breturn);
+  ASSERT_EQ(merges.size(), 3u);
+  HPhi* merge_value_return = FindOrNull(merges.begin(), merges.end(), [&](HPhi* p) {
+    return p != phi_bottom && p->GetType() == DataType::Type::kInt32;
+  });
+  HPhi* merge_alloc = FindOrNull(merges.begin(), merges.end(), [](HPhi* p) {
+    return p->GetType() == DataType::Type::kReference;
+  });
+  ASSERT_NE(merge_alloc, nullptr);
+  EXPECT_TRUE(merge_alloc->InputAt(0)->IsNewInstance()) << *merge_alloc;
+  EXPECT_EQ(merge_alloc->InputAt(0)->InputAt(0), cls) << *merge_alloc << " cls? " << *cls;
+  EXPECT_EQ(merge_alloc->InputAt(1), null_const);
+  ASSERT_NE(pred_get, nullptr);
+  EXPECT_INS_EQ(pred_get->GetTarget(), merge_alloc);
+  EXPECT_INS_EQ(pred_get->GetDefaultValue(), merge_value_return) << " pred-get is: " << *pred_get;
+  EXPECT_INS_EQ(merge_value_return->InputAt(0), graph_->GetIntConstant(0))
+      << " merge val is: " << *merge_value_return;
+  EXPECT_INS_EQ(merge_value_return->InputAt(1), FindSingleInstruction<HPhi>(graph_, mid))
+      << " merge val is: " << *merge_value_return;
+}
+
 // Based on structure seen in `java.util.Set java.util.Collections$UnmodifiableMap.entrySet()`
 // We end up having to update a PHI generated by normal LSE.
 // // ENTRY
@@ -5885,7 +6261,8 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad3) {
 // // won't be changed. The escape happens with .BAR set so this is in escaping cohort.
 // return read_bottom.foo;
 TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -5989,7 +6366,8 @@ TEST_F(LoadStoreEliminationTest, MultiPredicatedLoad4) {
 // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PredicatedLoad2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6126,7 +6504,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedLoad2) {
 // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PredicatedLoad3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6253,7 +6632,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedLoad3) {
 // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PredicatedLoadDefaultValue) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6349,7 +6729,8 @@ TEST_F(LoadStoreEliminationTest, PredicatedLoadDefaultValue) {
 // // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoopPhis1) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6535,7 +6916,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis1) {
 // // predicated-ELIMINATE
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoopPhis2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6705,7 +7087,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis2) {
 // EXIT
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoopPhis3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6852,7 +7235,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis3) {
 // EXIT
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoopPhis4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -6996,7 +7380,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis4) {
 // EXIT
 // return obj.field
 TEST_F(LoadStoreEliminationTest, PartialLoopPhis5) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(/*handles=*/&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -7136,6 +7521,171 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis5) {
   EXPECT_INS_REMOVED(write_pre_header) << *write_pre_header;
 }
 
+// // ENTRY
+// obj = new Obj();
+// obj.field = 3;
+// if (param) {
+//   while (!test()) {
+//     if (test2()) {
+//       noescape();
+//     } else {
+//       abc = obj.field;
+//       obj.field = abc + 5;
+//       noescape();
+//     }
+//   }
+//   escape(obj);
+// } else {
+// }
+// return obj.field
+TEST_F(LoadStoreEliminationTest, PartialLoopPhis6) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(/*handles=*/&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "start"},
+                                                  {"start", "left"},
+                                                  {"start", "right"},
+                                                  {"left", "loop_pre_header"},
+
+                                                  {"loop_pre_header", "loop_header"},
+                                                  {"loop_header", "escape"},
+                                                  {"loop_header", "loop_body"},
+                                                  {"loop_body", "loop_if_left"},
+                                                  {"loop_body", "loop_if_right"},
+                                                  {"loop_if_left", "loop_header"},
+                                                  {"loop_if_right", "loop_header"},
+
+                                                  {"escape", "breturn"},
+                                                  {"right", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(exit);
+  GET_BLOCK(breturn);
+  GET_BLOCK(left);
+  GET_BLOCK(right);
+  GET_BLOCK(start);
+  GET_BLOCK(escape);
+
+  GET_BLOCK(loop_pre_header);
+  GET_BLOCK(loop_header);
+  GET_BLOCK(loop_body);
+  GET_BLOCK(loop_if_left);
+  GET_BLOCK(loop_if_right);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(breturn, {escape, right});
+  EnsurePredecessorOrder(loop_header, {loop_pre_header, loop_if_left, loop_if_right});
+  CHECK_SUBROUTINE_FAILURE();
+  HInstruction* bool_val = MakeParam(DataType::Type::kBool);
+  HInstruction* c3 = graph_->GetIntConstant(3);
+  HInstruction* c5 = graph_->GetIntConstant(5);
+
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* write_entry = MakeIFieldSet(new_inst, c3, MemberOffset(32));
+  HInstruction* entry_goto = new (GetAllocator()) HGoto();
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(write_entry);
+  entry->AddInstruction(entry_goto);
+  ManuallyBuildEnvFor(cls, {});
+  new_inst->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  start->AddInstruction(new (GetAllocator()) HIf(bool_val));
+
+  HInstruction* left_goto = new (GetAllocator()) HGoto();
+  left->AddInstruction(left_goto);
+
+  HInstruction* goto_preheader = new (GetAllocator()) HGoto();
+  loop_pre_header->AddInstruction(goto_preheader);
+
+  HInstruction* suspend_check_header = new (GetAllocator()) HSuspendCheck();
+  HInstruction* call_header = MakeInvoke(DataType::Type::kBool, {});
+  HInstruction* if_header = new (GetAllocator()) HIf(call_header);
+  loop_header->AddInstruction(suspend_check_header);
+  loop_header->AddInstruction(call_header);
+  loop_header->AddInstruction(if_header);
+  call_header->CopyEnvironmentFrom(cls->GetEnvironment());
+  suspend_check_header->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_loop_body = MakeInvoke(DataType::Type::kBool, {});
+  HInstruction* if_loop_body = new (GetAllocator()) HIf(call_loop_body);
+  loop_body->AddInstruction(call_loop_body);
+  loop_body->AddInstruction(if_loop_body);
+  call_loop_body->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_loop_left = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* goto_loop_left = new (GetAllocator()) HGoto();
+  loop_if_left->AddInstruction(call_loop_left);
+  loop_if_left->AddInstruction(goto_loop_left);
+  call_loop_left->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* read_loop_right = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* add_loop_right =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, c5, read_loop_right);
+  HInstruction* write_loop_right = MakeIFieldSet(new_inst, add_loop_right, MemberOffset(32));
+  HInstruction* call_loop_right = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* goto_loop_right = new (GetAllocator()) HGoto();
+  loop_if_right->AddInstruction(read_loop_right);
+  loop_if_right->AddInstruction(add_loop_right);
+  loop_if_right->AddInstruction(write_loop_right);
+  loop_if_right->AddInstruction(call_loop_right);
+  loop_if_right->AddInstruction(goto_loop_right);
+  call_loop_right->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* call_escape = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* goto_escape = new (GetAllocator()) HGoto();
+  escape->AddInstruction(call_escape);
+  escape->AddInstruction(goto_escape);
+  call_escape->CopyEnvironmentFrom(cls->GetEnvironment());
+
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(goto_right);
+
+  HInstruction* read_bottom = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* return_exit = new (GetAllocator()) HReturn(read_bottom);
+  breturn->AddInstruction(read_bottom);
+  breturn->AddInstruction(return_exit);
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSEWithPartial();
+  LOG(INFO) << "Post LSE " << blks;
+
+  HPredicatedInstanceFieldGet* pred_get =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  EXPECT_INS_REMOVED(read_bottom) << *read_bottom;
+  ASSERT_TRUE(pred_get != nullptr);
+  HPhi* inst_return_phi = pred_get->GetTarget()->AsPhi();
+  ASSERT_TRUE(inst_return_phi != nullptr) << pred_get->GetTarget()->DumpWithArgs();
+  EXPECT_INS_EQ(inst_return_phi->InputAt(0),
+                FindSingleInstruction<HNewInstance>(graph_, escape->GetSinglePredecessor()));
+  EXPECT_INS_EQ(inst_return_phi->InputAt(1), graph_->GetNullConstant());
+  EXPECT_INS_EQ(pred_get->GetDefaultValue()->InputAt(0), graph_->GetIntConstant(0));
+  EXPECT_INS_EQ(pred_get->GetDefaultValue()->InputAt(1), c3);
+  HPhi* loop_header_phi = FindSingleInstruction<HPhi>(graph_, loop_header);
+  ASSERT_NE(loop_header_phi, nullptr);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(0), c3);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(1), loop_header_phi);
+  EXPECT_INS_EQ(loop_header_phi->InputAt(2), add_loop_right);
+  EXPECT_INS_EQ(add_loop_right->InputAt(0), c5);
+  EXPECT_INS_EQ(add_loop_right->InputAt(1), loop_header_phi);
+  HInstanceFieldSet* mat_set =
+      FindSingleInstruction<HInstanceFieldSet>(graph_, escape->GetSinglePredecessor());
+  ASSERT_NE(mat_set, nullptr);
+  EXPECT_INS_EQ(mat_set->InputAt(1), loop_header_phi);
+  EXPECT_INS_REMOVED(write_loop_right);
+  EXPECT_INS_REMOVED(write_entry);
+  EXPECT_INS_RETAINED(call_header);
+  EXPECT_INS_RETAINED(call_loop_left);
+  EXPECT_INS_RETAINED(call_loop_right);
+}
+
 // TODO This should really be in an Instruction simplifier Gtest but (1) that
 // doesn't exist and (2) we should move this simplification to directly in the
 // LSE pass since there is more information then.
@@ -7149,7 +7699,8 @@ TEST_F(LoadStoreEliminationTest, PartialLoopPhis5) {
 // }
 // return obj.field;
 TEST_F(LoadStoreEliminationTest, SimplifyTest) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -7240,7 +7791,8 @@ TEST_F(LoadStoreEliminationTest, SimplifyTest) {
 // }
 // return obj.field;
 TEST_F(LoadStoreEliminationTest, SimplifyTest2) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -7343,7 +7895,8 @@ TEST_F(LoadStoreEliminationTest, SimplifyTest2) {
 // }
 // return obj.field;
 TEST_F(LoadStoreEliminationTest, SimplifyTest3) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -7449,7 +8002,8 @@ TEST_F(LoadStoreEliminationTest, SimplifyTest3) {
 // }
 // return obj.field;
 TEST_F(LoadStoreEliminationTest, SimplifyTest4) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
@@ -7561,7 +8115,8 @@ TEST_F(LoadStoreEliminationTest, SimplifyTest4) {
 // }
 // return obj.foo;
 TEST_F(LoadStoreEliminationTest, PartialIrreducibleLoop) {
-  VariableSizedHandleScope vshs(Thread::Current());
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
   CreateGraph(&vshs);
   AdjacencyListGraph blks(SetupFromAdjacencyList("start",
                                                  "exit",
@@ -7689,5 +8244,573 @@ TEST_F(LoadStoreEliminationTest, PartialIrreducibleLoop) {
   ASSERT_NE(mat, nullptr);
   EXPECT_INS_EQ(pred_get->GetTarget()->InputAt(1), mat);
 }
+
+enum class UsesOrder { kDefaultOrder, kReverseOrder };
+std::ostream& operator<<(std::ostream& os, const UsesOrder& ord) {
+  switch (ord) {
+    case UsesOrder::kDefaultOrder:
+      return os << "DefaultOrder";
+    case UsesOrder::kReverseOrder:
+      return os << "ReverseOrder";
+  }
+}
+
+class UsesOrderDependentTestGroup
+    : public LoadStoreEliminationTestBase<CommonCompilerTestWithParam<UsesOrder>> {};
+
+// Make sure that we record replacements by predicated loads and use them
+// instead of constructing Phis with inputs removed from the graph. Bug: 183897743
+// Note that the bug was hit only for a certain ordering of the NewInstance
+// uses, so we test both orderings.
+// // ENTRY
+// obj = new Obj();
+// obj.foo = 11;
+// if (param1) {
+//   // LEFT1
+//   escape(obj);
+// } else {
+//   // RIGHT1
+// }
+// // MIDDLE
+// a = obj.foo;
+// if (param2) {
+//   // LEFT2
+//   obj.foo = 33;
+// } else {
+//   // RIGHT2
+// }
+// // BRETURN
+// no_escape()  // If `obj` escaped, the field value can change. (Avoid non-partial LSE.)
+// b = obj.foo;
+// return a + b;
+TEST_P(UsesOrderDependentTestGroup, RecordPredicatedReplacements1) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "left1"},
+                                                  {"entry", "right1"},
+                                                  {"left1", "middle"},
+                                                  {"right1", "middle"},
+                                                  {"middle", "left2"},
+                                                  {"middle", "right2"},
+                                                  {"left2", "breturn"},
+                                                  {"right2", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(left1);
+  GET_BLOCK(right1);
+  GET_BLOCK(middle);
+  GET_BLOCK(left2);
+  GET_BLOCK(right2);
+  GET_BLOCK(breturn);
+  GET_BLOCK(exit);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(middle, {left1, right1});
+  EnsurePredecessorOrder(breturn, {left2, right2});
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* cnull = graph_->GetNullConstant();
+  HInstruction* c11 = graph_->GetIntConstant(11);
+  HInstruction* c33 = graph_->GetIntConstant(33);
+  HInstruction* param1 = MakeParam(DataType::Type::kBool);
+  HInstruction* param2 = MakeParam(DataType::Type::kBool);
+
+  HInstruction* suspend = new (GetAllocator()) HSuspendCheck();
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* entry_write = MakeIFieldSet(new_inst, c11, MemberOffset(32));
+  HInstruction* entry_if = new (GetAllocator()) HIf(param1);
+  entry->AddInstruction(suspend);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(entry_write);
+  entry->AddInstruction(entry_if);
+  ManuallyBuildEnvFor(suspend, {});
+  ManuallyBuildEnvFor(cls, {});
+  ManuallyBuildEnvFor(new_inst, {});
+
+  HInstruction* left1_call = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* left1_goto = new (GetAllocator()) HGoto();
+  left1->AddInstruction(left1_call);
+  left1->AddInstruction(left1_goto);
+  ManuallyBuildEnvFor(left1_call, {});
+
+  HInstruction* right1_goto = new (GetAllocator()) HGoto();
+  right1->AddInstruction(right1_goto);
+
+  HInstruction* middle_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* middle_if = new (GetAllocator()) HIf(param2);
+  if (GetParam() == UsesOrder::kDefaultOrder) {
+    middle->AddInstruction(middle_read);
+  }
+  middle->AddInstruction(middle_if);
+
+  HInstanceFieldSet* left2_write = MakeIFieldSet(new_inst, c33, MemberOffset(32));
+  HInstruction* left2_goto = new (GetAllocator()) HGoto();
+  left2->AddInstruction(left2_write);
+  left2->AddInstruction(left2_goto);
+
+  HInstruction* right2_goto = new (GetAllocator()) HGoto();
+  right2->AddInstruction(right2_goto);
+
+  HInstruction* breturn_call = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* breturn_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* breturn_add =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, middle_read, breturn_read);
+  HInstruction* breturn_return = new (GetAllocator()) HReturn(breturn_add);
+  breturn->AddInstruction(breturn_call);
+  breturn->AddInstruction(breturn_read);
+  breturn->AddInstruction(breturn_add);
+  breturn->AddInstruction(breturn_return);
+  ManuallyBuildEnvFor(breturn_call, {});
+
+  if (GetParam() == UsesOrder::kReverseOrder) {
+    // Insert `middle_read` in the same position as for the `kDefaultOrder` case.
+    // The only difference is the order of entries in `new_inst->GetUses()` which
+    // is used by `HeapReferenceData::CollectReplacements()` and defines the order
+    // of instructions to process for `HeapReferenceData::PredicateInstructions()`.
+    middle->InsertInstructionBefore(middle_read, middle_if);
+  }
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSE();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_RETAINED(cls);
+  EXPECT_INS_REMOVED(new_inst);
+  HNewInstance* replacement_new_inst = FindSingleInstruction<HNewInstance>(graph_);
+  ASSERT_NE(replacement_new_inst, nullptr);
+  EXPECT_INS_REMOVED(entry_write);
+  std::vector<HInstanceFieldSet*> all_writes;
+  std::tie(all_writes) = FindAllInstructions<HInstanceFieldSet>(graph_);
+  ASSERT_EQ(2u, all_writes.size());
+  ASSERT_NE(all_writes[0] == left2_write, all_writes[1] == left2_write);
+  HInstanceFieldSet* replacement_write = all_writes[(all_writes[0] == left2_write) ? 1u : 0u];
+  ASSERT_FALSE(replacement_write->GetIsPredicatedSet());
+  ASSERT_INS_EQ(replacement_write->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_write->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left1_call);
+
+  EXPECT_INS_REMOVED(middle_read);
+  HPredicatedInstanceFieldGet* replacement_middle_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, middle);
+  ASSERT_NE(replacement_middle_read, nullptr);
+  ASSERT_TRUE(replacement_middle_read->GetTarget()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle_read->GetTarget()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle_read->GetTarget()->AsPhi()->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_middle_read->GetTarget()->AsPhi()->InputAt(1), cnull);
+  ASSERT_TRUE(replacement_middle_read->GetDefaultValue()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle_read->GetDefaultValue()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle_read->GetDefaultValue()->AsPhi()->InputAt(0), c0);
+  ASSERT_INS_EQ(replacement_middle_read->GetDefaultValue()->AsPhi()->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left2_write);
+  ASSERT_TRUE(left2_write->GetIsPredicatedSet());
+
+  EXPECT_INS_REMOVED(breturn_read);
+  HPredicatedInstanceFieldGet* replacement_breturn_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  ASSERT_NE(replacement_breturn_read, nullptr);
+  ASSERT_INS_EQ(replacement_breturn_read->GetTarget(), replacement_middle_read->GetTarget());
+  ASSERT_TRUE(replacement_breturn_read->GetDefaultValue()->IsPhi());
+  ASSERT_EQ(2u, replacement_breturn_read->GetDefaultValue()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_breturn_read->GetDefaultValue()->AsPhi()->InputAt(0), c33);
+  HInstruction* other_input = replacement_breturn_read->GetDefaultValue()->AsPhi()->InputAt(1);
+  ASSERT_NE(other_input->GetBlock(), nullptr) << GetParam();
+  ASSERT_INS_EQ(other_input, replacement_middle_read);
+}
+
+// Regression test for a bad DCHECK() found while trying to write a test for b/188188275.
+// // ENTRY
+// obj = new Obj();
+// obj.foo = 11;
+// if (param1) {
+//   // LEFT1
+//   escape(obj);
+// } else {
+//   // RIGHT1
+// }
+// // MIDDLE
+// a = obj.foo;
+// if (param2) {
+//   // LEFT2
+//   no_escape();
+// } else {
+//   // RIGHT2
+// }
+// // BRETURN
+// b = obj.foo;
+// return a + b;
+TEST_P(UsesOrderDependentTestGroup, RecordPredicatedReplacements2) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "left1"},
+                                                  {"entry", "right1"},
+                                                  {"left1", "middle"},
+                                                  {"right1", "middle"},
+                                                  {"middle", "left2"},
+                                                  {"middle", "right2"},
+                                                  {"left2", "breturn"},
+                                                  {"right2", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(left1);
+  GET_BLOCK(right1);
+  GET_BLOCK(middle);
+  GET_BLOCK(left2);
+  GET_BLOCK(right2);
+  GET_BLOCK(breturn);
+  GET_BLOCK(exit);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(middle, {left1, right1});
+  EnsurePredecessorOrder(breturn, {left2, right2});
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* cnull = graph_->GetNullConstant();
+  HInstruction* c11 = graph_->GetIntConstant(11);
+  HInstruction* param1 = MakeParam(DataType::Type::kBool);
+  HInstruction* param2 = MakeParam(DataType::Type::kBool);
+
+  HInstruction* suspend = new (GetAllocator()) HSuspendCheck();
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* entry_write = MakeIFieldSet(new_inst, c11, MemberOffset(32));
+  HInstruction* entry_if = new (GetAllocator()) HIf(param1);
+  entry->AddInstruction(suspend);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(entry_write);
+  entry->AddInstruction(entry_if);
+  ManuallyBuildEnvFor(suspend, {});
+  ManuallyBuildEnvFor(cls, {});
+  ManuallyBuildEnvFor(new_inst, {});
+
+  HInstruction* left1_call = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* left1_goto = new (GetAllocator()) HGoto();
+  left1->AddInstruction(left1_call);
+  left1->AddInstruction(left1_goto);
+  ManuallyBuildEnvFor(left1_call, {});
+
+  HInstruction* right1_goto = new (GetAllocator()) HGoto();
+  right1->AddInstruction(right1_goto);
+
+  HInstruction* middle_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* middle_if = new (GetAllocator()) HIf(param2);
+  if (GetParam() == UsesOrder::kDefaultOrder) {
+    middle->AddInstruction(middle_read);
+  }
+  middle->AddInstruction(middle_if);
+
+  HInstruction* left2_call = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* left2_goto = new (GetAllocator()) HGoto();
+  left2->AddInstruction(left2_call);
+  left2->AddInstruction(left2_goto);
+  ManuallyBuildEnvFor(left2_call, {});
+
+  HInstruction* right2_goto = new (GetAllocator()) HGoto();
+  right2->AddInstruction(right2_goto);
+
+  HInstruction* breturn_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* breturn_add =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, middle_read, breturn_read);
+  HInstruction* breturn_return = new (GetAllocator()) HReturn(breturn_add);
+  breturn->AddInstruction(breturn_read);
+  breturn->AddInstruction(breturn_add);
+  breturn->AddInstruction(breturn_return);
+
+  if (GetParam() == UsesOrder::kReverseOrder) {
+    // Insert `middle_read` in the same position as for the `kDefaultOrder` case.
+    // The only difference is the order of entries in `new_inst->GetUses()` which
+    // is used by `HeapReferenceData::CollectReplacements()` and defines the order
+    // of instructions to process for `HeapReferenceData::PredicateInstructions()`.
+    middle->InsertInstructionBefore(middle_read, middle_if);
+  }
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSE();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_RETAINED(cls);
+  EXPECT_INS_REMOVED(new_inst);
+  HNewInstance* replacement_new_inst = FindSingleInstruction<HNewInstance>(graph_);
+  ASSERT_NE(replacement_new_inst, nullptr);
+  EXPECT_INS_REMOVED(entry_write);
+  HInstanceFieldSet* replacement_write = FindSingleInstruction<HInstanceFieldSet>(graph_);
+  ASSERT_NE(replacement_write, nullptr);
+  ASSERT_FALSE(replacement_write->GetIsPredicatedSet());
+  ASSERT_INS_EQ(replacement_write->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_write->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left1_call);
+
+  EXPECT_INS_REMOVED(middle_read);
+  HPredicatedInstanceFieldGet* replacement_middle_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, middle);
+  ASSERT_NE(replacement_middle_read, nullptr);
+  ASSERT_TRUE(replacement_middle_read->GetTarget()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle_read->GetTarget()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle_read->GetTarget()->AsPhi()->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_middle_read->GetTarget()->AsPhi()->InputAt(1), cnull);
+  ASSERT_TRUE(replacement_middle_read->GetDefaultValue()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle_read->GetDefaultValue()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle_read->GetDefaultValue()->AsPhi()->InputAt(0), c0);
+  ASSERT_INS_EQ(replacement_middle_read->GetDefaultValue()->AsPhi()->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left2_call);
+
+  EXPECT_INS_REMOVED(breturn_read);
+  HPredicatedInstanceFieldGet* replacement_breturn_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  ASSERT_NE(replacement_breturn_read, nullptr);
+  ASSERT_INS_EQ(replacement_breturn_read->GetTarget(), replacement_middle_read->GetTarget());
+  ASSERT_INS_EQ(replacement_breturn_read->GetDefaultValue(), replacement_middle_read);
+}
+
+INSTANTIATE_TEST_SUITE_P(LoadStoreEliminationTest,
+                         UsesOrderDependentTestGroup,
+                         testing::Values(UsesOrder::kDefaultOrder, UsesOrder::kReverseOrder));
+
+// The parameter is the number of times we call `std::next_permutation` (from 0 to 5)
+// so that we test all 6 permutation of three items.
+class UsesOrderDependentTestGroupForThreeItems
+    : public LoadStoreEliminationTestBase<CommonCompilerTestWithParam<size_t>> {};
+
+// Make sure that after we record replacements by predicated loads, we correctly
+// use that predicated load for Phi placeholders that were previously marked as
+// replaced by the now removed unpredicated load. (The fix for bug 183897743 was
+// not good enough.) Bug: 188188275
+// // ENTRY
+// obj = new Obj();
+// obj.foo = 11;
+// if (param1) {
+//   // LEFT1
+//   escape(obj);
+// } else {
+//   // RIGHT1
+// }
+// // MIDDLE1
+// a = obj.foo;
+// if (param2) {
+//   // LEFT2
+//   no_escape1();
+// } else {
+//   // RIGHT2
+// }
+// // MIDDLE2
+// if (param3) {
+//   // LEFT3
+//   x = obj.foo;
+//   no_escape2();
+// } else {
+//   // RIGHT3
+//   x = 0;
+// }
+// // BRETURN
+// b = obj.foo;
+// return a + b + x;
+TEST_P(UsesOrderDependentTestGroupForThreeItems, RecordPredicatedReplacements3) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
+                                                 "exit",
+                                                 {{"entry", "left1"},
+                                                  {"entry", "right1"},
+                                                  {"left1", "middle1"},
+                                                  {"right1", "middle1"},
+                                                  {"middle1", "left2"},
+                                                  {"middle1", "right2"},
+                                                  {"left2", "middle2"},
+                                                  {"right2", "middle2"},
+                                                  {"middle2", "left3"},
+                                                  {"middle2", "right3"},
+                                                  {"left3", "breturn"},
+                                                  {"right3", "breturn"},
+                                                  {"breturn", "exit"}}));
+#define GET_BLOCK(name) HBasicBlock* name = blks.Get(#name)
+  GET_BLOCK(entry);
+  GET_BLOCK(left1);
+  GET_BLOCK(right1);
+  GET_BLOCK(middle1);
+  GET_BLOCK(left2);
+  GET_BLOCK(right2);
+  GET_BLOCK(middle2);
+  GET_BLOCK(left3);
+  GET_BLOCK(right3);
+  GET_BLOCK(breturn);
+  GET_BLOCK(exit);
+#undef GET_BLOCK
+  EnsurePredecessorOrder(middle1, {left1, right1});
+  EnsurePredecessorOrder(middle2, {left2, right2});
+  EnsurePredecessorOrder(breturn, {left3, right3});
+  HInstruction* c0 = graph_->GetIntConstant(0);
+  HInstruction* cnull = graph_->GetNullConstant();
+  HInstruction* c11 = graph_->GetIntConstant(11);
+  HInstruction* param1 = MakeParam(DataType::Type::kBool);
+  HInstruction* param2 = MakeParam(DataType::Type::kBool);
+  HInstruction* param3 = MakeParam(DataType::Type::kBool);
+
+  HInstruction* suspend = new (GetAllocator()) HSuspendCheck();
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+  HInstruction* entry_write = MakeIFieldSet(new_inst, c11, MemberOffset(32));
+  HInstruction* entry_if = new (GetAllocator()) HIf(param1);
+  entry->AddInstruction(suspend);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(entry_write);
+  entry->AddInstruction(entry_if);
+  ManuallyBuildEnvFor(suspend, {});
+  ManuallyBuildEnvFor(cls, {});
+  ManuallyBuildEnvFor(new_inst, {});
+
+  HInstruction* left1_call = MakeInvoke(DataType::Type::kVoid, { new_inst });
+  HInstruction* left1_goto = new (GetAllocator()) HGoto();
+  left1->AddInstruction(left1_call);
+  left1->AddInstruction(left1_goto);
+  ManuallyBuildEnvFor(left1_call, {});
+
+  HInstruction* right1_goto = new (GetAllocator()) HGoto();
+  right1->AddInstruction(right1_goto);
+
+  HInstruction* middle1_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* middle1_if = new (GetAllocator()) HIf(param2);
+  // Delay inserting `middle1_read`, do that later with ordering based on `GetParam()`.
+  middle1->AddInstruction(middle1_if);
+
+  HInstruction* left2_call = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* left2_goto = new (GetAllocator()) HGoto();
+  left2->AddInstruction(left2_call);
+  left2->AddInstruction(left2_goto);
+  ManuallyBuildEnvFor(left2_call, {});
+
+  HInstruction* right2_goto = new (GetAllocator()) HGoto();
+  right2->AddInstruction(right2_goto);
+
+  HInstruction* middle2_if = new (GetAllocator()) HIf(param3);
+  middle2->AddInstruction(middle2_if);
+
+  HInstruction* left3_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* left3_call = MakeInvoke(DataType::Type::kVoid, {});
+  HInstruction* left3_goto = new (GetAllocator()) HGoto();
+  // Delay inserting `left3_read`, do that later with ordering based on `GetParam()`.
+  left3->AddInstruction(left3_call);
+  left3->AddInstruction(left3_goto);
+  ManuallyBuildEnvFor(left3_call, {});
+
+  HInstruction* right3_goto = new (GetAllocator()) HGoto();
+  right3->AddInstruction(right3_goto);
+
+  HPhi* breturn_phi = MakePhi({left3_read, c0});
+  HInstruction* breturn_read = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  HInstruction* breturn_add1 =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, middle1_read, breturn_read);
+  HInstruction* breturn_add2 =
+      new (GetAllocator()) HAdd(DataType::Type::kInt32, breturn_add1, breturn_phi);
+  HInstruction* breturn_return = new (GetAllocator()) HReturn(breturn_add2);
+  breturn->AddPhi(breturn_phi);
+  // Delay inserting `breturn_read`, do that later with ordering based on `GetParam()`.
+  breturn->AddInstruction(breturn_add1);
+  breturn->AddInstruction(breturn_add2);
+  breturn->AddInstruction(breturn_return);
+
+  // Insert reads in the same positions but in different insertion orders.
+  // The only difference is the order of entries in `new_inst->GetUses()` which
+  // is used by `HeapReferenceData::CollectReplacements()` and defines the order
+  // of instructions to process for `HeapReferenceData::PredicateInstructions()`.
+  std::tuple<size_t, HInstruction*, HInstruction*> read_insertions[] = {
+      { 0u, middle1_read, middle1_if },
+      { 1u, left3_read, left3_call },
+      { 2u, breturn_read, breturn_add1 },
+  };
+  for (size_t i = 0, num = GetParam(); i != num; ++i) {
+    std::next_permutation(read_insertions, read_insertions + std::size(read_insertions));
+  }
+  for (auto [order, read, cursor] : read_insertions) {
+    cursor->GetBlock()->InsertInstructionBefore(read, cursor);
+  }
+
+  SetupExit(exit);
+
+  // PerformLSE expects this to be empty.
+  graph_->ClearDominanceInformation();
+  LOG(INFO) << "Pre LSE " << blks;
+  PerformLSE();
+  LOG(INFO) << "Post LSE " << blks;
+
+  EXPECT_INS_RETAINED(cls);
+  EXPECT_INS_REMOVED(new_inst);
+  HNewInstance* replacement_new_inst = FindSingleInstruction<HNewInstance>(graph_);
+  ASSERT_NE(replacement_new_inst, nullptr);
+  EXPECT_INS_REMOVED(entry_write);
+  HInstanceFieldSet* replacement_write = FindSingleInstruction<HInstanceFieldSet>(graph_);
+  ASSERT_NE(replacement_write, nullptr);
+  ASSERT_FALSE(replacement_write->GetIsPredicatedSet());
+  ASSERT_INS_EQ(replacement_write->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_write->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left1_call);
+
+  EXPECT_INS_REMOVED(middle1_read);
+  HPredicatedInstanceFieldGet* replacement_middle1_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, middle1);
+  ASSERT_NE(replacement_middle1_read, nullptr);
+  ASSERT_TRUE(replacement_middle1_read->GetTarget()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle1_read->GetTarget()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle1_read->GetTarget()->AsPhi()->InputAt(0), replacement_new_inst);
+  ASSERT_INS_EQ(replacement_middle1_read->GetTarget()->AsPhi()->InputAt(1), cnull);
+  ASSERT_TRUE(replacement_middle1_read->GetDefaultValue()->IsPhi());
+  ASSERT_EQ(2u, replacement_middle1_read->GetDefaultValue()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_middle1_read->GetDefaultValue()->AsPhi()->InputAt(0), c0);
+  ASSERT_INS_EQ(replacement_middle1_read->GetDefaultValue()->AsPhi()->InputAt(1), c11);
+
+  EXPECT_INS_RETAINED(left2_call);
+
+  EXPECT_INS_REMOVED(left3_read);
+  HPredicatedInstanceFieldGet* replacement_left3_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, left3);
+  ASSERT_NE(replacement_left3_read, nullptr);
+  ASSERT_TRUE(replacement_left3_read->GetTarget()->IsPhi());
+  ASSERT_INS_EQ(replacement_left3_read->GetTarget(), replacement_middle1_read->GetTarget());
+  ASSERT_INS_EQ(replacement_left3_read->GetDefaultValue(), replacement_middle1_read);
+  EXPECT_INS_RETAINED(left3_call);
+
+  EXPECT_INS_RETAINED(breturn_phi);
+  EXPECT_INS_REMOVED(breturn_read);
+  HPredicatedInstanceFieldGet* replacement_breturn_read =
+      FindSingleInstruction<HPredicatedInstanceFieldGet>(graph_, breturn);
+  ASSERT_NE(replacement_breturn_read, nullptr);
+  ASSERT_INS_EQ(replacement_breturn_read->GetTarget(), replacement_middle1_read->GetTarget());
+  ASSERT_EQ(2u, replacement_breturn_read->GetDefaultValue()->AsPhi()->InputCount());
+  ASSERT_INS_EQ(replacement_breturn_read->GetDefaultValue()->AsPhi()->InputAt(0),
+                replacement_left3_read);
+  ASSERT_INS_EQ(replacement_breturn_read->GetDefaultValue()->AsPhi()->InputAt(1),
+                replacement_middle1_read);
+  EXPECT_INS_RETAINED(breturn_add1);
+  ASSERT_INS_EQ(breturn_add1->InputAt(0), replacement_middle1_read);
+  ASSERT_INS_EQ(breturn_add1->InputAt(1), replacement_breturn_read);
+  EXPECT_INS_RETAINED(breturn_add2);
+  ASSERT_INS_EQ(breturn_add2->InputAt(0), breturn_add1);
+  ASSERT_INS_EQ(breturn_add2->InputAt(1), breturn_phi);
+  EXPECT_INS_RETAINED(breturn_return);
+}
+
+INSTANTIATE_TEST_SUITE_P(LoadStoreEliminationTest,
+                         UsesOrderDependentTestGroupForThreeItems,
+                         testing::Values(0u, 1u, 2u, 3u, 4u, 5u));
 
 }  // namespace art

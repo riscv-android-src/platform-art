@@ -35,13 +35,6 @@ pid_t GetTid() {
 
 class PaletteClientTest : public testing::Test {};
 
-TEST_F(PaletteClientTest, GetVersion) {
-  int32_t version = -1;
-  palette_status_t status = PaletteGetVersion(&version);
-  ASSERT_EQ(PALETTE_STATUS_OK, status);
-  ASSERT_GE(version, 1);
-}
-
 TEST_F(PaletteClientTest, SchedPriority) {
   int32_t tid = GetTid();
   int32_t saved_priority;
@@ -56,15 +49,9 @@ TEST_F(PaletteClientTest, SchedPriority) {
 }
 
 TEST_F(PaletteClientTest, Trace) {
-  int32_t enabled;
+  bool enabled = false;
   EXPECT_EQ(PALETTE_STATUS_OK, PaletteTraceEnabled(&enabled));
   EXPECT_EQ(PALETTE_STATUS_OK, PaletteTraceBegin("Hello world!"));
   EXPECT_EQ(PALETTE_STATUS_OK, PaletteTraceEnd());
   EXPECT_EQ(PALETTE_STATUS_OK, PaletteTraceIntegerValue("Beans", /*value=*/ 3));
-}
-
-TEST_F(PaletteClientTest, GetHooks) {
-  PaletteHooks* hooks = nullptr;
-  palette_status_t status = PaletteGetHooks(&hooks);
-  ASSERT_TRUE(status == PALETTE_STATUS_OK || status == PALETTE_STATUS_NOT_SUPPORTED);
 }

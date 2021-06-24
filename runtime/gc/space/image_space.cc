@@ -846,11 +846,11 @@ class ImageSpace::Loader {
     // Use the boot image component count to calculate the checksum from
     // the appropriate number of boot image chunks.
     uint32_t boot_image_component_count = image_header.GetBootImageComponentCount();
-    size_t boot_image_spaces_size = boot_image_spaces.size();
-    if (boot_image_component_count > boot_image_spaces_size) {
+    size_t expected_image_component_count = ImageSpace::GetNumberOfComponents(boot_image_spaces);
+    if (boot_image_component_count > expected_image_component_count) {
       *error_msg = StringPrintf("Too many boot image dependencies (%u > %zu) in image %s",
                                 boot_image_component_count,
-                                boot_image_spaces_size,
+                                expected_image_component_count,
                                 image_filename);
       return false;
     }
@@ -1411,12 +1411,14 @@ class ImageSpace::BootImageLayout {
     mutable android::base::unique_fd oat_fd;
   };
 
-  BootImageLayout(const std::string& image_location,
+  BootImageLayout(ArrayRef<const std::string> image_locations,
                   ArrayRef<const std::string> boot_class_path,
-                  ArrayRef<const std::string> boot_class_path_locations)
-     : image_location_(image_location),
+                  ArrayRef<const std::string> boot_class_path_locations,
+                  ArrayRef<const int> boot_class_path_fds)
+     : image_locations_(image_locations),
        boot_class_path_(boot_class_path),
-       boot_class_path_locations_(boot_class_path_locations) {}
+       boot_class_path_locations_(boot_class_path_locations),
+       boot_class_path_fds_(boot_class_path_fds) {}
 
   std::string GetPrimaryImageLocation();
 
@@ -1485,7 +1487,7 @@ class ImageSpace::BootImageLayout {
     return boot_class_path_[bcp_index].substr(0u, bcp_slash_pos + 1u);
   }
 
-  bool VerifyImageLocation(const std::vector<std::string>& components,
+  bool VerifyImageLocation(ArrayRef<const std::string> components,
                            /*out*/size_t* named_components_count,
                            /*out*/std::string* error_msg);
 
@@ -1512,7 +1514,7 @@ class ImageSpace::BootImageLayout {
                         const std::string& base_filename,
                         size_t bcp_index,
                         const std::string& profile_filename,
-                        ArrayRef<std::string> dependencies,
+                        ArrayRef<const std::string> dependencies,
                         /*out*/std::string* error_msg);
 
   bool CheckAndRemoveLastChunkChecksum(/*inout*/std::string_view* oat_checksums,
@@ -1527,9 +1529,10 @@ class ImageSpace::BootImageLayout {
                                 /*inout*/std::string_view* oat_checksums,
                                 /*out*/std::string* error_msg);
 
-  const std::string& image_location_;
+  ArrayRef<const std::string> image_locations_;
   ArrayRef<const std::string> boot_class_path_;
   ArrayRef<const std::string> boot_class_path_locations_;
+  ArrayRef<const int> boot_class_path_fds_;
 
   std::vector<ImageChunk> chunks_;
   uint32_t base_address_ = 0u;
@@ -1539,15 +1542,8 @@ class ImageSpace::BootImageLayout {
 };
 
 std::string ImageSpace::BootImageLayout::GetPrimaryImageLocation() {
-  size_t location_start = 0u;
-  size_t location_end = image_location_.find(kComponentSeparator);
-  while (location_end == location_start) {
-    ++location_start;
-    location_end = image_location_.find(location_start, kComponentSeparator);
-  }
-  std::string location = (location_end == std::string::npos)
-      ? image_location_.substr(location_start)
-      : image_location_.substr(location_start, location_end - location_start);
+  DCHECK(!image_locations_.empty());
+  std::string location = image_locations_[0];
   if (location.find('/') == std::string::npos) {
     // No path, so use the path from the first boot class path component.
     size_t slash_pos = boot_class_path_.empty()
@@ -1562,7 +1558,7 @@ std::string ImageSpace::BootImageLayout::GetPrimaryImageLocation() {
 }
 
 bool ImageSpace::BootImageLayout::VerifyImageLocation(
-    const std::vector<std::string>& components,
+    ArrayRef<const std::string> components,
     /*out*/size_t* named_components_count,
     /*out*/std::string* error_msg) {
   DCHECK(named_components_count != nullptr);
@@ -1853,7 +1849,7 @@ bool ImageSpace::BootImageLayout::CompileExtension(const std::string& base_locat
                                                    const std::string& base_filename,
                                                    size_t bcp_index,
                                                    const std::string& profile_filename,
-                                                   ArrayRef<std::string> dependencies,
+                                                   ArrayRef<const std::string> dependencies,
                                                    /*out*/std::string* error_msg) {
   DCHECK_LE(total_component_count_, next_bcp_index_);
   DCHECK_LE(next_bcp_index_, bcp_index);
@@ -2080,8 +2076,7 @@ bool ImageSpace::BootImageLayout::LoadOrValidate(FilenameFn&& filename_fn,
   static_assert(ImageSpace::kImageChecksumPrefix == 'i', "Format prefix check.");
   DCHECK(!validate || StartsWith(*oat_checksums, "i"));
 
-  std::vector<std::string> components;
-  Split(image_location_, kComponentSeparator, &components);
+  ArrayRef<const std::string> components = image_locations_;
   size_t named_components_count = 0u;
   if (!VerifyImageLocation(components, &named_components_count, error_msg)) {
     return false;
@@ -2099,7 +2094,7 @@ bool ImageSpace::BootImageLayout::LoadOrValidate(FilenameFn&& filename_fn,
   DCHECK_EQ(named_component_locations.size(), named_components.size());
   const size_t bcp_component_count = boot_class_path_.size();
   size_t bcp_pos = 0u;
-  ArrayRef<std::string> extension_dependencies;
+  ArrayRef<const std::string> extension_dependencies;
   for (size_t i = 0, size = named_components.size(); i != size; ++i) {
     const std::string& base_location = named_component_locations[i].base_location;
     size_t bcp_index = named_component_locations[i].bcp_index;
@@ -2107,8 +2102,7 @@ bool ImageSpace::BootImageLayout::LoadOrValidate(FilenameFn&& filename_fn,
     if (extension_dependencies.empty() && !profile_filename.empty()) {
       // Each extension is compiled against the same dependencies, namely the leading
       // named components that were specified without providing the profile filename.
-      extension_dependencies =
-          ArrayRef<std::string>(components).SubArray(/*pos=*/ 0, /*length=*/ i);
+      extension_dependencies = components.SubArray(/*pos=*/ 0, /*length=*/ i);
     }
     if (bcp_index < bcp_pos) {
       DCHECK_NE(i, 0u);
@@ -2158,8 +2152,7 @@ bool ImageSpace::BootImageLayout::LoadOrValidate(FilenameFn&& filename_fn,
   }
 
   // Look for remaining components if there are any wildcard specifications.
-  ArrayRef<const std::string> search_paths =
-      ArrayRef<const std::string>(components).SubArray(/*pos=*/ named_components_count);
+  ArrayRef<const std::string> search_paths = components.SubArray(/*pos=*/ named_components_count);
   if (!search_paths.empty()) {
     const std::string& primary_base_location = named_component_locations[0].base_location;
     size_t base_slash_pos = primary_base_location.rfind('/');
@@ -2229,13 +2222,15 @@ class ImageSpace::BootImageLoader {
  public:
   BootImageLoader(const std::vector<std::string>& boot_class_path,
                   const std::vector<std::string>& boot_class_path_locations,
-                  const std::string& image_location,
+                  const std::vector<int>& boot_class_path_fds,
+                  const std::vector<std::string>& image_locations,
                   InstructionSet image_isa,
                   bool relocate,
                   bool executable)
       : boot_class_path_(boot_class_path),
         boot_class_path_locations_(boot_class_path_locations),
-        image_location_(image_location),
+        boot_class_path_fds_(boot_class_path_fds),
+        image_locations_(image_locations),
         image_isa_(image_isa),
         relocate_(relocate),
         executable_(executable),
@@ -2243,7 +2238,10 @@ class ImageSpace::BootImageLoader {
   }
 
   void FindImageFiles() {
-    BootImageLayout layout(image_location_, boot_class_path_, boot_class_path_locations_);
+    BootImageLayout layout(image_locations_,
+                           boot_class_path_,
+                           boot_class_path_locations_,
+                           boot_class_path_fds_);
     std::string image_location = layout.GetPrimaryImageLocation();
     std::string system_filename;
     bool found_image = FindImageFilenameImpl(image_location.c_str(),
@@ -2811,6 +2809,7 @@ class ImageSpace::BootImageLoader {
                    android::base::unique_fd vdex_fd,
                    android::base::unique_fd oat_fd,
                    ArrayRef<const std::string> dex_filenames,
+                   ArrayRef<const int> dex_fds,
                    bool validate_oat_file,
                    ArrayRef<const std::unique_ptr<ImageSpace>> dependencies,
                    TimingLogger* logger,
@@ -2838,6 +2837,7 @@ class ImageSpace::BootImageLoader {
                                      executable_,
                                      /*low_4gb=*/ false,
                                      dex_filenames,
+                                     dex_fds,
                                      image_reservation,
                                      error_msg));
       } else {
@@ -3039,10 +3039,14 @@ class ImageSpace::BootImageLoader {
     for (size_t i = 0u, size = locations.size(); i != size; ++i) {
       ImageSpace* space = (*spaces)[spaces->size() - chunk.image_space_count + i].get();
       size_t bcp_chunk_size = (chunk.image_space_count == 1u) ? chunk.component_count : 1u;
+
+      auto boot_class_path_fds = boot_class_path_fds_.empty() ? ArrayRef<const int>()
+          : boot_class_path_fds_.SubArray(/*pos=*/ chunk.start_index + i, bcp_chunk_size);
       if (!OpenOatFile(space,
                        std::move(chunk.vdex_fd),
                        std::move(chunk.oat_fd),
                        boot_class_path_.SubArray(/*pos=*/ chunk.start_index + i, bcp_chunk_size),
+                       boot_class_path_fds,
                        validate_oat_file,
                        dependencies,
                        logger,
@@ -3101,7 +3105,8 @@ class ImageSpace::BootImageLoader {
 
   const ArrayRef<const std::string> boot_class_path_;
   const ArrayRef<const std::string> boot_class_path_locations_;
-  const std::string image_location_;
+  const ArrayRef<const int> boot_class_path_fds_;
+  const ArrayRef<const std::string> image_locations_;
   const InstructionSet image_isa_;
   const bool relocate_;
   const bool executable_;
@@ -3115,7 +3120,10 @@ bool ImageSpace::BootImageLoader::LoadFromSystem(
     /*out*/std::string* error_msg) {
   TimingLogger logger(__PRETTY_FUNCTION__, /*precise=*/ true, VLOG_IS_ON(image));
 
-  BootImageLayout layout(image_location_, boot_class_path_, boot_class_path_locations_);
+  BootImageLayout layout(image_locations_,
+                         boot_class_path_,
+                         boot_class_path_locations_,
+                         boot_class_path_fds_);
   if (!layout.LoadFromSystem(image_isa_, error_msg)) {
     return false;
   }
@@ -3140,9 +3148,10 @@ bool ImageSpace::BootImageLoader::LoadFromSystem(
 
 bool ImageSpace::IsBootClassPathOnDisk(InstructionSet image_isa) {
   Runtime* runtime = Runtime::Current();
-  BootImageLayout layout(runtime->GetImageLocation(),
+  BootImageLayout layout(ArrayRef<const std::string>(runtime->GetImageLocations()),
                          ArrayRef<const std::string>(runtime->GetBootClassPath()),
-                         ArrayRef<const std::string>(runtime->GetBootClassPathLocations()));
+                         ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
+                         ArrayRef<const int>(runtime->GetBootClassPathFds()));
   const std::string image_location = layout.GetPrimaryImageLocation();
   std::unique_ptr<ImageHeader> image_header;
   std::string error_msg;
@@ -3164,7 +3173,8 @@ bool ImageSpace::IsBootClassPathOnDisk(InstructionSet image_isa) {
 bool ImageSpace::LoadBootImage(
     const std::vector<std::string>& boot_class_path,
     const std::vector<std::string>& boot_class_path_locations,
-    const std::string& image_location,
+    const std::vector<int>& boot_class_path_fds,
+    const std::vector<std::string>& image_locations,
     const InstructionSet image_isa,
     bool relocate,
     bool executable,
@@ -3179,13 +3189,14 @@ bool ImageSpace::LoadBootImage(
   DCHECK(extra_reservation != nullptr);
   DCHECK_NE(image_isa, InstructionSet::kNone);
 
-  if (image_location.empty()) {
+  if (image_locations.empty()) {
     return false;
   }
 
   BootImageLoader loader(boot_class_path,
                          boot_class_path_locations,
-                         image_location,
+                         boot_class_path_fds,
+                         image_locations,
                          image_isa,
                          relocate,
                          executable);
@@ -3216,8 +3227,9 @@ bool ImageSpace::LoadBootImage(
     oss << msg;
   }
 
-  LOG(ERROR) << "Could not create image space with image file '" << image_location << "'. "
-      << "Attempting to fall back to imageless running. Error was: " << oss.str();
+  LOG(ERROR) << "Could not create image space with image file '"
+      << Join(image_locations, kComponentSeparator) << "'. Attempting to fall back to imageless "
+      << "running. Error was: " << oss.str();
 
   return false;
 }
@@ -3426,9 +3438,10 @@ static size_t CheckAndCountBCPComponents(std::string_view oat_boot_class_path,
 
 bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
                                               std::string_view oat_boot_class_path,
-                                              const std::string& image_location,
+                                              ArrayRef<const std::string> image_locations,
                                               ArrayRef<const std::string> boot_class_path_locations,
                                               ArrayRef<const std::string> boot_class_path,
+                                              ArrayRef<const int> boot_class_path_fds,
                                               InstructionSet image_isa,
                                               /*out*/std::string* error_msg) {
   if (oat_checksums.empty() || oat_boot_class_path.empty()) {
@@ -3446,10 +3459,15 @@ bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
 
   size_t bcp_pos = 0u;
   if (StartsWith(oat_checksums, "i")) {
-    // Use only the matching part of the BCP for validation.
-    BootImageLayout layout(image_location,
+    // Use only the matching part of the BCP for validation.  FDs are optional, so only pass the
+    // sub-array if provided.
+    ArrayRef<const int> bcp_fds = boot_class_path_fds.empty()
+        ? ArrayRef<const int>()
+        : boot_class_path_fds.SubArray(/*pos=*/ 0u, bcp_size);
+    BootImageLayout layout(image_locations,
                            boot_class_path.SubArray(/*pos=*/ 0u, bcp_size),
-                           boot_class_path_locations.SubArray(/*pos=*/ 0u, bcp_size));
+                           boot_class_path_locations.SubArray(/*pos=*/ 0u, bcp_size),
+                           bcp_fds);
     std::string primary_image_location = layout.GetPrimaryImageLocation();
     std::string system_filename;
     bool has_system = false;
@@ -3458,7 +3476,7 @@ bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
                            &system_filename,
                            &has_system)) {
       *error_msg = StringPrintf("Unable to find image file for %s and %s",
-                                image_location.c_str(),
+                                android::base::Join(image_locations, kComponentSeparator).c_str(),
                                 GetInstructionSetString(image_isa));
       return false;
     }

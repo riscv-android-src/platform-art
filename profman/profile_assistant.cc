@@ -53,7 +53,7 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
 
   // Merge all current profiles.
   for (size_t i = 0; i < profile_files.size(); i++) {
-    ProfileCompilationInfo cur_info;
+    ProfileCompilationInfo cur_info(options.IsBootImageMerge());
     if (!cur_info.Load(profile_files[i]->Fd(), /*merge_classes=*/ true, filter_fn)) {
       LOG(WARNING) << "Could not load profile file at index " << i;
       if (options.IsForceMerge()) {
@@ -62,22 +62,12 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
         // cleared lazily.
         continue;
       }
-      return kErrorBadProfiles;
-    }
-
-    // Check version mismatch.
-    // This may happen during profile analysis if one profile is regular and
-    // the other one is for the boot image. For example when switching on-off
-    // the boot image profiles.
-    if (!info.SameVersion(cur_info)) {
-      if (options.IsForceMerge()) {
-        // If we have to merge forcefully, ignore the current profile and
-        // continue to the next one.
-        continue;
-      } else {
-        // Otherwise, return an error.
+      // TODO: Do we really need to use a different error code for version mismatch?
+      ProfileCompilationInfo wrong_info(!options.IsBootImageMerge());
+      if (wrong_info.Load(profile_files[i]->Fd(), /*merge_classes=*/ true, filter_fn)) {
         return kErrorDifferentVersions;
       }
+      return kErrorBadProfiles;
     }
 
     if (!info.MergeWith(cur_info)) {
@@ -88,6 +78,9 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
 
   // If we perform a forced merge do not analyze the difference between profiles.
   if (!options.IsForceMerge()) {
+    if (info.IsEmpty()) {
+      return kSkipCompilationEmptyProfiles;
+    }
     uint32_t min_change_in_methods_for_compilation = std::max(
         (options.GetMinNewMethodsPercentChangeForCompilation() * number_of_methods) / 100,
         kMinNewMethodsForCompilation);
@@ -98,7 +91,7 @@ ProfileAssistant::ProcessingResult ProfileAssistant::ProcessProfilesInternal(
     if (((info.GetNumberOfMethods() - number_of_methods) < min_change_in_methods_for_compilation) &&
         ((info.GetNumberOfResolvedClasses() - number_of_classes)
             < min_change_in_classes_for_compilation)) {
-      return kSkipCompilation;
+      return kSkipCompilationSmallDelta;
     }
   }
 

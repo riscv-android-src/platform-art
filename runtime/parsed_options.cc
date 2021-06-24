@@ -23,6 +23,7 @@
 #include <android-base/strings.h>
 
 #include "base/file_utils.h"
+#include "base/flags.h"
 #include "base/indenter.h"
 #include "base/macros.h"
 #include "base/utils.h"
@@ -111,6 +112,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xbootclasspath:_")
           .WithType<ParseStringList<':'>>()  // std::vector<std::string>, split by :
           .IntoKey(M::BootClassPath)
+      .Define("-Xbootclasspathfds:_")
+          .WithType<ParseIntList<':'>>()
+          .IntoKey(M::BootClassPathFds)
       .Define("-Xcheck:jni")
           .IntoKey(M::CheckJni)
       .Define("-Xms_")
@@ -166,7 +170,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::JITCompileThreshold)
       .SetCategory("ART")
       .Define("-Ximage:_")
-          .WithType<std::string>()
+          .WithType<ParseStringList<':'>>()
           .IntoKey(M::Image)
       .Define("-Xprimaryzygote")
           .IntoKey(M::PrimaryZygote)
@@ -288,6 +292,7 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       // TODO This should be redone.
       .Define({"-Xps-_",
                "-Xps-min-save-period-ms:_",
+               "-Xps-min-first-save-ms:_",
                "-Xps-save-resolved-classes-delayed-ms:_",
                "-Xps-hot-startup-method-samples:_",
                "-Xps-min-methods-to-save:_",
@@ -383,6 +388,13 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:ThreadSuspendTimeout=_")  // in ms
           .WithType<MillisecondsToNanoseconds>()  // store as ns
           .IntoKey(M::ThreadSuspendTimeout)
+      .Define("-XX:MonitorTimeoutEnable=_")
+          .WithType<bool>()
+          .WithValueMap({{"false", false}, {"true", true}})
+          .IntoKey(M::MonitorTimeoutEnable)
+      .Define("-XX:MonitorTimeout=_")  // in ms
+          .WithType<int>()
+          .IntoKey(M::MonitorTimeout)
       .Define("-XX:GlobalRefAllocStackTraceLimit=_")  // Number of free slots to enable tracing.
           .WithType<unsigned int>()
           .IntoKey(M::GlobalRefAllocStackTraceLimit)
@@ -403,27 +415,8 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::CorePlatformApiPolicy)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
-      .Define("-Xwrite-metrics-to-log")
-          .WithHelp("Enables writing ART metrics to logcat")
-          .IntoKey(M::WriteMetricsToLog)
-      .Define("-Xwrite-metrics-to-statsd=_")
-          .WithType<bool>()
-          .WithValueMap({{"false", false}, {"true", true}})
-          .WithHelp("Enables writing ART metrics to statsd")
-          .IntoKey(M::WriteMetricsToStatsd)
-      .Define("-Xwrite-metrics-to-file=_")
-          .WithHelp("Enables writing ART metrics to the given file")
-          .WithType<std::string>()
-          .IntoKey(M::WriteMetricsToFile)
-      .Define("-Xdisable-final-metrics-report")
-          .WithHelp("Disables reporting metrics when ART shuts down")
-          .IntoKey(M::DisableFinalMetricsReport)
-      .Define("-Xmetrics-reporting-period=_")
-          .WithHelp("The time in seconds between metrics reports")
-          .WithType<unsigned int>()
-          .IntoKey(M::MetricsReportingPeriod)
       .Define("-Xonly-use-system-oat-files")
-          .IntoKey(M::OnlyUseSystemOatFiles)
+          .IntoKey(M::OnlyUseTrustedOatFiles)
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
@@ -456,8 +449,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:PerfettoJavaHeapStackProf=_")
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
-          .IntoKey(M::PerfettoJavaHeapStackProf)
-      .Ignore({
+          .IntoKey(M::PerfettoJavaHeapStackProf);
+
+      FlagBase::AddFlagsToCmdlineParser(parser_builder.get());
+
+      parser_builder->Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
           "-Xdexopt:_", "-Xnoquithandler", "-Xjnigreflimit:_", "-Xgenregmap", "-Xnogenregmap",
@@ -726,14 +722,21 @@ bool ParsedOptions::DoParse(const RuntimeOptions& options,
   }
 
   if (!args.Exists(M::CompilerCallbacksPtr) && !args.Exists(M::Image)) {
-    std::string image = GetDefaultBootImageLocation(GetAndroidRoot());
-    args.Set(M::Image, image);
+    std::string image_locations = GetDefaultBootImageLocation(GetAndroidRoot());
+    args.Set(M::Image, ParseStringList<':'>::Split(image_locations));
   }
 
   // 0 means no growth limit, and growth limit should be always <= heap size
   if (args.GetOrDefault(M::HeapGrowthLimit) <= 0u ||
       args.GetOrDefault(M::HeapGrowthLimit) > args.GetOrDefault(M::MemoryMaximumSize)) {
     args.Set(M::HeapGrowthLimit, args.GetOrDefault(M::MemoryMaximumSize));
+  }
+
+  // Increase log thresholds for GC stress mode to avoid excessive log spam.
+  if (args.GetOrDefault(M::GcOption).gcstress_) {
+    args.SetIfMissing(M::AlwaysLogExplicitGcs, false);
+    args.SetIfMissing(M::LongPauseLogThreshold, gc::Heap::kDefaultLongPauseLogThresholdGcStress);
+    args.SetIfMissing(M::LongGCLogThreshold, gc::Heap::kDefaultLongGCLogThresholdGcStress);
   }
 
   *runtime_options = std::move(args);

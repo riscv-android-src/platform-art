@@ -64,24 +64,24 @@ class AssemblerX86Test : public AssemblerTest<x86::X86Assembler,
   void SetUpHelpers() override {
     if (addresses_singleton_.size() == 0) {
       // One addressing mode to test the repeat drivers.
-      addresses_singleton_.push_back(x86::Address(x86::EAX, x86::EBX, x86::TIMES_1, 2));
+      addresses_singleton_.push_back(x86::Address(x86::EAX, x86::EBX, TIMES_1, 2));
     }
 
     if (addresses_.size() == 0) {
       // Several addressing modes.
-      addresses_.push_back(x86::Address(x86::EDI, x86::EAX, x86::TIMES_1, 15));
-      addresses_.push_back(x86::Address(x86::EDI, x86::EBX, x86::TIMES_2, 16));
-      addresses_.push_back(x86::Address(x86::EDI, x86::ECX, x86::TIMES_4, 17));
-      addresses_.push_back(x86::Address(x86::EDI, x86::EDX, x86::TIMES_8, 18));
+      addresses_.push_back(x86::Address(x86::EDI, x86::EAX, TIMES_1, 15));
+      addresses_.push_back(x86::Address(x86::EDI, x86::EBX, TIMES_2, 16));
+      addresses_.push_back(x86::Address(x86::EDI, x86::ECX, TIMES_4, 17));
+      addresses_.push_back(x86::Address(x86::EDI, x86::EDX, TIMES_8, 18));
       addresses_.push_back(x86::Address(x86::EAX, -1));
       addresses_.push_back(x86::Address(x86::EBX, 0));
       addresses_.push_back(x86::Address(x86::ESI, 1));
       addresses_.push_back(x86::Address(x86::EDI, 987654321));
       // Several addressing modes with the special ESP.
-      addresses_.push_back(x86::Address(x86::ESP, x86::EAX, x86::TIMES_1, 15));
-      addresses_.push_back(x86::Address(x86::ESP, x86::EBX, x86::TIMES_2, 16));
-      addresses_.push_back(x86::Address(x86::ESP, x86::ECX, x86::TIMES_4, 17));
-      addresses_.push_back(x86::Address(x86::ESP, x86::EDX, x86::TIMES_8, 18));
+      addresses_.push_back(x86::Address(x86::ESP, x86::EAX, TIMES_1, 15));
+      addresses_.push_back(x86::Address(x86::ESP, x86::EBX, TIMES_2, 16));
+      addresses_.push_back(x86::Address(x86::ESP, x86::ECX, TIMES_4, 17));
+      addresses_.push_back(x86::Address(x86::ESP, x86::EDX, TIMES_8, 18));
       addresses_.push_back(x86::Address(x86::ESP, -1));
       addresses_.push_back(x86::Address(x86::ESP, 0));
       addresses_.push_back(x86::Address(x86::ESP, 1));
@@ -278,16 +278,16 @@ TEST_F(AssemblerX86Test, PoplAllAddresses) {
         continue;
       } else if (*base == *index) {
        // Index only.
-       all_addresses.push_back(x86::Address(*index, x86::TIMES_1, -1));
-       all_addresses.push_back(x86::Address(*index, x86::TIMES_2, 0));
-       all_addresses.push_back(x86::Address(*index, x86::TIMES_4, 1));
-       all_addresses.push_back(x86::Address(*index, x86::TIMES_8, 123456789));
+       all_addresses.push_back(x86::Address(*index, TIMES_1, -1));
+       all_addresses.push_back(x86::Address(*index, TIMES_2, 0));
+       all_addresses.push_back(x86::Address(*index, TIMES_4, 1));
+       all_addresses.push_back(x86::Address(*index, TIMES_8, 123456789));
       }
       // Base and index.
-      all_addresses.push_back(x86::Address(*base, *index, x86::TIMES_1, -1));
-      all_addresses.push_back(x86::Address(*base, *index, x86::TIMES_2, 0));
-      all_addresses.push_back(x86::Address(*base, *index, x86::TIMES_4, 1));
-      all_addresses.push_back(x86::Address(*base, *index, x86::TIMES_8, 123456789));
+      all_addresses.push_back(x86::Address(*base, *index, TIMES_1, -1));
+      all_addresses.push_back(x86::Address(*base, *index, TIMES_2, 0));
+      all_addresses.push_back(x86::Address(*base, *index, TIMES_4, 1));
+      all_addresses.push_back(x86::Address(*base, *index, TIMES_8, 123456789));
     }
   }
   DriverStr(RepeatA(&x86::X86Assembler::popl, all_addresses, "popl {mem}"), "popq");
@@ -551,11 +551,11 @@ TEST_F(AssemblerX86Test, RoundSD) {
 
 TEST_F(AssemblerX86Test, CmovlAddress) {
   GetAssembler()->cmovl(x86::kEqual, x86::Register(x86::EAX), x86::Address(
-      x86::Register(x86::EDI), x86::Register(x86::EBX), x86::TIMES_4, 12));
+      x86::Register(x86::EDI), x86::Register(x86::EBX), TIMES_4, 12));
   GetAssembler()->cmovl(x86::kNotEqual, x86::Register(x86::EDI), x86::Address(
-      x86::Register(x86::ESI), x86::Register(x86::EBX), x86::TIMES_4, 12));
+      x86::Register(x86::ESI), x86::Register(x86::EBX), TIMES_4, 12));
   GetAssembler()->cmovl(x86::kEqual, x86::Register(x86::EDI), x86::Address(
-      x86::Register(x86::EDI), x86::Register(x86::EAX), x86::TIMES_4, 12));
+      x86::Register(x86::EDI), x86::Register(x86::EAX), TIMES_4, 12));
   const char* expected =
     "cmovzl 0xc(%EDI,%EBX,4), %eax\n"
     "cmovnzl 0xc(%ESI,%EBX,4), %edi\n"
@@ -1322,6 +1322,49 @@ TEST_F(AssemblerX86Test, Negl) {
 
 TEST_F(AssemblerX86Test, Notl) {
   DriverStr(RepeatR(&x86::X86Assembler::notl, "notl %{reg}"), "notl");
+}
+
+// Test that displacing an existing address is the same as constructing a new one with the same
+// initial displacement.
+TEST_F(AssemblerX86Test, AddressDisplaceBy) {
+  // Test different displacements, including some 8-bit and 32-bit ones, so that changing
+  // displacement may require a different addressing mode.
+  static const std::vector<int32_t> displacements = {0, 42, -42, 140, -140};
+  // Test with all scale factors.
+  static const std::vector<ScaleFactor> scales = {TIMES_1, TIMES_2, TIMES_4, TIMES_8};
+
+  for (int32_t disp0 : displacements) {  // initial displacement
+    for (int32_t disp : displacements) {  // extra displacement
+      for (const x86::Register *reg : GetRegisters()) {
+        // Test non-SIB addressing.
+        EXPECT_EQ(x86::Address::displace(x86::Address(*reg, disp0), disp),
+                  x86::Address(*reg, disp0 + disp));
+
+        // Test SIB addressing with EBP base.
+        if (*reg != x86::ESP) {
+          for (ScaleFactor scale : scales) {
+            EXPECT_EQ(x86::Address::displace(x86::Address(*reg, scale, disp0), disp),
+                      x86::Address(*reg, scale, disp0 + disp));
+          }
+        }
+
+        // Test SIB addressing with different base.
+        for (const x86::Register *index : GetRegisters()) {
+          if (*index == x86::ESP) {
+            continue;  // Skip ESP as it cannot be used with this address constructor.
+          }
+          for (ScaleFactor scale : scales) {
+            EXPECT_EQ(x86::Address::displace(x86::Address(*reg, *index, scale, disp0), disp),
+                      x86::Address(*reg, *index, scale, disp0 + disp));
+          }
+        }
+
+        // Test absolute addressing.
+        EXPECT_EQ(x86::Address::displace(x86::Address::Absolute(disp0), disp),
+                  x86::Address::Absolute(disp0 + disp));
+      }
+    }
+  }
 }
 
 }  // namespace art

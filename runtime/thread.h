@@ -254,7 +254,7 @@ class Thread {
 
   bool IsSuspended() const {
     union StateAndFlags state_and_flags;
-    state_and_flags.as_int = tls32_.state_and_flags.as_int;
+    state_and_flags.as_int = tls32_.state_and_flags.as_atomic_int.load(std::memory_order_relaxed);
     return state_and_flags.as_struct.state != kRunnable &&
         (state_and_flags.as_struct.flags & kSuspendRequest) != 0;
   }
@@ -908,16 +908,16 @@ class Thread {
   void HandleScopeVisitRoots(RootVisitor* visitor, uint32_t thread_id)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  BaseHandleScope* GetTopHandleScope() {
+  BaseHandleScope* GetTopHandleScope() REQUIRES_SHARED(Locks::mutator_lock_) {
     return tlsPtr_.top_handle_scope;
   }
 
-  void PushHandleScope(BaseHandleScope* handle_scope) {
+  void PushHandleScope(BaseHandleScope* handle_scope) REQUIRES_SHARED(Locks::mutator_lock_) {
     DCHECK_EQ(handle_scope->GetLink(), tlsPtr_.top_handle_scope);
     tlsPtr_.top_handle_scope = handle_scope;
   }
 
-  BaseHandleScope* PopHandleScope() {
+  BaseHandleScope* PopHandleScope() REQUIRES_SHARED(Locks::mutator_lock_) {
     BaseHandleScope* handle_scope = tlsPtr_.top_handle_scope;
     DCHECK(handle_scope != nullptr);
     tlsPtr_.top_handle_scope = tlsPtr_.top_handle_scope->GetLink();
@@ -1517,6 +1517,9 @@ class Thread {
   };
   static_assert(sizeof(StateAndFlags) == sizeof(int32_t), "Weird state_and_flags size");
 
+  // Format state and flags as a hex string. For diagnostic output.
+  std::string StateAndFlagsAsHexString() const;
+
   static void ThreadExitCallback(void* arg);
 
   // Maximum number of suspend barriers.
@@ -1883,7 +1886,8 @@ class Thread {
 
   // Custom TLS field that can be used by plugins or the runtime. Should not be accessed directly by
   // compiled code or entrypoints.
-  SafeMap<std::string, std::unique_ptr<TLSData>> custom_tls_ GUARDED_BY(Locks::custom_tls_lock_);
+  SafeMap<std::string, std::unique_ptr<TLSData>, std::less<>> custom_tls_
+      GUARDED_BY(Locks::custom_tls_lock_);
 
 #ifndef __BIONIC__
   __attribute__((tls_model("initial-exec")))

@@ -3158,14 +3158,14 @@ jobjectArray Thread::CreateAnnotatedStackTrace(const ScopedObjectAccessAlreadyRu
     return nullptr;
   }
 
-  ArtField* stack_trace_element_field = h_aste_class->FindField(
-      soa.Self(), h_aste_class.Get(), "stackTraceElement", "Ljava/lang/StackTraceElement;");
+  ArtField* stack_trace_element_field =
+      h_aste_class->FindDeclaredInstanceField("stackTraceElement", "Ljava/lang/StackTraceElement;");
   DCHECK(stack_trace_element_field != nullptr);
-  ArtField* held_locks_field = h_aste_class->FindField(
-        soa.Self(), h_aste_class.Get(), "heldLocks", "[Ljava/lang/Object;");
+  ArtField* held_locks_field =
+      h_aste_class->FindDeclaredInstanceField("heldLocks", "[Ljava/lang/Object;");
   DCHECK(held_locks_field != nullptr);
-  ArtField* blocked_on_field = h_aste_class->FindField(
-        soa.Self(), h_aste_class.Get(), "blockedOn", "Ljava/lang/Object;");
+  ArtField* blocked_on_field =
+      h_aste_class->FindDeclaredInstanceField("blockedOn", "Ljava/lang/Object;");
   DCHECK(blocked_on_field != nullptr);
 
   int32_t length = static_cast<int32_t>(dumper.stack_trace_elements_.size());
@@ -4466,6 +4466,12 @@ bool Thread::IsSystemDaemon() const {
   }
   return jni::DecodeArtField(
       WellKnownClasses::java_lang_Thread_systemDaemon)->GetBoolean(GetPeer());
+}
+
+std::string Thread::StateAndFlagsAsHexString() const {
+  std::stringstream result_stream;
+  result_stream << std::hex << tls32_.state_and_flags.as_atomic_int.load();
+  return result_stream.str();
 }
 
 ScopedExceptionStorage::ScopedExceptionStorage(art::Thread* self)

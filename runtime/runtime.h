@@ -132,7 +132,6 @@ class Runtime {
 
   bool EnsurePluginLoaded(const char* plugin_name, std::string* error_msg);
   bool EnsurePerfettoPlugin(std::string* error_msg);
-  bool EnsurePerfettoJavaHeapProfPlugin(std::string* error_msg);
 
   // IsAotCompiler for compilers that don't have a running runtime. Only dex2oat currently.
   bool IsAotCompiler() const {
@@ -213,8 +212,8 @@ class Runtime {
     return image_compiler_options_;
   }
 
-  const std::string& GetImageLocation() const {
-    return image_location_;
+  const std::vector<std::string>& GetImageLocations() const {
+    return image_locations_;
   }
 
   // Starts a runtime, which may cause threads to be started and code to run.
@@ -285,6 +284,10 @@ class Runtime {
     DCHECK(boot_class_path_locations_.empty() ||
            boot_class_path_locations_.size() == boot_class_path_.size());
     return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
+  }
+
+  const std::vector<int>& GetBootClassPathFds() const {
+    return boot_class_path_fds_;
   }
 
   const std::string& GetClassPathString() const {
@@ -526,7 +529,8 @@ class Runtime {
   }
 
   void RegisterAppInfo(const std::vector<std::string>& code_paths,
-                       const std::string& profile_output_filename);
+                       const std::string& profile_output_filename,
+                       const std::string& ref_profile_filename);
 
   // Transaction support.
   bool IsActiveTransaction() const;
@@ -722,6 +726,14 @@ class Runtime {
 
   bool IsProfileableFromShell() const {
     return is_profileable_from_shell_;
+  }
+
+  void SetProfileable(bool value) {
+    is_profileable_ = value;
+  }
+
+  bool IsProfileable() const {
+    return is_profileable_;
   }
 
   void SetJavaDebuggable(bool value);
@@ -974,6 +986,13 @@ class Runtime {
     return perfetto_javaheapprof_enabled_;
   }
 
+  bool IsMonitorTimeoutEnabled() const {
+    return monitor_timeout_enable_;
+  }
+
+  uint64_t GetMonitorTimeoutNs() const {
+    return monitor_timeout_ns_;
+  }
   // Return true if we should load oat files as executable or not.
   bool GetOatFilesExecutable() const;
 
@@ -987,6 +1006,21 @@ class Runtime {
                                   const uint8_t* map_end,
                                   const std::string& file_name);
 
+  const std::string& GetApexVersions() const {
+    return apex_versions_;
+  }
+
+  // Trigger a flag reload from system properties or device congfigs.
+  //
+  // Should only be called from runtime init and zygote post fork as
+  // we don't want to change the runtime config midway during execution.
+  //
+  // The caller argument should be the name of the function making this call
+  // and will be used to enforce the appropriate names.
+  //
+  // See Flags::ReloadAllFlags as well.
+  static void ReloadAllFlags(const std::string& caller);
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -998,7 +1032,7 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
-  void InitMetrics(const RuntimeArgumentMap& runtime_options);
+  void InitMetrics();
 
   void StartDaemonThreads();
   void StartSignalCatcher();
@@ -1026,6 +1060,10 @@ class Runtime {
 
   ThreadPool* AcquireThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
   void ReleaseThreadPool() REQUIRES(!Locks::runtime_thread_pool_lock_);
+
+  // Parses /apex/apex-info-list.xml to initialize a string containing versions
+  // of boot classpath jars and encoded into .oat files.
+  void InitializeApexVersions();
 
   // A pointer to the active runtime or null.
   static Runtime* instance_;
@@ -1067,10 +1105,11 @@ class Runtime {
   std::string compiler_executable_;
   std::vector<std::string> compiler_options_;
   std::vector<std::string> image_compiler_options_;
-  std::string image_location_;
+  std::vector<std::string> image_locations_;
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
+  std::vector<int> boot_class_path_fds_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
@@ -1224,7 +1263,16 @@ class Runtime {
   // Whether Java code needs to be debuggable.
   bool is_java_debuggable_;
 
+  bool monitor_timeout_enable_;
+  uint64_t monitor_timeout_ns_;
+
+  // Whether or not this application can be profiled by the shell user,
+  // even when running on a device that is running in user mode.
   bool is_profileable_from_shell_ = false;
+
+  // Whether or not this application can be profiled by system services on a
+  // device running in user mode, but not necessarily by the shell user.
+  bool is_profileable_ = false;
 
   // The maximum number of failed boots we allow before pruning the dalvik cache
   // and trying again. This option is only inspected when we're running as a
@@ -1352,6 +1400,14 @@ class Runtime {
 
   metrics::ArtMetrics metrics_;
   std::unique_ptr<metrics::MetricsReporter> metrics_reporter_;
+
+  // Apex versions of boot classpath jars concatenated in a string. The format
+  // is of the type:
+  // '/apex1_version/apex2_version//'
+  //
+  // When the apex is the factory version, we don't encode it (for example in
+  // the third entry in the example above).
+  std::string apex_versions_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

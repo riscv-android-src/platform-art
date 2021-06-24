@@ -93,7 +93,6 @@ libart_cc_defaults {
         "debugger.cc",
         "dex/dex_file_annotations.cc",
         "dex_register_location.cc",
-        "dex_to_dex_decompiler.cc",
         "elf_file.cc",
         "exec_utils.cc",
         "fault_handler.cc",
@@ -327,7 +326,6 @@ libart_cc_defaults {
                 "interpreter/mterp/mterp.cc",
                 "interpreter/mterp/nterp_stub.cc",
                 ":libart_mterp.x86",
-                "arch/x86/__x86.get_pc_thunk.S",
                 "arch/x86/context_x86.cc",
                 "arch/x86/entrypoints_init_x86.cc",
                 "arch/x86/jni_entrypoints_x86.S",
@@ -376,6 +374,9 @@ libart_cc_defaults {
                 "thread_android.cc",
                 "metrics/statsd.cc",
             ],
+            header_libs: [
+                "libnativeloader-headers", // For dlext_namespaces.h
+            ],
             shared_libs: [
                 "libdl_android",
                 "libicu",
@@ -385,6 +386,10 @@ libart_cc_defaults {
             ],
             static_libs: [
                 "libstatslog_art",
+                "libtinyxml2",
+            ],
+            generated_sources: [
+                "apex-info-list-tinyxml",
             ],
         },
         android_arm: {
@@ -413,8 +418,9 @@ libart_cc_defaults {
             ],
         },
     },
-    cflags: ["-DBUILDING_LIBART=1"],
-    generated_sources: ["art_operator_srcs"],
+    generated_sources: [
+        "art_operator_srcs",
+    ],
     // asm_support_gen.h (used by asm_support.h) is generated with cpp-define-generator
     generated_headers: ["cpp-define-generator-asm-support"],
     // export our headers so the libart-gtest targets can use it as well.
@@ -440,6 +446,7 @@ libart_cc_defaults {
         "libsigchain",
         "libunwindstack",
     ],
+    static_libs: ["libodrstatslog"],
     export_include_dirs: ["."],
     // ART's macros.h depends on libbase's macros.h.
     // Note: runtime_options.h depends on cmdline. But we don't really want to export this
@@ -458,10 +465,18 @@ libart_static_cc_defaults {
         "liblzma", // libelffile dependency; must be repeated here since it's a static lib.
         "libnativebridge",
         "libnativeloader",
+        "libodrstatslog",
         "libsigchain_fake",
         "libunwindstack",
         "libz",
     ],
+    target: {
+        bionic: {
+            whole_static_libs: [
+                "libasync_safe", // libunwindstack dependency on Bionic.
+            ],
+        },
+    },
 }
 
 cc_defaults {
@@ -538,6 +553,7 @@ art_cc_library {
     defaults: [
         "libart_defaults",
         "libart_nativeunwind_defaults",
+        "art_hugepage_defaults",
         "art_pgo_defaults",
     ],
     whole_static_libs: [
@@ -548,8 +564,6 @@ art_cc_library {
     shared_libs: [
         "libartbase",
         "libdexfile",
-        // We need to eagerly load it so libdexfile_support used from libunwindstack can find it.
-        "libdexfile_external",
         "libprofile",
     ],
     export_shared_lib_headers: [
@@ -582,9 +596,6 @@ art_cc_library {
     shared_libs: [
         "libartbased",
         "libdexfiled",
-        // We need to eagerly preload it, so that libunwindstack can find it.
-        // Otherwise, it would try to load the non-debug version with dlopen.
-        "libdexfiled_external",
         "libprofiled",
     ],
     export_shared_lib_headers: [
@@ -592,6 +603,10 @@ art_cc_library {
     ],
     apex_available: [
         "com.android.art.debug",
+        // TODO(b/183882457): This lib doesn't go into com.android.art, but
+        // apex_available lists need to be the same for internal libs to avoid
+        // stubs, and this depends on libsigchain.
+        "com.android.art",
     ],
 }
 
@@ -709,6 +724,7 @@ art_cc_test {
         "jni/java_vm_ext_test.cc",
         "jni/jni_internal_test.cc",
         "method_handles_test.cc",
+        "metrics/reporter_test.cc",
         "mirror/dex_cache_test.cc",
         "mirror/method_type_test.cc",
         "mirror/object_test.cc",
@@ -766,7 +782,6 @@ art_cc_test {
     ],
     shared_libs: [
         "libartd-compiler",
-        "libvixld",
     ],
 }
 

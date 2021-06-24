@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include "zlib.h"
 
+#include "android-base/file.h"
 #include "android-base/stringprintf.h"
 #include "android-base/strings.h"
 
@@ -67,8 +68,9 @@ std::ostream& operator << (std::ostream& stream, const OatFileAssistant::OatStat
     case OatFileAssistant::kOatUpToDate:
       stream << "kOatUpToDate";
       break;
-    default:
-      UNREACHABLE();
+    case OatFileAssistant::kOatContextOutOfDate:
+      stream << "kOaContextOutOfDate";
+      break;
   }
 
   return stream;
@@ -76,12 +78,14 @@ std::ostream& operator << (std::ostream& stream, const OatFileAssistant::OatStat
 
 OatFileAssistant::OatFileAssistant(const char* dex_location,
                                    const InstructionSet isa,
+                                   ClassLoaderContext* context,
                                    bool load_executable,
-                                   bool only_load_system_executable)
+                                   bool only_load_trusted_executable)
     : OatFileAssistant(dex_location,
                        isa,
+                       context,
                        load_executable,
-                       only_load_system_executable,
+                       only_load_trusted_executable,
                        /*vdex_fd=*/ -1,
                        /*oat_fd=*/ -1,
                        /*zip_fd=*/ -1) {}
@@ -89,20 +93,23 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
 
 OatFileAssistant::OatFileAssistant(const char* dex_location,
                                    const InstructionSet isa,
+                                   ClassLoaderContext* context,
                                    bool load_executable,
-                                   bool only_load_system_executable,
+                                   bool only_load_trusted_executable,
                                    int vdex_fd,
                                    int oat_fd,
                                    int zip_fd)
-    : isa_(isa),
+    : context_(context),
+      isa_(isa),
       load_executable_(load_executable),
-      only_load_system_executable_(only_load_system_executable),
+      only_load_trusted_executable_(only_load_trusted_executable),
       odex_(this, /*is_oat_location=*/ false),
       oat_(this, /*is_oat_location=*/ true),
       vdex_for_odex_(this, /*is_oat_location=*/ false),
       vdex_for_oat_(this, /*is_oat_location=*/ true),
       zip_fd_(zip_fd) {
   CHECK(dex_location != nullptr) << "OatFileAssistant: null dex location";
+  CHECK(!load_executable || context != nullptr) << "Loading executable without a context";
 
   if (zip_fd < 0) {
     CHECK_LE(oat_fd, 0) << "zip_fd must be provided with valid oat_fd. zip_fd=" << zip_fd
@@ -192,14 +199,10 @@ bool OatFileAssistant::IsInBootClassPath() {
 }
 
 int OatFileAssistant::GetDexOptNeeded(CompilerFilter::Filter target,
-                                      ClassLoaderContext* class_loader_context,
-                                      const std::vector<int>& context_fds,
                                       bool profile_changed,
                                       bool downgrade) {
   OatFileInfo& info = GetBestInfo();
   DexOptNeeded dexopt_needed = info.GetDexOptNeeded(target,
-                                                    class_loader_context,
-                                                    context_fds,
                                                     profile_changed,
                                                     downgrade);
   if (info.IsOatLocation() || dexopt_needed == kDex2OatFromScratch) {
@@ -397,6 +400,19 @@ bool OatFileAssistant::DexChecksumUpToDate(const OatFile& file, std::string* err
   return true;
 }
 
+static bool ValidateApexVersions(const OatFile& oat_file) {
+  const char* oat_apex_versions =
+      oat_file.GetOatHeader().GetStoreValueByKey(OatHeader::kApexVersionsKey);
+  if (oat_apex_versions == nullptr) {
+    return false;
+  }
+  // Some dex files get compiled with a subset of the boot classpath (for
+  // example currently system server is compiled with DEX2OAT_BOOTCLASSPATH).
+  // For such cases, the oat apex versions will be a prefix of the runtime apex
+  // versions.
+  return android::base::StartsWith(Runtime::Current()->GetApexVersions(), oat_apex_versions);
+}
+
 OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile& file) {
   // Verify the ART_USE_READ_BARRIER state.
   // TODO: Don't fully reject files due to read barrier state. If they contain
@@ -427,20 +443,28 @@ OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile& 
       VLOG(oat) << "Oat image checksum does not match image checksum.";
       return kOatBootImageOutOfDate;
     }
+    if (!ValidateApexVersions(file)) {
+      VLOG(oat) << "Apex versions do not match.";
+      return kOatBootImageOutOfDate;
+    }
   } else {
     VLOG(oat) << "Image checksum test skipped for compiler filter " << current_compiler_filter;
   }
 
   // zip_file_only_contains_uncompressed_dex_ is only set during fetching the dex checksums.
   DCHECK(required_dex_checksums_attempted_);
-  if (only_load_system_executable_ &&
-      !LocationIsOnSystem(file.GetLocation().c_str()) &&
+  if (only_load_trusted_executable_ &&
+      !LocationIsTrusted(file.GetLocation()) &&
       file.ContainsDexCode() &&
       zip_file_only_contains_uncompressed_dex_) {
     LOG(ERROR) << "Not loading "
                << dex_location_
                << ": oat file has dex code, but APK has uncompressed dex code";
     return kOatDexOutOfDate;
+  }
+
+  if (!ClassLoaderContextIsOkay(file)) {
+    return kOatContextOutOfDate;
   }
 
   return kOatUpToDate;
@@ -625,9 +649,10 @@ bool OatFileAssistant::ValidateBootClassPathChecksums(const OatFile& oat_file) {
   bool result = gc::space::ImageSpace::VerifyBootClassPathChecksums(
       oat_boot_class_path_checksums_view,
       oat_boot_class_path_view,
-      runtime->GetImageLocation(),
+      ArrayRef<const std::string>(runtime->GetImageLocations()),
       ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
       ArrayRef<const std::string>(runtime->GetBootClassPath()),
+      ArrayRef<const int>(runtime->GetBootClassPathFds()),
       isa_,
       &error_msg);
   if (!result) {
@@ -727,6 +752,7 @@ bool OatFileAssistant::OatFileInfo::IsUseable() {
   switch (Status()) {
     case kOatCannotOpen:
     case kOatDexOutOfDate:
+    case kOatContextOutOfDate:
     case kOatBootImageOutOfDate: return false;
 
     case kOatUpToDate: return true;
@@ -752,29 +778,17 @@ OatFileAssistant::OatStatus OatFileAssistant::OatFileInfo::Status() {
 
 OatFileAssistant::DexOptNeeded OatFileAssistant::OatFileInfo::GetDexOptNeeded(
     CompilerFilter::Filter target,
-    ClassLoaderContext* context,
-    const std::vector<int>& context_fds,
     bool profile_changed,
     bool downgrade) {
 
-  bool filter_okay = CompilerFilterIsOkay(target, profile_changed, downgrade);
-  bool class_loader_context_okay = ClassLoaderContextIsOkay(context, context_fds);
+  if (IsUseable()) {
+    return CompilerFilterIsOkay(target, profile_changed, downgrade)
+        ? kNoDexOptNeeded
+        : kDex2OatForFilter;
+  }
 
-  // Only check the filter and relocation if the class loader context is ok.
-  // If it is not, we will return kDex2OatFromScratch as the compilation needs to be redone.
-  if (class_loader_context_okay) {
-    if (filter_okay && Status() == kOatUpToDate) {
-      // The oat file is in good shape as is.
-      return kNoDexOptNeeded;
-    }
-
-    if (IsUseable()) {
-      return kDex2OatForFilter;
-    }
-
-    if (Status() == kOatBootImageOutOfDate) {
-      return kDex2OatForBootImage;
-    }
+  if (Status() == kOatBootImageOutOfDate) {
+    return kDex2OatForBootImage;
   }
 
   if (oat_file_assistant_->HasDexFiles()) {
@@ -833,8 +847,8 @@ const OatFile* OatFileAssistant::OatFileInfo::GetFile() {
                                         &error_msg));
     }
   } else {
-    if (executable && oat_file_assistant_->only_load_system_executable_) {
-      executable = LocationIsOnSystem(filename_.c_str());
+    if (executable && oat_file_assistant_->only_load_trusted_executable_) {
+      executable = LocationIsTrusted(filename_);
     }
     VLOG(oat) << "Loading " << filename_ << " with executable: " << executable;
     if (use_fd_) {
@@ -887,51 +901,36 @@ bool OatFileAssistant::OatFileInfo::CompilerFilterIsOkay(
     CompilerFilter::IsAsGoodAs(current, target);
 }
 
-bool OatFileAssistant::OatFileInfo::ClassLoaderContextIsOkay(ClassLoaderContext* context,
-                                                             const std::vector<int>& context_fds) {
-  const OatFile* file = GetFile();
-  if (file == nullptr) {
-    // No oat file means we have nothing to verify.
-    return true;
-  }
-
-  if (file->IsBackedByVdexOnly()) {
+bool OatFileAssistant::ClassLoaderContextIsOkay(const OatFile& oat_file) const {
+  if (oat_file.IsBackedByVdexOnly()) {
     // Only a vdex file, we don't depend on the class loader context.
     return true;
   }
 
-  if (!CompilerFilter::IsVerificationEnabled(file->GetCompilerFilter())) {
+  if (!CompilerFilter::IsVerificationEnabled(oat_file.GetCompilerFilter())) {
     // If verification is not enabled we don't need to verify the class loader context and we
     // assume it's ok.
     return true;
   }
 
-
-  if (context == nullptr) {
-    // TODO(calin): stop using null for the unkown contexts.
-    // b/148494302 introduces runtime encoding for unknown context which will make this possible.
-    VLOG(oat) << "ClassLoaderContext check failed: uknown(null) context";
-    return false;
+  if (context_ == nullptr) {
+    // When no class loader context is provided (which happens for deprecated
+    // DexFile APIs), just assume it is OK.
+    return true;
   }
 
-  size_t dir_index = oat_file_assistant_->dex_location_.rfind('/');
-  std::string classpath_dir = (dir_index != std::string::npos)
-      ? oat_file_assistant_->dex_location_.substr(0, dir_index)
-      : "";
-
-  if (!context->OpenDexFiles(classpath_dir, context_fds, /*only_read_checksums*/ true)) {
-    VLOG(oat) << "ClassLoaderContext check failed: dex files from the context could not be opened";
-    return false;
-  }
-
-  const bool result = context->VerifyClassLoaderContextMatch(file->GetClassLoaderContext()) !=
-      ClassLoaderContext::VerificationResult::kMismatch;
-  if (!result) {
+  ClassLoaderContext::VerificationResult matches = context_->VerifyClassLoaderContextMatch(
+      oat_file.GetClassLoaderContext(),
+      /*verify_names=*/ true,
+      /*verify_checksums=*/ true);
+  if (matches == ClassLoaderContext::VerificationResult::kMismatch) {
     VLOG(oat) << "ClassLoaderContext check failed. Context was "
-              << file->GetClassLoaderContext()
-              << ". The expected context is " << context->EncodeContextForOatFile(classpath_dir);
+              << oat_file.GetClassLoaderContext()
+              << ". The expected context is "
+              << context_->EncodeContextForOatFile(android::base::Dirname(dex_location_));
+    return false;
   }
-  return result;
+  return true;
 }
 
 bool OatFileAssistant::OatFileInfo::IsExecutable() {
@@ -983,7 +982,10 @@ void OatFileAssistant::GetOptimizationStatus(
     std::string* out_compilation_reason) {
   // It may not be possible to load an oat file executable (e.g., selinux restrictions). Load
   // non-executable and check the status manually.
-  OatFileAssistant oat_file_assistant(filename.c_str(), isa, /*load_executable=*/ false);
+  OatFileAssistant oat_file_assistant(filename.c_str(),
+                                      isa,
+                                      /* context= */ nullptr,
+                                      /*load_executable=*/ false);
   std::string out_odex_location;  // unused
   std::string out_odex_status;  // unused
   oat_file_assistant.GetOptimizationStatus(
@@ -1036,6 +1038,11 @@ void OatFileAssistant::GetOptimizationStatus(
     case kOatBootImageOutOfDate:
       *out_compilation_filter = "run-from-apk-fallback";
       *out_odex_status = "boot-image-more-recent";
+      return;
+
+    case kOatContextOutOfDate:
+      *out_compilation_filter = "run-from-apk-fallback";
+      *out_odex_status = "context-mismatch";
       return;
 
     case kOatDexOutOfDate:

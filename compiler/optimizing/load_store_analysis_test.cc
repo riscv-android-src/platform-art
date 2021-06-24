@@ -38,9 +38,9 @@
 
 namespace art {
 
-class LoadStoreAnalysisTest : public OptimizingUnitTest {
+class LoadStoreAnalysisTest : public CommonCompilerTest, public OptimizingUnitTestHelper {
  public:
-  LoadStoreAnalysisTest() : graph_(CreateGraph()) {}
+  LoadStoreAnalysisTest() {}
 
   AdjacencyListGraph SetupFromAdjacencyList(
       const std::string_view entry_name,
@@ -58,11 +58,10 @@ class LoadStoreAnalysisTest : public OptimizingUnitTest {
   }
   void CheckReachability(const AdjacencyListGraph& adj,
                          const std::vector<AdjacencyListGraph::Edge>& reach);
-
-  HGraph* graph_;
 };
 
 TEST_F(LoadStoreAnalysisTest, ArrayHeapLocations) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -145,6 +144,7 @@ TEST_F(LoadStoreAnalysisTest, ArrayHeapLocations) {
 }
 
 TEST_F(LoadStoreAnalysisTest, FieldHeapLocations) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -225,6 +225,7 @@ TEST_F(LoadStoreAnalysisTest, FieldHeapLocations) {
 }
 
 TEST_F(LoadStoreAnalysisTest, ArrayIndexAliasingTest) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -318,6 +319,7 @@ TEST_F(LoadStoreAnalysisTest, ArrayIndexAliasingTest) {
 }
 
 TEST_F(LoadStoreAnalysisTest, ArrayAliasingTest) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -529,6 +531,7 @@ TEST_F(LoadStoreAnalysisTest, ArrayAliasingTest) {
 }
 
 TEST_F(LoadStoreAnalysisTest, ArrayIndexCalculationOverflowTest) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -647,6 +650,7 @@ TEST_F(LoadStoreAnalysisTest, ArrayIndexCalculationOverflowTest) {
 }
 
 TEST_F(LoadStoreAnalysisTest, TestHuntOriginalRef) {
+  CreateGraph();
   HBasicBlock* entry = new (GetAllocator()) HBasicBlock(graph_);
   graph_->AddBlock(entry);
   graph_->SetEntryBlock(entry);
@@ -753,6 +757,7 @@ void LoadStoreAnalysisTest::CheckReachability(const AdjacencyListGraph& adj,
 }
 
 TEST_F(LoadStoreAnalysisTest, ReachabilityTest1) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -768,6 +773,7 @@ TEST_F(LoadStoreAnalysisTest, ReachabilityTest1) {
 }
 
 TEST_F(LoadStoreAnalysisTest, ReachabilityTest2) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -784,6 +790,7 @@ TEST_F(LoadStoreAnalysisTest, ReachabilityTest2) {
 }
 
 TEST_F(LoadStoreAnalysisTest, ReachabilityTest3) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
                                                  { { "entry", "loop-header" },
@@ -839,6 +846,7 @@ static bool AreExclusionsIndependent(HGraph* graph, const ExecutionSubgraph* esg
 // // EXIT
 // obj.field;
 TEST_F(LoadStoreAnalysisTest, PartialEscape) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -918,6 +926,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -946,6 +955,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape) {
 // // EXIT
 // obj.field2;
 TEST_F(LoadStoreAnalysisTest, PartialEscape2) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -1025,6 +1035,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape2) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1054,6 +1065,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape2) {
 // // EXIT
 // obj.field;
 TEST_F(LoadStoreAnalysisTest, PartialEscape3) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -1146,6 +1158,175 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape3) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  ASSERT_TRUE(esg->IsValid());
+  ASSERT_TRUE(IsValidSubgraph(esg));
+  ASSERT_TRUE(AreExclusionsIndependent(graph_, esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 3u);
+  ASSERT_TRUE(contents.find(blks.Get("left")) == contents.end());
+
+  ASSERT_TRUE(contents.find(blks.Get("right")) != contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("entry")) != contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("exit")) != contents.end());
+}
+
+// For simplicity Partial LSE considers check-casts to escape. It means we don't
+// need to worry about inserting throws.
+// // ENTRY
+// obj = new Obj();
+// obj.field = 10;
+// if (parameter_value) {
+//   // LEFT
+//   (Foo)obj;
+// } else {
+//   // RIGHT
+//   obj.field = 20;
+// }
+// // EXIT
+// obj.field;
+TEST_F(LoadStoreAnalysisTest, PartialEscape4) {
+  CreateGraph();
+  AdjacencyListGraph blks(SetupFromAdjacencyList(
+      "entry",
+      "exit",
+      { { "entry", "left" }, { "entry", "right" }, { "left", "exit" }, { "right", "exit" } }));
+  HBasicBlock* entry = blks.Get("entry");
+  HBasicBlock* left = blks.Get("left");
+  HBasicBlock* right = blks.Get("right");
+  HBasicBlock* exit = blks.Get("exit");
+
+  HInstruction* bool_value = new (GetAllocator())
+      HParameterValue(graph_->GetDexFile(), dex::TypeIndex(1), 1, DataType::Type::kBool);
+  HInstruction* c10 = graph_->GetIntConstant(10);
+  HInstruction* c20 = graph_->GetIntConstant(20);
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* new_inst = MakeNewInstance(cls);
+
+  HInstruction* write_entry = MakeIFieldSet(new_inst, c10, MemberOffset(32));
+  HInstruction* if_inst = new (GetAllocator()) HIf(bool_value);
+  entry->AddInstruction(bool_value);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(write_entry);
+  entry->AddInstruction(if_inst);
+
+  ScopedNullHandle<mirror::Class> null_klass_;
+  HInstruction* cls2 = MakeClassLoad();
+  HInstruction* check_cast = new (GetAllocator()) HCheckCast(
+      new_inst, cls2, TypeCheckKind::kExactCheck, null_klass_, 0, GetAllocator(), nullptr, nullptr);
+  HInstruction* goto_left = new (GetAllocator()) HGoto();
+  left->AddInstruction(cls2);
+  left->AddInstruction(check_cast);
+  left->AddInstruction(goto_left);
+
+  HInstruction* write_right = MakeIFieldSet(new_inst, c20, MemberOffset(32));
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(write_right);
+  right->AddInstruction(goto_right);
+
+  HInstruction* read_final = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  exit->AddInstruction(read_final);
+
+  ScopedArenaAllocator allocator(graph_->GetArenaStack());
+  LoadStoreAnalysis lsa(graph_, nullptr, &allocator, LoadStoreAnalysisType::kFull);
+  lsa.Run();
+
+  const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
+  ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
+  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
+
+  ASSERT_TRUE(esg->IsValid());
+  ASSERT_TRUE(IsValidSubgraph(esg));
+  ASSERT_TRUE(AreExclusionsIndependent(graph_, esg));
+  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
+                                                  esg->ReachableBlocks().end());
+
+  ASSERT_EQ(contents.size(), 3u);
+  ASSERT_TRUE(contents.find(blks.Get("left")) == contents.end());
+
+  ASSERT_TRUE(contents.find(blks.Get("right")) != contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("entry")) != contents.end());
+  ASSERT_TRUE(contents.find(blks.Get("exit")) != contents.end());
+}
+
+// For simplicity Partial LSE considers instance-ofs with bitvectors to escape.
+// // ENTRY
+// obj = new Obj();
+// obj.field = 10;
+// if (parameter_value) {
+//   // LEFT
+//   obj instanceof /*bitvector*/ Foo;
+// } else {
+//   // RIGHT
+//   obj.field = 20;
+// }
+// // EXIT
+// obj.field;
+TEST_F(LoadStoreAnalysisTest, PartialEscape5) {
+  ScopedObjectAccess soa(Thread::Current());
+  VariableSizedHandleScope vshs(soa.Self());
+  CreateGraph(&vshs);
+  AdjacencyListGraph blks(SetupFromAdjacencyList(
+      "entry",
+      "exit",
+      { { "entry", "left" }, { "entry", "right" }, { "left", "exit" }, { "right", "exit" } }));
+  HBasicBlock* entry = blks.Get("entry");
+  HBasicBlock* left = blks.Get("left");
+  HBasicBlock* right = blks.Get("right");
+  HBasicBlock* exit = blks.Get("exit");
+
+  HInstruction* bool_value = new (GetAllocator())
+      HParameterValue(graph_->GetDexFile(), dex::TypeIndex(1), 1, DataType::Type::kBool);
+  HInstruction* c10 = graph_->GetIntConstant(10);
+  HInstruction* c20 = graph_->GetIntConstant(20);
+  HIntConstant* bs1 = graph_->GetIntConstant(0xffff);
+  HIntConstant* bs2 = graph_->GetIntConstant(0x00ff);
+  HInstruction* cls = MakeClassLoad();
+  HInstruction* null_const = graph_->GetNullConstant();
+  HInstruction* new_inst = MakeNewInstance(cls);
+
+  HInstruction* write_entry = MakeIFieldSet(new_inst, c10, MemberOffset(32));
+  HInstruction* if_inst = new (GetAllocator()) HIf(bool_value);
+  entry->AddInstruction(bool_value);
+  entry->AddInstruction(cls);
+  entry->AddInstruction(new_inst);
+  entry->AddInstruction(write_entry);
+  entry->AddInstruction(if_inst);
+
+  ScopedNullHandle<mirror::Class> null_klass_;
+  HInstruction* instanceof = new (GetAllocator()) HInstanceOf(new_inst,
+                                                              null_const,
+                                                              TypeCheckKind::kBitstringCheck,
+                                                              null_klass_,
+                                                              0,
+                                                              GetAllocator(),
+                                                              bs1,
+                                                              bs2);
+  HInstruction* goto_left = new (GetAllocator()) HGoto();
+  left->AddInstruction(instanceof);
+  left->AddInstruction(goto_left);
+
+  HInstruction* write_right = MakeIFieldSet(new_inst, c20, MemberOffset(32));
+  HInstruction* goto_right = new (GetAllocator()) HGoto();
+  right->AddInstruction(write_right);
+  right->AddInstruction(goto_right);
+
+  HInstruction* read_final = MakeIFieldGet(new_inst, DataType::Type::kInt32, MemberOffset(32));
+  exit->AddInstruction(read_final);
+
+  ScopedArenaAllocator allocator(graph_->GetArenaStack());
+  LoadStoreAnalysis lsa(graph_, nullptr, &allocator, LoadStoreAnalysisType::kFull);
+  lsa.Run();
+
+  const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
+  ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   ASSERT_TRUE(esg->IsValid());
@@ -1177,6 +1358,7 @@ TEST_F(LoadStoreAnalysisTest, PartialEscape3) {
 // // call_func prevents the elimination of this store.
 // obj.f2 = 0;
 TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacentNoPredicated) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -1260,18 +1442,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacentNoPredicated) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
-
-  EXPECT_FALSE(esg->IsValid()) << esg->GetExcludedCohorts();
-  EXPECT_FALSE(IsValidSubgraph(esg));
-  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
-                                                  esg->ReachableBlocks().end());
-
-  EXPECT_EQ(contents.size(), 0u);
-  EXPECT_TRUE(contents.find(blks.Get("left")) == contents.end());
-  EXPECT_TRUE(contents.find(blks.Get("right")) == contents.end());
-  EXPECT_TRUE(contents.find(blks.Get("entry")) == contents.end());
-  EXPECT_TRUE(contents.find(blks.Get("exit")) == contents.end());
+  ASSERT_FALSE(info->IsPartialSingleton());
 }
 
 // With predicated-set we can (partially) remove the store as well.
@@ -1288,6 +1459,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacentNoPredicated) {
 // // call_func prevents the elimination of this store.
 // obj.f2 = 0;
 TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacent) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -1370,6 +1542,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacent) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
+  ASSERT_TRUE(info->IsPartialSingleton());
   const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
 
   EXPECT_TRUE(esg->IsValid()) << esg->GetExcludedCohorts();
@@ -1397,6 +1570,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscapeAdjacent) {
 // // EXIT
 // obj.f0;
 TEST_F(LoadStoreAnalysisTest, TotalEscape) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList(
       "entry",
       "exit",
@@ -1489,18 +1663,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
-
-  ASSERT_FALSE(esg->IsValid());
-  ASSERT_FALSE(IsValidSubgraph(esg));
-  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
-                                                  esg->ReachableBlocks().end());
-
-  ASSERT_EQ(contents.size(), 0u);
-  ASSERT_TRUE(contents.find(blks.Get("left")) == contents.end());
-  ASSERT_TRUE(contents.find(blks.Get("right")) == contents.end());
-  ASSERT_TRUE(contents.find(blks.Get("entry")) == contents.end());
-  ASSERT_TRUE(contents.find(blks.Get("exit")) == contents.end());
+  ASSERT_FALSE(info->IsPartialSingleton());
 }
 
 // // ENTRY
@@ -1509,6 +1672,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape) {
 // // EXIT
 // return obj;
 TEST_F(LoadStoreAnalysisTest, TotalEscape2) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry", "exit", { { "entry", "exit" } }));
   HBasicBlock* entry = blks.Get("entry");
   HBasicBlock* exit = blks.Get("exit");
@@ -1554,16 +1718,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape2) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
-
-  ASSERT_FALSE(esg->IsValid());
-  ASSERT_FALSE(IsValidSubgraph(esg));
-  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
-                                                  esg->ReachableBlocks().end());
-
-  ASSERT_EQ(contents.size(), 0u);
-  ASSERT_TRUE(contents.find(blks.Get("entry")) == contents.end());
-  ASSERT_TRUE(contents.find(blks.Get("exit")) == contents.end());
+  ASSERT_FALSE(info->IsPartialSingleton());
 }
 
 // // ENTRY
@@ -1587,6 +1742,7 @@ TEST_F(LoadStoreAnalysisTest, TotalEscape2) {
 // // EXIT
 // obj.f0
 TEST_F(LoadStoreAnalysisTest, DoubleDiamondEscape) {
+  CreateGraph();
   AdjacencyListGraph blks(SetupFromAdjacencyList("entry",
                                                  "exit",
                                                  { { "entry", "high_left" },
@@ -1735,14 +1891,7 @@ TEST_F(LoadStoreAnalysisTest, DoubleDiamondEscape) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
-
-  ASSERT_FALSE(esg->IsValid());
-  ASSERT_FALSE(IsValidSubgraph(esg));
-  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
-                                                  esg->ReachableBlocks().end());
-
-  ASSERT_EQ(contents.size(), 0u);
+  ASSERT_FALSE(info->IsPartialSingleton());
 }
 
 // // ENTRY
@@ -1906,11 +2055,6 @@ TEST_F(LoadStoreAnalysisTest, PartialPhiPropagation1) {
 
   const HeapLocationCollector& heap_location_collector = lsa.GetHeapLocationCollector();
   ReferenceInfo* info = heap_location_collector.FindReferenceInfoOf(new_inst);
-  const ExecutionSubgraph* esg = info->GetNoEscapeSubgraph();
-  std::unordered_set<const HBasicBlock*> contents(esg->ReachableBlocks().begin(),
-                                                  esg->ReachableBlocks().end());
-
-  ASSERT_EQ(contents.size(), 0u);
-  ASSERT_FALSE(esg->IsValid());
+  ASSERT_FALSE(info->IsPartialSingleton());
 }
 }  // namespace art

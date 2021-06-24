@@ -12,9 +12,6 @@ package {
 cc_defaults {
     name: "libnativeloader-defaults",
     defaults: ["art_defaults"],
-    cppflags: [
-        "-fvisibility=hidden",
-    ],
     header_libs: ["libnativeloader-headers"],
     export_header_lib_headers: ["libnativeloader-headers"],
 }
@@ -119,32 +116,56 @@ cc_library_headers {
     export_header_lib_headers: ["jni_headers"],
 }
 
-art_cc_test {
-    name: "libnativeloader_test",
-    srcs: [
-        "native_loader_test.cpp",
-        "native_loader.cpp",
-        "library_namespaces.cpp",
-        "native_loader_namespace.cpp",
-        "public_libraries.cpp",
+cc_defaults {
+    name: "libnativeloader-test-defaults",
+    defaults: [
+        "art_module_source_build_defaults",
+        "art_test_defaults",
     ],
+    host_supported: false,
+
     cflags: ["-DANDROID"],
-    static_libs: [
-        "libbase",
-        "liblog",
-        "libgmock",
-        "PlatformProperties",
+
+    // The tests mock libdl_android and libnativebridge symbols, so export them
+    // to override the ones loaded from their libs.
+    ldflags: [
+        "-Wl,--export-dynamic-symbol=android_*",
+        "-Wl,--export-dynamic-symbol=NativeBridge*",
     ],
+
     header_libs: [
         "libnativebridge-headers",
         "libnativehelper_header_only",
-        "libnativeloader-headers",
     ],
-    // native_loader_test.cpp mocks libdl APIs so system_shared_libs
-    // are used to include C libraries without libdl.
-    system_shared_libs: [
-        "libc",
-        "libm",
+    static_libs: [
+        "libgmock",
     ],
+    shared_libs: [
+        "libbase",
+    ],
+
     test_suites: ["device-tests"],
+}
+
+art_cc_test {
+    name: "libnativeloader_test",
+    defaults: ["libnativeloader-test-defaults"],
+    srcs: [
+        "native_loader_api_test.c",
+        "native_loader_test.cpp",
+    ],
+    shared_libs: [
+        "libnativeloader",
+    ],
+}
+
+art_cc_test {
+    name: "libnativeloader_lazy_test",
+    defaults: ["libnativeloader-test-defaults"],
+    srcs: [
+        "native_loader_lazy_test.cpp",
+    ],
+    static_libs: [
+        "libnativeloader_lazy",
+    ],
 }

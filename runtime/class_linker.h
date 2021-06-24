@@ -312,6 +312,11 @@ class ClassLinker {
                                            ObjPtr<mirror::ClassLoader> class_loader)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // Look up a resolved type with the given descriptor associated with the given ClassLoader.
+  ObjPtr<mirror::Class> LookupResolvedType(const char* descriptor,
+                                           ObjPtr<mirror::ClassLoader> class_loader)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+
   // Determine whether a dex cache result should be trusted, or an IncompatibleClassChangeError
   // check and IllegalAccessError check should be performed even after a hit.
   enum class ResolveMode {  // private.
@@ -687,11 +692,6 @@ class ClassLinker {
   PointerSize GetImagePointerSize() const {
     return image_pointer_size_;
   }
-
-  // Used by image writer for checking.
-  bool ClassInClassTable(ObjPtr<mirror::Class> klass)
-      REQUIRES(Locks::classlinker_classes_lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Clear the ArrayClass cache. This is necessary when cleaning up for the image, as the cache
   // entries are roots, but potentially not image classes.

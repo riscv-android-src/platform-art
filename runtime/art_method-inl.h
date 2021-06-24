@@ -209,9 +209,7 @@ inline std::string_view ArtMethod::GetNameView() {
   if (LIKELY(dex_method_idx != dex::kDexNoIndex)) {
     DCHECK(!IsProxyMethod());
     const DexFile* dex_file = GetDexFile();
-    uint32_t length = 0;
-    const char* name = dex_file->GetMethodName(dex_file->GetMethodId(dex_method_idx), &length);
-    return StringViewFromUtf16Length(name, length);
+    return dex_file->GetMethodNameView(dex_method_idx);
   }
   return GetRuntimeMethodName();
 }
@@ -413,12 +411,12 @@ inline CodeItemDebugInfoAccessor ArtMethod::DexInstructionDebugInfo() {
 }
 
 inline void ArtMethod::SetCounter(uint16_t hotness_count) {
-  DCHECK(!IsAbstract()) << PrettyMethod();
+  DCHECK(!IsAbstract());
   hotness_count_ = hotness_count;
 }
 
 inline uint16_t ArtMethod::GetCounter() {
-  DCHECK(!IsAbstract()) << PrettyMethod();
+  DCHECK(!IsAbstract());
   return hotness_count_;
 }
 

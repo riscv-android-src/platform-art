@@ -19,6 +19,7 @@
 #include "perfetto_hprof.h"
 
 #include <android-base/logging.h>
+#include <base/fast_exit.h>
 #include <fcntl.h>
 #include <inttypes.h>
 #include <sched.h>
@@ -40,7 +41,6 @@
 #include "gc/scoped_gc_critical_section.h"
 #include "mirror/object-refvisitor-inl.h"
 #include "nativehelper/scoped_local_ref.h"
-#include "perfetto/profiling/normalize.h"
 #include "perfetto/profiling/parse_smaps.h"
 #include "perfetto/trace/interned_data/interned_data.pbzero.h"
 #include "perfetto/trace/profiling/heap_graph.pbzero.h"
@@ -151,22 +151,6 @@ bool ShouldSampleSmapsEntry(const perfetto::profiling::SmapsEntry& e) {
   return false;
 }
 
-bool CanConnectToSocket(const char* name) {
-  struct sockaddr_un addr = {};
-  addr.sun_family = AF_UNIX;
-  strncpy(addr.sun_path, name, sizeof(addr.sun_path) - 1);
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
-  if (fd == -1) {
-    PLOG(ERROR) << "failed to create socket";
-    return false;
-  }
-  bool connected = connect(fd, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) == 0;
-  close(fd);
-  return connected;
-}
-
-constexpr size_t kMaxCmdlineSize = 512;
-
 class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
  public:
   constexpr static perfetto::BufferExhaustedPolicy kBufferExhaustedPolicy =
@@ -187,63 +171,14 @@ class JavaHprofDataSource : public perfetto::DataSource<JavaHprofDataSource> {
         new perfetto::protos::pbzero::JavaHprofConfig::Decoder(
           args.config->java_hprof_config_raw()));
 
-    if (args.config->enable_extra_guardrails() && !CanConnectToSocket("/dev/socket/heapprofd")) {
-      LOG(ERROR) << "rejecting extra guardrails";
-      enabled_ = false;
-      return;
-    }
-
     dump_smaps_ = cfg->dump_smaps();
     for (auto it = cfg->ignored_types(); it; ++it) {
       std::string name = (*it).ToStdString();
       ignored_types_.emplace_back(std::move(name));
     }
-
-    uint64_t self_pid = static_cast<uint64_t>(getpid());
-    for (auto pid_it = cfg->pid(); pid_it; ++pid_it) {
-      if (*pid_it == self_pid) {
-        enabled_ = true;
-        return;
-      }
-    }
-
-    if (cfg->has_process_cmdline()) {
-      int fd = open("/proc/self/cmdline", O_RDONLY | O_CLOEXEC);
-      if (fd == -1) {
-        PLOG(ERROR) << "failed to open /proc/self/cmdline";
-        return;
-      }
-      char cmdline[kMaxCmdlineSize];
-      ssize_t rd = read(fd, cmdline, sizeof(cmdline) - 1);
-      if (rd == -1) {
-        PLOG(ERROR) << "failed to read /proc/self/cmdline";
-      }
-      close(fd);
-      if (rd == -1) {
-        return;
-      }
-      cmdline[rd] = '\0';
-      char* cmdline_ptr = cmdline;
-      ssize_t sz = perfetto::profiling::NormalizeCmdLine(&cmdline_ptr, static_cast<size_t>(rd + 1));
-      if (sz == -1) {
-        PLOG(ERROR) << "failed to normalize cmdline";
-      }
-      for (auto it = cfg->process_cmdline(); it; ++it) {
-        std::string other = (*it).ToStdString();
-        // Append \0 to make this a C string.
-        other.resize(other.size() + 1);
-        char* other_ptr = &(other[0]);
-        ssize_t other_sz = perfetto::profiling::NormalizeCmdLine(&other_ptr, other.size());
-        if (other_sz == -1) {
-          PLOG(ERROR) << "failed to normalize other cmdline";
-          continue;
-        }
-        if (sz == other_sz && strncmp(cmdline_ptr, other_ptr, static_cast<size_t>(sz)) == 0) {
-          enabled_ = true;
-          return;
-        }
-      }
-    }
+    // This tracing session ID matches the requesting tracing session ID, so we know heapprofd
+    // has verified it targets this process.
+    enabled_ = true;
   }
 
   bool dump_smaps() { return dump_smaps_; }
@@ -912,9 +847,9 @@ void DumpPerfetto(art::Thread* self) {
           });
 
   LOG(INFO) << "finished dumping heap for " << parent_pid;
-  // Prevent the atexit handlers to run. We do not want to call cleanup
+  // Prevent the `atexit` handlers from running. We do not want to call cleanup
   // functions the parent process has registered.
-  _exit(0);
+  art::FastExit(0);
 }
 
 // The plugin initialization function.

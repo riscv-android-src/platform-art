@@ -98,7 +98,7 @@ class ClassTable {
 
     // Data contains the class pointer GcRoot as well as the low bits of the descriptor hash.
     mutable Atomic<uint32_t> data_;
-    static const uint32_t kHashMask = kObjectAlignment - 1;
+    static constexpr uint32_t kHashMask = kObjectAlignment - 1;
   };
 
   using DescriptorHashPair = std::pair<const char*, uint32_t>;
@@ -141,11 +141,6 @@ class ClassTable {
                   TrackingAllocator<TableSlot, kAllocatorTagClassTable>> ClassSet;
 
   ClassTable();
-
-  // Used by image writer for checking.
-  bool Contains(ObjPtr<mirror::Class> klass)
-      REQUIRES(!lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Freeze the current class tables by allocating a new table and never updating or modifying the
   // existing table. This helps prevents dirty pages after caused by inserting after zygote fork.
@@ -209,13 +204,8 @@ class ClassTable {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Return the first class that matches the descriptor of klass. Returns null if there are none.
+  // Used for tests and debug-build checks.
   ObjPtr<mirror::Class> LookupByDescriptor(ObjPtr<mirror::Class> klass)
-      REQUIRES(!lock_)
-      REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // Try to insert a class and return the inserted class if successful. If another class
-  // with the same descriptor is already in the table, return the existing entry.
-  ObjPtr<mirror::Class> TryInsert(ObjPtr<mirror::Class> klass)
       REQUIRES(!lock_)
       REQUIRES_SHARED(Locks::mutator_lock_);
 

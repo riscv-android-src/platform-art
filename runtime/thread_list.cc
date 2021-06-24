@@ -118,15 +118,6 @@ bool ThreadList::Contains(Thread* thread) {
   return find(list_.begin(), list_.end(), thread) != list_.end();
 }
 
-bool ThreadList::Contains(pid_t tid) {
-  for (const auto& thread : list_) {
-    if (thread->GetTid() == tid) {
-      return true;
-    }
-  }
-  return false;
-}
-
 pid_t ThreadList::GetLockOwner() {
   return Locks::thread_list_lock_->GetExclusiveOwnerTid();
 }
@@ -179,12 +170,12 @@ void ThreadList::DumpUnattachedThreads(std::ostream& os, bool dump_native_stack)
     char* end;
     pid_t tid = strtol(e->d_name, &end, 10);
     if (!*end) {
-      bool contains;
+      Thread* thread;
       {
         MutexLock mu(self, *Locks::thread_list_lock_);
-        contains = Contains(tid);
+        thread = FindThreadByTid(tid);
       }
-      if (!contains) {
+      if (thread == nullptr) {
         DumpUnattachedThread(os, tid, dump_native_stack);
       }
     }
@@ -883,10 +874,11 @@ static void ThreadSuspendByPeerWarning(Thread* self,
 }
 
 Thread* ThreadList::SuspendThreadByPeer(jobject peer,
-                                        bool request_suspension,
                                         SuspendReason reason,
                                         bool* timed_out) {
+  bool request_suspension = true;
   const uint64_t start_time = NanoTime();
+  int self_suspend_count = 0;
   useconds_t sleep_us = kThreadSuspendInitialSleepUs;
   *timed_out = false;
   Thread* const self = Thread::Current();
@@ -935,6 +927,7 @@ Thread* ThreadList::SuspendThreadByPeer(jobject peer,
             // We hold the suspend count lock but another thread is trying to suspend us. Its not
             // safe to try to suspend another thread in case we get a cycle. Start the loop again
             // which will allow this thread to be suspended.
+            ++self_suspend_count;
             continue;
           }
           CHECK(suspended_thread == nullptr);
@@ -966,20 +959,22 @@ Thread* ThreadList::SuspendThreadByPeer(jobject peer,
         }
         const uint64_t total_delay = NanoTime() - start_time;
         if (total_delay >= thread_suspend_timeout_ns_) {
-          ThreadSuspendByPeerWarning(self,
-                                     ::android::base::FATAL,
-                                     "Thread suspension timed out",
-                                     peer);
-          if (suspended_thread != nullptr) {
+          if (suspended_thread == nullptr) {
+            ThreadSuspendByPeerWarning(self,
+                                       ::android::base::FATAL,
+                                       "Failed to issue suspend request",
+                                       peer);
+          } else {
             CHECK_EQ(suspended_thread, thread);
-            bool updated = suspended_thread->ModifySuspendCount(soa.Self(),
-                                                                -1,
-                                                                nullptr,
-                                                                reason);
-            DCHECK(updated);
+            LOG(WARNING) << "Suspended thread state_and_flags: "
+                         << suspended_thread->StateAndFlagsAsHexString()
+                         << ", self_suspend_count = " << self_suspend_count;
+            ThreadSuspendByPeerWarning(self,
+                                       ::android::base::FATAL,
+                                       "Thread suspension timed out",
+                                       peer);
           }
-          *timed_out = true;
-          return nullptr;
+          UNREACHABLE();
         } else if (sleep_us == 0 &&
             total_delay > static_cast<uint64_t>(kThreadSuspendMaxYieldUs) * 1000) {
           // We have spun for kThreadSuspendMaxYieldUs time, switch to sleeps to prevent
@@ -1104,6 +1099,15 @@ Thread* ThreadList::SuspendThreadByThreadId(uint32_t thread_id,
 Thread* ThreadList::FindThreadByThreadId(uint32_t thread_id) {
   for (const auto& thread : list_) {
     if (thread->GetThreadId() == thread_id) {
+      return thread;
+    }
+  }
+  return nullptr;
+}
+
+Thread* ThreadList::FindThreadByTid(int tid) {
+  for (const auto& thread : list_) {
+    if (thread->GetTid() == tid) {
       return thread;
     }
   }

@@ -252,13 +252,13 @@ class OatSymbolizer final {
       const OatFile::OatClass oat_class = oat_dex_file->GetOatClass(class_def_index);
       OatClassType type = oat_class.GetType();
       switch (type) {
-        case kOatClassAllCompiled:
-        case kOatClassSomeCompiled:
+        case OatClassType::kAllCompiled:
+        case OatClassType::kSomeCompiled:
           WalkOatClass(oat_class, *dex_file, class_def_index);
           break;
 
-        case kOatClassNoneCompiled:
-        case kOatClassMax:
+        case OatClassType::kNoneCompiled:
+        case OatClassType::kOatClassMax:
           // Ignore.
           break;
       }
@@ -1127,7 +1127,12 @@ class OatDumper {
       vios->Stream() << "DEX CODE:\n";
       ScopedIndentation indent2(vios);
       if (code_item_accessor.HasCodeItem()) {
+        uint32_t max_pc = code_item_accessor.InsnsSizeInCodeUnits();
         for (const DexInstructionPcPair& inst : code_item_accessor) {
+          if (inst.DexPc() + inst->SizeInCodeUnits() > max_pc) {
+            LOG(WARNING) << "GLITCH: run-away instruction at idx=0x" << std::hex << inst.DexPc();
+            break;
+          }
           vios->Stream() << StringPrintf("0x%04x: ", inst.DexPc()) << inst->DumpHexLE(5)
                          << StringPrintf("\t| %s\n", inst->DumpString(&dex_file).c_str());
         }
@@ -2545,6 +2550,7 @@ static int DumpOat(Runtime* runtime,
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ false,
                                                   dex_filenames,
+                                                  /*dex_fds=*/ ArrayRef<const int>(),
                                                   /*reservation=*/ nullptr,
                                                   &error_msg));
   if (oat_file == nullptr) {
@@ -2573,6 +2579,7 @@ static int SymbolizeOat(const char* oat_filename,
                                                   /*executable=*/ false,
                                                   /*low_4gb=*/ false,
                                                   dex_filenames,
+                                                  /*dex_fds=*/ ArrayRef<const int>(),
                                                   /*reservation=*/ nullptr,
                                                   &error_msg));
   if (oat_file == nullptr) {
@@ -2623,6 +2630,7 @@ class IMTDumper {
                                                       /*executable=*/ false,
                                                       /*low_4gb=*/false,
                                                       dex_filenames,
+                                                      /*dex_fds=*/ArrayRef<const int>(),
                                                       /*reservation=*/ nullptr,
                                                       &error_msg));
       if (oat_file == nullptr) {
