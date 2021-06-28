@@ -20,7 +20,6 @@ for arg; do
   shift
 done
 
-MAINLINE_MODULES=()
 if [ -z "$skip_apex" ]; then
   # Take the list of modules from MAINLINE_MODULES.
   if [ -n "${MAINLINE_MODULES}" ]; then
@@ -31,6 +30,8 @@ if [ -z "$skip_apex" ]; then
       com.android.art.debug
     )
   fi
+else
+  MAINLINE_MODULES=()
 fi
 
 # Take the list of products to build the modules for from
@@ -115,11 +116,13 @@ if [ ${#MODULE_SDKS_AND_EXPORTS[*]} -gt 0 ]; then
   # dependencies, but there are no actual apps to build here.
   export TARGET_BUILD_APPS=none
 
-  # Make build-aml-prebuilts.sh set the source_build Soong config variable true.
-  export ENABLE_ART_SOURCE_BUILD=true
+  # We use force building LLVM components flag (even though we actually don't
+  # compile them) because we don't have bionic host prebuilts
+  # for them.
+  export FORCE_BUILD_LLVM_COMPONENTS=true
 
-  echo_and_run build/soong/scripts/build-aml-prebuilts.sh "${build_args[@]}" \
-    ${MODULE_SDKS_AND_EXPORTS[*]}
+  echo_and_run build/soong/scripts/build-aml-prebuilts.sh \
+    TARGET_PRODUCT=mainline_sdk "${build_args[@]}" ${MODULE_SDKS_AND_EXPORTS[*]}
 
   rm -rf ${DIST_DIR}/mainline-sdks
   mkdir -p ${DIST_DIR}

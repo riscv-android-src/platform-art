@@ -35,3 +35,4 @@ luci-notify detected a status change for builder "{{ .Build.Builder | formatBuil
 <br/>
 Full details are available <a href="https://{{.BuildbucketHostname}}/build/{{.Build.Id}}">here</a>.
 <br/><br/>
+

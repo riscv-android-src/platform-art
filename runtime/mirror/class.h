@@ -776,6 +776,9 @@ class MANAGED Class final : public Object {
         PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
+  // The index in the methods_ array where the first copied method is.
+  ALWAYS_INLINE uint32_t GetCopiedMethodsStartOffset() REQUIRES_SHARED(Locks::mutator_lock_);
+
   template<VerifyObjectFlags kVerifyFlags = kDefaultVerifyFlags>
   ALWAYS_INLINE ArraySlice<ArtMethod> GetCopiedMethodsSlice(PointerSize pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
@@ -1089,10 +1092,7 @@ class MANAGED Class final : public Object {
   ArtField* GetStaticField(uint32_t i) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Find a static or instance field using the JLS resolution order
-  static ArtField* FindField(Thread* self,
-                             ObjPtr<Class> klass,
-                             std::string_view name,
-                             std::string_view type)
+  ArtField* FindField(ObjPtr<mirror::DexCache> dex_cache, uint32_t field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Finds the given instance field in this class or a superclass.
@@ -1111,18 +1111,12 @@ class MANAGED Class final : public Object {
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Finds the given static field in this class or a superclass.
-  static ArtField* FindStaticField(Thread* self,
-                                   ObjPtr<Class> klass,
-                                   std::string_view name,
-                                   std::string_view type)
+  ArtField* FindStaticField(std::string_view name, std::string_view type)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Finds the given static field in this class or superclass, only searches classes that
   // have the same dex cache.
-  static ArtField* FindStaticField(Thread* self,
-                                   ObjPtr<Class> klass,
-                                   ObjPtr<DexCache> dex_cache,
-                                   uint32_t dex_field_idx)
+  ArtField* FindStaticField(ObjPtr<DexCache> dex_cache, uint32_t dex_field_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   ArtField* FindDeclaredStaticField(std::string_view name, std::string_view type)
@@ -1216,11 +1210,10 @@ class MANAGED Class final : public Object {
 
   dex::TypeIndex GetDirectInterfaceTypeIdx(uint32_t idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
-  // Get the direct interface of the `klass` at index `idx` if resolved, otherwise return null.
+  // Get the direct interface at index `idx` if resolved, otherwise return null.
   // If the caller expects the interface to be resolved, for example for a resolved `klass`,
   // that assumption should be checked by `DCHECK(result != nullptr)`.
-  static ObjPtr<Class> GetDirectInterface(Thread* self, ObjPtr<Class> klass, uint32_t idx)
-      REQUIRES_SHARED(Locks::mutator_lock_);
+  ObjPtr<Class> GetDirectInterface(uint32_t idx) REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Resolve and get the direct interface of the `klass` at index `idx`.
   // Returns null with a pending exception if the resolution fails.
@@ -1395,9 +1388,6 @@ class MANAGED Class final : public Object {
 
   // The index in the methods_ array where the first direct method is.
   ALWAYS_INLINE uint32_t GetDirectMethodsStartOffset() REQUIRES_SHARED(Locks::mutator_lock_);
-
-  // The index in the methods_ array where the first copied method is.
-  ALWAYS_INLINE uint32_t GetCopiedMethodsStartOffset() REQUIRES_SHARED(Locks::mutator_lock_);
 
   bool ProxyDescriptorEquals(const char* match) REQUIRES_SHARED(Locks::mutator_lock_);
 

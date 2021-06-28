@@ -286,6 +286,10 @@ class Runtime {
     return boot_class_path_locations_.empty() ? boot_class_path_ : boot_class_path_locations_;
   }
 
+  const std::vector<int>& GetBootClassPathFds() const {
+    return boot_class_path_fds_;
+  }
+
   const std::string& GetClassPathString() const {
     return class_path_string_;
   }
@@ -525,7 +529,8 @@ class Runtime {
   }
 
   void RegisterAppInfo(const std::vector<std::string>& code_paths,
-                       const std::string& profile_output_filename);
+                       const std::string& profile_output_filename,
+                       const std::string& ref_profile_filename);
 
   // Transaction support.
   bool IsActiveTransaction() const;
@@ -1005,6 +1010,17 @@ class Runtime {
     return apex_versions_;
   }
 
+  // Trigger a flag reload from system properties or device congfigs.
+  //
+  // Should only be called from runtime init and zygote post fork as
+  // we don't want to change the runtime config midway during execution.
+  //
+  // The caller argument should be the name of the function making this call
+  // and will be used to enforce the appropriate names.
+  //
+  // See Flags::ReloadAllFlags as well.
+  static void ReloadAllFlags(const std::string& caller);
+
  private:
   static void InitPlatformSignalHandlers();
 
@@ -1016,7 +1032,7 @@ class Runtime {
       SHARED_TRYLOCK_FUNCTION(true, Locks::mutator_lock_);
   void InitNativeMethods() REQUIRES(!Locks::mutator_lock_);
   void RegisterRuntimeNativeMethods(JNIEnv* env);
-  void InitMetrics(const RuntimeArgumentMap& runtime_options);
+  void InitMetrics();
 
   void StartDaemonThreads();
   void StartSignalCatcher();
@@ -1093,6 +1109,7 @@ class Runtime {
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
+  std::vector<int> boot_class_path_fds_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 

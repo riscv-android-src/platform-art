@@ -69,6 +69,7 @@
 #include "palette/palette_types.h"
 
 #include "odr_artifacts.h"
+#include "odr_compilation_log.h"
 #include "odr_config.h"
 #include "odr_fs_utils.h"
 #include "odr_metrics.h"
@@ -636,17 +637,17 @@ class OnDeviceRefresh final {
     return ExitCode::kOkay;
   }
 
-  static void AddDex2OatCommonOptions(/*inout*/ std::vector<std::string>& args) {
-    args.emplace_back("--android-root=out/empty");
-    args.emplace_back("--abort-on-hard-verifier-error");
-    args.emplace_back("--no-abort-on-soft-verifier-error");
-    args.emplace_back("--compilation-reason=boot");
-    args.emplace_back("--image-format=lz4");
-    args.emplace_back("--force-determinism");
-    args.emplace_back("--resolve-startup-const-strings=true");
+  static void AddDex2OatCommonOptions(/*inout*/ std::vector<std::string>* args) {
+    args->emplace_back("--android-root=out/empty");
+    args->emplace_back("--abort-on-hard-verifier-error");
+    args->emplace_back("--no-abort-on-soft-verifier-error");
+    args->emplace_back("--compilation-reason=boot");
+    args->emplace_back("--image-format=lz4");
+    args->emplace_back("--force-determinism");
+    args->emplace_back("--resolve-startup-const-strings=true");
   }
 
-  static void AddDex2OatConcurrencyArguments(/*inout*/ std::vector<std::string>& args) {
+  static void AddDex2OatConcurrencyArguments(/*inout*/ std::vector<std::string>* args) {
     static constexpr std::pair<const char*, const char*> kPropertyArgPairs[] = {
         std::make_pair("dalvik.vm.boot-dex2oat-cpu-set", "--cpu-set="),
         std::make_pair("dalvik.vm.boot-dex2oat-threads", "-j"),
@@ -655,33 +656,52 @@ class OnDeviceRefresh final {
       auto [property, arg] = property_arg_pair;
       std::string value = android::base::GetProperty(property, {});
       if (!value.empty()) {
-        args.push_back(arg + value);
+        args->push_back(arg + value);
       }
     }
   }
 
-  static void AddDex2OatDebugInfo(/*inout*/ std::vector<std::string>& args) {
-    args.emplace_back("--generate-mini-debug-info");
-    args.emplace_back("--strip");
+  static void AddDex2OatDebugInfo(/*inout*/ std::vector<std::string>* args) {
+    args->emplace_back("--generate-mini-debug-info");
+    args->emplace_back("--strip");
   }
 
-  static void AddDex2OatInstructionSet(/*inout*/ std::vector<std::string> args,
+  static void AddDex2OatInstructionSet(/*inout*/ std::vector<std::string>* args,
                                        InstructionSet isa) {
     const char* isa_str = GetInstructionSetString(isa);
-    args.emplace_back(Concatenate({"--instruction-set=", isa_str}));
+    args->emplace_back(Concatenate({"--instruction-set=", isa_str}));
   }
 
-  static std::unique_ptr<File> AddDex2OatProfileAndCompilerFilter(
-      /*inout*/ std::vector<std::string>& args,
+  static void AddDex2OatProfileAndCompilerFilter(
+      /*inout*/ std::vector<std::string>* args,
+      /*inout*/ std::vector<std::unique_ptr<File>>* output_files,
       const std::string& profile_path) {
     std::unique_ptr<File> profile_file(OS::OpenFileForReading(profile_path.c_str()));
     if (profile_file && profile_file->IsOpened()) {
-      args.emplace_back(android::base::StringPrintf("--profile-file-fd=%d", profile_file->Fd()));
-      args.emplace_back("--compiler-filter=speed-profile");
+      args->emplace_back(android::base::StringPrintf("--profile-file-fd=%d", profile_file->Fd()));
+      args->emplace_back("--compiler-filter=speed-profile");
+      output_files->push_back(std::move(profile_file));
     } else {
-      args.emplace_back("--compiler-filter=speed");
+      args->emplace_back("--compiler-filter=speed");
     }
-    return profile_file;
+  }
+
+  static bool AddBootClasspathFds(/*inout*/ std::vector<std::string>& args,
+                                  /*inout*/ std::vector<std::unique_ptr<File>>& output_files,
+                                  const std::vector<std::string>& bcp_jars) {
+    auto bcp_fds = std::vector<std::string>();
+    for (const std::string& jar : bcp_jars) {
+      std::unique_ptr<File> jar_file(OS::OpenFileForReading(jar.c_str()));
+      if (!jar_file->IsValid()) {
+        LOG(ERROR) << "Failed to open a BCP jar " << jar;
+        return false;
+      }
+      bcp_fds.push_back(std::to_string(jar_file->Fd()));
+      output_files.push_back(std::move(jar_file));
+    }
+    args.emplace_back("--runtime-arg");
+    args.emplace_back(Concatenate({"-Xbootclasspathfds:", android::base::Join(bcp_fds, ':')}));
+    return true;
   }
 
   WARN_UNUSED bool VerifySystemServerArtifactsAreUpToDate(bool on_system) const {
@@ -992,6 +1012,20 @@ class OnDeviceRefresh final {
     return Concatenate({staging_dir, "/", android::base::Basename(path)});
   }
 
+  std::string JoinFilesAsFDs(const std::vector<std::unique_ptr<File>>& files, char delimiter) const {
+      std::stringstream output;
+      bool is_first = true;
+      for (const auto& f : files) {
+        if (is_first) {
+          is_first = false;
+        } else {
+          output << delimiter;
+        }
+        output << std::to_string(f->Fd());
+      }
+      return output.str();
+  }
+
   WARN_UNUSED bool CompileBootExtensionArtifacts(const InstructionSet isa,
                                                  const std::string& staging_dir,
                                                  OdrMetrics& metrics,
@@ -1001,14 +1035,14 @@ class OnDeviceRefresh final {
     std::vector<std::string> args;
     args.push_back(config_.GetDex2Oat());
 
-    AddDex2OatCommonOptions(args);
-    AddDex2OatConcurrencyArguments(args);
-    AddDex2OatDebugInfo(args);
-    AddDex2OatInstructionSet(args, isa);
+    AddDex2OatCommonOptions(&args);
+    AddDex2OatConcurrencyArguments(&args);
+    AddDex2OatDebugInfo(&args);
+    AddDex2OatInstructionSet(&args, isa);
 
     std::vector<std::unique_ptr<File>> readonly_files_raii;
     const std::string boot_profile_file(GetAndroidRoot() + "/etc/boot-image.prof");
-    readonly_files_raii.emplace_back(AddDex2OatProfileAndCompilerFilter(args, boot_profile_file));
+    AddDex2OatProfileAndCompilerFilter(&args, &readonly_files_raii, boot_profile_file);
 
     // Compile as a single image for fewer files and slightly less memory overhead.
     args.emplace_back("--single-image");
@@ -1018,7 +1052,9 @@ class OnDeviceRefresh final {
 
     const std::string dirty_image_objects_file(GetAndroidRoot() + "/etc/dirty-image-objects");
     if (OS::FileExists(dirty_image_objects_file.c_str())) {
-      args.emplace_back(Concatenate({"--dirty-image-objects=", dirty_image_objects_file}));
+      std::unique_ptr<File> file(OS::OpenFileForReading(dirty_image_objects_file.c_str()));
+      args.emplace_back(android::base::StringPrintf("--dirty-image-objects-fd=%d", file->Fd()));
+      readonly_files_raii.push_back(std::move(file));
     } else {
       LOG(WARNING) << "Missing dirty objects file : " << QuotePath(dirty_image_objects_file);
     }
@@ -1033,6 +1069,10 @@ class OnDeviceRefresh final {
 
     args.emplace_back("--runtime-arg");
     args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetDex2oatBootClasspath()}));
+    auto bcp_jars = android::base::Split(config_.GetDex2oatBootClasspath(), ":");
+    if (!AddBootClasspathFds(args, readonly_files_raii, bcp_jars)) {
+      return false;
+    }
 
     const std::string image_location = GetBootImageExtensionImagePath(isa);
     const OdrArtifacts artifacts = OdrArtifacts::ForBootImageExtension(image_location);
@@ -1073,6 +1113,17 @@ class OnDeviceRefresh final {
     if (!EnsureDirectoryExists(install_location)) {
       metrics.SetStatus(OdrMetrics::Status::kIoError);
       return false;
+    }
+
+    if (config_.UseCompilationOs()) {
+      std::vector<std::string> prefix_args = {
+        "/apex/com.android.compos/bin/pvm_exec",
+        "--cid=" + config_.GetCompilationOsAddress(),
+        "--in-fd=" + JoinFilesAsFDs(readonly_files_raii, ','),
+        "--out-fd=" + JoinFilesAsFDs(staging_files, ','),
+        "--",
+      };
+      args.insert(args.begin(), prefix_args.begin(), prefix_args.end());
     }
 
     const time_t timeout = GetSubprocessTimeout();
@@ -1116,8 +1167,8 @@ class OnDeviceRefresh final {
 
     const std::string dex2oat = config_.GetDex2Oat();
     const InstructionSet isa = config_.GetSystemServerIsa();
-    std::vector<std::unique_ptr<File>> readonly_files_raii;
     for (const std::string& jar : systemserver_compilable_jars_) {
+      std::vector<std::unique_ptr<File>> readonly_files_raii;
       std::vector<std::string> args;
       args.emplace_back(dex2oat);
       args.emplace_back("--dex-file=" + jar);
@@ -1126,13 +1177,13 @@ class OnDeviceRefresh final {
       args.emplace_back(android::base::StringPrintf("--dex-fd=%d", dex_file->Fd()));
       readonly_files_raii.push_back(std::move(dex_file));
 
-      AddDex2OatCommonOptions(args);
-      AddDex2OatConcurrencyArguments(args);
-      AddDex2OatDebugInfo(args);
-      AddDex2OatInstructionSet(args, isa);
+      AddDex2OatCommonOptions(&args);
+      AddDex2OatConcurrencyArguments(&args);
+      AddDex2OatDebugInfo(&args);
+      AddDex2OatInstructionSet(&args, isa);
       const std::string jar_name(android::base::Basename(jar));
       const std::string profile = Concatenate({GetAndroidRoot(), "/framework/", jar_name, ".prof"});
-      readonly_files_raii.emplace_back(AddDex2OatProfileAndCompilerFilter(args, profile));
+      AddDex2OatProfileAndCompilerFilter(&args, &readonly_files_raii, profile);
 
       const std::string image_location = GetSystemServerImagePath(/*on_system=*/false, jar);
       const std::string install_location = android::base::Dirname(image_location);
@@ -1177,15 +1228,48 @@ class OnDeviceRefresh final {
           EraseFiles(staging_files);
           return false;
         }
-        args.emplace_back("--updatable-bcp-packages-file=" + bcp_packages);
+        std::unique_ptr<File> file(OS::OpenFileForReading(bcp_packages.c_str()));
+        args.emplace_back(android::base::StringPrintf("--updatable-bcp-packages-fd=%d", file->Fd()));
+        readonly_files_raii.push_back(std::move(file));
       }
 
       args.emplace_back("--runtime-arg");
       args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetDex2oatBootClasspath()}));
+      auto bcp_jars = android::base::Split(config_.GetDex2oatBootClasspath(), ":");
+      if (!AddBootClasspathFds(args, readonly_files_raii, bcp_jars)) {
+        return false;
+      }
+
       const std::string context_path = android::base::Join(classloader_context, ':');
       args.emplace_back(Concatenate({"--class-loader-context=PCL[", context_path, "]"}));
+      if (!classloader_context.empty()) {
+        std::vector<int> fds;
+        for (const std::string& path : classloader_context) {
+          std::unique_ptr<File> file(OS::OpenFileForReading(path.c_str()));
+          if (!file->IsValid()) {
+            PLOG(ERROR) << "Failed to open classloader context " << path;
+            metrics.SetStatus(OdrMetrics::Status::kIoError);
+            return false;
+          }
+          fds.emplace_back(file->Fd());
+          readonly_files_raii.emplace_back(std::move(file));
+        }
+        const std::string context_fds = android::base::Join(fds, ':');
+        args.emplace_back(Concatenate({"--class-loader-context-fds=", context_fds}));
+      }
       const std::string extension_image = GetBootImageExtensionImage(/*on_system=*/false);
       args.emplace_back(Concatenate({"--boot-image=", GetBootImage(), ":", extension_image}));
+
+      if (config_.UseCompilationOs()) {
+        std::vector<std::string> prefix_args = {
+          "/apex/com.android.compos/bin/pvm_exec",
+          "--cid=" + config_.GetCompilationOsAddress(),
+          "--in-fd=" + JoinFilesAsFDs(readonly_files_raii, ','),
+          "--out-fd=" + JoinFilesAsFDs(staging_files, ','),
+          "--",
+        };
+        args.insert(args.begin(), prefix_args.begin(), prefix_args.end());
+      }
 
       const time_t timeout = GetSubprocessTimeout();
       const std::string cmd_line = android::base::Join(args, ' ');
@@ -1423,8 +1507,12 @@ class OnDeviceRefresh final {
 
     int n = 1;
     for (; n < argc - 1; ++n) {
-      if (!InitializeCommonConfig(argv[n], config)) {
-        UsageError("Unrecognized argument: '%s'", argv[n]);
+      const char* arg = argv[n];
+      std::string value;
+      if (ArgumentMatches(arg, "--use-compilation-os=", &value)) {
+        config->SetCompilationOsAddress(value);
+      } else if (!InitializeCommonConfig(arg, config)) {
+        UsageError("Unrecognized argument: '%s'", arg);
       }
     }
     return n;
@@ -1456,10 +1544,16 @@ class OnDeviceRefresh final {
         return odr.CheckArtifactsAreUpToDate(metrics);
       } else if (action == "--compile") {
         const ExitCode exit_code = odr.CheckArtifactsAreUpToDate(metrics);
-        if (exit_code == ExitCode::kCompilationRequired) {
-          return odr.Compile(metrics, /*force_compile=*/false);
+        if (exit_code != ExitCode::kCompilationRequired) {
+          return exit_code;
         }
-        return exit_code;
+        OdrCompilationLog compilation_log;
+        if (!compilation_log.ShouldAttemptCompile(metrics.GetApexVersion(), metrics.GetTrigger())) {
+          return ExitCode::kOkay;
+        }
+        ExitCode compile_result = odr.Compile(metrics, /*force_compile=*/false);
+        compilation_log.Log(metrics.GetApexVersion(), metrics.GetTrigger(), compile_result);
+        return compile_result;
       } else if (action == "--force-compile") {
         return odr.Compile(metrics, /*force_compile=*/true);
       } else if (action == "--verify") {

@@ -136,6 +136,7 @@ TEST_F(ImageSpaceTest, StringDeduplication) {
     extra_reservation = MemMap::Invalid();
     return ImageSpace::LoadBootImage(bcp,
                                      bcp_locations,
+                                     /*boot_class_path_fds=*/ std::vector<int>(),
                                      full_image_locations,
                                      kRuntimeISA,
                                      /*relocate=*/ false,
@@ -255,6 +256,7 @@ TEST_F(DexoptTest, ValidateOatFile) {
                                                 /*executable=*/ false,
                                                 /*low_4gb=*/ false,
                                                 ArrayRef<const std::string>(dex_filenames),
+                                                /*dex_fds=*/ ArrayRef<const int>(),
                                                 /*reservation=*/ nullptr,
                                                 &error_msg));
     ASSERT_TRUE(oat2 != nullptr) << error_msg;
@@ -336,6 +338,7 @@ TEST_F(DexoptTest, Checksums) {
         ArrayRef<const std::string>(runtime->GetImageLocations()),
         ArrayRef<const std::string>(bcp_locations),
         ArrayRef<const std::string>(bcp),
+        /*boot_class_path_fds=*/ ArrayRef<const int>(),
         kRuntimeISA,
         &error_msg);
   };

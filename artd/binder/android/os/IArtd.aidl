@@ -14,17 +14,10 @@
  * limitations under the License.
  */
 
-// Typically GCC outputs functions like these into any object file that needs a PIC base register,
-// and one of the copies for each register is used. Clang doesn't use these functions, but
-// SETUP_GOT_NOSAVE in asm_support_x86.S calls this one.
+package android.os;
 
-    .section .text.__x86.get_pc_thunk.bx,"axG",@progbits,__x86.get_pc_thunk.bx,comdat
-    .globl __x86.get_pc_thunk.bx
-    .hidden __x86.get_pc_thunk.bx
-    .p2align 4
-    .type __x86.get_pc_thunk.bx,@function
-__x86.get_pc_thunk.bx:
-    .cfi_startproc
-    movl (%esp), %ebx
-    ret
-    .cfi_endproc
+/** {@hide} */
+interface IArtd {
+    // Test to see if the artd service is available.
+    boolean isAlive();
+}

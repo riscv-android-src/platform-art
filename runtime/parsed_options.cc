@@ -23,6 +23,7 @@
 #include <android-base/strings.h>
 
 #include "base/file_utils.h"
+#include "base/flags.h"
 #include "base/indenter.h"
 #include "base/macros.h"
 #include "base/utils.h"
@@ -111,6 +112,9 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-Xbootclasspath:_")
           .WithType<ParseStringList<':'>>()  // std::vector<std::string>, split by :
           .IntoKey(M::BootClassPath)
+      .Define("-Xbootclasspathfds:_")
+          .WithType<ParseIntList<':'>>()
+          .IntoKey(M::BootClassPathFds)
       .Define("-Xcheck:jni")
           .IntoKey(M::CheckJni)
       .Define("-Xms_")
@@ -411,27 +415,8 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
           .IntoKey(M::CorePlatformApiPolicy)
       .Define("-Xuse-stderr-logger")
           .IntoKey(M::UseStderrLogger)
-      .Define("-Xwrite-metrics-to-log")
-          .WithHelp("Enables writing ART metrics to logcat")
-          .IntoKey(M::WriteMetricsToLog)
-      .Define("-Xwrite-metrics-to-statsd=_")
-          .WithType<bool>()
-          .WithValueMap({{"false", false}, {"true", true}})
-          .WithHelp("Enables writing ART metrics to statsd")
-          .IntoKey(M::WriteMetricsToStatsd)
-      .Define("-Xwrite-metrics-to-file=_")
-          .WithHelp("Enables writing ART metrics to the given file")
-          .WithType<std::string>()
-          .IntoKey(M::WriteMetricsToFile)
-      .Define("-Xdisable-final-metrics-report")
-          .WithHelp("Disables reporting metrics when ART shuts down")
-          .IntoKey(M::DisableFinalMetricsReport)
-      .Define("-Xmetrics-reporting-period=_")
-          .WithHelp("The time in seconds between metrics reports")
-          .WithType<unsigned int>()
-          .IntoKey(M::MetricsReportingPeriod)
       .Define("-Xonly-use-system-oat-files")
-          .IntoKey(M::OnlyUseSystemOatFiles)
+          .IntoKey(M::OnlyUseTrustedOatFiles)
       .Define("-Xverifier-logging-threshold=_")
           .WithType<unsigned int>()
           .IntoKey(M::VerifierLoggingThreshold)
@@ -464,8 +449,11 @@ std::unique_ptr<RuntimeParser> ParsedOptions::MakeParser(bool ignore_unrecognize
       .Define("-XX:PerfettoJavaHeapStackProf=_")
           .WithType<bool>()
           .WithValueMap({{"false", false}, {"true", true}})
-          .IntoKey(M::PerfettoJavaHeapStackProf)
-      .Ignore({
+          .IntoKey(M::PerfettoJavaHeapStackProf);
+
+      FlagBase::AddFlagsToCmdlineParser(parser_builder.get());
+
+      parser_builder->Ignore({
           "-ea", "-da", "-enableassertions", "-disableassertions", "--runtime-arg", "-esa",
           "-dsa", "-enablesystemassertions", "-disablesystemassertions", "-Xrs", "-Xint:_",
           "-Xdexopt:_", "-Xnoquithandler", "-Xjnigreflimit:_", "-Xgenregmap", "-Xnogenregmap",

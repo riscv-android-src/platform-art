@@ -846,11 +846,11 @@ class ImageSpace::Loader {
     // Use the boot image component count to calculate the checksum from
     // the appropriate number of boot image chunks.
     uint32_t boot_image_component_count = image_header.GetBootImageComponentCount();
-    size_t boot_image_spaces_size = boot_image_spaces.size();
-    if (boot_image_component_count > boot_image_spaces_size) {
+    size_t expected_image_component_count = ImageSpace::GetNumberOfComponents(boot_image_spaces);
+    if (boot_image_component_count > expected_image_component_count) {
       *error_msg = StringPrintf("Too many boot image dependencies (%u > %zu) in image %s",
                                 boot_image_component_count,
-                                boot_image_spaces_size,
+                                expected_image_component_count,
                                 image_filename);
       return false;
     }
@@ -1413,10 +1413,12 @@ class ImageSpace::BootImageLayout {
 
   BootImageLayout(ArrayRef<const std::string> image_locations,
                   ArrayRef<const std::string> boot_class_path,
-                  ArrayRef<const std::string> boot_class_path_locations)
+                  ArrayRef<const std::string> boot_class_path_locations,
+                  ArrayRef<const int> boot_class_path_fds)
      : image_locations_(image_locations),
        boot_class_path_(boot_class_path),
-       boot_class_path_locations_(boot_class_path_locations) {}
+       boot_class_path_locations_(boot_class_path_locations),
+       boot_class_path_fds_(boot_class_path_fds) {}
 
   std::string GetPrimaryImageLocation();
 
@@ -1530,6 +1532,7 @@ class ImageSpace::BootImageLayout {
   ArrayRef<const std::string> image_locations_;
   ArrayRef<const std::string> boot_class_path_;
   ArrayRef<const std::string> boot_class_path_locations_;
+  ArrayRef<const int> boot_class_path_fds_;
 
   std::vector<ImageChunk> chunks_;
   uint32_t base_address_ = 0u;
@@ -2219,12 +2222,14 @@ class ImageSpace::BootImageLoader {
  public:
   BootImageLoader(const std::vector<std::string>& boot_class_path,
                   const std::vector<std::string>& boot_class_path_locations,
+                  const std::vector<int>& boot_class_path_fds,
                   const std::vector<std::string>& image_locations,
                   InstructionSet image_isa,
                   bool relocate,
                   bool executable)
       : boot_class_path_(boot_class_path),
         boot_class_path_locations_(boot_class_path_locations),
+        boot_class_path_fds_(boot_class_path_fds),
         image_locations_(image_locations),
         image_isa_(image_isa),
         relocate_(relocate),
@@ -2233,7 +2238,10 @@ class ImageSpace::BootImageLoader {
   }
 
   void FindImageFiles() {
-    BootImageLayout layout(image_locations_, boot_class_path_, boot_class_path_locations_);
+    BootImageLayout layout(image_locations_,
+                           boot_class_path_,
+                           boot_class_path_locations_,
+                           boot_class_path_fds_);
     std::string image_location = layout.GetPrimaryImageLocation();
     std::string system_filename;
     bool found_image = FindImageFilenameImpl(image_location.c_str(),
@@ -2801,6 +2809,7 @@ class ImageSpace::BootImageLoader {
                    android::base::unique_fd vdex_fd,
                    android::base::unique_fd oat_fd,
                    ArrayRef<const std::string> dex_filenames,
+                   ArrayRef<const int> dex_fds,
                    bool validate_oat_file,
                    ArrayRef<const std::unique_ptr<ImageSpace>> dependencies,
                    TimingLogger* logger,
@@ -2828,6 +2837,7 @@ class ImageSpace::BootImageLoader {
                                      executable_,
                                      /*low_4gb=*/ false,
                                      dex_filenames,
+                                     dex_fds,
                                      image_reservation,
                                      error_msg));
       } else {
@@ -3029,10 +3039,14 @@ class ImageSpace::BootImageLoader {
     for (size_t i = 0u, size = locations.size(); i != size; ++i) {
       ImageSpace* space = (*spaces)[spaces->size() - chunk.image_space_count + i].get();
       size_t bcp_chunk_size = (chunk.image_space_count == 1u) ? chunk.component_count : 1u;
+
+      auto boot_class_path_fds = boot_class_path_fds_.empty() ? ArrayRef<const int>()
+          : boot_class_path_fds_.SubArray(/*pos=*/ chunk.start_index + i, bcp_chunk_size);
       if (!OpenOatFile(space,
                        std::move(chunk.vdex_fd),
                        std::move(chunk.oat_fd),
                        boot_class_path_.SubArray(/*pos=*/ chunk.start_index + i, bcp_chunk_size),
+                       boot_class_path_fds,
                        validate_oat_file,
                        dependencies,
                        logger,
@@ -3091,6 +3105,7 @@ class ImageSpace::BootImageLoader {
 
   const ArrayRef<const std::string> boot_class_path_;
   const ArrayRef<const std::string> boot_class_path_locations_;
+  const ArrayRef<const int> boot_class_path_fds_;
   const ArrayRef<const std::string> image_locations_;
   const InstructionSet image_isa_;
   const bool relocate_;
@@ -3105,7 +3120,10 @@ bool ImageSpace::BootImageLoader::LoadFromSystem(
     /*out*/std::string* error_msg) {
   TimingLogger logger(__PRETTY_FUNCTION__, /*precise=*/ true, VLOG_IS_ON(image));
 
-  BootImageLayout layout(image_locations_, boot_class_path_, boot_class_path_locations_);
+  BootImageLayout layout(image_locations_,
+                         boot_class_path_,
+                         boot_class_path_locations_,
+                         boot_class_path_fds_);
   if (!layout.LoadFromSystem(image_isa_, error_msg)) {
     return false;
   }
@@ -3132,7 +3150,8 @@ bool ImageSpace::IsBootClassPathOnDisk(InstructionSet image_isa) {
   Runtime* runtime = Runtime::Current();
   BootImageLayout layout(ArrayRef<const std::string>(runtime->GetImageLocations()),
                          ArrayRef<const std::string>(runtime->GetBootClassPath()),
-                         ArrayRef<const std::string>(runtime->GetBootClassPathLocations()));
+                         ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
+                         ArrayRef<const int>(runtime->GetBootClassPathFds()));
   const std::string image_location = layout.GetPrimaryImageLocation();
   std::unique_ptr<ImageHeader> image_header;
   std::string error_msg;
@@ -3154,6 +3173,7 @@ bool ImageSpace::IsBootClassPathOnDisk(InstructionSet image_isa) {
 bool ImageSpace::LoadBootImage(
     const std::vector<std::string>& boot_class_path,
     const std::vector<std::string>& boot_class_path_locations,
+    const std::vector<int>& boot_class_path_fds,
     const std::vector<std::string>& image_locations,
     const InstructionSet image_isa,
     bool relocate,
@@ -3175,6 +3195,7 @@ bool ImageSpace::LoadBootImage(
 
   BootImageLoader loader(boot_class_path,
                          boot_class_path_locations,
+                         boot_class_path_fds,
                          image_locations,
                          image_isa,
                          relocate,
@@ -3420,6 +3441,7 @@ bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
                                               ArrayRef<const std::string> image_locations,
                                               ArrayRef<const std::string> boot_class_path_locations,
                                               ArrayRef<const std::string> boot_class_path,
+                                              ArrayRef<const int> boot_class_path_fds,
                                               InstructionSet image_isa,
                                               /*out*/std::string* error_msg) {
   if (oat_checksums.empty() || oat_boot_class_path.empty()) {
@@ -3437,10 +3459,15 @@ bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
 
   size_t bcp_pos = 0u;
   if (StartsWith(oat_checksums, "i")) {
-    // Use only the matching part of the BCP for validation.
+    // Use only the matching part of the BCP for validation.  FDs are optional, so only pass the
+    // sub-array if provided.
+    ArrayRef<const int> bcp_fds = boot_class_path_fds.empty()
+        ? ArrayRef<const int>()
+        : boot_class_path_fds.SubArray(/*pos=*/ 0u, bcp_size);
     BootImageLayout layout(image_locations,
                            boot_class_path.SubArray(/*pos=*/ 0u, bcp_size),
-                           boot_class_path_locations.SubArray(/*pos=*/ 0u, bcp_size));
+                           boot_class_path_locations.SubArray(/*pos=*/ 0u, bcp_size),
+                           bcp_fds);
     std::string primary_image_location = layout.GetPrimaryImageLocation();
     std::string system_filename;
     bool has_system = false;
@@ -3471,19 +3498,18 @@ bool ImageSpace::VerifyBootClassPathChecksums(std::string_view oat_checksums,
     oat_checksums.remove_prefix(1u);
 
     const std::string& bcp_filename = boot_class_path[bcp_pos];
-    std::vector<std::unique_ptr<const DexFile>> dex_files;
+    std::vector<uint32_t> checksums;
+    std::vector<std::string> dex_locations;
     const ArtDexFileLoader dex_file_loader;
-    if (!dex_file_loader.Open(bcp_filename.c_str(),
-                              bcp_filename,  // The location does not matter here.
-                              /*verify=*/ false,
-                              /*verify_checksum=*/ false,
-                              error_msg,
-                              &dex_files)) {
+    if (!dex_file_loader.GetMultiDexChecksums(bcp_filename.c_str(),
+                                              &checksums,
+                                              &dex_locations,
+                                              error_msg)) {
       return false;
     }
-    DCHECK(!dex_files.empty());
-    for (const std::unique_ptr<const DexFile>& dex_file : dex_files) {
-      std::string dex_file_checksum = StringPrintf("/%08x", dex_file->GetLocationChecksum());
+    DCHECK(!checksums.empty());
+    for (uint32_t checksum : checksums) {
+      std::string dex_file_checksum = StringPrintf("/%08x", checksum);
       if (!StartsWith(oat_checksums, dex_file_checksum)) {
         *error_msg = StringPrintf("Dex checksum mismatch, expected %s to start with %s",
                                   std::string(oat_checksums).c_str(),

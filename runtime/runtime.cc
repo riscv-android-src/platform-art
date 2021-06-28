@@ -56,6 +56,7 @@
 #include "base/dumpable.h"
 #include "base/enums.h"
 #include "base/file_utils.h"
+#include "base/flags.h"
 #include "base/malloc_arena_pool.h"
 #include "base/mem_map_arena_pool.h"
 #include "base/memory_tool.h"
@@ -1003,7 +1004,12 @@ bool Runtime::Start() {
       !jit_options_->GetProfileSaverOptions().GetProfilePath().empty()) {
     std::vector<std::string> dex_filenames;
     Split(class_path_string_, ':', &dex_filenames);
-    RegisterAppInfo(dex_filenames, jit_options_->GetProfileSaverOptions().GetProfilePath());
+    // It's ok to pass "" to the ref profile filename. It indicates we don't have
+    // a reference profile.
+    RegisterAppInfo(
+        dex_filenames,
+        jit_options_->GetProfileSaverOptions().GetProfilePath(),
+        /*ref_profile_filename=*/ "");
   }
 
   return true;
@@ -1082,16 +1088,17 @@ void Runtime::InitNonZygoteOrPostFork(
   GetMetrics()->Reset();
 
   if (metrics_reporter_ != nullptr) {
-    if (IsSystemServer() && !metrics_reporter_->IsPeriodicReportingEnabled()) {
-      // For system server, we don't get startup metrics, so make sure we have periodic reporting
-      // enabled.
-      //
-      // Note that this does not override the command line argument if one is given.
-      metrics_reporter_->SetReportingPeriod(kOneHourInSeconds);
-    }
+    // Now that we know if we are an app or system server, reload the metrics reporter config
+    // in case there are any difference.
+    metrics::ReportingConfig metrics_config =
+        metrics::ReportingConfig::FromFlags(is_system_server);
+
+    metrics_reporter_->ReloadConfig(metrics_config);
 
     metrics::SessionData session_data{metrics::SessionData::CreateDefault()};
-    session_data.session_id = GetRandomNumber<int64_t>(0, std::numeric_limits<int64_t>::max());
+    // Start the session id from 1 to avoid clashes with the default value.
+    // (better for debugability)
+    session_data.session_id = GetRandomNumber<int64_t>(1, std::numeric_limits<int64_t>::max());
     // TODO: set session_data.compilation_reason and session_data.compiler_filter
     metrics_reporter_->MaybeStartBackgroundThread(session_data);
   }
@@ -1284,6 +1291,10 @@ void Runtime::InitializeApexVersions() {
   apex_versions_ = result;
 }
 
+void Runtime::ReloadAllFlags(const std::string& caller) {
+  FlagBase::ReloadAllFlags(caller);
+}
+
 bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // (b/30160149): protect subprocesses from modifications to LD_LIBRARY_PATH, etc.
   // Take a snapshot of the environment at the time the runtime was created, for use by Exec, etc.
@@ -1293,6 +1304,9 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   Opt runtime_options(std::move(runtime_options_in));
   ScopedTrace trace(__FUNCTION__);
   CHECK_EQ(static_cast<size_t>(sysconf(_SC_PAGE_SIZE)), kPageSize);
+
+  // Reload all the flags value (from system properties and device configs).
+  ReloadAllFlags(__FUNCTION__);
 
   // Early override for logging output.
   if (runtime_options.Exists(Opt::UseStderrLogger)) {
@@ -1379,6 +1393,13 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
       LOG(ERROR) << "Boot class path missing from boot image oat file " << oat_file->GetLocation();
       return false;
     }
+  }
+
+  boot_class_path_fds_ = runtime_options.ReleaseOrDefault(Opt::BootClassPathFds);
+  if (!boot_class_path_fds_.empty() && boot_class_path_fds_.size() != boot_class_path_.size()) {
+    LOG(ERROR) << "Number of FDs specified in -Xbootclasspathfds must match the number of JARs in "
+               << "-Xbootclasspath.";
+    return false;
   }
 
   class_path_string_ = runtime_options.ReleaseOrDefault(Opt::ClassPath);
@@ -1504,6 +1525,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
                        runtime_options.GetOrDefault(Opt::NonMovingSpaceCapacity),
                        GetBootClassPath(),
                        GetBootClassPathLocations(),
+                       GetBootClassPathFds(),
                        image_locations_,
                        instruction_set_,
                        // Override the collector type to CC if the read barrier config.
@@ -1826,7 +1848,7 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
   // Class-roots are setup, we can now finish initializing the JniIdManager.
   GetJniIdManager()->Init(self);
 
-  InitMetrics(runtime_options);
+  InitMetrics();
 
   // Runtime initialization is largely done now.
   // We load plugins first since that can modify the runtime state slightly.
@@ -1918,16 +1940,16 @@ bool Runtime::Init(RuntimeArgumentMap&& runtime_options_in) {
 
   VLOG(startup) << "Runtime::Init exiting";
 
-  // Set OnlyUseSystemOatFiles only after boot classpath has been set up.
-  if (runtime_options.Exists(Opt::OnlyUseSystemOatFiles)) {
-    oat_file_manager_->SetOnlyUseSystemOatFiles();
+  // Set OnlyUseTrustedOatFiles only after the boot classpath has been set up.
+  if (runtime_options.Exists(Opt::OnlyUseTrustedOatFiles)) {
+    oat_file_manager_->SetOnlyUseTrustedOatFiles();
   }
 
   return true;
 }
 
-void Runtime::InitMetrics(const RuntimeArgumentMap& runtime_options) {
-  auto metrics_config = metrics::ReportingConfig::FromRuntimeArguments(runtime_options);
+void Runtime::InitMetrics() {
+  metrics::ReportingConfig metrics_config = metrics::ReportingConfig::FromFlags();
   metrics_reporter_ = metrics::MetricsReporter::Create(metrics_config, this);
 }
 
@@ -2024,6 +2046,10 @@ void Runtime::InitNativeMethods() {
   // a regular JNI libraries with a regular JNI_OnLoad. Most JNI libraries can
   // just use System.loadLibrary, but libcore can't because it's the library
   // that implements System.loadLibrary!
+  //
+  // By setting calling class to java.lang.Object, the caller location for these
+  // JNI libs is core-oj.jar in the ART APEX, and hence they are loaded from the
+  // com_android_art linker namespace.
 
   // libicu_jni has to be initialized before libopenjdk{d} due to runtime dependency from
   // libopenjdk{d} to Icu4cMetadata native methods in libicu_jni. See http://b/143888405
@@ -2541,7 +2567,8 @@ void Runtime::ClearCalleeSaveMethods() {
 }
 
 void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
-                              const std::string& profile_output_filename) {
+                              const std::string& profile_output_filename,
+                              const std::string& ref_profile_filename) {
   if (jit_.get() == nullptr) {
     // We are not JITing. Nothing to do.
     return;
@@ -2549,6 +2576,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
 
   VLOG(profiler) << "Register app with " << profile_output_filename
       << " " << android::base::Join(code_paths, ':');
+  VLOG(profiler) << "Reference profile is: " << ref_profile_filename;
 
   if (profile_output_filename.empty()) {
     LOG(WARNING) << "JIT profile information will not be recorded: profile filename is empty.";
@@ -2563,7 +2591,7 @@ void Runtime::RegisterAppInfo(const std::vector<std::string>& code_paths,
     return;
   }
 
-  jit_->StartProfileSaver(profile_output_filename, code_paths);
+  jit_->StartProfileSaver(profile_output_filename, code_paths, ref_profile_filename);
 }
 
 // Transaction support.
