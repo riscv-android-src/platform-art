@@ -734,15 +734,21 @@ bool OatFileBase::Setup(int zip_fd,
         const ArtDexFileLoader dex_file_loader;
         bool loaded = false;
         CHECK(zip_fd == -1 || dex_fds.empty());  // Allow only the supported combinations.
-        int fd = zip_fd >= 0 ?: dex_fd;
-        if (fd != -1) {
-          // Note that we assume dex_fds are backing by jars.
-          loaded = dex_file_loader.OpenZip(fd,
+        if (zip_fd != -1) {
+          loaded = dex_file_loader.OpenZip(zip_fd,
                                            dex_file_location,
                                            /*verify=*/ false,
                                            /*verify_checksum=*/ false,
                                            error_msg,
                                            &new_dex_files);
+        } else if (dex_fd != -1) {
+          // Note that we assume dex_fds are backing by jars.
+          loaded = dex_file_loader.OpenZipFromOwnedFd(dex_fd,
+                                                      dex_file_location,
+                                                      /*verify=*/ false,
+                                                      /*verify_checksum=*/ false,
+                                                      error_msg,
+                                                      &new_dex_files);
         } else {
           loaded = dex_file_loader.Open(dex_file_name.c_str(),
                                         dex_file_location,
@@ -1676,13 +1682,12 @@ class OatFileBackedByVdex final : public OatFileBase {
   void SetupHeader(size_t number_of_dex_files) {
     DCHECK(!IsExecutable());
 
-    // Create a fake OatHeader with a key store containing only the compiler
-    // filter (it helps debugging and is required by
-    // OatHeader::GetCompilerFilter).
+    // Create a fake OatHeader with a key store to help debugging.
     std::unique_ptr<const InstructionSetFeatures> isa_features =
         InstructionSetFeatures::FromCppDefines();
     SafeMap<std::string, std::string> store;
     store.Put(OatHeader::kCompilerFilter, CompilerFilter::NameOfFilter(CompilerFilter::kVerify));
+    store.Put(OatHeader::kCompilationReasonKey, "vdex");
     store.Put(OatHeader::kConcurrentCopying,
               kUseReadBarrier ? OatHeader::kTrueValue : OatHeader::kFalseValue);
     oat_header_.reset(OatHeader::Create(kRuntimeISA,

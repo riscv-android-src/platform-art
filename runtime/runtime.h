@@ -20,6 +20,7 @@
 #include <jni.h>
 #include <stdio.h>
 
+#include <forward_list>
 #include <iosfwd>
 #include <memory>
 #include <set>
@@ -27,6 +28,7 @@
 #include <utility>
 #include <vector>
 
+#include "app_info.h"
 #include "base/locks.h"
 #include "base/macros.h"
 #include "base/mem_map.h"
@@ -290,6 +292,12 @@ class Runtime {
     return boot_class_path_fds_;
   }
 
+  // Returns the checksums for the boot image, extensions and extra boot class path dex files,
+  // based on the image spaces and boot class path dex files loaded in memory.
+  const std::string& GetBootClassPathChecksums() const {
+    return boot_class_path_checksums_;
+  }
+
   const std::string& GetClassPathString() const {
     return class_path_string_;
   }
@@ -528,9 +536,11 @@ class Runtime {
     return &instrumentation_;
   }
 
-  void RegisterAppInfo(const std::vector<std::string>& code_paths,
+  void RegisterAppInfo(const std::string& package_name,
+                       const std::vector<std::string>& code_paths,
                        const std::string& profile_output_filename,
-                       const std::string& ref_profile_filename);
+                       const std::string& ref_profile_filename,
+                       int32_t code_type);
 
   // Transaction support.
   bool IsActiveTransaction() const;
@@ -541,7 +551,8 @@ class Runtime {
   // do them in one function.
   void RollbackAndExitTransactionMode() REQUIRES_SHARED(Locks::mutator_lock_);
   bool IsTransactionAborted() const;
-  const std::unique_ptr<Transaction>& GetTransaction() const;
+  const Transaction* GetTransaction() const;
+  Transaction* GetTransaction();
   bool IsActiveStrictTransactionMode() const;
 
   void AbortTransactionAndThrowAbortError(Thread* self, const std::string& abort_message)
@@ -549,34 +560,48 @@ class Runtime {
   void ThrowTransactionAbortError(Thread* self)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  void RecordWriteFieldBoolean(mirror::Object* obj, MemberOffset field_offset, uint8_t value,
-                               bool is_volatile) const;
-  void RecordWriteFieldByte(mirror::Object* obj, MemberOffset field_offset, int8_t value,
-                            bool is_volatile) const;
-  void RecordWriteFieldChar(mirror::Object* obj, MemberOffset field_offset, uint16_t value,
-                            bool is_volatile) const;
-  void RecordWriteFieldShort(mirror::Object* obj, MemberOffset field_offset, int16_t value,
-                          bool is_volatile) const;
-  void RecordWriteField32(mirror::Object* obj, MemberOffset field_offset, uint32_t value,
-                          bool is_volatile) const;
-  void RecordWriteField64(mirror::Object* obj, MemberOffset field_offset, uint64_t value,
-                          bool is_volatile) const;
+  void RecordWriteFieldBoolean(mirror::Object* obj,
+                               MemberOffset field_offset,
+                               uint8_t value,
+                               bool is_volatile);
+  void RecordWriteFieldByte(mirror::Object* obj,
+                            MemberOffset field_offset,
+                            int8_t value,
+                            bool is_volatile);
+  void RecordWriteFieldChar(mirror::Object* obj,
+                            MemberOffset field_offset,
+                            uint16_t value,
+                            bool is_volatile);
+  void RecordWriteFieldShort(mirror::Object* obj,
+                             MemberOffset field_offset,
+                             int16_t value,
+                             bool is_volatile);
+  void RecordWriteField32(mirror::Object* obj,
+                          MemberOffset field_offset,
+                          uint32_t value,
+                          bool is_volatile);
+  void RecordWriteField64(mirror::Object* obj,
+                          MemberOffset field_offset,
+                          uint64_t value,
+                          bool is_volatile);
   void RecordWriteFieldReference(mirror::Object* obj,
                                  MemberOffset field_offset,
                                  ObjPtr<mirror::Object> value,
-                                 bool is_volatile) const
+                                 bool is_volatile)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void RecordWriteArray(mirror::Array* array, size_t index, uint64_t value) const
+  void RecordWriteArray(mirror::Array* array, size_t index, uint64_t value)
       REQUIRES_SHARED(Locks::mutator_lock_);
-  void RecordStrongStringInsertion(ObjPtr<mirror::String> s) const
+  void RecordStrongStringInsertion(ObjPtr<mirror::String> s)
       REQUIRES(Locks::intern_table_lock_);
-  void RecordWeakStringInsertion(ObjPtr<mirror::String> s) const
+  void RecordWeakStringInsertion(ObjPtr<mirror::String> s)
       REQUIRES(Locks::intern_table_lock_);
-  void RecordStrongStringRemoval(ObjPtr<mirror::String> s) const
+  void RecordStrongStringRemoval(ObjPtr<mirror::String> s)
       REQUIRES(Locks::intern_table_lock_);
-  void RecordWeakStringRemoval(ObjPtr<mirror::String> s) const
+  void RecordWeakStringRemoval(ObjPtr<mirror::String> s)
       REQUIRES(Locks::intern_table_lock_);
-  void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx) const
+  void RecordResolveString(ObjPtr<mirror::DexCache> dex_cache, dex::StringIndex string_idx)
+      REQUIRES_SHARED(Locks::mutator_lock_);
+  void RecordResolveMethodType(ObjPtr<mirror::DexCache> dex_cache, dex::ProtoIndex proto_idx)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   void SetFaultMessage(const std::string& message);
@@ -699,11 +724,11 @@ class Runtime {
   ArenaPool* GetArenaPool() {
     return arena_pool_.get();
   }
-  ArenaPool* GetJitArenaPool() {
-    return jit_arena_pool_.get();
-  }
   const ArenaPool* GetArenaPool() const {
     return arena_pool_.get();
+  }
+  ArenaPool* GetJitArenaPool() {
+    return jit_arena_pool_.get();
   }
 
   void ReclaimArenaPoolMemory();
@@ -891,6 +916,10 @@ class Runtime {
     return result;
   }
 
+  bool DenyArtApexDataFiles() const {
+    return deny_art_apex_data_files_;
+  }
+
   // Whether or not we use MADV_RANDOM on files that are thought to have random access patterns.
   // This is beneficial for low RAM devices since it reduces page cache thrashing.
   bool MAdviseRandomAccess() const {
@@ -971,11 +1000,19 @@ class Runtime {
   // first call.
   void NotifyStartupCompleted();
 
+  // Notify the runtime that the application finished loading some dex/odex files. This is
+  // called everytime we load a set of dex files in a class loader.
+  void NotifyDexFileLoaded();
+
   // Return true if startup is already completed.
   bool GetStartupCompleted() const;
 
   bool IsVerifierMissingKThrowFatal() const {
     return verifier_missing_kthrow_fatal_;
+  }
+
+  bool IsJavaZygoteForkLoopRequired() const {
+    return force_java_zygote_fork_loop_;
   }
 
   bool IsPerfettoHprofEnabled() const {
@@ -997,6 +1034,8 @@ class Runtime {
   bool GetOatFilesExecutable() const;
 
   metrics::ArtMetrics* GetMetrics() { return &metrics_; }
+
+  AppInfo* GetAppInfo() { return &app_info_; }
 
   void RequestMetricsReport(bool synchronous = true);
 
@@ -1109,6 +1148,7 @@ class Runtime {
 
   std::vector<std::string> boot_class_path_;
   std::vector<std::string> boot_class_path_locations_;
+  std::string boot_class_path_checksums_;
   std::vector<int> boot_class_path_fds_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
@@ -1211,7 +1251,7 @@ class Runtime {
   // Support nested transactions, maintain a list containing all transactions. Transactions are
   // handled under a stack discipline. Because GC needs to go over all transactions, we choose list
   // as substantial data structure instead of stack.
-  std::list<std::unique_ptr<Transaction>> preinitialization_transactions_;
+  std::forward_list<Transaction> preinitialization_transactions_;
 
   // If kNone, verification is disabled. kEnable by default.
   verifier::VerifyMode verify_;
@@ -1363,6 +1403,9 @@ class Runtime {
   // indirection is changed. This is intended only for testing JNI id swapping.
   bool automatically_set_jni_ids_indirection_;
 
+  // True if files in /data/misc/apexdata/com.android.art are considered untrustworthy.
+  bool deny_art_apex_data_files_;
+
   // Saved environment.
   class EnvSnapshot {
    public:
@@ -1395,6 +1438,7 @@ class Runtime {
   std::atomic<bool> startup_completed_ = false;
 
   bool verifier_missing_kthrow_fatal_;
+  bool force_java_zygote_fork_loop_;
   bool perfetto_hprof_enabled_;
   bool perfetto_javaheapprof_enabled_;
 
@@ -1408,6 +1452,9 @@ class Runtime {
   // When the apex is the factory version, we don't encode it (for example in
   // the third entry in the example above).
   std::string apex_versions_;
+
+  // The info about the application code paths.
+  AppInfo app_info_;
 
   // Note: See comments on GetFaultMessage.
   friend std::string GetFaultMessageForAbortLogging();

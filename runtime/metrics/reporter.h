@@ -17,6 +17,7 @@
 #ifndef ART_RUNTIME_METRICS_REPORTER_H_
 #define ART_RUNTIME_METRICS_REPORTER_H_
 
+#include "app_info.h"
 #include "base/message_queue.h"
 #include "base/metrics/metrics.h"
 
@@ -71,7 +72,7 @@ struct ReportingConfig {
   // Causes metrics to be written to the log, which makes them show up in logcat.
   bool dump_to_logcat{false};
 
-  // Causes metrics to be written to statsd, which causes them to be uploaded to Westworld.
+  // Causes metrics to be written to statsd.
   bool dump_to_statsd{false};
 
   // If set, provides a file name to enable metrics logging to a file.
@@ -110,6 +111,10 @@ class MetricsReporter {
   // completes.
   void NotifyStartupCompleted();
 
+  // Notifies the reporter that the app info was updated. This is used to detect / infer
+  // the compiler filter / reason of primary apks.
+  void NotifyAppInfoUpdated(AppInfo* app_info);
+
   // Requests a metrics report
   //
   // If synchronous is set to true, this function will block until the report has completed.
@@ -120,7 +125,7 @@ class MetricsReporter {
   void ReloadConfig(const ReportingConfig& config);
 
   void SetCompilationInfo(CompilationReason compilation_reason,
-                          CompilerFilter::Filter compiler_filter);
+                          CompilerFilterReporting compiler_filter);
 
   static constexpr const char* kBackgroundThreadName = "Metrics Background Reporting Thread";
 
@@ -144,6 +149,9 @@ class MetricsReporter {
 
   // Outputs the current state of the metrics to the destination set by config_.
   void ReportMetrics();
+
+  // Updates the session data in all the backends.
+  void UpdateSessionInBackends();
 
   // Whether or not we should wait for startup before reporting for the first time.
   bool ShouldReportAtStartup() const;
@@ -182,7 +190,7 @@ class MetricsReporter {
 
   struct CompilationInfoMessage {
     CompilationReason compilation_reason;
-    CompilerFilter::Filter compiler_filter;
+    CompilerFilterReporting compiler_filter;
   };
 
   MessageQueue<ShutdownRequestedMessage,
