@@ -71,6 +71,18 @@ java_sdk_library {
     sdk_version: "core_platform",
     min_sdk_version: "31",
 
+    public: {
+        // Override the setting of "module_current" from the defaults as that is
+        // not available in all manifests where this needs to be built.
+        sdk_version: "core_current",
+    },
+
+    system_server: {
+        // Override the setting of "module_current" from the defaults as that is
+        // not available in all manifests where this needs to be built.
+        sdk_version: "core_current",
+    },
+
     // The API elements are the ones annotated with
     //   libcore.api.CorePlatformApi(status=libcore.api.CorePlatformApi.Status.STABLE)
     droiddoc_options: [
@@ -99,16 +111,33 @@ java_sdk_library {
     dist_group: "android",
 }
 
-art_cc_test {
-    name: "art_libartservice_tests",
-    defaults: [
-        "art_gtest_defaults",
-    ],
+art_cc_defaults {
+    name: "art_libartservice_tests_defaults",
     srcs: [
         "service/native/service_test.cc",
     ],
     shared_libs: [
         "libbase",
         "libartservice",
+    ],
+}
+
+// Version of ART gtest `art_libartservice_tests` bundled with the ART APEX on target.
+// TODO(b/192274705): Remove this module when the migration to standalone ART gtests is complete.
+art_cc_test {
+    name: "art_libartservice_tests",
+    defaults: [
+        "art_gtest_defaults",
+        "art_libartservice_tests_defaults",
+    ],
+}
+
+// Standalone version of ART gtest `art_libartservice_tests`, not bundled with the ART APEX on
+// target.
+art_cc_test {
+    name: "art_standalone_libartservice_tests",
+    defaults: [
+        "art_standalone_gtest_defaults",
+        "art_libartservice_tests_defaults",
     ],
 }

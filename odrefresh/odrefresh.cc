@@ -360,7 +360,10 @@ class OnDeviceRefresh final {
       LOG(ERROR) << "Could not update " << QuotePath(cache_info_filename_) << " : no ART Apex info";
       return {};
     }
-    return art_apex::ArtModuleInfo{info->getVersionCode(), info->getVersionName()};
+    // The lastUpdateMillis is an addition to ApexInfoList.xsd to support samegrade installs.
+    int64_t last_update_millis = info->hasLastUpdateMillis() ? info->getLastUpdateMillis() : 0;
+    return art_apex::ArtModuleInfo{
+        info->getVersionCode(), info->getVersionName(), last_update_millis};
   }
 
   bool CheckComponents(const std::vector<art_apex::Component>& expected_components,
@@ -487,7 +490,7 @@ class OnDeviceRefresh final {
 
     // Clean-up helper used to simplify clean-ups and handling failures there.
     auto cleanup_return = [this](ExitCode exit_code) {
-      return CleanApexdataDirectory() ? exit_code : ExitCode::kCleanupFailed;
+      return RemoveArtifactsDirectory() ? exit_code : ExitCode::kCleanupFailed;
     };
 
     const auto apex_info = GetArtApexInfo();
@@ -497,6 +500,21 @@ class OnDeviceRefresh final {
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
       return cleanup_return(ExitCode::kCompilationRequired);
     }
+
+    // Generate current module info for the current ART APEX.
+    const auto current_info = GenerateArtModuleInfo();
+    if (!current_info.has_value()) {
+      // This should never happen, further up-to-date checks are not possible if it does.
+      LOG(ERROR) << "Failed to generate cache provenance.";
+      metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
+      return cleanup_return(ExitCode::kCompilationRequired);
+    }
+
+    // Record ART APEX version for metrics reporting.
+    metrics.SetArtApexVersion(current_info->getVersionCode());
+
+    // Record ART APEX last update milliseconds (used in compilation log).
+    metrics.SetArtApexLastUpdateMillis(current_info->getLastUpdateMillis());
 
     if (apex_info->getIsFactory()) {
       // Remove any artifacts on /data as they are not necessary and no compilation is necessary.
@@ -521,18 +539,6 @@ class OnDeviceRefresh final {
       return cleanup_return(ExitCode::kCompilationRequired);
     }
 
-    // Generate current module info for the current ART APEX.
-    const auto current_info = GenerateArtModuleInfo();
-    if (!current_info.has_value()) {
-      // This should never happen, further up-to-date checks are not possible if it does.
-      LOG(ERROR) << "Failed to generate cache provenance.";
-      metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
-      return cleanup_return(ExitCode::kCompilationRequired);
-    }
-
-    // Record ART Apex version for metrics reporting.
-    metrics.SetArtApexVersion(current_info->getVersionCode());
-
     // Check whether the current cache ART module info differs from the current ART module info.
     // Always check APEX version.
     const auto cached_info = cache_info->getFirstArtModuleInfo();
@@ -546,9 +552,21 @@ class OnDeviceRefresh final {
     }
 
     if (cached_info->getVersionName() != current_info->getVersionName()) {
-      LOG(INFO) << "ART APEX version code mismatch ("
+      LOG(INFO) << "ART APEX version name mismatch ("
                 << cached_info->getVersionName()
                 << " != " << current_info->getVersionName() << ").";
+      metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
+      return cleanup_return(ExitCode::kCompilationRequired);
+    }
+
+    // Check lastUpdateMillis for samegrade installs. If `cached_info` is missing lastUpdateMillis
+    // then it is not current with the schema used by this binary so treat it as a samegrade
+    // update. Otherwise check whether the lastUpdateMillis changed.
+    if (!cached_info->hasLastUpdateMillis() ||
+        cached_info->getLastUpdateMillis() != current_info->getLastUpdateMillis()) {
+      LOG(INFO) << "ART APEX last update time mismatch ("
+                << cached_info->getLastUpdateMillis()
+                << " != " << current_info->getLastUpdateMillis() << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
       return cleanup_return(ExitCode::kCompilationRequired);
     }
@@ -943,13 +961,13 @@ class OnDeviceRefresh final {
     return exit_code;
   }
 
-  WARN_UNUSED bool CleanApexdataDirectory() const {
-    const std::string& apex_data_path = GetArtApexData();
+  WARN_UNUSED bool RemoveArtifactsDirectory() const {
     if (config_.GetDryRun()) {
-      LOG(INFO) << "Files under `" << QuotePath(apex_data_path) << " would be removed (dry-run).";
+      LOG(INFO) << "Directory " << QuotePath(kOdrefreshArtifactDirectory)
+                << " and contents would be removed (dry-run).";
       return true;
     }
-    return CleanDirectory(apex_data_path);
+    return RemoveDirectory(kOdrefreshArtifactDirectory);
   }
 
   WARN_UNUSED bool RemoveArtifacts(const OdrArtifacts& artifacts) const {
@@ -1343,7 +1361,7 @@ class OnDeviceRefresh final {
     const char* staging_dir = nullptr;
     metrics.SetStage(OdrMetrics::Stage::kPreparation);
     // Clean-up existing files.
-    if (force_compile && !CleanApexdataDirectory()) {
+    if (force_compile && !RemoveArtifactsDirectory()) {
       metrics.SetStatus(OdrMetrics::Status::kIoError);
       return ExitCode::kCleanupFailed;
     }
@@ -1385,7 +1403,7 @@ class OnDeviceRefresh final {
         if (!CompileBootExtensionArtifacts(
                 isa, staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
           LOG(ERROR) << "Compilation of BCP failed: " << error_msg;
-          if (!config_.GetDryRun() && !CleanDirectory(staging_dir)) {
+          if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
             return ExitCode::kCleanupFailed;
           }
           return ExitCode::kCompilationFailed;
@@ -1405,7 +1423,7 @@ class OnDeviceRefresh final {
       if (!CompileSystemServerArtifacts(
               staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
         LOG(ERROR) << "Compilation of system_server failed: " << error_msg;
-        if (!config_.GetDryRun() && !CleanDirectory(staging_dir)) {
+        if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
           return ExitCode::kCleanupFailed;
         }
         return ExitCode::kCompilationFailed;
@@ -1548,11 +1566,16 @@ class OnDeviceRefresh final {
           return exit_code;
         }
         OdrCompilationLog compilation_log;
-        if (!compilation_log.ShouldAttemptCompile(metrics.GetApexVersion(), metrics.GetTrigger())) {
+        if (!compilation_log.ShouldAttemptCompile(metrics.GetArtApexVersion(),
+                                                  metrics.GetArtApexLastUpdateMillis(),
+                                                  metrics.GetTrigger())) {
           return ExitCode::kOkay;
         }
         ExitCode compile_result = odr.Compile(metrics, /*force_compile=*/false);
-        compilation_log.Log(metrics.GetApexVersion(), metrics.GetTrigger(), compile_result);
+        compilation_log.Log(metrics.GetArtApexVersion(),
+                            metrics.GetArtApexLastUpdateMillis(),
+                            metrics.GetTrigger(),
+                            compile_result);
         return compile_result;
       } else if (action == "--force-compile") {
         return odr.Compile(metrics, /*force_compile=*/true);
