@@ -74,7 +74,7 @@ class ClassLoader;
 class DexCache;
 template<class T> class ObjectArray;
 template<class T> class PrimitiveArray;
-typedef PrimitiveArray<int8_t> ByteArray;
+using ByteArray = PrimitiveArray<int8_t>;
 class String;
 class Throwable;
 }  // namespace mirror
@@ -115,7 +115,7 @@ class Trace;
 struct TraceConfig;
 class Transaction;
 
-typedef std::vector<std::pair<std::string, const void*>> RuntimeOptions;
+using RuntimeOptions = std::vector<std::pair<std::string, const void*>>;
 
 class Runtime {
  public:
@@ -781,7 +781,7 @@ class Runtime {
   }
 
   void SetNonStandardExitsEnabled() {
-    DoAndMaybeSwitchInterpreter([=](){ non_standard_exits_enabled_ = true; });
+    non_standard_exits_enabled_ = true;
   }
 
   bool AreAsyncExceptionsThrown() const {
@@ -789,19 +789,8 @@ class Runtime {
   }
 
   void SetAsyncExceptionsThrown() {
-    DoAndMaybeSwitchInterpreter([=](){ async_exceptions_thrown_ = true; });
+    async_exceptions_thrown_ = true;
   }
-
-  // Change state and re-check which interpreter should be used.
-  //
-  // This must be called whenever there is an event that forces
-  // us to use different interpreter (e.g. debugger is attached).
-  //
-  // Changing the state using the lamda gives us some multihreading safety.
-  // It ensures that two calls do not interfere with each other and
-  // it makes it possible to DCHECK that thread local flag is correct.
-  template<typename Action>
-  static void DoAndMaybeSwitchInterpreter(Action lamda);
 
   // Returns the build fingerprint, if set. Otherwise an empty string is returned.
   std::string GetFingerprint() {

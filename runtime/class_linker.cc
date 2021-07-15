@@ -151,8 +151,6 @@
 #include "verifier/verifier_deps.h"
 #include "well_known_classes.h"
 
-#include "interpreter/interpreter_mterp_impl.h"
-
 namespace art {
 
 using android::base::StringPrintf;
@@ -4746,9 +4744,16 @@ verifier::FailureKind ClassLinker::PerformClassVerification(Thread* self,
                                                             verifier::HardFailLogMode log_level,
                                                             std::string* error_msg) {
   Runtime* const runtime = Runtime::Current();
+  StackHandleScope<2> hs(self);
+  Handle<mirror::DexCache> dex_cache(hs.NewHandle(klass->GetDexCache()));
+  Handle<mirror::ClassLoader> class_loader(hs.NewHandle(klass->GetClassLoader()));
   return verifier::ClassVerifier::VerifyClass(self,
                                               verifier_deps,
-                                              klass.Get(),
+                                              dex_cache->GetDexFile(),
+                                              klass,
+                                              dex_cache,
+                                              class_loader,
+                                              *klass->GetClassDef(),
                                               runtime->GetCompilerCallbacks(),
                                               runtime->IsAotCompiler(),
                                               log_level,
