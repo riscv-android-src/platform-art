@@ -69,6 +69,7 @@
 #include "palette/palette_types.h"
 
 #include "odr_artifacts.h"
+#include "odr_compilation_log.h"
 #include "odr_config.h"
 #include "odr_fs_utils.h"
 #include "odr_metrics.h"
@@ -250,6 +251,10 @@ class OnDeviceRefresh final {
   // List of system_server components that should be compiled.
   std::vector<std::string> systemserver_compilable_jars_;
 
+  // List of all boot classpath components. Used as the dependencies for compiling the
+  // system_server.
+  std::vector<std::string> boot_classpath_jars_;
+
   const time_t start_time_;
 
  public:
@@ -266,13 +271,8 @@ class OnDeviceRefresh final {
       }
     }
 
-    for (const std::string& jar : android::base::Split(config_.GetSystemServerClasspath(), ":")) {
-      // Only consider DEX files on the SYSTEMSERVERCLASSPATH for compilation that do not reside
-      // in APEX modules. Otherwise, we'll recompile on boot any time one of these APEXes updates.
-      if (!LocationIsOnApex(jar)) {
-        systemserver_compilable_jars_.emplace_back(jar);
-      }
-    }
+    systemserver_compilable_jars_ = android::base::Split(config_.GetSystemServerClasspath(), ":");
+    boot_classpath_jars_ = android::base::Split(config_.GetBootClasspath(), ":");
   }
 
   time_t GetExecutionTimeUsed() const { return time(nullptr) - start_time_; }
@@ -330,9 +330,16 @@ class OnDeviceRefresh final {
     const std::vector<art_apex::ArtModuleInfo> art_module_infos { art_module_info.value() };
 
     std::optional<std::vector<art_apex::Component>> bcp_components =
-        GenerateBootExtensionComponents();
+        GenerateBootClasspathComponents();
     if (!bcp_components.has_value()) {
-      LOG(ERROR) << "No boot classpath extension components.";
+      LOG(ERROR) << "No boot classpath components.";
+      return;
+    }
+
+    std::optional<std::vector<art_apex::Component>> bcp_compilable_components =
+        GenerateBootExtensionCompilableComponents();
+    if (!bcp_compilable_components.has_value()) {
+      LOG(ERROR) << "No boot classpath extension compilable components.";
       return;
     }
 
@@ -345,7 +352,8 @@ class OnDeviceRefresh final {
 
     std::ofstream out(cache_info_filename_.c_str());
     art_apex::CacheInfo info{art_module_infos,
-                             {{art_apex::Dex2oatBootClasspath{bcp_components.value()}}},
+                             {{art_apex::BootClasspath{bcp_components.value()}}},
+                             {{art_apex::Dex2oatBootClasspath{bcp_compilable_components.value()}}},
                              {{art_apex::SystemServerClasspath{system_server_components.value()}}}};
 
     art_apex::write(out, info);
@@ -359,7 +367,10 @@ class OnDeviceRefresh final {
       LOG(ERROR) << "Could not update " << QuotePath(cache_info_filename_) << " : no ART Apex info";
       return {};
     }
-    return art_apex::ArtModuleInfo{info->getVersionCode(), info->getVersionName()};
+    // The lastUpdateMillis is an addition to ApexInfoList.xsd to support samegrade installs.
+    int64_t last_update_millis = info->hasLastUpdateMillis() ? info->getLastUpdateMillis() : 0;
+    return art_apex::ArtModuleInfo{
+        info->getVersionCode(), info->getVersionName(), last_update_millis};
   }
 
   bool CheckComponents(const std::vector<art_apex::Component>& expected_components,
@@ -435,7 +446,11 @@ class OnDeviceRefresh final {
     return components;
   }
 
-  std::vector<art_apex::Component> GenerateBootExtensionComponents() const {
+  std::vector<art_apex::Component> GenerateBootClasspathComponents() const {
+    return GenerateComponents(boot_classpath_jars_);
+  }
+
+  std::vector<art_apex::Component> GenerateBootExtensionCompilableComponents() const {
     return GenerateComponents(boot_extension_compilable_jars_);
   }
 
@@ -486,7 +501,7 @@ class OnDeviceRefresh final {
 
     // Clean-up helper used to simplify clean-ups and handling failures there.
     auto cleanup_return = [this](ExitCode exit_code) {
-      return CleanApexdataDirectory() ? exit_code : ExitCode::kCleanupFailed;
+      return RemoveArtifactsDirectory() ? exit_code : ExitCode::kCleanupFailed;
     };
 
     const auto apex_info = GetArtApexInfo();
@@ -496,6 +511,21 @@ class OnDeviceRefresh final {
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
       return cleanup_return(ExitCode::kCompilationRequired);
     }
+
+    // Generate current module info for the current ART APEX.
+    const auto current_info = GenerateArtModuleInfo();
+    if (!current_info.has_value()) {
+      // This should never happen, further up-to-date checks are not possible if it does.
+      LOG(ERROR) << "Failed to generate cache provenance.";
+      metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
+      return cleanup_return(ExitCode::kCompilationRequired);
+    }
+
+    // Record ART APEX version for metrics reporting.
+    metrics.SetArtApexVersion(current_info->getVersionCode());
+
+    // Record ART APEX last update milliseconds (used in compilation log).
+    metrics.SetArtApexLastUpdateMillis(current_info->getLastUpdateMillis());
 
     if (apex_info->getIsFactory()) {
       // Remove any artifacts on /data as they are not necessary and no compilation is necessary.
@@ -520,18 +550,6 @@ class OnDeviceRefresh final {
       return cleanup_return(ExitCode::kCompilationRequired);
     }
 
-    // Generate current module info for the current ART APEX.
-    const auto current_info = GenerateArtModuleInfo();
-    if (!current_info.has_value()) {
-      // This should never happen, further up-to-date checks are not possible if it does.
-      LOG(ERROR) << "Failed to generate cache provenance.";
-      metrics.SetTrigger(OdrMetrics::Trigger::kUnknown);
-      return cleanup_return(ExitCode::kCompilationRequired);
-    }
-
-    // Record ART Apex version for metrics reporting.
-    metrics.SetArtApexVersion(current_info->getVersionCode());
-
     // Check whether the current cache ART module info differs from the current ART module info.
     // Always check APEX version.
     const auto cached_info = cache_info->getFirstArtModuleInfo();
@@ -545,9 +563,21 @@ class OnDeviceRefresh final {
     }
 
     if (cached_info->getVersionName() != current_info->getVersionName()) {
-      LOG(INFO) << "ART APEX version code mismatch ("
+      LOG(INFO) << "ART APEX version name mismatch ("
                 << cached_info->getVersionName()
                 << " != " << current_info->getVersionName() << ").";
+      metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
+      return cleanup_return(ExitCode::kCompilationRequired);
+    }
+
+    // Check lastUpdateMillis for samegrade installs. If `cached_info` is missing lastUpdateMillis
+    // then it is not current with the schema used by this binary so treat it as a samegrade
+    // update. Otherwise check whether the lastUpdateMillis changed.
+    if (!cached_info->hasLastUpdateMillis() ||
+        cached_info->getLastUpdateMillis() != current_info->getLastUpdateMillis()) {
+      LOG(INFO) << "ART APEX last update time mismatch ("
+                << cached_info->getLastUpdateMillis()
+                << " != " << current_info->getLastUpdateMillis() << ").";
       metrics.SetTrigger(OdrMetrics::Trigger::kApexVersionMismatch);
       return cleanup_return(ExitCode::kCompilationRequired);
     }
@@ -560,9 +590,9 @@ class OnDeviceRefresh final {
     //
     // The boot class components may change unexpectedly, for example an OTA could update
     // framework.jar.
-    const std::vector<art_apex::Component> expected_bcp_components =
-        GenerateBootExtensionComponents();
-    if (expected_bcp_components.size() != 0 &&
+    const std::vector<art_apex::Component> expected_bcp_compilable_components =
+        GenerateBootExtensionCompilableComponents();
+    if (expected_bcp_compilable_components.size() != 0 &&
         (!cache_info->hasDex2oatBootClasspath() ||
          !cache_info->getFirstDex2oatBootClasspath()->hasComponent())) {
       LOG(INFO) << "Missing Dex2oatBootClasspath components.";
@@ -571,9 +601,10 @@ class OnDeviceRefresh final {
     }
 
     std::string error_msg;
-    const std::vector<art_apex::Component>& bcp_components =
+    const std::vector<art_apex::Component>& bcp_compilable_components =
         cache_info->getFirstDex2oatBootClasspath()->getComponent();
-    if (!CheckComponents(expected_bcp_components, bcp_components, &error_msg)) {
+    if (!CheckComponents(
+            expected_bcp_compilable_components, bcp_compilable_components, &error_msg)) {
       LOG(INFO) << "Dex2OatClasspath components mismatch: " << error_msg;
       metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
       return cleanup_return(ExitCode::kCompilationRequired);
@@ -610,6 +641,25 @@ class OnDeviceRefresh final {
       return cleanup_system_server_return(ExitCode::kCompilationRequired);
     }
 
+    const std::vector<art_apex::Component> expected_bcp_components =
+        GenerateBootClasspathComponents();
+    if (expected_bcp_components.size() != 0 &&
+        (!cache_info->hasBootClasspath() || !cache_info->getFirstBootClasspath()->hasComponent())) {
+      LOG(INFO) << "Missing BootClasspath components.";
+      metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
+      return cleanup_system_server_return(ExitCode::kCompilationRequired);
+    }
+
+    const std::vector<art_apex::Component>& bcp_components =
+        cache_info->getFirstBootClasspath()->getComponent();
+    if (!CheckComponents(expected_bcp_components, bcp_components, &error_msg)) {
+      LOG(INFO) << "BootClasspath components mismatch: " << error_msg;
+      metrics.SetTrigger(OdrMetrics::Trigger::kDexFilesChanged);
+      // Boot classpath components can be dependencies of system_server components, so system_server
+      // components need to be recompiled if boot classpath components are changed.
+      return cleanup_system_server_return(ExitCode::kCompilationRequired);
+    }
+
     // Cache info looks good, check all compilation artifacts exist.
     auto cleanup_boot_extensions_return = [this](ExitCode exit_code, InstructionSet isa) {
       return RemoveBootExtensionArtifactsFromData(isa) ? exit_code : ExitCode::kCleanupFailed;
@@ -636,17 +686,17 @@ class OnDeviceRefresh final {
     return ExitCode::kOkay;
   }
 
-  static void AddDex2OatCommonOptions(/*inout*/ std::vector<std::string>& args) {
-    args.emplace_back("--android-root=out/empty");
-    args.emplace_back("--abort-on-hard-verifier-error");
-    args.emplace_back("--no-abort-on-soft-verifier-error");
-    args.emplace_back("--compilation-reason=boot");
-    args.emplace_back("--image-format=lz4");
-    args.emplace_back("--force-determinism");
-    args.emplace_back("--resolve-startup-const-strings=true");
+  static void AddDex2OatCommonOptions(/*inout*/ std::vector<std::string>* args) {
+    args->emplace_back("--android-root=out/empty");
+    args->emplace_back("--abort-on-hard-verifier-error");
+    args->emplace_back("--no-abort-on-soft-verifier-error");
+    args->emplace_back("--compilation-reason=boot");
+    args->emplace_back("--image-format=lz4");
+    args->emplace_back("--force-determinism");
+    args->emplace_back("--resolve-startup-const-strings=true");
   }
 
-  static void AddDex2OatConcurrencyArguments(/*inout*/ std::vector<std::string>& args) {
+  static void AddDex2OatConcurrencyArguments(/*inout*/ std::vector<std::string>* args) {
     static constexpr std::pair<const char*, const char*> kPropertyArgPairs[] = {
         std::make_pair("dalvik.vm.boot-dex2oat-cpu-set", "--cpu-set="),
         std::make_pair("dalvik.vm.boot-dex2oat-threads", "-j"),
@@ -655,29 +705,109 @@ class OnDeviceRefresh final {
       auto [property, arg] = property_arg_pair;
       std::string value = android::base::GetProperty(property, {});
       if (!value.empty()) {
-        args.push_back(arg + value);
+        args->push_back(arg + value);
       }
     }
   }
 
-  static void AddDex2OatDebugInfo(/*inout*/ std::vector<std::string>& args) {
-    args.emplace_back("--generate-mini-debug-info");
-    args.emplace_back("--strip");
+  static void AddDex2OatDebugInfo(/*inout*/ std::vector<std::string>* args) {
+    args->emplace_back("--generate-mini-debug-info");
+    args->emplace_back("--strip");
   }
 
-  static void AddDex2OatInstructionSet(/*inout*/ std::vector<std::string> args,
+  static void AddDex2OatInstructionSet(/*inout*/ std::vector<std::string>* args,
                                        InstructionSet isa) {
     const char* isa_str = GetInstructionSetString(isa);
-    args.emplace_back(Concatenate({"--instruction-set=", isa_str}));
+    args->emplace_back(Concatenate({"--instruction-set=", isa_str}));
   }
 
-  static void AddDex2OatProfileAndCompilerFilter(/*inout*/ std::vector<std::string>& args,
-                                                 const std::string& profile_file) {
-    if (OS::FileExists(profile_file.c_str(), /*check_file_type=*/true)) {
-      args.emplace_back(Concatenate({"--profile-file=", profile_file}));
-      args.emplace_back("--compiler-filter=speed-profile");
+  static void AddDex2OatProfileAndCompilerFilter(
+      /*inout*/ std::vector<std::string>* args,
+      /*inout*/ std::vector<std::unique_ptr<File>>* output_files,
+      const std::string& profile_path) {
+    std::unique_ptr<File> profile_file(OS::OpenFileForReading(profile_path.c_str()));
+    if (profile_file && profile_file->IsOpened()) {
+      args->emplace_back(android::base::StringPrintf("--profile-file-fd=%d", profile_file->Fd()));
+      args->emplace_back("--compiler-filter=speed-profile");
+      output_files->push_back(std::move(profile_file));
     } else {
-      args.emplace_back("--compiler-filter=speed");
+      args->emplace_back("--compiler-filter=speed");
+    }
+  }
+
+  static bool AddBootClasspathFds(/*inout*/ std::vector<std::string>& args,
+                                  /*inout*/ std::vector<std::unique_ptr<File>>& output_files,
+                                  const std::vector<std::string>& bcp_jars) {
+    auto bcp_fds = std::vector<std::string>();
+    for (const std::string& jar : bcp_jars) {
+      std::unique_ptr<File> jar_file(OS::OpenFileForReading(jar.c_str()));
+      if (!jar_file || !jar_file->IsValid()) {
+        LOG(ERROR) << "Failed to open a BCP jar " << jar;
+        return false;
+      }
+      bcp_fds.push_back(std::to_string(jar_file->Fd()));
+      output_files.push_back(std::move(jar_file));
+    }
+    args.emplace_back("--runtime-arg");
+    args.emplace_back(Concatenate({"-Xbootclasspathfds:", android::base::Join(bcp_fds, ':')}));
+    return true;
+  }
+
+  static void AddCompiledBootClasspathFdsIfAny(
+      /*inout*/ std::vector<std::string>& args,
+      /*inout*/ std::vector<std::unique_ptr<File>>& output_files,
+      const std::vector<std::string>& bcp_jars,
+      const InstructionSet isa) {
+    std::vector<std::string> bcp_image_fds;
+    std::vector<std::string> bcp_oat_fds;
+    std::vector<std::string> bcp_vdex_fds;
+    std::vector<std::unique_ptr<File>> opened_files;
+    bool added_any = false;
+    for (const std::string& jar : bcp_jars) {
+      std::string image_path = GetApexDataBootImage(jar);
+      image_path = image_path.empty() ? "" : GetSystemImageFilename(image_path.c_str(), isa);
+      std::unique_ptr<File> image_file(OS::OpenFileForReading(image_path.c_str()));
+      if (image_file && image_file->IsValid()) {
+        bcp_image_fds.push_back(std::to_string(image_file->Fd()));
+        opened_files.push_back(std::move(image_file));
+        added_any = true;
+      } else {
+        bcp_image_fds.push_back("-1");
+      }
+
+      std::string oat_path = ReplaceFileExtension(image_path, "oat");
+      std::unique_ptr<File> oat_file(OS::OpenFileForReading(oat_path.c_str()));
+      if (oat_file && oat_file->IsValid()) {
+        bcp_oat_fds.push_back(std::to_string(oat_file->Fd()));
+        opened_files.push_back(std::move(oat_file));
+        added_any = true;
+      } else {
+        bcp_oat_fds.push_back("-1");
+      }
+
+      std::string vdex_path = ReplaceFileExtension(image_path, "vdex");
+      std::unique_ptr<File> vdex_file(OS::OpenFileForReading(vdex_path.c_str()));
+      if (vdex_file && vdex_file->IsValid()) {
+        bcp_vdex_fds.push_back(std::to_string(vdex_file->Fd()));
+        opened_files.push_back(std::move(vdex_file));
+        added_any = true;
+      } else {
+        bcp_vdex_fds.push_back("-1");
+      }
+    }
+    // Add same amount of FDs as BCP JARs, or none.
+    if (added_any) {
+      std::move(opened_files.begin(), opened_files.end(), std::back_inserter(output_files));
+
+      args.emplace_back("--runtime-arg");
+      args.emplace_back(Concatenate({"-Xbootclasspathimagefds:",
+        android::base::Join(bcp_image_fds, ':')}));
+      args.emplace_back("--runtime-arg");
+      args.emplace_back(Concatenate({"-Xbootclasspathoatfds:",
+        android::base::Join(bcp_oat_fds, ':')}));
+      args.emplace_back("--runtime-arg");
+      args.emplace_back(Concatenate({"-Xbootclasspathvdexfds:",
+        android::base::Join(bcp_vdex_fds, ':')}));
     }
   }
 
@@ -744,7 +874,7 @@ class OnDeviceRefresh final {
       args.emplace_back(
           Concatenate({"--isa=", GetInstructionSetString(config_.GetSystemServerIsa())}));
       args.emplace_back("--runtime-arg");
-      args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetDex2oatBootClasspath()}));
+      args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetBootClasspath()}));
       args.emplace_back(Concatenate(
           {"--class-loader-context=PCL[", android::base::Join(classloader_context, ':'), "]"}));
 
@@ -920,13 +1050,13 @@ class OnDeviceRefresh final {
     return exit_code;
   }
 
-  WARN_UNUSED bool CleanApexdataDirectory() const {
-    const std::string& apex_data_path = GetArtApexData();
+  WARN_UNUSED bool RemoveArtifactsDirectory() const {
     if (config_.GetDryRun()) {
-      LOG(INFO) << "Files under `" << QuotePath(apex_data_path) << " would be removed (dry-run).";
+      LOG(INFO) << "Directory " << QuotePath(kOdrefreshArtifactDirectory)
+                << " and contents would be removed (dry-run).";
       return true;
     }
-    return CleanDirectory(apex_data_path);
+    return RemoveDirectory(kOdrefreshArtifactDirectory);
   }
 
   WARN_UNUSED bool RemoveArtifacts(const OdrArtifacts& artifacts) const {
@@ -989,6 +1119,20 @@ class OnDeviceRefresh final {
     return Concatenate({staging_dir, "/", android::base::Basename(path)});
   }
 
+  std::string JoinFilesAsFDs(const std::vector<std::unique_ptr<File>>& files, char delimiter) const {
+      std::stringstream output;
+      bool is_first = true;
+      for (const auto& f : files) {
+        if (is_first) {
+          is_first = false;
+        } else {
+          output << delimiter;
+        }
+        output << std::to_string(f->Fd());
+      }
+      return output.str();
+  }
+
   WARN_UNUSED bool CompileBootExtensionArtifacts(const InstructionSet isa,
                                                  const std::string& staging_dir,
                                                  OdrMetrics& metrics,
@@ -998,12 +1142,14 @@ class OnDeviceRefresh final {
     std::vector<std::string> args;
     args.push_back(config_.GetDex2Oat());
 
-    AddDex2OatCommonOptions(args);
-    AddDex2OatConcurrencyArguments(args);
-    AddDex2OatDebugInfo(args);
-    AddDex2OatInstructionSet(args, isa);
+    AddDex2OatCommonOptions(&args);
+    AddDex2OatConcurrencyArguments(&args);
+    AddDex2OatDebugInfo(&args);
+    AddDex2OatInstructionSet(&args, isa);
+
+    std::vector<std::unique_ptr<File>> readonly_files_raii;
     const std::string boot_profile_file(GetAndroidRoot() + "/etc/boot-image.prof");
-    AddDex2OatProfileAndCompilerFilter(args, boot_profile_file);
+    AddDex2OatProfileAndCompilerFilter(&args, &readonly_files_raii, boot_profile_file);
 
     // Compile as a single image for fewer files and slightly less memory overhead.
     args.emplace_back("--single-image");
@@ -1013,7 +1159,9 @@ class OnDeviceRefresh final {
 
     const std::string dirty_image_objects_file(GetAndroidRoot() + "/etc/dirty-image-objects");
     if (OS::FileExists(dirty_image_objects_file.c_str())) {
-      args.emplace_back(Concatenate({"--dirty-image-objects=", dirty_image_objects_file}));
+      std::unique_ptr<File> file(OS::OpenFileForReading(dirty_image_objects_file.c_str()));
+      args.emplace_back(android::base::StringPrintf("--dirty-image-objects-fd=%d", file->Fd()));
+      readonly_files_raii.push_back(std::move(file));
     } else {
       LOG(WARNING) << "Missing dirty objects file : " << QuotePath(dirty_image_objects_file);
     }
@@ -1021,10 +1169,17 @@ class OnDeviceRefresh final {
     // Add boot extensions to compile.
     for (const std::string& component : boot_extension_compilable_jars_) {
       args.emplace_back("--dex-file=" + component);
+      std::unique_ptr<File> file(OS::OpenFileForReading(component.c_str()));
+      args.emplace_back(android::base::StringPrintf("--dex-fd=%d", file->Fd()));
+      readonly_files_raii.push_back(std::move(file));
     }
 
     args.emplace_back("--runtime-arg");
     args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetDex2oatBootClasspath()}));
+    auto bcp_jars = android::base::Split(config_.GetDex2oatBootClasspath(), ":");
+    if (!AddBootClasspathFds(args, readonly_files_raii, bcp_jars)) {
+      return false;
+    }
 
     const std::string image_location = GetBootImageExtensionImagePath(isa);
     const OdrArtifacts artifacts = OdrArtifacts::ForBootImageExtension(image_location);
@@ -1065,6 +1220,17 @@ class OnDeviceRefresh final {
     if (!EnsureDirectoryExists(install_location)) {
       metrics.SetStatus(OdrMetrics::Status::kIoError);
       return false;
+    }
+
+    if (config_.UseCompilationOs()) {
+      std::vector<std::string> prefix_args = {
+        "/apex/com.android.compos/bin/pvm_exec",
+        "--cid=" + config_.GetCompilationOsAddress(),
+        "--in-fd=" + JoinFilesAsFDs(readonly_files_raii, ','),
+        "--out-fd=" + JoinFilesAsFDs(staging_files, ','),
+        "--",
+      };
+      args.insert(args.begin(), prefix_args.begin(), prefix_args.end());
     }
 
     const time_t timeout = GetSubprocessTimeout();
@@ -1109,17 +1275,22 @@ class OnDeviceRefresh final {
     const std::string dex2oat = config_.GetDex2Oat();
     const InstructionSet isa = config_.GetSystemServerIsa();
     for (const std::string& jar : systemserver_compilable_jars_) {
+      std::vector<std::unique_ptr<File>> readonly_files_raii;
       std::vector<std::string> args;
       args.emplace_back(dex2oat);
       args.emplace_back("--dex-file=" + jar);
 
-      AddDex2OatCommonOptions(args);
-      AddDex2OatConcurrencyArguments(args);
-      AddDex2OatDebugInfo(args);
-      AddDex2OatInstructionSet(args, isa);
+      std::unique_ptr<File> dex_file(OS::OpenFileForReading(jar.c_str()));
+      args.emplace_back(android::base::StringPrintf("--dex-fd=%d", dex_file->Fd()));
+      readonly_files_raii.push_back(std::move(dex_file));
+
+      AddDex2OatCommonOptions(&args);
+      AddDex2OatConcurrencyArguments(&args);
+      AddDex2OatDebugInfo(&args);
+      AddDex2OatInstructionSet(&args, isa);
       const std::string jar_name(android::base::Basename(jar));
       const std::string profile = Concatenate({GetAndroidRoot(), "/framework/", jar_name, ".prof"});
-      AddDex2OatProfileAndCompilerFilter(args, profile);
+      AddDex2OatProfileAndCompilerFilter(&args, &readonly_files_raii, profile);
 
       const std::string image_location = GetSystemServerImagePath(/*on_system=*/false, jar);
       const std::string install_location = android::base::Dirname(image_location);
@@ -1164,15 +1335,49 @@ class OnDeviceRefresh final {
           EraseFiles(staging_files);
           return false;
         }
-        args.emplace_back("--updatable-bcp-packages-file=" + bcp_packages);
+        std::unique_ptr<File> file(OS::OpenFileForReading(bcp_packages.c_str()));
+        args.emplace_back(android::base::StringPrintf("--updatable-bcp-packages-fd=%d", file->Fd()));
+        readonly_files_raii.push_back(std::move(file));
       }
 
       args.emplace_back("--runtime-arg");
-      args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetDex2oatBootClasspath()}));
+      args.emplace_back(Concatenate({"-Xbootclasspath:", config_.GetBootClasspath()}));
+      auto bcp_jars = android::base::Split(config_.GetBootClasspath(), ":");
+      if (!AddBootClasspathFds(args, readonly_files_raii, bcp_jars)) {
+        return false;
+      }
+      AddCompiledBootClasspathFdsIfAny(args, readonly_files_raii, bcp_jars, isa);
+
       const std::string context_path = android::base::Join(classloader_context, ':');
       args.emplace_back(Concatenate({"--class-loader-context=PCL[", context_path, "]"}));
+      if (!classloader_context.empty()) {
+        std::vector<int> fds;
+        for (const std::string& path : classloader_context) {
+          std::unique_ptr<File> file(OS::OpenFileForReading(path.c_str()));
+          if (!file->IsValid()) {
+            PLOG(ERROR) << "Failed to open classloader context " << path;
+            metrics.SetStatus(OdrMetrics::Status::kIoError);
+            return false;
+          }
+          fds.emplace_back(file->Fd());
+          readonly_files_raii.emplace_back(std::move(file));
+        }
+        const std::string context_fds = android::base::Join(fds, ':');
+        args.emplace_back(Concatenate({"--class-loader-context-fds=", context_fds}));
+      }
       const std::string extension_image = GetBootImageExtensionImage(/*on_system=*/false);
       args.emplace_back(Concatenate({"--boot-image=", GetBootImage(), ":", extension_image}));
+
+      if (config_.UseCompilationOs()) {
+        std::vector<std::string> prefix_args = {
+          "/apex/com.android.compos/bin/pvm_exec",
+          "--cid=" + config_.GetCompilationOsAddress(),
+          "--in-fd=" + JoinFilesAsFDs(readonly_files_raii, ','),
+          "--out-fd=" + JoinFilesAsFDs(staging_files, ','),
+          "--",
+        };
+        args.insert(args.begin(), prefix_args.begin(), prefix_args.end());
+      }
 
       const time_t timeout = GetSubprocessTimeout();
       const std::string cmd_line = android::base::Join(args, ' ');
@@ -1246,7 +1451,7 @@ class OnDeviceRefresh final {
     const char* staging_dir = nullptr;
     metrics.SetStage(OdrMetrics::Stage::kPreparation);
     // Clean-up existing files.
-    if (force_compile && !CleanApexdataDirectory()) {
+    if (force_compile && !RemoveArtifactsDirectory()) {
       metrics.SetStatus(OdrMetrics::Status::kIoError);
       return ExitCode::kCleanupFailed;
     }
@@ -1288,7 +1493,7 @@ class OnDeviceRefresh final {
         if (!CompileBootExtensionArtifacts(
                 isa, staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
           LOG(ERROR) << "Compilation of BCP failed: " << error_msg;
-          if (!config_.GetDryRun() && !CleanDirectory(staging_dir)) {
+          if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
             return ExitCode::kCleanupFailed;
           }
           return ExitCode::kCompilationFailed;
@@ -1308,7 +1513,7 @@ class OnDeviceRefresh final {
       if (!CompileSystemServerArtifacts(
               staging_dir, metrics, &dex2oat_invocation_count, &error_msg)) {
         LOG(ERROR) << "Compilation of system_server failed: " << error_msg;
-        if (!config_.GetDryRun() && !CleanDirectory(staging_dir)) {
+        if (!config_.GetDryRun() && !RemoveDirectory(staging_dir)) {
           return ExitCode::kCleanupFailed;
         }
         return ExitCode::kCompilationFailed;
@@ -1393,6 +1598,7 @@ class OnDeviceRefresh final {
   static int InitializeTargetConfig(int argc, const char** argv, OdrConfig* config) {
     config->SetApexInfoListFile("/apex/apex-info-list.xml");
     config->SetArtBinDir(GetArtBinDir());
+    config->SetBootClasspath(GetEnvironmentVariableOrDie("BOOTCLASSPATH"));
     config->SetDex2oatBootclasspath(GetEnvironmentVariableOrDie("DEX2OATBOOTCLASSPATH"));
     config->SetSystemServerClasspath(GetEnvironmentVariableOrDie("SYSTEMSERVERCLASSPATH"));
     config->SetIsa(kRuntimeISA);
@@ -1410,8 +1616,12 @@ class OnDeviceRefresh final {
 
     int n = 1;
     for (; n < argc - 1; ++n) {
-      if (!InitializeCommonConfig(argv[n], config)) {
-        UsageError("Unrecognized argument: '%s'", argv[n]);
+      const char* arg = argv[n];
+      std::string value;
+      if (ArgumentMatches(arg, "--use-compilation-os=", &value)) {
+        config->SetCompilationOsAddress(value);
+      } else if (!InitializeCommonConfig(arg, config)) {
+        UsageError("Unrecognized argument: '%s'", arg);
       }
     }
     return n;
@@ -1443,10 +1653,21 @@ class OnDeviceRefresh final {
         return odr.CheckArtifactsAreUpToDate(metrics);
       } else if (action == "--compile") {
         const ExitCode exit_code = odr.CheckArtifactsAreUpToDate(metrics);
-        if (exit_code == ExitCode::kCompilationRequired) {
-          return odr.Compile(metrics, /*force_compile=*/false);
+        if (exit_code != ExitCode::kCompilationRequired) {
+          return exit_code;
         }
-        return exit_code;
+        OdrCompilationLog compilation_log;
+        if (!compilation_log.ShouldAttemptCompile(metrics.GetArtApexVersion(),
+                                                  metrics.GetArtApexLastUpdateMillis(),
+                                                  metrics.GetTrigger())) {
+          return ExitCode::kOkay;
+        }
+        ExitCode compile_result = odr.Compile(metrics, /*force_compile=*/false);
+        compilation_log.Log(metrics.GetArtApexVersion(),
+                            metrics.GetArtApexLastUpdateMillis(),
+                            metrics.GetTrigger(),
+                            compile_result);
+        return compile_result;
       } else if (action == "--force-compile") {
         return odr.Compile(metrics, /*force_compile=*/true);
       } else if (action == "--verify") {

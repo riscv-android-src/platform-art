@@ -326,23 +326,6 @@ class ArtMethod final {
 
   bool IsSignaturePolymorphic() REQUIRES_SHARED(Locks::mutator_lock_);
 
-  bool UseFastInterpreterToInterpreterInvoke() const {
-    // The bit is applicable only if the method is not intrinsic.
-    constexpr uint32_t mask = kAccFastInterpreterToInterpreterInvoke | kAccIntrinsic;
-    return (GetAccessFlags() & mask) == kAccFastInterpreterToInterpreterInvoke;
-  }
-
-  void SetFastInterpreterToInterpreterInvokeFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
-    DCHECK(!IsIntrinsic());
-    AddAccessFlags(kAccFastInterpreterToInterpreterInvoke);
-  }
-
-  void ClearFastInterpreterToInterpreterInvokeFlag() REQUIRES_SHARED(Locks::mutator_lock_) {
-    if (!IsIntrinsic()) {
-      ClearAccessFlags(kAccFastInterpreterToInterpreterInvoke);
-    }
-  }
-
   bool SkipAccessChecks() const {
     // The kAccSkipAccessChecks flag value is used with a different meaning for native methods,
     // so we need to check the kAccNative flag as well.
@@ -361,11 +344,9 @@ class ArtMethod final {
   }
 
   bool PreviouslyWarm() const {
-    if (IsIntrinsic()) {
-      // kAccPreviouslyWarm overlaps with kAccIntrinsicBits.
-      return true;
-    }
-    return (GetAccessFlags() & kAccPreviouslyWarm) != 0;
+    // kAccPreviouslyWarm overlaps with kAccIntrinsicBits. Return true for intrinsics.
+    constexpr uint32_t mask = kAccPreviouslyWarm | kAccIntrinsic;
+    return (GetAccessFlags() & mask) != 0u;
   }
 
   void SetPreviouslyWarm() REQUIRES_SHARED(Locks::mutator_lock_) {
@@ -500,8 +481,6 @@ class ArtMethod final {
     SetNativePointer(EntryPointFromQuickCompiledCodeOffset(pointer_size),
                      entry_point_from_quick_compiled_code,
                      pointer_size);
-    // We might want to invoke compiled code, so don't use the fast path.
-    ClearFastInterpreterToInterpreterInvokeFlag();
   }
 
   static constexpr MemberOffset DataOffset(PointerSize pointer_size) {
@@ -706,9 +685,9 @@ class ArtMethod final {
   void CopyFrom(ArtMethod* src, PointerSize image_pointer_size)
       REQUIRES_SHARED(Locks::mutator_lock_);
 
-  ALWAYS_INLINE void SetCounter(uint16_t hotness_count) REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE void SetCounter(uint16_t hotness_count);
 
-  ALWAYS_INLINE uint16_t GetCounter() REQUIRES_SHARED(Locks::mutator_lock_);
+  ALWAYS_INLINE uint16_t GetCounter();
 
   ALWAYS_INLINE static constexpr uint16_t MaxCounter() {
     return std::numeric_limits<decltype(hotness_count_)>::max();

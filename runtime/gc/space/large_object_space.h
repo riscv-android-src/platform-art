@@ -101,7 +101,7 @@ class LargeObjectSpace : public DiscontinuousSpace, public AllocSpace {
     const uint8_t* byte_obj = reinterpret_cast<const uint8_t*>(obj);
     return Begin() <= byte_obj && byte_obj < End();
   }
-  void LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override
+  bool LogFragmentationAllocFailure(std::ostream& os, size_t failed_alloc_bytes) override
       REQUIRES_SHARED(Locks::mutator_lock_);
 
   // Return true if the large object is a zygote large object. Potentially slow.
@@ -226,8 +226,9 @@ class FreeListSpace final : public LargeObjectSpace {
    public:
     bool operator()(const AllocationInfo* a, const AllocationInfo* b) const;
   };
-  typedef std::set<AllocationInfo*, SortByPrevFree,
-                   TrackingAllocator<AllocationInfo*, kAllocatorTagLOSFreeList>> FreeBlocks;
+  using FreeBlocks = std::set<AllocationInfo*,
+                              SortByPrevFree,
+                              TrackingAllocator<AllocationInfo*, kAllocatorTagLOSFreeList>>;
 
   // There is not footer for any allocations at the end of the space, so we keep track of how much
   // free space there is at the end manually.

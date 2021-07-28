@@ -12,7 +12,6 @@
 // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 // See the License for the specific language governing permissions and
 // limitations under the License.
-//
 
 package {
     // See: http://go/android-license-faq
@@ -27,23 +26,18 @@ art_cc_binary {
     name: "artd",
     defaults: ["art_defaults"],
     min_sdk_version: "S",
-    host_supported: true,
 
     srcs: [
         "artd.cc",
     ],
 
     shared_libs: [
+        "artd-aidl-ndk",
         "libartbase",
         "libarttools",
         "libbase",
+        "libbinder_ndk",
     ],
-
-    target: {
-        host: {
-            stl: "c++_static",
-        },
-    },
 
     apex_available: [
         "com.android.art",

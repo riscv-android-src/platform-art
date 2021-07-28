@@ -29,6 +29,7 @@ cc_defaults {
     defaults: ["art_defaults"],
     srcs: [
         "odrefresh.cc",
+        "odr_compilation_log.cc",
         "odr_fs_utils.cc",
         "odr_metrics.cc",
         "odr_metrics_record.cc",
@@ -36,7 +37,7 @@ cc_defaults {
     local_include_dirs: ["include"],
     header_libs: ["dexoptanalyzer_headers"],
     generated_sources: [
-        "apex-info-list",
+        "apex-info-list-tinyxml",
         "art-apex-cache-info",
         "art-odrefresh-operator-srcs",
     ],
@@ -46,21 +47,11 @@ cc_defaults {
         "libdexfile",
         "liblog",
     ],
-    static_libs: ["libxml2"],
+    static_libs: ["libtinyxml2"],
     target: {
         android: {
             // Use the 32-bit version of odrefresh on devices.
             compile_multilib: "prefer32",
-        },
-        linux: {
-            enabled: true,
-        },
-        host: {
-            shared_libs: [
-                // Both these libraries for libxml2 on host for code derived from apex-info-list.
-                "libicui18n",
-                "libicuuc",
-            ],
         },
     },
     tidy: true,
@@ -162,15 +153,14 @@ cc_library_static {
     ],
 }
 
-art_cc_test {
-    name: "art_odrefresh_tests",
-    defaults: [
-        "art_gtest_defaults",
-    ],
+art_cc_defaults {
+    name: "art_odrefresh_tests_defaults",
     generated_sources: ["art-odrefresh-operator-srcs"],
     header_libs: ["odrefresh_headers"],
     srcs: [
         "odr_artifacts_test.cc",
+        "odr_compilation_log.cc",
+        "odr_compilation_log_test.cc",
         "odr_fs_utils.cc",
         "odr_fs_utils_test.cc",
         "odr_metrics.cc",
@@ -180,6 +170,25 @@ art_cc_test {
         "odrefresh_test.cc",
     ],
     shared_libs: ["libbase"],
+}
+
+// Version of ART gtest `art_odrefresh_tests` bundled with the ART APEX on target.
+// TODO(b/192274705): Remove this module when the migration to standalone ART gtests is complete.
+art_cc_test {
+    name: "art_odrefresh_tests",
+    defaults: [
+        "art_gtest_defaults",
+        "art_odrefresh_tests_defaults",
+    ],
+}
+
+// Standalone version of ART gtest `art_odrefresh_tests`, not bundled with the ART APEX on target.
+art_cc_test {
+    name: "art_standalone_odrefresh_tests",
+    defaults: [
+        "art_standalone_gtest_defaults",
+        "art_odrefresh_tests_defaults",
+    ],
 }
 
 genrule {
@@ -206,4 +215,5 @@ xsd_config {
     package_name: "com.android.art",
     api_dir: "schema",
     gen_writer: true,
+    tinyxml: true,
 }

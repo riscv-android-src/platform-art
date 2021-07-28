@@ -44,7 +44,7 @@ class LockWord;
 template<class T> class Handle;
 class StackVisitor;
 class Thread;
-typedef uint32_t MonitorId;
+using MonitorId = uint32_t;
 
 namespace mirror {
 class Object;
@@ -60,6 +60,12 @@ class Monitor {
   // The default number of spins that are done before thread suspension is used to forcibly inflate
   // a lock word. See Runtime::max_spins_before_thin_lock_inflation_.
   constexpr static size_t kDefaultMaxSpinsBeforeThinLockInflation = 50;
+
+  static constexpr int kDefaultMonitorTimeoutMs = 500;
+
+  static constexpr int kMonitorTimeoutMinMs = 200;
+
+  static constexpr int kMonitorTimeoutMaxMs = 1000;  // 1 second
 
   ~Monitor();
 
@@ -413,6 +419,8 @@ class Monitor {
   void CheckLockOwnerRequest(Thread* self)
       REQUIRES(monitor_lock_) REQUIRES_SHARED(Locks::mutator_lock_);
 
+  void MaybeEnableTimeout() REQUIRES(Locks::mutator_lock_);
+
   // The denser encoded version of this monitor as stored in the lock word.
   MonitorId monitor_id_;
 
@@ -444,7 +452,7 @@ class MonitorList {
   size_t DeflateMonitors() REQUIRES(!monitor_list_lock_) REQUIRES(Locks::mutator_lock_);
   size_t Size() REQUIRES(!monitor_list_lock_);
 
-  typedef std::list<Monitor*, TrackingAllocator<Monitor*, kAllocatorTagMonitorList>> Monitors;
+  using Monitors = std::list<Monitor*, TrackingAllocator<Monitor*, kAllocatorTagMonitorList>>;
 
  private:
   // During sweeping we may free an object and on a separate thread have an object created using

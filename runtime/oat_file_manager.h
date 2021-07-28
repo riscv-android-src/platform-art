@@ -71,11 +71,6 @@ class OatFileManager {
   // Returns the boot image oat files.
   std::vector<const OatFile*> GetBootOatFiles() const;
 
-  // Fetches information from the primary oat file.
-  bool GetPrimaryOatFileInfo(std::string* compilation_reason,
-                             CompilerFilter::Filter* compiler_filter)
-      const REQUIRES(!Locks::oat_file_manager_lock_);
-
   // Returns the oat files for the images, registers the oat files.
   // Takes ownership of the imagespace's underlying oat files.
   std::vector<const OatFile*> RegisterImageOatFiles(
@@ -123,7 +118,7 @@ class OatFileManager {
 
   void DumpForSigQuit(std::ostream& os);
 
-  void SetOnlyUseSystemOatFiles();
+  void SetOnlyUseTrustedOatFiles();
 
   // Spawn a background thread which verifies all classes in the given dex files.
   void RunBackgroundVerification(const std::vector<const DexFile*>& dex_files,

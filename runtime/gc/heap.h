@@ -76,7 +76,7 @@ class Verification;
 
 namespace accounting {
 template <typename T> class AtomicStack;
-typedef AtomicStack<mirror::Object> ObjectStack;
+using ObjectStack = AtomicStack<mirror::Object>;
 class CardTable;
 class HeapBitmap;
 class ModUnionTable;
@@ -140,7 +140,9 @@ class Heap {
   static constexpr size_t kDefaultMaxFree = 2 * MB;
   static constexpr size_t kDefaultMinFree = kDefaultMaxFree / 4;
   static constexpr size_t kDefaultLongPauseLogThreshold = MsToNs(5);
+  static constexpr size_t kDefaultLongPauseLogThresholdGcStress = MsToNs(50);
   static constexpr size_t kDefaultLongGCLogThreshold = MsToNs(100);
+  static constexpr size_t kDefaultLongGCLogThresholdGcStress = MsToNs(1000);
   static constexpr size_t kDefaultTLABSize = 32 * KB;
   static constexpr double kDefaultTargetUtilization = 0.75;
   static constexpr double kDefaultHeapGrowthMultiplier = 2.0;
@@ -199,7 +201,11 @@ class Heap {
        size_t non_moving_space_capacity,
        const std::vector<std::string>& boot_class_path,
        const std::vector<std::string>& boot_class_path_locations,
-       const std::string& image_file_name,
+       const std::vector<int>& boot_class_path_fds,
+       const std::vector<int>& boot_class_path_image_fds,
+       const std::vector<int>& boot_class_path_vdex_fds,
+       const std::vector<int>& boot_class_path_oat_fds,
+       const std::vector<std::string>& image_file_names,
        InstructionSet image_instruction_set,
        CollectorType foreground_collector_type,
        CollectorType background_collector_type,
@@ -259,11 +265,14 @@ class Heap {
                !*backtrace_lock_,
                !process_state_update_lock_,
                !Roles::uninterruptible_) {
-    return AllocObjectWithAllocator<kInstrumented>(self,
-                                                   klass,
-                                                   num_bytes,
-                                                   GetCurrentNonMovingAllocator(),
-                                                   pre_fence_visitor);
+    mirror::Object* obj = AllocObjectWithAllocator<kInstrumented>(self,
+                                                                  klass,
+                                                                  num_bytes,
+                                                                  GetCurrentNonMovingAllocator(),
+                                                                  pre_fence_visitor);
+    // Java Heap Profiler check and sample allocation.
+    JHPCheckNonTlabSampleAllocation(self, obj, num_bytes);
+    return obj;
   }
 
   template <bool kInstrumented = true, bool kCheckLargeObject = true, typename PreFenceVisitor>
@@ -831,8 +840,10 @@ class Heap {
 
   // Request asynchronous GC. Observed_gc_num is the value of GetCurrentGcNum() when we started to
   // evaluate the GC triggering condition. If a GC has been completed since then, we consider our
-  // job done. Ensures that gcs_completed_ will eventually be incremented beyond observed_gc_num.
-  void RequestConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t observed_gc_num)
+  // job done. If we return true, then we ensured that gcs_completed_ will eventually be
+  // incremented beyond observed_gc_num. We return false only in corner cases in which we cannot
+  // ensure that.
+  bool RequestConcurrentGC(Thread* self, GcCause cause, bool force_full, uint32_t observed_gc_num)
       REQUIRES(!*pending_task_lock_);
 
   // Whether or not we may use a garbage collector, used so that we only create collectors we need.
@@ -863,6 +874,8 @@ class Heap {
   int CheckPerfettoJHPEnabled();
   // In NonTlab case: Check whether we should report a sample allocation and if so report it.
   // Also update state (bytes_until_sample).
+  // By calling JHPCheckNonTlabSampleAllocation from different functions for Large allocations and
+  // non-moving allocations we are able to use the stack to identify these allocations separately.
   void JHPCheckNonTlabSampleAllocation(Thread* self,
                                        mirror::Object* ret,
                                        size_t alloc_size);
@@ -1580,9 +1593,10 @@ class Heap {
   // Increment is guarded by gc_complete_lock_.
   Atomic<uint32_t> gcs_completed_;
 
-  // The number of garbage collections we've scheduled. Normally either gcs_complete_ or
-  // gcs_complete + 1.
-  Atomic<uint32_t> gcs_requested_;
+  // The number of the last garbage collection that has been requested.  A value of gcs_completed
+  // + 1 indicates that another collection is needed or in progress. A value of gcs_completed_ or
+  // (logically) less means that no new GC has been requested.
+  Atomic<uint32_t> max_gc_requested_;
 
   // Active tasks which we can modify (change target time, desired collector type, etc..).
   CollectorTransitionTask* pending_collector_transition_ GUARDED_BY(pending_task_lock_);

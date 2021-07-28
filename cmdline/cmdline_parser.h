@@ -210,8 +210,26 @@ struct CmdlineParser {
       return parent_;
     }
 
+    // Write the results of this argument into a variable pointed to by destination.
+    // An optional is used to tell whether the command line argument was present.
+    CmdlineParser::Builder& IntoLocation(std::optional<TArg>* destination) {
+      save_value_ = [destination](TArg& value) {
+        *destination = value;
+      };
+
+      load_value_ = [destination]() -> TArg& {
+        return destination->value();
+      };
+
+      save_value_specified_ = true;
+      load_value_specified_ = true;
+
+      CompleteArgument();
+      return parent_;
+    }
+
     // Ensure we always move this when returning a new builder.
-    ArgumentBuilder(ArgumentBuilder&&) = default;
+    ArgumentBuilder(ArgumentBuilder&&) noexcept = default;
 
    protected:
     // Used by builder to internally ignore arguments by dropping them on the floor after parsing.
@@ -354,7 +372,7 @@ struct CmdlineParser {
     }
 
     // Ensure we always move this when returning a new builder.
-    UntypedArgumentBuilder(UntypedArgumentBuilder&&) = default;
+    UntypedArgumentBuilder(UntypedArgumentBuilder&&) noexcept = default;
 
    protected:
     void SetNames(std::vector<const char*>&& names) {
@@ -572,9 +590,9 @@ struct CmdlineParser {
   }
 
   // Ensure we have a default move constructor.
-  CmdlineParser(CmdlineParser&&) = default;
+  CmdlineParser(CmdlineParser&&) noexcept = default;
   // Ensure we have a default move assignment operator.
-  CmdlineParser& operator=(CmdlineParser&&) = default;
+  CmdlineParser& operator=(CmdlineParser&&) noexcept = default;
 
  private:
   friend struct Builder;
