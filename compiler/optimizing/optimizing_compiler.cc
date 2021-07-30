@@ -552,7 +552,6 @@ bool OptimizingCompiler::RunArchOptimizations(HGraph* graph,
                               codegen,
                               dex_compilation_unit,
                               pass_observer,
-                              handles,
                               riscv64_optimizations);
     }
 #endif
