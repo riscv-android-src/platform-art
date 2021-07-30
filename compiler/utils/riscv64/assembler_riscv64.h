@@ -1873,7 +1873,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
              BranchCondition condition,
              GpuRegister lhs,
              GpuRegister rhs = ZERO);
-  void Call(Riscv64Label* label, bool is_bare);
+  void Call(Riscv64Label* label, bool is_bare) override;
   void FinalizeLabeledBranch(Riscv64Label* label);
 
   Branch* GetBranch(uint32_t branch_id);

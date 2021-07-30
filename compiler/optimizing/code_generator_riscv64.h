@@ -363,11 +363,15 @@ class CodeGeneratorRISCV64 : public CodeGenerator {
 
   size_t GetWordSize() const override { return kRiscv64DoublewordSize; }
 
-  size_t GetFloatingPointSpillSlotSize() const override {
+  size_t GetSlowPathFPWidth() const override {
     return GetGraph()->HasSIMD()
         ? 2 * kRiscv64DoublewordSize   // 16 bytes for each spill.
         : 1 * kRiscv64DoublewordSize;  //  8 bytes for each spill.
   }
+
+  size_t GetCalleePreservedFPWidth() const override {
+    return 1 * kRiscv64DoublewordSize;
+   }
 
   uintptr_t GetAddressOf(HBasicBlock* block) override {
     return assembler_.GetLabelLocation(GetLabelOf(block));
