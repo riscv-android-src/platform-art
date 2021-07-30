@@ -59,54 +59,6 @@ using android::base::unique_fd;
 namespace art {
 namespace jit {
 
-// [workaround] help jit debug, remove it later
-static bool IsForbidJitCompile(ArtMethod* method) {
-  typedef std::map<std::string, bool> FJCMMap;
-  static FJCMMap *fjc_methods = nullptr;
-  static bool forbid_all = false;
-  if (fjc_methods == nullptr) {
-    fjc_methods = new FJCMMap();
-
-#if defined(__riscv)
-    std::ifstream f("/data/fjcm.cfg", std::ios::in);
-    if (f.is_open()) {
-      char buf[1024] = {0};
-      while (f.getline(buf, sizeof(buf))) {
-        char* ptr = buf;
-
-        if (fjc_methods->empty() && strstr(ptr, "###forbid_all") != NULL) {
-          forbid_all = true;
-          break;
-        }
-
-        if (ptr[0] == '#') {
-          continue;
-        }
-
-        char* ret = strstr(ptr, ":");
-        if (ret != NULL) {
-          ptr = ret + 1;
-        }
-
-        (*fjc_methods)[buf] = true;
-      }
-      f.close();
-    }
-#endif
-  }
-  std::string name = method->PrettyMethod();
-  static std::ofstream f("/data/jcm.list", std::ios::out);
-  if (f.is_open()) {
-    f << name << std::endl;
-  }
-
-  bool is_forbid = (fjc_methods->count(name) != 0 && fjc_methods->at(name)) || forbid_all;
-  // printf("IsForbidJitCompile%d:%s\n", is_forbid, name.c_str());
-  // LOG(INFO) << "IsForbidJitCompile:" << name << ", is_forbid:" << is_forbid;
-
-  return is_forbid;
-}
-
 static constexpr bool kEnableOnStackReplacement = true;
 
 // Maximum permitted threshold value.
@@ -386,13 +338,6 @@ bool Jit::CompileMethod(ArtMethod* method,
   if (!code_cache_->NotifyCompilationOf(method_to_compile, self, compilation_kind, prejit)) {
     return false;
   }
-
-#if 0
-  // [workaround] help jit debug, remove it later
-  if (IsForbidJitCompile(method_to_compile)) {
-    return false;
-  }
-#endif
 
   VLOG(jit) << "Compiling method "
             << ArtMethod::PrettyMethod(method_to_compile)
