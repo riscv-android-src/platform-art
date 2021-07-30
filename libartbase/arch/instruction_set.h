@@ -216,7 +216,6 @@ constexpr size_t GetBytesPerFprSpillLocation(InstructionSet isa) {
 namespace instruction_set_details {
 
 #if !defined(ART_STACK_OVERFLOW_GAP_arm) || !defined(ART_STACK_OVERFLOW_GAP_arm64) || \
-    !defined(ART_STACK_OVERFLOW_GAP_mips) || !defined(ART_STACK_OVERFLOW_GAP_mips64) || \
     !defined(ART_STACK_OVERFLOW_GAP_x86) || !defined(ART_STACK_OVERFLOW_GAP_x86_64) || \
     !defined(ART_STACK_OVERFLOW_GAP_riscv64)
 #error "Missing defines for stack overflow gap"
@@ -241,6 +240,9 @@ constexpr size_t GetStackOverflowReservedBytes(InstructionSet isa) {
 
     case InstructionSet::kArm64:
       return instruction_set_details::kArm64StackOverflowReservedBytes;
+
+    case InstructionSet::kRiscv64:
+      return instruction_set_details::kRiscv64StackOverflowReservedBytes;
 
     case InstructionSet::kX86:
       return instruction_set_details::kX86StackOverflowReservedBytes;
