@@ -260,6 +260,41 @@ ArrayRef<const ManagedRegister> Riscv64JniCallingConvention::CalleeSaveRegisters
   return ArrayRef<const ManagedRegister>(kCalleeSaveRegisters);
 }
 
+ManagedRegister Riscv64JniCallingConvention::SavedLocalReferenceCookieRegister() const {
+  //todo: arm based implementation.
+  // The r5 is callee-save register in both managed and native ABIs.
+  // It is saved in the stack frame and it has no special purpose like `tr`.
+  //static_assert((kCoreCalleeSpillMask & (1u << R5)) != 0u);  // Managed callee save register.
+  //return ArmManagedRegister::FromCoreRegister(R5);
+
+  return ManagedRegister::NoRegister();
+}
+
+ManagedRegister Riscv64JniCallingConvention::HiddenArgumentRegister() const{
+  //todo: arm based implementation.
+  //CHECK(IsCriticalNative());
+  //// R4 is neither managed callee-save, nor argument register, nor scratch register.
+  //// (It is native callee-save but the value coming from managed code can be clobbered.)
+  //// TODO: Change to static_assert; std::none_of should be constexpr since C++20.
+  //DCHECK(std::none_of(kCalleeSaveRegisters,
+  //                    kCalleeSaveRegisters + std::size(kCalleeSaveRegisters),
+  //                    [](ManagedRegister callee_save) constexpr {
+  //                      return callee_save.Equals(ArmManagedRegister::FromCoreRegister(R4));
+  //                    }));
+  //DCHECK(std::none_of(kJniArgumentRegisters,
+  //                    kJniArgumentRegisters + std::size(kJniArgumentRegisters),
+  //                    [](Register reg) { return reg == R4; }));
+  //return ArmManagedRegister::FromCoreRegister(R4);
+  return ManagedRegister::NoRegister();
+}
+
+bool Riscv64JniCallingConvention::UseTailCall() const {
+  //todo: 
+  //CHECK(IsCriticalNative());
+  //return OutFrameSize() == 0u;
+  return true;
+}
+
 bool Riscv64JniCallingConvention::IsCurrentParamInRegister() {
   if (IsCurrentParamAFloatOrDouble()) {
     return (itr_float_and_doubles_ < kMaxFloatOrDoubleRegisterArguments);

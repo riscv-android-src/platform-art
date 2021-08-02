@@ -1885,6 +1885,137 @@ void InstructionCodeGeneratorRISCV64::GenerateClassInitializationCheck(SlowPathC
   __ Bind(slow_path->GetExitLabel());
 }
 
+void InstructionCodeGeneratorRISCV64::VisitPredicatedInstanceFieldGet(
+    HPredicatedInstanceFieldGet* instruction) {
+  //todo: follow below arm64 implement a version for riscv64
+  //vixl::aarch64::Label finish;
+  //__ Cbz(InputRegisterAt(instruction, 1), &finish);
+  //HandleFieldGet(instruction, instruction->GetFieldInfo());
+  //__ Bind(&finish);
+}
+
+void InstructionCodeGeneratorRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
+  //todo: follow below arm64 implement a version for riscv64
+  //__ Mov(w0, instruction->GetFormat()->GetValue());
+  //codegen_->InvokeRuntime(kQuickStringBuilderAppend, instruction, instruction->GetDexPc());
+}
+
+void InstructionCodeGeneratorRISCV64::VisitVecPredSetAll(HVecPredSetAll*) {
+}
+
+void InstructionCodeGeneratorRISCV64::VisitVecPredWhile(HVecPredWhile* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+  UNREACHABLE();
+}
+
+void InstructionCodeGeneratorRISCV64::VisitVecPredCondition(HVecPredCondition* instruction) {
+  LOG(FATAL) << "No SIMD for " << instruction->GetId();
+  UNREACHABLE();
+}
+
+void LocationsBuilderRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
+  //todo: follow below arm64 implement a version for riscv64
+  //__ Mov(w0, instruction->GetFormat()->GetValue());
+  //codegen_->InvokeRuntime(kQuickStringBuilderAppend, instruction, instruction->GetDexPc());
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+  //todo: follow below arm64 implement a version for riscv64
+  //GenerateDivideUnsigned(invoke, codegen_);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitLongDivideUnsigned(HInvoke* invoke) {
+  //todo: follow below arm64 implement a version for riscv64
+  //GenerateDivideUnsigned(invoke, codegen_);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathMultiplyHigh(HInvoke* invoke) {
+  //todo: follow below arm64 implement a version for riscv64
+  //LocationSummary* locations = invoke->GetLocations();
+  //MacroAssembler* masm = codegen_->GetVIXLAssembler();
+  //DataType::Type type = invoke->GetType();
+  //DCHECK(type == DataType::Type::kInt64);
+//
+  //Register x = RegisterFrom(locations->InAt(0), type);
+  //Register y = RegisterFrom(locations->InAt(1), type);
+  //Register out = RegisterFrom(locations->Out(), type);
+//
+  //__ Smulh(out, x, y);
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Ceil(HInvoke* invoke) {
+  //todo: follow below arm64 implement a version for riscv64
+  //MacroAssembler* masm = GetVIXLAssembler();
+  //auto roundOp = [masm](const VRegister& out, const VRegister& in) {
+  //  __ Frintp(out, in);  // Round towards Plus infinity
+  //};
+  //GenerateFP16Round(invoke, codegen_, masm, roundOp);
+}
+
+void LocationsBuilderRISCV64::VisitPredicatedInstanceFieldGet(HPredicatedInstanceFieldGet*) {
+  //todo: follow below arm64 implement a version for riscv64
+
+}
+
+void LocationsBuilderRISCV64::VisitVecPredSetAll(art::HVecPredSetAll*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void LocationsBuilderRISCV64::VisitVecPredWhile(art::HVecPredWhile*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void LocationsBuilderRISCV64::VisitVecPredCondition(art::HVecPredCondition*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Floor(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Rint(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16ToFloat(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16ToHalf(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Greater(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16GreaterEquals(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Less(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitFP16LessEquals(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendObject(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendString(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendCharSequence(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendCharArray(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendBoolean(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendChar(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendLong(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendFloat(art::HInvoke*) {
+  //todo: follow below arm64 implement a version for riscv64
+}
+
+
 void InstructionCodeGeneratorRISCV64::GenerateBitstringTypeCheckCompare(HTypeCheckInstruction* check,
                                                                        GpuRegister temp) {
   uint32_t path_to_root = check->GetBitstringPathToRoot();

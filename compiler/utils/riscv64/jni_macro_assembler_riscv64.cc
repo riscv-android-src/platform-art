@@ -134,6 +134,13 @@ void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src) {
   __ CopyRef(dest, src);
 }
 
+void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest,
+                       ManagedRegister base,
+                       MemberOffset offs,
+                       bool unpoison_reference) {
+  //todo: follow arm64 to implement a riscv version
+}
+
 void Riscv64JNIMacroAssembler::Copy(FrameOffset dest,
                                   FrameOffset src,
                                   size_t size) {
@@ -282,6 +289,20 @@ void Riscv64JNIMacroAssembler::RemoveFrame(size_t frame_size,
   __ RemoveFrame(frame_size, callee_save_regs, may_suspend);
 }
 
+void Riscv64JNIMacroAssembler::MoveArguments(ArrayRef<art::ArgumentLocation>, ArrayRef<art::ArgumentLocation>) {
+  //todo: follow arm64 to implement a riscv version
+}
+
+
+void Riscv64JNIMacroAssembler::CreateJObject(art::ManagedRegister, art::FrameOffset, art::ManagedRegister, bool){
+  //todo: follow arm64 to implement a riscv version
+}
+void Riscv64JNIMacroAssembler::CreateJObject(art::FrameOffset, art::FrameOffset, bool){
+  //todo: follow arm64 to implement a riscv version
+}
+void Riscv64JNIMacroAssembler::TestGcMarking(art::JNIMacroLabel*, art::JNIMacroUnaryCondition){
+  //todo: follow arm64 to implement a riscv version
+}
 #undef ___
 
 }  // namespace riscv64
