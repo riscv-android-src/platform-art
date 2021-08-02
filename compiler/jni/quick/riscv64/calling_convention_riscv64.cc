@@ -73,13 +73,13 @@ static constexpr uint32_t kCoreCalleeSpillMask = CalculateCoreCalleeSpillMask();
 static constexpr uint32_t kFpCalleeSpillMask = 0u;
 
 // Calling convention
-ManagedRegister Riscv64ManagedRuntimeCallingConvention::InterproceduralScratchRegister() {
-  return Riscv64ManagedRegister::FromGpuRegister(T6);
-}
-
-ManagedRegister Riscv64JniCallingConvention::InterproceduralScratchRegister() {
-  return Riscv64ManagedRegister::FromGpuRegister(T6);
-}
+//ManagedRegister Riscv64ManagedRuntimeCallingConvention::InterproceduralScratchRegister() {
+//  return Riscv64ManagedRegister::FromGpuRegister(T6);
+//}
+//
+//ManagedRegister Riscv64JniCallingConvention::InterproceduralScratchRegister() {
+//  return Riscv64ManagedRegister::FromGpuRegister(T6);
+//}
 
 static ManagedRegister ReturnRegisterForShorty(const char* shorty) {
   if (shorty[0] == 'F' || shorty[0] == 'D') {
@@ -131,48 +131,48 @@ FrameOffset Riscv64ManagedRuntimeCallingConvention::CurrentParamStackOffset() {
   return result;
 }
 
-const ManagedRegisterEntrySpills& Riscv64ManagedRuntimeCallingConvention::EntrySpills() {
-  if ((entry_spills_.size() == 0) && (NumArgs() > 0)) {
-    int gp_reg_index = 1;   // we start from X1/W1, X0 holds ArtMethod*.
-    int fp_reg_index = 0;   // D0/S0.
-
-    // We need to choose the correct register (D/S or X/W) since the managed
-    // stack uses 32bit stack slots.
-    ResetIterator(FrameOffset(0));
-    while (HasNext()) {
-      if (IsCurrentParamAFloatOrDouble()) {  // FP regs.
-          if (fp_reg_index < 8) {
-            FpuRegister arg = kFpuArgumentRegisters[fp_reg_index];
-            Riscv64ManagedRegister reg = Riscv64ManagedRegister::FromFpuRegister(arg);
-            entry_spills_.push_back(reg, IsCurrentParamADouble() ? 8 : 4);
-            fp_reg_index++;
-          } else {
-            if (!IsCurrentParamADouble()) {
-              entry_spills_.push_back(ManagedRegister::NoRegister(), 4);
-            } else {
-              entry_spills_.push_back(ManagedRegister::NoRegister(), 8);
-            }
-          }
-      } else {  // GP regs.
-          if (gp_reg_index < 8) {
-            GpuRegister arg = kGpuArgumentRegisters[gp_reg_index];
-            Riscv64ManagedRegister reg = Riscv64ManagedRegister::FromGpuRegister(arg);
-            entry_spills_.push_back(reg,
-                                  (IsCurrentParamALong() && (!IsCurrentParamAReference())) ? 8 : 4);
-            gp_reg_index++;
-          } else {
-            if (IsCurrentParamALong() && (!IsCurrentParamAReference())) {
-              entry_spills_.push_back(ManagedRegister::NoRegister(), 8);
-            } else {
-              entry_spills_.push_back(ManagedRegister::NoRegister(), 4);
-            }
-          }
-      }
-      Next();
-    }
-  }
-  return entry_spills_;
-}
+//const ManagedRegisterEntrySpills& Riscv64ManagedRuntimeCallingConvention::EntrySpills() {
+//  if ((entry_spills_.size() == 0) && (NumArgs() > 0)) {
+//    int gp_reg_index = 1;   // we start from X1/W1, X0 holds ArtMethod*.
+//    int fp_reg_index = 0;   // D0/S0.
+//
+//    // We need to choose the correct register (D/S or X/W) since the managed
+//    // stack uses 32bit stack slots.
+//    ResetIterator(FrameOffset(0));
+//    while (HasNext()) {
+//      if (IsCurrentParamAFloatOrDouble()) {  // FP regs.
+//          if (fp_reg_index < 8) {
+//            FpuRegister arg = kFpuArgumentRegisters[fp_reg_index];
+//            Riscv64ManagedRegister reg = Riscv64ManagedRegister::FromFpuRegister(arg);
+//            entry_spills_.push_back(reg, IsCurrentParamADouble() ? 8 : 4);
+//            fp_reg_index++;
+//          } else {
+//            if (!IsCurrentParamADouble()) {
+//              entry_spills_.push_back(ManagedRegister::NoRegister(), 4);
+//            } else {
+//              entry_spills_.push_back(ManagedRegister::NoRegister(), 8);
+//            }
+//          }
+//      } else {  // GP regs.
+//          if (gp_reg_index < 8) {
+//            GpuRegister arg = kGpuArgumentRegisters[gp_reg_index];
+//            Riscv64ManagedRegister reg = Riscv64ManagedRegister::FromGpuRegister(arg);
+//            entry_spills_.push_back(reg,
+//                                  (IsCurrentParamALong() && (!IsCurrentParamAReference())) ? 8 : 4);
+//            gp_reg_index++;
+//          } else {
+//            if (IsCurrentParamALong() && (!IsCurrentParamAReference())) {
+//              entry_spills_.push_back(ManagedRegister::NoRegister(), 8);
+//            } else {
+//              entry_spills_.push_back(ManagedRegister::NoRegister(), 4);
+//            }
+//          }
+//      }
+//      Next();
+//    }
+//  }
+//  return entry_spills_;
+//}
 
 // JNI calling convention
 
@@ -199,7 +199,7 @@ ManagedRegister Riscv64JniCallingConvention::ReturnScratchRegister() const {
   return Riscv64ManagedRegister::FromGpuRegister(AT);
 }
 
-size_t Riscv64JniCallingConvention::FrameSize() {
+size_t Riscv64JniCallingConvention::FrameSize() const {
   // ArtMethod*, RA and callee save area size, local reference segment state.
   size_t method_ptr_size = static_cast<size_t>(kFramePointerSize);
   size_t ra_and_callee_save_area_size = (CalleeSaveRegisters().size() + 1) * kFramePointerSize;
@@ -213,10 +213,13 @@ size_t Riscv64JniCallingConvention::FrameSize() {
   size_t handle_scope_size = HandleScope::SizeOf(kRiscv64PointerSize, ReferenceCount());
 
   size_t total_size = frame_data_size;
-  if (LIKELY(HasHandleScope())) {
+
+  //fixme: as no HasHandleScope definition
+  //if (LIKELY(HasHandleScope())) {
     // HandleScope is sometimes excluded.
-    total_size += handle_scope_size;                                 // Handle scope size.
-  }
+  //  total_size += handle_scope_size;                                 // Handle scope size.
+  //}
+  total_size += handle_scope_size;
 
   // Plus return value spill area size.
   total_size += SizeOfReturnValue();
@@ -224,8 +227,33 @@ size_t Riscv64JniCallingConvention::FrameSize() {
   return RoundUp(total_size, kStackAlignment);
 }
 
-size_t Riscv64JniCallingConvention::OutArgSize() {
-  return RoundUp(NumberOfOutgoingStackArgs() * kFramePointerSize, kStackAlignment);
+//todo: same as OutArgSize?
+size_t Riscv64JniCallingConvention::OutFrameSize() const{
+  size_t all_args = NumberOfExtraArgumentsForJni() + NumArgs();
+
+  //todo: follow arm64 to get the size
+  //size_t num_fp_args = NumFloatOrDoubleArgs();
+  //DCHECK_GE(all_args, num_fp_args);
+  //size_t num_non_fp_args = all_args - num_fp_args;
+  
+  //  // @CriticalNative can use tail call as all managed callee saves are preserved by AAPCS64.
+  //  static_assert((kCoreCalleeSpillMask & ~kAapcs64CoreCalleeSpillMask) == 0u);
+  //  static_assert((kFpCalleeSpillMask & ~kAapcs64FpCalleeSpillMask) == 0u);
+  //
+  //  // For @CriticalNative, we can make a tail call if there are no stack args and
+  //  // we do not need to extend the result. Otherwise, add space for return PC.
+  //  if (is_critical_native_ && (size != 0u || RequiresSmallResultTypeExtension())) {
+  //    size += kFramePointerSize;  // We need to spill LR with the args.
+  //  }
+  //  size_t out_args_size = RoundUp(size, kAapcs64StackAlignment);
+  //  if (UNLIKELY(IsCriticalNative())) {
+  //    DCHECK_EQ(out_args_size, GetCriticalNativeStubFrameSize(GetShorty(), NumArgs() + 1u));
+  //  }
+  //  return out_args_size;
+  
+  
+  //return RoundUp(NumberOfOutgoingStackArgs() * kFramePointerSize, kStackAlignment);
+  return RoundUp(all_args * kFramePointerSize, kStackAlignment);
 }
 
 ArrayRef<const ManagedRegister> Riscv64JniCallingConvention::CalleeSaveRegisters() const {
@@ -265,25 +293,10 @@ FrameOffset Riscv64JniCallingConvention::CurrentParamStackOffset() {
     - std::min(kMaxIntLikeRegisterArguments,
     static_cast<size_t>(itr_args_ - itr_float_and_doubles_));
 
-  size_t offset = displacement_.Int32Value() - OutArgSize() + (args_on_stack * kFramePointerSize);
-  CHECK_LT(offset, OutArgSize());
+  size_t offset = displacement_.Int32Value() - OutFrameSize() + (args_on_stack * kFramePointerSize);
+  CHECK_LT(offset, OutFrameSize());
   return FrameOffset(offset);
   // TODO: Seems identical to X86_64 code.
-}
-
-size_t Riscv64JniCallingConvention::NumberOfOutgoingStackArgs() {
-  // all arguments including JNI args
-  size_t all_args = NumArgs() + NumberOfExtraArgumentsForJni();
-  DCHECK_GE(all_args, NumFloatOrDoubleArgs());
-
-  size_t all_stack_args = all_args
-    - std::min(kMaxFloatOrDoubleRegisterArguments,
-    static_cast<size_t>(NumFloatOrDoubleArgs()))
-    - std::min(kMaxIntLikeRegisterArguments,
-    static_cast<size_t>((all_args - NumFloatOrDoubleArgs())));
-
-  // TODO: Seems similar to X86_64 code except it doesn't count return pc.
-  return all_stack_args;
 }
 
 }  // namespace riscv64

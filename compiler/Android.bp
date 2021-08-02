@@ -175,7 +175,16 @@ art_cc_defaults {
 
     },
     static: {
-        cflags: ["-DART_STATIC_LIBART_COMPILER"],
+        cflags: [
+            "-DART_STATIC_LIBART_COMPILER", 
+            "-Wno-unreachable-code",
+            "-Wno-unreachable-code-return",
+            "-Wno-unreachable-code-break",
+            "-Wno-missing-noreturn",
+            "-Wno-invalid-noreturn",
+            "-Wno-unused-parameter",
+            "-Wno-unused-const-variable",
+        ],
     },
     generated_sources: ["art_compiler_operator_srcs"],
     shared_libs: [

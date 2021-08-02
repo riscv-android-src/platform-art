@@ -386,6 +386,23 @@ class CodeGeneratorRISCV64 : public CodeGenerator {
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
   void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) override;
 
+  size_t GetSIMDRegisterWidth() const override{
+    //fixme!!
+    return 1 * kRiscv64DoublewordSize;
+  }
+
+  //fixme!!
+  void IncreaseFrame(size_t adjustment) override{
+    //__ Claim(adjustment);
+    GetAssembler()->cfi().AdjustCFAOffset(adjustment);
+  }
+
+  //fixme!!
+  void DecreaseFrame(size_t adjustment) override{
+    //__ Drop(adjustment);
+    GetAssembler()->cfi().AdjustCFAOffset(-adjustment);
+  }
+
   // Fast path implementation of ReadBarrier::Barrier for a heap
   // reference field load when Baker's read barriers are used.
   void GenerateFieldLoadWithBakerReadBarrier(HInstruction* instruction,

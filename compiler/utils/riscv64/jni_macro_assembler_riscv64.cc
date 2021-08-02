@@ -37,8 +37,8 @@ void Riscv64JNIMacroAssembler::GetCurrentThread(ManagedRegister tr) {
   __ GetCurrentThread(tr);
 }
 
-void Riscv64JNIMacroAssembler::GetCurrentThread(FrameOffset offset, ManagedRegister scratch) {
-  __ GetCurrentThread(offset, scratch);
+void Riscv64JNIMacroAssembler::GetCurrentThread(FrameOffset offset) {
+  __ GetCurrentThread(offset);
 }
 
 // See Riscv64 PCS Section 5.2.2.1.
@@ -64,15 +64,13 @@ void Riscv64JNIMacroAssembler::StoreRawPtr(FrameOffset offs, ManagedRegister m_s
 }
 
 void Riscv64JNIMacroAssembler::StoreImmediateToFrame(FrameOffset offs,
-                                                   uint32_t imm,
-                                                   ManagedRegister m_scratch) {
-  __ StoreImmediateToFrame(offs, imm, m_scratch);
+                                                   uint32_t imm) {
+  __ StoreImmediateToFrame(offs, imm);
 }
 
 void Riscv64JNIMacroAssembler::StoreStackOffsetToThread(ThreadOffset64 tr_offs,
-                                                      FrameOffset fr_offs,
-                                                      ManagedRegister m_scratch) {
-  __ StoreStackOffsetToThread(tr_offs, fr_offs, m_scratch);
+                                                      FrameOffset fr_offs) {
+  __ StoreStackOffsetToThread(tr_offs, fr_offs);
 }
 
 void Riscv64JNIMacroAssembler::StoreStackPointerToThread(ThreadOffset64 tr_offs) {
@@ -81,9 +79,8 @@ void Riscv64JNIMacroAssembler::StoreStackPointerToThread(ThreadOffset64 tr_offs)
 
 void Riscv64JNIMacroAssembler::StoreSpanning(FrameOffset dest_off,
                                            ManagedRegister m_source,
-                                           FrameOffset in_off,
-                                           ManagedRegister m_scratch) {
-  __ StoreSpanning(dest_off, m_source, in_off, m_scratch);
+                                           FrameOffset in_off) {
+  __ StoreSpanning(dest_off, m_source, in_off);
 }
 
 void Riscv64JNIMacroAssembler::Load(ManagedRegister m_dst, FrameOffset src, size_t size) {
@@ -123,9 +120,8 @@ void Riscv64JNIMacroAssembler::Move(ManagedRegister m_dst, ManagedRegister m_src
 }
 
 void Riscv64JNIMacroAssembler::CopyRawPtrFromThread(FrameOffset fr_offs,
-                                                  ThreadOffset64 tr_offs,
-                                                  ManagedRegister m_scratch) {
-  __ CopyRawPtrFromThread(fr_offs, tr_offs, m_scratch);
+                                                  ThreadOffset64 tr_offs) {
+  __ CopyRawPtrFromThread(fr_offs, tr_offs);
 }
 
 void Riscv64JNIMacroAssembler::CopyRawPtrToThread(ThreadOffset64 tr_offs,
@@ -134,15 +130,14 @@ void Riscv64JNIMacroAssembler::CopyRawPtrToThread(ThreadOffset64 tr_offs,
   __ CopyRawPtrToThread(tr_offs, fr_offs, m_scratch);
 }
 
-void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src, ManagedRegister m_scratch) {
-  __ CopyRef(dest, src, m_scratch);
+void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src) {
+  __ CopyRef(dest, src);
 }
 
 void Riscv64JNIMacroAssembler::Copy(FrameOffset dest,
                                   FrameOffset src,
-                                  ManagedRegister m_scratch,
                                   size_t size) {
-  __ Copy(dest, src, m_scratch, size);
+  __ Copy(dest, src, size);
 }
 
 void Riscv64JNIMacroAssembler::Copy(FrameOffset dest,
@@ -209,17 +204,16 @@ void Riscv64JNIMacroAssembler::VerifyObject(FrameOffset src, bool could_be_null)
   __ VerifyObject(src, could_be_null);
 }
 
-void Riscv64JNIMacroAssembler::Call(ManagedRegister m_base, Offset offs, ManagedRegister m_scratch) {
-  __ Call(m_base, offs, m_scratch);
+void Riscv64JNIMacroAssembler::Call(ManagedRegister m_base, Offset offs) {
+  __ Call(m_base, offs);
 }
 
-void Riscv64JNIMacroAssembler::Call(FrameOffset base, Offset offs, ManagedRegister m_scratch) {
-  __ Call(base, offs, m_scratch);
+void Riscv64JNIMacroAssembler::Call(FrameOffset base, Offset offs) {
+  __ Call(base, offs);
 }
 
-void Riscv64JNIMacroAssembler::CallFromThread(ThreadOffset64 offset,
-                                            ManagedRegister scratch) {
-  __ CallFromThread(offset, scratch);
+void Riscv64JNIMacroAssembler::CallFromThread(ThreadOffset64 offset) {
+  __ CallFromThread(offset);
 }
 
 void Riscv64JNIMacroAssembler::CreateHandleScopeEntry(ManagedRegister m_out_reg,
@@ -241,8 +235,8 @@ void Riscv64JNIMacroAssembler::LoadReferenceFromHandleScope(ManagedRegister m_ou
   __ LoadReferenceFromHandleScope(m_out_reg, m_in_reg);
 }
 
-void Riscv64JNIMacroAssembler::ExceptionPoll(ManagedRegister m_scratch, size_t stack_adjust) {
-  __ ExceptionPoll(m_scratch, stack_adjust);
+void Riscv64JNIMacroAssembler::ExceptionPoll(size_t stack_adjust) {
+  __ ExceptionPoll(stack_adjust);
 }
 
 std::unique_ptr<JNIMacroLabel> Riscv64JNIMacroAssembler::CreateLabel() {
@@ -254,22 +248,21 @@ void Riscv64JNIMacroAssembler::Jump(JNIMacroLabel* label) {
   __ Bc(down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
 }
 
-void Riscv64JNIMacroAssembler::Jump(JNIMacroLabel* label,
-                                  JNIMacroUnaryCondition condition,
-                                  ManagedRegister test) {
-  CHECK(label != nullptr);
-
-  switch (condition) {
-    case JNIMacroUnaryCondition::kZero:
-      __ Beqzc(test.AsRiscv64().AsGpuRegister(), down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
-      break;
-    case JNIMacroUnaryCondition::kNotZero:
-      __ Bnezc(test.AsRiscv64().AsGpuRegister(), down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
-      break;
-    default:
-      LOG(FATAL) << "Not implemented unary condition: " << static_cast<int>(condition);
-      UNREACHABLE();
-  }
+void Riscv64JNIMacroAssembler::Jump(ManagedRegister base, Offset offset) {
+  //todo: reimplement it
+  //CHECK(label != nullptr);
+//
+  //switch (condition) {
+  //  case JNIMacroUnaryCondition::kZero:
+  //    __ Beqzc(test.AsRiscv64().AsGpuRegister(), down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
+  //    break;
+  //  case JNIMacroUnaryCondition::kNotZero:
+  //    __ Bnezc(test.AsRiscv64().AsGpuRegister(), down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
+  //    break;
+  //  default:
+  //    LOG(FATAL) << "Not implemented unary condition: " << static_cast<int>(condition);
+  //    UNREACHABLE();
+  //}
 }
 
 void Riscv64JNIMacroAssembler::Bind(JNIMacroLabel* label) {
@@ -279,9 +272,8 @@ void Riscv64JNIMacroAssembler::Bind(JNIMacroLabel* label) {
 
 void Riscv64JNIMacroAssembler::BuildFrame(size_t frame_size,
                                         ManagedRegister method_reg,
-                                        ArrayRef<const ManagedRegister> callee_save_regs,
-                                        const ManagedRegisterEntrySpills& entry_spills) {
-  __ BuildFrame(frame_size, method_reg, callee_save_regs, entry_spills);
+                                        ArrayRef<const ManagedRegister> callee_save_regs) {
+  __ BuildFrame(frame_size, method_reg, callee_save_regs);
 }
 
 void Riscv64JNIMacroAssembler::RemoveFrame(size_t frame_size,

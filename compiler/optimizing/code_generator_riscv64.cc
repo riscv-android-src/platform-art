@@ -1718,7 +1718,7 @@ void CodeGeneratorRISCV64::AllocateInstanceForIntrinsic(HInvokeStaticOrDirect* i
   if (GetCompilerOptions().IsBootImage()) {
     DCHECK_EQ(boot_image_offset, IntrinsicVisitor::IntegerValueOfInfo::kInvalidReference);
     // Load the class the same way as for HLoadClass::LoadKind::kBootImageLinkTimePcRelative.
-    MethodReference target_method = invoke->GetTargetMethod();
+    MethodReference target_method = invoke->GetResolvedMethodReference();
     dex::TypeIndex type_idx = target_method.dex_file->GetMethodId(target_method.index).class_idx_;
     PcRelativePatchInfo* info_high = NewBootImageTypePatch(*target_method.dex_file, type_idx);
     PcRelativePatchInfo* info_low =
@@ -1970,13 +1970,13 @@ void LocationsBuilderRISCV64::HandleBinaryOp(HBinaryOperation* instruction) {
           can_use_imm = IsUint<11>(imm);
         } else {
           DCHECK(instruction->IsAdd() || instruction->IsSub());
-          bool single_use = right->GetUses().HasExactlyOneElement();
           if (instruction->IsSub()) {
             if (!(type == DataType::Type::kInt32 && imm == INT32_MIN)) {
               imm = -imm;
             }
           }
 #if 0
+          bool single_use = right->GetUses().HasExactlyOneElement();
           if (type == DataType::Type::kInt32) {
             can_use_imm = IsInt<11>(imm) || (Low16Bits(imm) == 0) || single_use;
           } else {
@@ -5915,7 +5915,7 @@ void InstructionCodeGeneratorRISCV64::VisitInvokeInterface(HInvokeInterface* inv
 
   // Set the hidden argument.
   __ LoadConst32(invoke->GetLocations()->GetTemp(1).AsRegister<GpuRegister>(),
-                 invoke->GetDexMethodIndex());
+                 invoke->GetMethodReference().index);
 
   // temp = object->GetClass();
   if (receiver.IsStackSlot()) {
@@ -6033,6 +6033,9 @@ HLoadClass::LoadKind CodeGeneratorRISCV64::GetSupportedLoadClassKind(
       break;
     case HLoadClass::LoadKind::kRuntimeCall:
       break;
+    default:
+      //todo: kBssEntryPublic and kBssEntryPackage to be handled
+      break;
   }
   if (fallback_load) {
     desired_class_load_kind = HLoadClass::LoadKind::kRuntimeCall;
@@ -6051,11 +6054,11 @@ void CodeGeneratorRISCV64::GenerateStaticOrDirectCall(
     HInvokeStaticOrDirect* invoke, Location temp, SlowPathCode* slow_path) {
   // All registers are assumed to be correctly set up per the calling convention.
   Location callee_method = temp;  // For all kinds except kRecursive, callee will be in temp.
-  HInvokeStaticOrDirect::MethodLoadKind method_load_kind = invoke->GetMethodLoadKind();
-  HInvokeStaticOrDirect::CodePtrLocation code_ptr_location = invoke->GetCodePtrLocation();
+  MethodLoadKind method_load_kind = invoke->GetMethodLoadKind();
+  CodePtrLocation code_ptr_location = invoke->GetCodePtrLocation();
 
   switch (method_load_kind) {
-    case HInvokeStaticOrDirect::MethodLoadKind::kStringInit: {
+    case MethodLoadKind::kStringInit: {
       // temp = thread->string_init_entrypoint
       uint32_t offset =
           GetThreadOffset<kRiscv64PointerSize>(invoke->GetStringInitEntryPoint()).Int32Value();
@@ -6065,20 +6068,20 @@ void CodeGeneratorRISCV64::GenerateStaticOrDirectCall(
                         offset);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kRecursive:
+    case MethodLoadKind::kRecursive:
       callee_method = invoke->GetLocations()->InAt(invoke->GetSpecialInputIndex());
       break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageLinkTimePcRelative: {
+    case MethodLoadKind::kBootImageLinkTimePcRelative: {
       DCHECK(GetCompilerOptions().IsBootImage());
       CodeGeneratorRISCV64::PcRelativePatchInfo* info_high =
-          NewBootImageMethodPatch(invoke->GetTargetMethod());
+          NewBootImageMethodPatch(invoke->GetResolvedMethodReference());
       CodeGeneratorRISCV64::PcRelativePatchInfo* info_low =
-          NewBootImageMethodPatch(invoke->GetTargetMethod(), info_high);
+          NewBootImageMethodPatch(invoke->GetResolvedMethodReference(), info_high);
       EmitPcRelativeAddressPlaceholderHigh(info_high, AT, info_low);
       __ Addi(temp.AsRegister<GpuRegister>(), AT, /* imm12= */ 0x678);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kBootImageRelRo: {
+    case MethodLoadKind::kBootImageRelRo: {
       uint32_t boot_image_offset = GetBootImageOffset(invoke);
       PcRelativePatchInfo* info_high = NewBootImageRelRoPatch(boot_image_offset);
       PcRelativePatchInfo* info_low = NewBootImageRelRoPatch(boot_image_offset, info_high);
@@ -6087,31 +6090,31 @@ void CodeGeneratorRISCV64::GenerateStaticOrDirectCall(
       __ Lwu(temp.AsRegister<GpuRegister>(), AT, /* imm12= */ 0x678);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kBssEntry: {
+    case MethodLoadKind::kBssEntry: {
       PcRelativePatchInfo* info_high = NewMethodBssEntryPatch(
-          MethodReference(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex()));
+          MethodReference(&GetGraph()->GetDexFile(), invoke->GetMethodReference().index));
       PcRelativePatchInfo* info_low = NewMethodBssEntryPatch(
-          MethodReference(&GetGraph()->GetDexFile(), invoke->GetDexMethodIndex()), info_high);
+          MethodReference(&GetGraph()->GetDexFile(), invoke->GetMethodReference().index), info_high);
       EmitPcRelativeAddressPlaceholderHigh(info_high, AT, info_low);
       __ Ld(temp.AsRegister<GpuRegister>(), AT, /* imm12= */ 0x678);
       break;
     }
-    case HInvokeStaticOrDirect::MethodLoadKind::kJitDirectAddress:
+    case MethodLoadKind::kJitDirectAddress:
       __ LoadLiteral(temp.AsRegister<GpuRegister>(),
                      kLoadDoubleword,
                      DeduplicateUint64Literal(invoke->GetMethodAddress()));
       break;
-    case HInvokeStaticOrDirect::MethodLoadKind::kRuntimeCall: {
+    case MethodLoadKind::kRuntimeCall: {
       GenerateInvokeStaticOrDirectRuntimeCall(invoke, temp, slow_path);
       return;  // No code pointer retrieval; the runtime performs the call directly.
     }
   }
 
   switch (code_ptr_location) {
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallSelf:
+    case CodePtrLocation::kCallSelf:
       __ Balc(&frame_entry_label_);
       break;
-    case HInvokeStaticOrDirect::CodePtrLocation::kCallArtMethod:
+    case CodePtrLocation::kCallArtMethod:
       // T6 = callee_method->entry_point_from_quick_compiled_code_;
       __ LoadFromOffset(kLoadDoubleword,
                         T6,
@@ -6120,6 +6123,9 @@ void CodeGeneratorRISCV64::GenerateStaticOrDirectCall(
                             kRiscv64PointerSize).Int32Value());
       // T6()
       __ Jalr(T6);
+      break;
+    default:
+      //todo: kCallCriticalNative
       break;
   }
   RecordPcInfo(invoke, invoke->GetDexPc(), slow_path);
@@ -6308,6 +6314,9 @@ void InstructionCodeGeneratorRISCV64::VisitLoadClass(HLoadClass* cls) NO_THREAD_
     case HLoadClass::LoadKind::kInvalid:
       LOG(FATAL) << "UNREACHABLE";
       UNREACHABLE();
+    default:
+      //todo: kBssEntryPublic and kBssEntryPackage
+      break;
   }
 
   if (generate_null_check || cls->MustGenerateClinitCheck()) {

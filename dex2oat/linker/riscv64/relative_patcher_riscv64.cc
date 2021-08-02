@@ -45,6 +45,12 @@ void Riscv64RelativePatcher::PatchCall(std::vector<uint8_t>* code ATTRIBUTE_UNUS
   UNIMPLEMENTED(FATAL) << "PatchCall unimplemented on RISCV64";
 }
 
+void Riscv64RelativePatcher::PatchEntrypointCall(std::vector<uint8_t>* code ATTRIBUTE_UNUSED,
+                                   const LinkerPatch& patch ATTRIBUTE_UNUSED,
+                                   uint32_t patch_offset ATTRIBUTE_UNUSED) {
+  UNIMPLEMENTED(FATAL) << "PatchCall unimplemented on RISCV64";
+}
+
 void Riscv64RelativePatcher::PatchPcRelativeReference(std::vector<uint8_t>* code,
                                                      const LinkerPatch& patch,
                                                      uint32_t patch_offset,

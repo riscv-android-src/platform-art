@@ -362,14 +362,14 @@ void IntrinsicCodeGeneratorRISCV64::VisitMathSqrt(HInvoke* invoke) {
   __ SqrtD(out, in);
 }
 
-static void CreateFPToFP(ArenaAllocator* allocator,
-                         HInvoke* invoke,
-                         Location::OutputOverlap overlaps = Location::kOutputOverlap) {
-  LocationSummary* locations =
-      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
-  locations->SetInAt(0, Location::RequiresFpuRegister());
-  locations->SetOut(Location::RequiresFpuRegister(), overlaps);
-}
+//static void CreateFPToFP(ArenaAllocator* allocator,
+//                         HInvoke* invoke,
+//                         Location::OutputOverlap overlaps = Location::kOutputOverlap) {
+//  LocationSummary* locations =
+//      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+//  locations->SetInAt(0, Location::RequiresFpuRegister());
+//  locations->SetOut(Location::RequiresFpuRegister(), overlaps);
+//}
 
 // double java.lang.Math.rint(double)  // @TODO
 UNIMPLEMENTED_INTRINSIC(RISCV64, MathRint)
@@ -1015,7 +1015,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitUnsafeCASObject(HInvoke* invoke) {
 }
 
 // int java.lang.String.compareTo(String anotherString)  // @TODO
-void IntrinsicLocationsBuilderRISCV64::VisitStringCompareTo(HInvoke* invoke) {
+void IntrinsicLocationsBuilderRISCV64::VisitStringCompareTo(HInvoke* invoke ATTRIBUTE_UNUSED) {
   #if 0
   LocationSummary* locations = new (allocator_) LocationSummary(
       invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
@@ -1330,21 +1330,21 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringNewStringFromString(HInvoke* invo
   __ Bind(slow_path->GetExitLabel());
 }
 
-static void GenIsInfinite(LocationSummary* locations,
-                          bool is64bit,
-                          Riscv64Assembler* assembler) {
-  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
-  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+//static void GenIsInfinite(LocationSummary* locations,
+//                          bool is64bit,
+//                          Riscv64Assembler* assembler) {
+//  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
+//  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
-  if (is64bit) {
-    __ ClassD(FTMP, in);
-  } else {
-    __ ClassS(FTMP, in);
-  }
-  __ Mfc1(out, FTMP);
-  __ Andi(out, out, kPositiveInfinity | kNegativeInfinity);
-  __ Sltu(out, ZERO, out);
-}
+//  if (is64bit) {
+//    __ ClassD(FTMP, in);
+//  } else {
+//    __ ClassS(FTMP, in);
+//  }
+//  __ Mfc1(out, FTMP);
+//  __ Andi(out, out, kPositiveInfinity | kNegativeInfinity);
+//  __ Sltu(out, ZERO, out);
+//}
 
 // boolean java.lang.Float.isInfinite(float)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FloatIsInfinite)
@@ -1912,8 +1912,16 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                             info.integer_boot_image_offset);
+      //codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+      //                                       info.integer_boot_image_offset);
+      //auto allocate_instance = [&]() {
+      //  DCHECK(out.X().Is(InvokeRuntimeCallingConvention().GetRegisterAt(0)));
+      //  codegen_->LoadIntrinsicDeclaringClass(out, invoke);
+      //  codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+      //  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      //};
+      //allocate_instance();
+
       __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
       // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
       // one.
@@ -1939,8 +1947,16 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
 
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
-                                           info.integer_boot_image_offset);
+    //codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+    //                                       info.integer_boot_image_offset);
+    //auto allocate_instance = [&]() {
+      //  DCHECK(out.X().Is(InvokeRuntimeCallingConvention().GetRegisterAt(0)));
+      //  codegen_->LoadIntrinsicDeclaringClass(out, invoke);
+      //  codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
+      //  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
+      //};
+    //allocate_instance();
+
     __ StoreToOffset(kStoreWord, in, out, info.value_offset);
     // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
     // one.
@@ -1988,7 +2004,7 @@ UNIMPLEMENTED_INTRINSIC(RISCV64, StringStringIndexOfAfter);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferAppend);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferLength);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferToString);
-UNIMPLEMENTED_INTRINSIC(RISCV64, StringBuilderAppend);
+UNIMPLEMENTED_INTRINSIC(RISCV64, StringBuilderAppendInt);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBuilderLength);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBuilderToString);
 
