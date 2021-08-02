@@ -463,631 +463,631 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   DebugFrameOpCodeWriterForAssembler& cfi() override { return Assembler::cfi(); }
 
   // Emit Machine Instructions.
-  [[noreturn]] void Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void Addiu(GpuRegister rt, GpuRegister rs, int16_t imm16);
-  [[noreturn]] void Daddu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Daddiu(GpuRegister rt, GpuRegister rs, int16_t imm16);  // RISCV64
-  [[noreturn]] void Subu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void Dsubu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void Addiu(GpuRegister rt, GpuRegister rs, int16_t imm16);
+  void Daddu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Daddiu(GpuRegister rt, GpuRegister rs, int16_t imm16);  // RISCV64
+  void Subu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void Dsubu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
 
-  [[noreturn]] void MulR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void MuhR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void DivR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void ModR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void DivuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void ModuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void Dmul(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Dmuh(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Ddiv(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Dmod(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Ddivu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Dmodu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void MulR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void MuhR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void DivR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void ModR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void DivuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void ModuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void Dmul(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Dmuh(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Ddiv(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Dmod(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Ddivu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  void Dmodu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
 
-  [[noreturn]] void Bitswap(GpuRegister rd, GpuRegister rt);
-  [[noreturn]] void Dbitswap(GpuRegister rd, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Seb(GpuRegister rd, GpuRegister rt);
-  [[noreturn]] void Seh(GpuRegister rd, GpuRegister rt);
-  [[noreturn]] void Dsbh(GpuRegister rd, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Dshd(GpuRegister rd, GpuRegister rt);  // RISCV64
-  [[noreturn]] void Dext(GpuRegister rs, GpuRegister rt, int pos, int size);  // RISCV64
-  [[noreturn]] void Ins(GpuRegister rt, GpuRegister rs, int pos, int size);
-  [[noreturn]] void Dins(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  [[noreturn]] void Dinsm(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  [[noreturn]] void Dinsu(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  [[noreturn]] void DblIns(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  [[noreturn]] void Lsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);
-  [[noreturn]] void Dlsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);  // RISCV64
-  [[noreturn]] void Wsbh(GpuRegister rd, GpuRegister rt);
-  [[noreturn]] void Sc(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
-  [[noreturn]] void Scd(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
-  [[noreturn]] void Ll(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
-  [[noreturn]] void Lld(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
+  void Bitswap(GpuRegister rd, GpuRegister rt);
+  void Dbitswap(GpuRegister rd, GpuRegister rt);  // RISCV64
+  void Seb(GpuRegister rd, GpuRegister rt);
+  void Seh(GpuRegister rd, GpuRegister rt);
+  void Dsbh(GpuRegister rd, GpuRegister rt);  // RISCV64
+  void Dshd(GpuRegister rd, GpuRegister rt);  // RISCV64
+  void Dext(GpuRegister rs, GpuRegister rt, int pos, int size);  // RISCV64
+  void Ins(GpuRegister rt, GpuRegister rs, int pos, int size);
+  void Dins(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
+  void Dinsm(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
+  void Dinsu(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
+  void DblIns(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
+  void Lsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);
+  void Dlsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);  // RISCV64
+  void Wsbh(GpuRegister rd, GpuRegister rt);
+  void Sc(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
+  void Scd(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
+  void Ll(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
+  void Lld(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
 
-  [[noreturn]] void Sll(GpuRegister rd, GpuRegister rt, int shamt);
-  [[noreturn]] void Srl(GpuRegister rd, GpuRegister rt, int shamt);
-  [[noreturn]] void Rotr(GpuRegister rd, GpuRegister rt, int shamt);
-  [[noreturn]] void Sra(GpuRegister rd, GpuRegister rt, int shamt);
-  [[noreturn]] void Sllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  [[noreturn]] void Srlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  [[noreturn]] void Rotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  [[noreturn]] void Srav(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  [[noreturn]] void Dsll(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsrl(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Drotr(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsra(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsll32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsrl32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Drotr32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsra32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  [[noreturn]] void Dsllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  [[noreturn]] void Dsrlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  [[noreturn]] void Drotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  [[noreturn]] void Dsrav(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
+  void Sll(GpuRegister rd, GpuRegister rt, int shamt);
+  void Srl(GpuRegister rd, GpuRegister rt, int shamt);
+  void Rotr(GpuRegister rd, GpuRegister rt, int shamt);
+  void Sra(GpuRegister rd, GpuRegister rt, int shamt);
+  void Sllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+  void Srlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+  void Rotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+  void Srav(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+  void Dsll(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsrl(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Drotr(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsra(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsll32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsrl32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Drotr32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsra32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
+  void Dsllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
+  void Dsrlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
+  void Drotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
+  void Dsrav(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
 
-  [[noreturn]] void Lwpc(GpuRegister rs, uint32_t imm19);
-  [[noreturn]] void Lwupc(GpuRegister rs, uint32_t imm19);  // RISCV64
-  [[noreturn]] void Ldpc(GpuRegister rs, uint32_t imm18);  // RISCV64
+  void Lwpc(GpuRegister rs, uint32_t imm19);
+  void Lwupc(GpuRegister rs, uint32_t imm19);  // RISCV64
+  void Ldpc(GpuRegister rs, uint32_t imm18);  // RISCV64
   /*
-  [[noreturn]] void Lui(GpuRegister rt, uint16_t imm16);
+  void Lui(GpuRegister rt, uint16_t imm16);
   */
-  [[noreturn]] void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
-  [[noreturn]] void Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16);  // RISCV64
-  [[noreturn]] void Dahi(GpuRegister rs, uint16_t imm16);  // RISCV64
-  [[noreturn]] void Dati(GpuRegister rs, uint16_t imm16);  // RISCV64
-  [[noreturn]] void Sync(uint32_t stype);
+  void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
+  void Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16);  // RISCV64
+  void Dahi(GpuRegister rs, uint16_t imm16);  // RISCV64
+  void Dati(GpuRegister rs, uint16_t imm16);  // RISCV64
+  void Sync(uint32_t stype);
 
-  [[noreturn]] void Seleqz(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void Selnez(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  [[noreturn]] void Clz(GpuRegister rd, GpuRegister rs);
-  [[noreturn]] void Clo(GpuRegister rd, GpuRegister rs);
-  [[noreturn]] void Dclz(GpuRegister rd, GpuRegister rs);  // RISCV64
-  [[noreturn]] void Dclo(GpuRegister rd, GpuRegister rs);  // RISCV64
+  void Seleqz(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void Selnez(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+  void Clz(GpuRegister rd, GpuRegister rs);
+  void Clo(GpuRegister rd, GpuRegister rs);
+  void Dclz(GpuRegister rd, GpuRegister rs);  // RISCV64
+  void Dclo(GpuRegister rd, GpuRegister rs);  // RISCV64
 
-  [[noreturn]] void Jalr(GpuRegister rd, GpuRegister rs);
-  [[noreturn]] void Jalr(GpuRegister rs);
-  [[noreturn]] void Jr(GpuRegister rs);
-  [[noreturn]] void Addiupc(GpuRegister rs, uint32_t imm19);
-  [[noreturn]] void Bc(uint32_t imm20);
-  [[noreturn]] void Balc(uint32_t imm20);
-  [[noreturn]] void Jic(GpuRegister rt, uint16_t imm16);
-  [[noreturn]] void Jialc(GpuRegister rt, uint16_t imm16);
-  [[noreturn]] void Bltc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bltzc(GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bgtzc(GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bgec(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bgezc(GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Blezc(GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bltuc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bgeuc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Beqc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Bnec(GpuRegister rs, GpuRegister rt, uint16_t imm12);
-  [[noreturn]] void Beqzc(GpuRegister rs, uint32_t imm12);
-  [[noreturn]] void Bnezc(GpuRegister rs, uint32_t imm12);
+  void Jalr(GpuRegister rd, GpuRegister rs);
+  void Jalr(GpuRegister rs);
+  void Jr(GpuRegister rs);
+  void Addiupc(GpuRegister rs, uint32_t imm19);
+  void Bc(uint32_t imm20);
+  void Balc(uint32_t imm20);
+  void Jic(GpuRegister rt, uint16_t imm16);
+  void Jialc(GpuRegister rt, uint16_t imm16);
+  void Bltc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Bltzc(GpuRegister rt, uint16_t imm12);
+  void Bgtzc(GpuRegister rt, uint16_t imm12);
+  void Bgec(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Bgezc(GpuRegister rt, uint16_t imm12);
+  void Blezc(GpuRegister rt, uint16_t imm12);
+  void Bltuc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Bgeuc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Beqc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Bnec(GpuRegister rs, GpuRegister rt, uint16_t imm12);
+  void Beqzc(GpuRegister rs, uint32_t imm12);
+  void Bnezc(GpuRegister rs, uint32_t imm12);
 
-  [[noreturn]] void AddS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SubS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void MulS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void DivS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void AddD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SubD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void MulD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void DivD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SqrtS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void SqrtD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void AbsS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void AbsD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void MovS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void MovD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void NegS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void NegD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void RoundLS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void RoundLD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void RoundWS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void RoundWD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void TruncLS(GpuRegister rd, FpuRegister fs);
-  [[noreturn]] void TruncLD(GpuRegister rd, FpuRegister fs);
-  [[noreturn]] void TruncWS(GpuRegister rd, FpuRegister fs);
-  [[noreturn]] void TruncWD(GpuRegister rd, FpuRegister fs);
-  [[noreturn]] void CeilLS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void CeilLD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void CeilWS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void CeilWD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void FloorLS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void FloorLD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void FloorWS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void FloorWD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SelD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SeleqzS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SeleqzD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SelnezS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void RintS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void RintD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void ClassS(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void ClassD(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUnS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpEqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUeqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpLtS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUltS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpLeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUleS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpOrS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUneS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpNeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUnD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpEqD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUeqD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpLtD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUltD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpLeD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUleD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpOrD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpUneD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  [[noreturn]] void CmpNeD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void AddS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SubS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MulS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void DivS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void AddD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SubD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MulD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void DivD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SqrtS(FpuRegister fd, FpuRegister fs);
+  void SqrtD(FpuRegister fd, FpuRegister fs);
+  void AbsS(FpuRegister fd, FpuRegister fs);
+  void AbsD(FpuRegister fd, FpuRegister fs);
+  void MovS(FpuRegister fd, FpuRegister fs);
+  void MovD(FpuRegister fd, FpuRegister fs);
+  void NegS(FpuRegister fd, FpuRegister fs);
+  void NegD(FpuRegister fd, FpuRegister fs);
+  void RoundLS(FpuRegister fd, FpuRegister fs);
+  void RoundLD(FpuRegister fd, FpuRegister fs);
+  void RoundWS(FpuRegister fd, FpuRegister fs);
+  void RoundWD(FpuRegister fd, FpuRegister fs);
+  void TruncLS(GpuRegister rd, FpuRegister fs);
+  void TruncLD(GpuRegister rd, FpuRegister fs);
+  void TruncWS(GpuRegister rd, FpuRegister fs);
+  void TruncWD(GpuRegister rd, FpuRegister fs);
+  void CeilLS(FpuRegister fd, FpuRegister fs);
+  void CeilLD(FpuRegister fd, FpuRegister fs);
+  void CeilWS(FpuRegister fd, FpuRegister fs);
+  void CeilWD(FpuRegister fd, FpuRegister fs);
+  void FloorLS(FpuRegister fd, FpuRegister fs);
+  void FloorLD(FpuRegister fd, FpuRegister fs);
+  void FloorWS(FpuRegister fd, FpuRegister fs);
+  void FloorWD(FpuRegister fd, FpuRegister fs);
+  void SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SelD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SeleqzS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SeleqzD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SelnezS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void RintS(FpuRegister fd, FpuRegister fs);
+  void RintD(FpuRegister fd, FpuRegister fs);
+  void ClassS(FpuRegister fd, FpuRegister fs);
+  void ClassD(FpuRegister fd, FpuRegister fs);
+  void MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void CmpUnS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpEqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUeqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpLtS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUltS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpLeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUleS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpOrS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUneS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpNeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUnD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpEqD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUeqD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpLtD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUltD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpLeD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUleD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpOrD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpUneD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  void CmpNeD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
 
-  [[noreturn]] void Cvtsw(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void Cvtdw(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void Cvtsd(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void Cvtds(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void Cvtsl(FpuRegister fd, FpuRegister fs);
-  [[noreturn]] void Cvtdl(FpuRegister fd, FpuRegister fs);
+  void Cvtsw(FpuRegister fd, FpuRegister fs);
+  void Cvtdw(FpuRegister fd, FpuRegister fs);
+  void Cvtsd(FpuRegister fd, FpuRegister fs);
+  void Cvtds(FpuRegister fd, FpuRegister fs);
+  void Cvtsl(FpuRegister fd, FpuRegister fs);
+  void Cvtdl(FpuRegister fd, FpuRegister fs);
 
-  [[noreturn]] void Mfc1(GpuRegister rt, FpuRegister fs);
-  [[noreturn]] void Mfhc1(GpuRegister rt, FpuRegister fs);
-  [[noreturn]] void Mtc1(GpuRegister rt, FpuRegister fs);
-  [[noreturn]] void Mthc1(GpuRegister rt, FpuRegister fs);
-  [[noreturn]] void Dmfc1(GpuRegister rt, FpuRegister fs);  // RISCV64
-  [[noreturn]] void Dmtc1(GpuRegister rt, FpuRegister fs);  // RISCV64
-  [[noreturn]] void Lwc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  [[noreturn]] void Ldc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  [[noreturn]] void Swc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  [[noreturn]] void Sdc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
+  void Mfc1(GpuRegister rt, FpuRegister fs);
+  void Mfhc1(GpuRegister rt, FpuRegister fs);
+  void Mtc1(GpuRegister rt, FpuRegister fs);
+  void Mthc1(GpuRegister rt, FpuRegister fs);
+  void Dmfc1(GpuRegister rt, FpuRegister fs);  // RISCV64
+  void Dmtc1(GpuRegister rt, FpuRegister fs);  // RISCV64
+  void Lwc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
+  void Ldc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
+  void Swc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
+  void Sdc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
 
-  [[noreturn]] void Break();
-  [[noreturn]] void Nop();
-  [[noreturn]] void Move(GpuRegister rd, GpuRegister rs);
-  [[noreturn]] void Clear(GpuRegister rd);
-  [[noreturn]] void Not(GpuRegister rd, GpuRegister rs);
+  void Break();
+  void Nop();
+  void Move(GpuRegister rd, GpuRegister rs);
+  void Clear(GpuRegister rd);
+  void Not(GpuRegister rd, GpuRegister rs);
 
   // MSA instructions.
-  [[noreturn]] void AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Asub_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Asub_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void Ffint_sW(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void Ffint_sD(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void Ftint_sW(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void Ftint_sD(VectorRegister wd, VectorRegister ws);
+  void Ffint_sW(VectorRegister wd, VectorRegister ws);
+  void Ffint_sD(VectorRegister wd, VectorRegister ws);
+  void Ftint_sW(VectorRegister wd, VectorRegister ws);
+  void Ftint_sD(VectorRegister wd, VectorRegister ws);
 
-  [[noreturn]] void SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
   // Immediate shift instructions, where shamtN denotes shift amount (must be between 0 and 2^N-1).
-  [[noreturn]] void SlliB(VectorRegister wd, VectorRegister ws, int shamt3);
-  [[noreturn]] void SlliH(VectorRegister wd, VectorRegister ws, int shamt4);
-  [[noreturn]] void SlliW(VectorRegister wd, VectorRegister ws, int shamt5);
-  [[noreturn]] void SlliD(VectorRegister wd, VectorRegister ws, int shamt6);
-  [[noreturn]] void SraiB(VectorRegister wd, VectorRegister ws, int shamt3);
-  [[noreturn]] void SraiH(VectorRegister wd, VectorRegister ws, int shamt4);
-  [[noreturn]] void SraiW(VectorRegister wd, VectorRegister ws, int shamt5);
-  [[noreturn]] void SraiD(VectorRegister wd, VectorRegister ws, int shamt6);
-  [[noreturn]] void SrliB(VectorRegister wd, VectorRegister ws, int shamt3);
-  [[noreturn]] void SrliH(VectorRegister wd, VectorRegister ws, int shamt4);
-  [[noreturn]] void SrliW(VectorRegister wd, VectorRegister ws, int shamt5);
-  [[noreturn]] void SrliD(VectorRegister wd, VectorRegister ws, int shamt6);
+  void SlliB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SlliH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SlliW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SlliD(VectorRegister wd, VectorRegister ws, int shamt6);
+  void SraiB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SraiH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SraiW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SraiD(VectorRegister wd, VectorRegister ws, int shamt6);
+  void SrliB(VectorRegister wd, VectorRegister ws, int shamt3);
+  void SrliH(VectorRegister wd, VectorRegister ws, int shamt4);
+  void SrliW(VectorRegister wd, VectorRegister ws, int shamt5);
+  void SrliD(VectorRegister wd, VectorRegister ws, int shamt6);
 
-  [[noreturn]] void MoveV(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void SplatiB(VectorRegister wd, VectorRegister ws, int n4);
-  [[noreturn]] void SplatiH(VectorRegister wd, VectorRegister ws, int n3);
-  [[noreturn]] void SplatiW(VectorRegister wd, VectorRegister ws, int n2);
-  [[noreturn]] void SplatiD(VectorRegister wd, VectorRegister ws, int n1);
-  [[noreturn]] void Copy_sB(GpuRegister rd, VectorRegister ws, int n4);
-  [[noreturn]] void Copy_sH(GpuRegister rd, VectorRegister ws, int n3);
-  [[noreturn]] void Copy_sW(GpuRegister rd, VectorRegister ws, int n2);
-  [[noreturn]] void Copy_sD(GpuRegister rd, VectorRegister ws, int n1);
-  [[noreturn]] void Copy_uB(GpuRegister rd, VectorRegister ws, int n4);
-  [[noreturn]] void Copy_uH(GpuRegister rd, VectorRegister ws, int n3);
-  [[noreturn]] void Copy_uW(GpuRegister rd, VectorRegister ws, int n2);
-  [[noreturn]] void InsertB(VectorRegister wd, GpuRegister rs, int n4);
-  [[noreturn]] void InsertH(VectorRegister wd, GpuRegister rs, int n3);
-  [[noreturn]] void InsertW(VectorRegister wd, GpuRegister rs, int n2);
-  [[noreturn]] void InsertD(VectorRegister wd, GpuRegister rs, int n1);
-  [[noreturn]] void FillB(VectorRegister wd, GpuRegister rs);
-  [[noreturn]] void FillH(VectorRegister wd, GpuRegister rs);
-  [[noreturn]] void FillW(VectorRegister wd, GpuRegister rs);
-  [[noreturn]] void FillD(VectorRegister wd, GpuRegister rs);
+  void MoveV(VectorRegister wd, VectorRegister ws);
+  void SplatiB(VectorRegister wd, VectorRegister ws, int n4);
+  void SplatiH(VectorRegister wd, VectorRegister ws, int n3);
+  void SplatiW(VectorRegister wd, VectorRegister ws, int n2);
+  void SplatiD(VectorRegister wd, VectorRegister ws, int n1);
+  void Copy_sB(GpuRegister rd, VectorRegister ws, int n4);
+  void Copy_sH(GpuRegister rd, VectorRegister ws, int n3);
+  void Copy_sW(GpuRegister rd, VectorRegister ws, int n2);
+  void Copy_sD(GpuRegister rd, VectorRegister ws, int n1);
+  void Copy_uB(GpuRegister rd, VectorRegister ws, int n4);
+  void Copy_uH(GpuRegister rd, VectorRegister ws, int n3);
+  void Copy_uW(GpuRegister rd, VectorRegister ws, int n2);
+  void InsertB(VectorRegister wd, GpuRegister rs, int n4);
+  void InsertH(VectorRegister wd, GpuRegister rs, int n3);
+  void InsertW(VectorRegister wd, GpuRegister rs, int n2);
+  void InsertD(VectorRegister wd, GpuRegister rs, int n1);
+  void FillB(VectorRegister wd, GpuRegister rs);
+  void FillH(VectorRegister wd, GpuRegister rs);
+  void FillW(VectorRegister wd, GpuRegister rs);
+  void FillD(VectorRegister wd, GpuRegister rs);
 
-  [[noreturn]] void LdiB(VectorRegister wd, int imm8);
-  [[noreturn]] void LdiH(VectorRegister wd, int imm10);
-  [[noreturn]] void LdiW(VectorRegister wd, int imm10);
-  [[noreturn]] void LdiD(VectorRegister wd, int imm10);
-  [[noreturn]] void LdB(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void LdH(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void LdW(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void LdD(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void StB(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void StH(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void StW(VectorRegister wd, GpuRegister rs, int offset);
-  [[noreturn]] void StD(VectorRegister wd, GpuRegister rs, int offset);
+  void LdiB(VectorRegister wd, int imm8);
+  void LdiH(VectorRegister wd, int imm10);
+  void LdiW(VectorRegister wd, int imm10);
+  void LdiD(VectorRegister wd, int imm10);
+  void LdB(VectorRegister wd, GpuRegister rs, int offset);
+  void LdH(VectorRegister wd, GpuRegister rs, int offset);
+  void LdW(VectorRegister wd, GpuRegister rs, int offset);
+  void LdD(VectorRegister wd, GpuRegister rs, int offset);
+  void StB(VectorRegister wd, GpuRegister rs, int offset);
+  void StH(VectorRegister wd, GpuRegister rs, int offset);
+  void StW(VectorRegister wd, GpuRegister rs, int offset);
+  void StD(VectorRegister wd, GpuRegister rs, int offset);
 
-  [[noreturn]] void IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
-  [[noreturn]] void Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt);
+  void Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt);
 
-  [[noreturn]] void PcntB(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void PcntH(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void PcntW(VectorRegister wd, VectorRegister ws);
-  [[noreturn]] void PcntD(VectorRegister wd, VectorRegister ws);
+  void PcntB(VectorRegister wd, VectorRegister ws);
+  void PcntH(VectorRegister wd, VectorRegister ws);
+  void PcntW(VectorRegister wd, VectorRegister ws);
+  void PcntD(VectorRegister wd, VectorRegister ws);
 
 
   // TODO dvt porting...
   /////////////////////////////// RV32I ///////////////////////////////
   // RV32I-R
-  [[noreturn]] void Add(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sub(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sll(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Slt(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sltu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Xor(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Srl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sra(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Or(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void And(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Add(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sub(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sll(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Slt(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sltu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Xor(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Srl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sra(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Or(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void And(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
   // RV32I-I
-  [[noreturn]] void Jalr(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Lb(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Lh(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Lw(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Lbu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Lhu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Addi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Slti(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Xori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Ori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Andi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Slli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Srli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Srai(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Fence(uint8_t pred, uint8_t succ);
-  [[noreturn]] void FenceI();
-  [[noreturn]] void Ecall();
-  [[noreturn]] void Ebreak();
-  [[noreturn]] void Csrrw(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  [[noreturn]] void Csrrs(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  [[noreturn]] void Csrrc(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  [[noreturn]] void Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
-  [[noreturn]] void Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
-  [[noreturn]] void Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  void Jalr(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Lb(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Lh(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Lw(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Lbu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Lhu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Addi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Slti(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Xori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Ori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Andi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Slli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Srli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Srai(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Fence(uint8_t pred, uint8_t succ);
+  void FenceI();
+  void Ecall();
+  void Ebreak();
+  void Csrrw(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
+  void Csrrs(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
+  void Csrrc(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
+  void Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  void Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  void Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
 
   // RV32I-S
-  [[noreturn]] void Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  [[noreturn]] void Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
   // RV32I-B
-  [[noreturn]] void Beq(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  [[noreturn]] void Bne(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  [[noreturn]] void Blt(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  [[noreturn]] void Bge(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  [[noreturn]] void Bltu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  [[noreturn]] void Bgeu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Beq(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Bne(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Blt(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Bge(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Bltu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
+  void Bgeu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
   // RV32I-U
-  [[noreturn]] void Lui(GpuRegister rd, uint32_t imm20);
-  [[noreturn]] void Auipc(GpuRegister rd, uint32_t imm20);
+  void Lui(GpuRegister rd, uint32_t imm20);
+  void Auipc(GpuRegister rd, uint32_t imm20);
   // RV32I-J
-  [[noreturn]] void Jal(GpuRegister rd, uint32_t imm20);
+  void Jal(GpuRegister rd, uint32_t imm20);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV64I ///////////////////////////////
   // RV64I-R
-  [[noreturn]] void Addw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Subw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sllw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Srlw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Sraw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Addw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Subw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sllw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Srlw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Sraw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
   // RV64I-I
-  [[noreturn]] void Lwu(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
-  [[noreturn]] void Ld(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
+  void Lwu(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
+  void Ld(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
   // void Slli(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
   // void Srli(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
   // void Srai(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
-  [[noreturn]] void Addiw(GpuRegister rd, GpuRegister rs1, int16_t imm12);
-  [[noreturn]] void Slliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
-  [[noreturn]] void Srliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
-  [[noreturn]] void Sraiw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
+  void Addiw(GpuRegister rd, GpuRegister rs1, int16_t imm12);
+  void Slliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
+  void Srliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
+  void Sraiw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
   // RV64I-S
-  [[noreturn]] void Sd(GpuRegister rs2, GpuRegister rs1, uint16_t imm12);
+  void Sd(GpuRegister rs2, GpuRegister rs1, uint16_t imm12);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV32M ///////////////////////////////
   // RV32M-R
-  [[noreturn]] void Mul(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Mulh(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Mulhu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Div(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Divu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Rem(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Remu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mul(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulh(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulhu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Div(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Divu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Rem(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Remu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV32A ///////////////////////////////
   // TODO confirm aq=? rl=?
-  [[noreturn]] void LrW(GpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoAddW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoXorW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoAndW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoOrW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMinW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMaxW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void LrW(GpuRegister rd, GpuRegister rs1);
+  void ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoAddW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoXorW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoAndW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoOrW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMinW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMaxW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV64A ///////////////////////////////
   // TODO confirm aq=? rl=?
-  [[noreturn]] void LrD(GpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoAddD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoXorD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoAndD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoOrD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMinD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMaxD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  [[noreturn]] void AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void LrD(GpuRegister rd, GpuRegister rs1);
+  void ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoAddD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoXorD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoAndD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoOrD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMinD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMaxD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
+  void AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV64M ///////////////////////////////
   // RV64M-R
-  [[noreturn]] void Mulw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Divw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Divuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Remw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  [[noreturn]] void Remuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Divw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Divuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Remw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Remuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
 
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV32F ///////////////////////////////
   // RV32F-I
-  [[noreturn]] void FLw(FpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void FLw(FpuRegister rd, GpuRegister rs1, uint16_t offset);
   // RV32F-S
-  [[noreturn]] void FSw(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void FSw(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
   // RV32F-R
-  [[noreturn]] void FMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMulS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FDivS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSqrtS(FpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FSgnjS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMinS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMaxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FCvtWS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  [[noreturn]] void FCvtWuS(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FMvXW(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FEqS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FLtS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FLeS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FClassS(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtSW(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FCvtSWu(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FMvWX(FpuRegister rd, GpuRegister rs1);
+  void FMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMulS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FDivS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSqrtS(FpuRegister rd, FpuRegister rs1);
+  void FSgnjS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMinS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMaxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FCvtWS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtWuS(GpuRegister rd, FpuRegister rs1);
+  void FMvXW(GpuRegister rd, FpuRegister rs1);
+  void FEqS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FLtS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FLeS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FClassS(GpuRegister rd, FpuRegister rs1);
+  void FCvtSW(FpuRegister rd, GpuRegister rs1);
+  void FCvtSWu(FpuRegister rd, GpuRegister rs1);
+  void FMvWX(FpuRegister rd, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV64F ///////////////////////////////
   // RV64F-R
-  [[noreturn]] void FCvtLS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  [[noreturn]] void FCvtLuS(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtSL(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FCvtSLu(FpuRegister rd, GpuRegister rs1);
+  void FCvtLS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtLuS(GpuRegister rd, FpuRegister rs1);
+  void FCvtSL(FpuRegister rd, GpuRegister rs1);
+  void FCvtSLu(FpuRegister rd, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV32D ///////////////////////////////
   // RV32D-I
-  [[noreturn]] void FLd(FpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void FLd(FpuRegister rd, GpuRegister rs1, uint16_t offset);
   // RV32D-S
-  [[noreturn]] void FSd(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void FSd(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
   // RV32D-R
-  [[noreturn]] void FMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  [[noreturn]] void FAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMulD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FDivD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSqrtD(FpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FSgnjD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMinD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FMaxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FCvtSD(FpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtDS(FpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FEqD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FLtD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FLeD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  [[noreturn]] void FClassD(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtWD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  [[noreturn]] void FCvtWuD(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtDW(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FCvtDWu(FpuRegister rd, GpuRegister rs1);
+  void FMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMulD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FDivD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSqrtD(FpuRegister rd, FpuRegister rs1);
+  void FSgnjD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMinD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMaxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FCvtSD(FpuRegister rd, FpuRegister rs1);
+  void FCvtDS(FpuRegister rd, FpuRegister rs1);
+  void FEqD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FLtD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FLeD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FClassD(GpuRegister rd, FpuRegister rs1);
+  void FCvtWD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtWuD(GpuRegister rd, FpuRegister rs1);
+  void FCvtDW(FpuRegister rd, GpuRegister rs1);
+  void FCvtDWu(FpuRegister rd, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   /////////////////////////////// RV64D ///////////////////////////////
-  [[noreturn]] void FCvtLD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  [[noreturn]] void FCvtLuD(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FMvXD(GpuRegister rd, FpuRegister rs1);
-  [[noreturn]] void FCvtDL(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FCvtDLu(FpuRegister rd, GpuRegister rs1);
-  [[noreturn]] void FMvDX(FpuRegister rd, GpuRegister rs1);
+  void FCvtLD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtLuD(GpuRegister rd, FpuRegister rs1);
+  void FMvXD(GpuRegister rd, FpuRegister rs1);
+  void FCvtDL(FpuRegister rd, GpuRegister rs1);
+  void FCvtDLu(FpuRegister rd, GpuRegister rs1);
+  void FMvDX(FpuRegister rd, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
   // Helper for replicating floating point value in all destination elements.
-  [[noreturn]] void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
+  void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
 
   // Higher level composite instructions.
   int InstrCountForLoadReplicatedConst32(int64_t);
-  [[noreturn]] void LoadConst32(GpuRegister rd, int32_t value);
-  [[noreturn]] void LoadConst64(GpuRegister rd, int64_t value);  // RISCV64
+  void LoadConst32(GpuRegister rd, int32_t value);
+  void LoadConst64(GpuRegister rd, int64_t value);  // RISCV64
 
   // This function is only used for testing purposes.
-  [[noreturn]] void RecordLoadConst64Path(int value);
+  void RecordLoadConst64Path(int value);
 
-  [[noreturn]] void Addiu32(GpuRegister rt, GpuRegister rs, int32_t value);
-  [[noreturn]] void Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);  // RISCV64
+  void Addiu32(GpuRegister rt, GpuRegister rs, int32_t value);
+  void Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);  // RISCV64
 
   //
   // Heap poisoning.
   //
 
   // Poison a heap reference contained in `src` and store it in `dst`.
-  [[noreturn]] void PoisonHeapReference(GpuRegister dst, GpuRegister src) {
+  void PoisonHeapReference(GpuRegister dst, GpuRegister src) {
     // dst = -src.
     // Negate the 32-bit ref.
     Dsubu(dst, ZERO, src);
@@ -1095,12 +1095,12 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     Dext(dst, dst, 0, 32);
   }
   // Poison a heap reference contained in `reg`.
-  [[noreturn]] void PoisonHeapReference(GpuRegister reg) {
+  void PoisonHeapReference(GpuRegister reg) {
     // reg = -reg.
     PoisonHeapReference(reg, reg);
   }
   // Unpoison a heap reference contained in `reg`.
-  [[noreturn]] void UnpoisonHeapReference(GpuRegister reg) {
+  void UnpoisonHeapReference(GpuRegister reg) {
     // reg = -reg.
     // Negate the 32-bit ref.
     Sub(reg, ZERO, reg);
@@ -1121,7 +1121,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     }
   }
 
-  [[noreturn]] void Bind(Label* label) override {
+  void Bind(Label* label) override {
     Bind(down_cast<Riscv64Label*>(label));
   }
   
@@ -1129,7 +1129,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     UNIMPLEMENTED(FATAL) << "Do not use Jump for RISCV64";
   }
 
-  [[noreturn]] void Bind(Riscv64Label* label);
+  void Bind(Riscv64Label* label);
 
   // Don't warn about a different virtual Bind/Jump in the base class.
   using JNIBase::Bind;
@@ -1148,18 +1148,18 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   // Emit a conditional jump to the label by applying a unary condition test to the register.
-  [[noreturn]] void Jump(ManagedRegister base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) override {
+  void Jump(ManagedRegister base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
   }
 
   // Code at this offset will serve as the target for the Jump call.
-  [[noreturn]] void Bind(JNIMacroLabel* label ATTRIBUTE_UNUSED) override {
+  void Bind(JNIMacroLabel* label ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
   }
 
-  [[noreturn]] void Jump(JNIMacroLabel* label ATTRIBUTE_UNUSED) override {
+  void Jump(JNIMacroLabel* label ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
   }
@@ -1169,7 +1169,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   //  UNREACHABLE();
   //}
 
-  [[noreturn]] void CopyRef(FrameOffset dest ATTRIBUTE_UNUSED,
+  void CopyRef(FrameOffset dest ATTRIBUTE_UNUSED,
                        ManagedRegister base ATTRIBUTE_UNUSED,
                        MemberOffset offs ATTRIBUTE_UNUSED,
                        bool unpoison_reference ATTRIBUTE_UNUSED) override {
@@ -1178,13 +1178,13 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
 
-  [[noreturn]] void CreateJObject(FrameOffset out_off ATTRIBUTE_UNUSED, FrameOffset spilled_reference_offset ATTRIBUTE_UNUSED,
+  void CreateJObject(FrameOffset out_off ATTRIBUTE_UNUSED, FrameOffset spilled_reference_offset ATTRIBUTE_UNUSED,
                              bool null_allowed ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
   }
 
-  [[noreturn]] void CreateJObject(ManagedRegister out_reg ATTRIBUTE_UNUSED,
+  void CreateJObject(ManagedRegister out_reg ATTRIBUTE_UNUSED,
                              FrameOffset spilled_reference_offset ATTRIBUTE_UNUSED,
                              ManagedRegister in_reg ATTRIBUTE_UNUSED,
                              bool null_allowed ATTRIBUTE_UNUSED) override {
@@ -1192,7 +1192,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     UNREACHABLE();
   }
 
-  [[noreturn]] void MoveArguments(ArrayRef<ArgumentLocation> dests ATTRIBUTE_UNUSED, ArrayRef<ArgumentLocation> srcs ATTRIBUTE_UNUSED) override {
+  void MoveArguments(ArrayRef<ArgumentLocation> dests ATTRIBUTE_UNUSED, ArrayRef<ArgumentLocation> srcs ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
   }
@@ -1207,13 +1207,13 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
 
   // Load label address using PC-relative loads. To be used with data labels in the literal /
   // jump table area only and not with regular code labels.
-  [[noreturn]] void LoadLabelAddress(GpuRegister dest_reg, Riscv64Label* label);
+  void LoadLabelAddress(GpuRegister dest_reg, Riscv64Label* label);
 
   // Create a new literal with the given data.
   Literal* NewLiteral(size_t size, const uint8_t* data);
 
   // Load literal using PC-relative loads.
-  [[noreturn]] void LoadLiteral(GpuRegister dest_reg, LoadOperandType load_type, Literal* literal);
+  void LoadLiteral(GpuRegister dest_reg, LoadOperandType load_type, Literal* literal);
 
   // Create a jump table for the given labels that will be emitted when finalizing.
   // When the table is emitted, offsets will be relative to the location of the table.
@@ -1242,41 +1242,41 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   //   expected to remain unchanged
   //
   // R6 compact branches without delay/forbidden slots.
-  [[noreturn]] void Bc(Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Balc(Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Jal(Riscv64Label* label, bool is_bare = false);
+  void Bc(Riscv64Label* label, bool is_bare = false);
+  void Balc(Riscv64Label* label, bool is_bare = false);
+  void Jal(Riscv64Label* label, bool is_bare = false);
   // R6 compact branches with forbidden slots.
-  [[noreturn]] void Bltc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bltzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bgtzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bgec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bgezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Blezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bltuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bgeuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Beqc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bnec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Beqzc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
-  [[noreturn]] void Bnezc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
+  void Bltc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bltzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgtzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Blezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bltuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgeuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Beqc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bnec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Beqzc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
+  void Bnezc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
 
-  [[noreturn]] void Bltz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bgtz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bgez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Blez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Jal(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Beq(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bne(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Blt(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bge(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bltu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bgeu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Beqz(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
-  [[noreturn]] void Bnez(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bltz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgtz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Blez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Jal(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Beq(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bne(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Blt(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bge(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bltu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgeu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Beqz(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bnez(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
 
-  [[noreturn]] void EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset, size_t size);
-  [[noreturn]] void AdjustBaseAndOffset(GpuRegister& base, int32_t& offset, bool is_doubleword);
+  void EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset, size_t size);
+  void AdjustBaseAndOffset(GpuRegister& base, int32_t& offset, bool is_doubleword);
   // If element_size_shift is negative at entry, its value will be calculated based on the offset.
-  [[noreturn]] void AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
+  void AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
                                            int32_t& offset,
                                            int& element_size_shift);
 
@@ -1289,7 +1289,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
 
  public:
   template <typename ImplicitNullChecker = NoImplicitNullChecker>
-  [[noreturn]] void StoreConstToOffset(StoreOperandType type,
+  void StoreConstToOffset(StoreOperandType type,
                           int64_t value,
                           GpuRegister base,
                           int32_t offset,
@@ -1362,7 +1362,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template <typename ImplicitNullChecker = NoImplicitNullChecker>
-  [[noreturn]] void LoadFromOffset(LoadOperandType type,
+  void LoadFromOffset(LoadOperandType type,
                       GpuRegister reg,
                       GpuRegister base,
                       int32_t offset,
@@ -1403,7 +1403,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template <typename ImplicitNullChecker = NoImplicitNullChecker>
-  [[noreturn]] void LoadFpuFromOffset(LoadOperandType type,
+  void LoadFpuFromOffset(LoadOperandType type,
                          FpuRegister reg,
                          GpuRegister base,
                          int32_t offset,
@@ -1434,7 +1434,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template <typename ImplicitNullChecker = NoImplicitNullChecker>
-  [[noreturn]] void StoreToOffset(StoreOperandType type,
+  void StoreToOffset(StoreOperandType type,
                      GpuRegister reg,
                      GpuRegister base,
                      int32_t offset,
@@ -1468,7 +1468,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template <typename ImplicitNullChecker = NoImplicitNullChecker>
-  [[noreturn]] void StoreFpuToOffset(StoreOperandType type,
+  void StoreFpuToOffset(StoreOperandType type,
                         FpuRegister reg,
                         GpuRegister base,
                         int32_t offset,
@@ -1499,134 +1499,134 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     }
   }
 
-  [[noreturn]] void LoadFromOffset(LoadOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
-  [[noreturn]] void LoadFpuFromOffset(LoadOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
-  [[noreturn]] void StoreToOffset(StoreOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
-  [[noreturn]] void StoreFpuToOffset(StoreOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
+  void LoadFromOffset(LoadOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
+  void LoadFpuFromOffset(LoadOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
+  void StoreToOffset(StoreOperandType type, GpuRegister reg, GpuRegister base, int32_t offset);
+  void StoreFpuToOffset(StoreOperandType type, FpuRegister reg, GpuRegister base, int32_t offset);
 
   // Emit data (e.g. encoded instruction or immediate) to the instruction stream.
-  [[noreturn]] void Emit(uint32_t value);
+  void Emit(uint32_t value);
 
   //
   // Overridden common assembler high-level functionality.
   //
 
   // Emit code that will create an activation on the stack.
-  [[noreturn]] void BuildFrame(size_t frame_size,
+  void BuildFrame(size_t frame_size,
                   ManagedRegister method_reg,
                   ArrayRef<const ManagedRegister> callee_save_regs) override;
 
   // Emit code that will remove an activation from the stack.
-  [[noreturn]] void RemoveFrame(size_t frame_size,
+  void RemoveFrame(size_t frame_size,
                    ArrayRef<const ManagedRegister> callee_save_regs,
                    bool may_suspend) override;
 
-  [[noreturn]] void IncreaseFrameSize(size_t adjust) override;
-  [[noreturn]] void DecreaseFrameSize(size_t adjust) override;
+  void IncreaseFrameSize(size_t adjust) override;
+  void DecreaseFrameSize(size_t adjust) override;
 
   // Store routines.
-  [[noreturn]] void Store(FrameOffset offs, ManagedRegister msrc, size_t size) override;
-  [[noreturn]] void StoreRef(FrameOffset dest, ManagedRegister msrc) override;
-  [[noreturn]] void StoreRawPtr(FrameOffset dest, ManagedRegister msrc) override;
+  void Store(FrameOffset offs, ManagedRegister msrc, size_t size) override;
+  void StoreRef(FrameOffset dest, ManagedRegister msrc) override;
+  void StoreRawPtr(FrameOffset dest, ManagedRegister msrc) override;
 
-  [[noreturn]] void StoreImmediateToFrame(FrameOffset dest, uint32_t imm) override;
+  void StoreImmediateToFrame(FrameOffset dest, uint32_t imm) override;
 
-  [[noreturn]] void StoreStackOffsetToThread(ThreadOffset64 thr_offs,
+  void StoreStackOffsetToThread(ThreadOffset64 thr_offs,
                                         FrameOffset fr_offs) override;
 
-  [[noreturn]] void StoreStackPointerToThread(ThreadOffset64 thr_offs) override;
+  void StoreStackPointerToThread(ThreadOffset64 thr_offs) override;
 
-  [[noreturn]] void StoreSpanning(FrameOffset dest, ManagedRegister msrc, FrameOffset in_off) override;
+  void StoreSpanning(FrameOffset dest, ManagedRegister msrc, FrameOffset in_off) override;
 
   // Load routines.
-  [[noreturn]] void Load(ManagedRegister mdest, FrameOffset src, size_t size) override;
+  void Load(ManagedRegister mdest, FrameOffset src, size_t size) override;
 
-  [[noreturn]] void LoadFromThread(ManagedRegister mdest, ThreadOffset64 src, size_t size) override;
+  void LoadFromThread(ManagedRegister mdest, ThreadOffset64 src, size_t size) override;
 
-  [[noreturn]] void LoadRef(ManagedRegister dest, FrameOffset src) override;
+  void LoadRef(ManagedRegister dest, FrameOffset src) override;
 
-  [[noreturn]] void LoadRef(ManagedRegister mdest, ManagedRegister base, MemberOffset offs,
+  void LoadRef(ManagedRegister mdest, ManagedRegister base, MemberOffset offs,
                bool unpoison_reference) override;
 
-  [[noreturn]] void LoadRawPtr(ManagedRegister mdest, ManagedRegister base, Offset offs) override;
+  void LoadRawPtr(ManagedRegister mdest, ManagedRegister base, Offset offs) override;
 
-  [[noreturn]] void LoadRawPtrFromThread(ManagedRegister mdest, ThreadOffset64 offs) override;
+  void LoadRawPtrFromThread(ManagedRegister mdest, ThreadOffset64 offs) override;
 
   // Copying routines.
-  [[noreturn]] void Move(ManagedRegister mdest, ManagedRegister msrc, size_t size) override;
+  void Move(ManagedRegister mdest, ManagedRegister msrc, size_t size) override;
 
-  [[noreturn]] void CopyRawPtrFromThread(FrameOffset fr_offs,
+  void CopyRawPtrFromThread(FrameOffset fr_offs,
                             ThreadOffset64 THREAD_FLAGS_OFFSET) override;
 
-  [[noreturn]] void CopyRawPtrToThread(ThreadOffset64 thr_offs,
+  void CopyRawPtrToThread(ThreadOffset64 thr_offs,
                           FrameOffset fr_offs,
                           ManagedRegister mscratch) override;
 
-  [[noreturn]] void CopyRef(FrameOffset dest, FrameOffset src) override;
+  void CopyRef(FrameOffset dest, FrameOffset src) override;
 
-  [[noreturn]] void Copy(FrameOffset dest, FrameOffset src, size_t size) override;
+  void Copy(FrameOffset dest, FrameOffset src, size_t size) override;
 
-  [[noreturn]] void Copy(FrameOffset dest, ManagedRegister src_base, Offset src_offset,
+  void Copy(FrameOffset dest, ManagedRegister src_base, Offset src_offset,
             ManagedRegister scratch, size_t size) override;
 
-  [[noreturn]] void Copy(ManagedRegister dest_base, Offset dest_offset, FrameOffset src,
+  void Copy(ManagedRegister dest_base, Offset dest_offset, FrameOffset src,
             ManagedRegister scratch, size_t size) override;
 
-  [[noreturn]] void Copy(FrameOffset dest, FrameOffset src_base, Offset src_offset,
+  void Copy(FrameOffset dest, FrameOffset src_base, Offset src_offset,
             ManagedRegister scratch, size_t size) override;
 
-  [[noreturn]] void Copy(ManagedRegister dest, Offset dest_offset, ManagedRegister src, Offset src_offset,
+  void Copy(ManagedRegister dest, Offset dest_offset, ManagedRegister src, Offset src_offset,
             ManagedRegister scratch, size_t size) override;
 
-  [[noreturn]] void Copy(FrameOffset dest, Offset dest_offset, FrameOffset src, Offset src_offset,
+  void Copy(FrameOffset dest, Offset dest_offset, FrameOffset src, Offset src_offset,
             ManagedRegister scratch, size_t size) override;
 
-  [[noreturn]] void MemoryBarrier(ManagedRegister) override;
+  void MemoryBarrier(ManagedRegister) override;
 
   // Sign extension.
-  [[noreturn]] void SignExtend(ManagedRegister mreg, size_t size) override;
+  void SignExtend(ManagedRegister mreg, size_t size) override;
 
   // Zero extension.
-  [[noreturn]] void ZeroExtend(ManagedRegister mreg, size_t size) override;
+  void ZeroExtend(ManagedRegister mreg, size_t size) override;
 
   // Exploit fast access in managed code to Thread::Current().
-  [[noreturn]] void GetCurrentThread(ManagedRegister tr) override;
-  [[noreturn]] void GetCurrentThread(FrameOffset dest_offset) override;
+  void GetCurrentThread(ManagedRegister tr) override;
+  void GetCurrentThread(FrameOffset dest_offset) override;
 
   // Set up out_reg to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed. in_reg holds a possibly stale reference
   // that can be used to avoid loading the handle scope entry to see if the value is
   // null.
-  [[noreturn]] void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
+  void CreateHandleScopeEntry(ManagedRegister out_reg, FrameOffset handlescope_offset,
                               ManagedRegister in_reg, bool null_allowed);
 
   // Set up out_off to hold a Object** into the handle scope, or to be null if the
   // value is null and null_allowed.
-  [[noreturn]] void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset, ManagedRegister
+  void CreateHandleScopeEntry(FrameOffset out_off, FrameOffset handlescope_offset, ManagedRegister
                               mscratch, bool null_allowed);
 
   // src holds a handle scope entry (Object**) load this into dst.
-  [[noreturn]] void LoadReferenceFromHandleScope(ManagedRegister dst, ManagedRegister src);
+  void LoadReferenceFromHandleScope(ManagedRegister dst, ManagedRegister src);
 
   // Heap::VerifyObject on src. In some cases (such as a reference to this) we
   // know that src may not be null.
-  [[noreturn]] void VerifyObject(ManagedRegister src, bool could_be_null) override;
-  [[noreturn]] void VerifyObject(FrameOffset src, bool could_be_null) override;
+  void VerifyObject(ManagedRegister src, bool could_be_null) override;
+  void VerifyObject(FrameOffset src, bool could_be_null) override;
 
   // Call to address held at [base+offset].
-  [[noreturn]] void Call(ManagedRegister base, Offset offset) override;
-  [[noreturn]] void Call(FrameOffset base, Offset offset) override;
-  [[noreturn]] void CallFromThread(ThreadOffset64 offset) override;
+  void Call(ManagedRegister base, Offset offset) override;
+  void Call(FrameOffset base, Offset offset) override;
+  void CallFromThread(ThreadOffset64 offset) override;
 
   // Generate code to check if Thread::Current()->exception_ is non-null
   // and branch to a ExceptionSlowPath if it is.
-  [[noreturn]] void ExceptionPoll(size_t stack_adjust) override;
+  void ExceptionPoll(size_t stack_adjust) override;
 
   // Emit slow paths queued during assembly and promote short branches to long if needed.
-  [[noreturn]] void FinalizeCode() override;
+  void FinalizeCode() override;
 
   // Emit branches and finalize all instructions.
-  [[noreturn]] void FinalizeInstructions(const MemoryRegion& region) override;
+  void FinalizeInstructions(const MemoryRegion& region) override;
 
   // Returns the (always-)current location of a label (can be used in class CodeGeneratorRISCV64,
   // must be used instead of Riscv64Label::GetPosition()).
@@ -1782,14 +1782,14 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     static OffsetBits GetOffsetSizeNeeded(uint32_t location, uint32_t target);
 
     // Resolve a branch when the target is known.
-    [[noreturn]] void Resolve(uint32_t target);
+    void Resolve(uint32_t target);
 
     // Relocate a branch by a given delta if needed due to expansion of this or another
     // branch at a given location by this delta (just changes location_ and target_).
-    [[noreturn]] void Relocate(uint32_t expand_location, uint32_t delta);
+    void Relocate(uint32_t expand_location, uint32_t delta);
 
     // If the branch is short, changes its type to long.
-    [[noreturn]] void PromoteToLong();
+    void PromoteToLong();
 
     // If necessary, updates the type by promoting a short branch to a long branch
     // based on the branch location and target. Returns the amount (in bytes) by
@@ -1808,9 +1808,9 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
 
    private:
     // Completes branch construction by determining and recording its type.
-    [[noreturn]] void InitializeType(Type initial_type);
+    void InitializeType(Type initial_type);
     // Helper for the above.
-    [[noreturn]] void InitShortOrLong(OffsetBits ofs_size, Type short_type, Type long_type);
+    void InitShortOrLong(OffsetBits ofs_size, Type short_type, Type long_type);
 
     uint32_t old_location_;      // Offset into assembler buffer in bytes.
     uint32_t location_;          // Offset into assembler buffer in bytes.
@@ -1827,30 +1827,30 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   friend std::ostream& operator<<(std::ostream& os, const Branch::Type& rhs);
   friend std::ostream& operator<<(std::ostream& os, const Branch::OffsetBits& rhs);
 
-  [[noreturn]] void EmitRsd(int opcode, GpuRegister rs, GpuRegister rd, int shamt, int funct);
-  [[noreturn]] void EmitRtd(int opcode, GpuRegister rt, GpuRegister rd, int shamt, int funct);
-  [[noreturn]] void EmitI(int opcode, GpuRegister rs, GpuRegister rt, uint16_t imm);
-  [[noreturn]] void EmitI21(int opcode, GpuRegister rs, uint32_t imm21);
-  [[noreturn]] void EmitI26(int opcode, uint32_t imm26);
-  [[noreturn]] void EmitFR(int opcode, int fmt, FpuRegister ft, FpuRegister fs, FpuRegister fd, int funct);
-  [[noreturn]] void EmitFI(int opcode, int fmt, FpuRegister rt, uint16_t imm);
-  [[noreturn]] void EmitBcond(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
-  [[noreturn]] void EmitMsa3R(int operation,
+  void EmitRsd(int opcode, GpuRegister rs, GpuRegister rd, int shamt, int funct);
+  void EmitRtd(int opcode, GpuRegister rt, GpuRegister rd, int shamt, int funct);
+  void EmitI(int opcode, GpuRegister rs, GpuRegister rt, uint16_t imm);
+  void EmitI21(int opcode, GpuRegister rs, uint32_t imm21);
+  void EmitI26(int opcode, uint32_t imm26);
+  void EmitFR(int opcode, int fmt, FpuRegister ft, FpuRegister fs, FpuRegister fd, int funct);
+  void EmitFI(int opcode, int fmt, FpuRegister rt, uint16_t imm);
+  void EmitBcond(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
+  void EmitMsa3R(int operation,
                  int df,
                  VectorRegister wt,
                  VectorRegister ws,
                  VectorRegister wd,
                  int minor_opcode);
-  [[noreturn]] void EmitMsaBIT(int operation, int df_m, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  [[noreturn]] void EmitMsaELM(int operation, int df_n, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  [[noreturn]] void EmitMsaMI10(int s10, GpuRegister rs, VectorRegister wd, int minor_opcode, int df);
-  [[noreturn]] void EmitMsaI10(int operation, int df, int i10, VectorRegister wd, int minor_opcode);
-  [[noreturn]] void EmitMsa2R(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  [[noreturn]] void EmitMsa2RF(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsaBIT(int operation, int df_m, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsaELM(int operation, int df_n, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsaMI10(int s10, GpuRegister rs, VectorRegister wd, int minor_opcode, int df);
+  void EmitMsaI10(int operation, int df, int i10, VectorRegister wd, int minor_opcode);
+  void EmitMsa2R(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  void EmitMsa2RF(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
 
   // TODO dvt porting...
   template<typename Reg1, typename Reg2, typename Reg3>
-  [[noreturn]] void EmitR(int funct7, Reg1 rs2, Reg2 rs1, int funct3, Reg3 rd, int opcode) {
+  void EmitR(int funct7, Reg1 rs2, Reg2 rs1, int funct3, Reg3 rd, int opcode) {
     // TODO validate params
     uint32_t encoding = static_cast<uint32_t>(funct7) << 25 |
                         static_cast<uint32_t>(rs2) << 20 |
@@ -1862,7 +1862,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template<typename Reg1, typename Reg2, typename Reg3, typename Reg4>
-  [[noreturn]] void EmitR4(Reg1 rs3, int funct2, Reg2 rs2, Reg3 rs1, int funct3, Reg4 rd, int opcode) {
+  void EmitR4(Reg1 rs3, int funct2, Reg2 rs2, Reg3 rs1, int funct3, Reg4 rd, int opcode) {
     // TODO validate params
     uint32_t encoding = static_cast<uint32_t>(rs3) << 27 |
                         static_cast<uint32_t>(funct2) << 25 |
@@ -1875,7 +1875,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   }
 
   template<typename Reg1, typename Reg2>
-  [[noreturn]] void EmitI(uint16_t imm, Reg1 rs1, int funct3, Reg2 rd, int opcode) {
+  void EmitI(uint16_t imm, Reg1 rs1, int funct3, Reg2 rd, int opcode) {
     uint32_t encoding = static_cast<uint32_t>(imm) << 20 |
                         static_cast<uint32_t>(rs1) << 15 |
                         static_cast<uint32_t>(funct3) << 12 |
@@ -1884,11 +1884,11 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     Emit(encoding);
   }
 
-  [[noreturn]] void EmitI5(uint16_t funct7, uint16_t imm5, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
-  [[noreturn]] void EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
+  void EmitI5(uint16_t funct7, uint16_t imm5, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
+  void EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
 
   template<typename Reg1, typename Reg2>
-  [[noreturn]] void EmitS(uint16_t imm, Reg1 rs2, Reg2 rs1, int funct3, int opcode) {
+  void EmitS(uint16_t imm, Reg1 rs2, Reg2 rs1, int funct3, int opcode) {
     // TODO validate params
     uint32_t encoding = (static_cast<uint32_t>(imm)&0xFE0) << 20 |
                         static_cast<uint32_t>(rs2) << 20 |
@@ -1899,32 +1899,32 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     Emit(encoding);
   }
 
-  [[noreturn]] void EmitB(uint16_t imm, GpuRegister rs2, GpuRegister rs1, int funct3, int opcode);
-  [[noreturn]] void EmitU(uint32_t imm, GpuRegister rd, int opcode);
-  [[noreturn]] void EmitJ(uint32_t imm, GpuRegister rd, int opcode);
+  void EmitB(uint16_t imm, GpuRegister rs2, GpuRegister rs1, int funct3, int opcode);
+  void EmitU(uint32_t imm, GpuRegister rd, int opcode);
+  void EmitJ(uint32_t imm, GpuRegister rd, int opcode);
 
-  [[noreturn]] void Buncond(Riscv64Label* label, bool is_bare);
-  [[noreturn]] void Bcond(Riscv64Label* label,
+  void Buncond(Riscv64Label* label, bool is_bare);
+  void Bcond(Riscv64Label* label,
              bool is_bare,
              BranchCondition condition,
              GpuRegister lhs,
              GpuRegister rhs = ZERO);
-  [[noreturn]] void Call(Riscv64Label* label, bool is_bare);
-  [[noreturn]] void FinalizeLabeledBranch(Riscv64Label* label);
+  void Call(Riscv64Label* label, bool is_bare);
+  void FinalizeLabeledBranch(Riscv64Label* label);
 
   Branch* GetBranch(uint32_t branch_id);
   const Branch* GetBranch(uint32_t branch_id) const;
 
-  [[noreturn]] void EmitLiterals();
-  [[noreturn]] void ReserveJumpTableSpace();
-  [[noreturn]] void EmitJumpTables();
-  [[noreturn]] void PromoteBranches();
-  [[noreturn]] void EmitBranch(Branch* branch);
-  [[noreturn]] void EmitBranches();
-  [[noreturn]] void PatchCFI();
+  void EmitLiterals();
+  void ReserveJumpTableSpace();
+  void EmitJumpTables();
+  void PromoteBranches();
+  void EmitBranch(Branch* branch);
+  void EmitBranches();
+  void PatchCFI();
 
   // Emits exception block.
-  [[noreturn]] void EmitExceptionPoll(Riscv64ExceptionSlowPath* exception);
+  void EmitExceptionPoll(Riscv64ExceptionSlowPath* exception);
 
   bool HasMsa() const {
     return has_msa_;
