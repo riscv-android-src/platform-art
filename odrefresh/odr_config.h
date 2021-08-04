@@ -146,6 +146,8 @@ class OdrConfig final {
       case art::InstructionSet::kArm:
       case art::InstructionSet::kArm64:
         return std::make_pair(art::InstructionSet::kArm, art::InstructionSet::kArm64);
+      case art::InstructionSet::kRiscv64:
+        return std::make_pair(art::InstructionSet::kRiscv64, art::InstructionSet::kRiscv64);
       case art::InstructionSet::kX86:
       case art::InstructionSet::kX86_64:
         return std::make_pair(art::InstructionSet::kX86, art::InstructionSet::kX86_64);
