@@ -371,7 +371,7 @@ class CodeGeneratorRISCV64 : public CodeGenerator {
 
   size_t GetCalleePreservedFPWidth() const override {
     return 1 * kRiscv64DoublewordSize;
-   }
+  }
 
   uintptr_t GetAddressOf(HBasicBlock* block) override {
     return assembler_.GetLabelLocation(GetLabelOf(block));
@@ -386,20 +386,20 @@ class CodeGeneratorRISCV64 : public CodeGenerator {
   void EmitLinkerPatches(ArenaVector<linker::LinkerPatch>* linker_patches) override;
   void EmitJitRootPatches(uint8_t* code, const uint8_t* roots_data) override;
 
-  size_t GetSIMDRegisterWidth() const override{
-    //fixme!!
+  size_t GetSIMDRegisterWidth() const override {
+    // fixme!!
     return 1 * kRiscv64DoublewordSize;
   }
 
-  //fixme!!
-  void IncreaseFrame(size_t adjustment) override{
-    //__ Claim(adjustment);
+  // fixme!!
+  void IncreaseFrame(size_t adjustment) override {
+    // __ Claim(adjustment);
     GetAssembler()->cfi().AdjustCFAOffset(adjustment);
   }
 
-  //fixme!!
-  void DecreaseFrame(size_t adjustment) override{
-    //__ Drop(adjustment);
+  // fixme!!
+  void DecreaseFrame(size_t adjustment) override {
+    // __ Drop(adjustment);
     GetAssembler()->cfi().AdjustCFAOffset(-adjustment);
   }
 

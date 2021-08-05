@@ -3712,8 +3712,8 @@ void Riscv64Assembler::BuildFrame(size_t frame_size,
 
   // Write out entry spills.
   // todo: replace the entry_spills
-  //int32_t offset = frame_size + kFramePointerSize;
-  //for (const ManagedRegisterSpill& spill : entry_spills) {
+  // int32_t offset = frame_size + kFramePointerSize;
+  // for (const ManagedRegisterSpill& spill : entry_spills) {
   //  Riscv64ManagedRegister reg = spill.AsRiscv64();
   //  int32_t size = spill.getSize();
   //  if (reg.IsNoRegister()) {
@@ -3728,7 +3728,7 @@ void Riscv64Assembler::BuildFrame(size_t frame_size,
   //        reg.AsGpuRegister(), SP, offset);
   //    offset += size;
   //  }
-  //}
+  // }
 }
 
 void Riscv64Assembler::RemoveFrame(size_t frame_size,
@@ -3819,22 +3819,22 @@ void Riscv64Assembler::StoreRawPtr(FrameOffset dest, ManagedRegister msrc) {
 }
 
 void Riscv64Assembler::StoreImmediateToFrame(FrameOffset dest ATTRIBUTE_UNUSED, uint32_t imm ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //todo: follow below are ways to get the scratch
-  //UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
-  //Register scratch = temps.AcquireW();
-  
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //LoadConst32(scratch.AsGpuRegister(), imm);
-  //StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // todo: follow below are ways to get the scratch
+  // UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
+  // Register scratch = temps.AcquireW();
+
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // LoadConst32(scratch.AsGpuRegister(), imm);
+  // StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
 }
 
 void Riscv64Assembler::StoreStackOffsetToThread(ThreadOffset64 thr_offs ATTRIBUTE_UNUSED,
                                                FrameOffset fr_offs ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //Daddiu64(scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
-  //StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // Daddiu64(scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
+  // StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
 }
 
 void Riscv64Assembler::StoreStackPointerToThread(ThreadOffset64 thr_offs) {
@@ -3843,11 +3843,11 @@ void Riscv64Assembler::StoreStackPointerToThread(ThreadOffset64 thr_offs) {
 
 void Riscv64Assembler::StoreSpanning(FrameOffset dest ATTRIBUTE_UNUSED, ManagedRegister msrc ATTRIBUTE_UNUSED,
                                     FrameOffset in_off ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister src = msrc.AsRiscv64();
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //StoreToOffset(kStoreDoubleword, src.AsGpuRegister(), SP, dest.Int32Value());
-  //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), SP, in_off.Int32Value());
-  //StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, dest.Int32Value() + 8);
+  // Riscv64ManagedRegister src = msrc.AsRiscv64();
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // StoreToOffset(kStoreDoubleword, src.AsGpuRegister(), SP, dest.Int32Value());
+  // LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), SP, in_off.Int32Value());
+  // StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, dest.Int32Value() + 8);
 }
 
 void Riscv64Assembler::Load(ManagedRegister mdest, FrameOffset src, size_t size) {
@@ -3920,18 +3920,18 @@ void Riscv64Assembler::Move(ManagedRegister mdest, ManagedRegister msrc, size_t 
 }
 
 void Riscv64Assembler::CopyRef(FrameOffset dest ATTRIBUTE_UNUSED, FrameOffset src ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //LoadFromOffset(kLoadWord, scratch.AsGpuRegister(), SP, src.Int32Value());
-  //StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // LoadFromOffset(kLoadWord, scratch.AsGpuRegister(), SP, src.Int32Value());
+  // StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
 }
 
 void Riscv64Assembler::CopyRawPtrFromThread(FrameOffset fr_offs ATTRIBUTE_UNUSED,
                                            ThreadOffset64 thr_offs ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
-  //StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
+  // StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
 }
 
 void Riscv64Assembler::CopyRawPtrToThread(ThreadOffset64 thr_offs,
@@ -3947,18 +3947,18 @@ void Riscv64Assembler::CopyRawPtrToThread(ThreadOffset64 thr_offs,
 
 void Riscv64Assembler::Copy(FrameOffset dest ATTRIBUTE_UNUSED, FrameOffset src ATTRIBUTE_UNUSED,
                             size_t size ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //CHECK(size == 4 || size == 8) << size;
-  //if (size == 4) {
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // CHECK(size == 4 || size == 8) << size;
+  // if (size == 4) {
   //  LoadFromOffset(kLoadWord, scratch.AsGpuRegister(), SP, src.Int32Value());
   //  StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, dest.Int32Value());
-  //} else if (size == 8) {
+  // } else if (size == 8) {
   //  LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), SP, src.Int32Value());
   //  StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, dest.Int32Value());
-  //} else {
+  // } else {
   //  UNIMPLEMENTED(FATAL) << "We only support Copy() of size 4 and 8";
-  //}
+  // }
 }
 
 void Riscv64Assembler::Copy(FrameOffset dest, ManagedRegister src_base, Offset src_offset,
@@ -4114,27 +4114,27 @@ void Riscv64Assembler::VerifyObject(FrameOffset src ATTRIBUTE_UNUSED,
 }
 
 void Riscv64Assembler::Call(ManagedRegister mbase ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister base = mbase.AsRiscv64();
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(base.IsGpuRegister()) << base;
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
+  // Riscv64ManagedRegister base = mbase.AsRiscv64();
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(base.IsGpuRegister()) << base;
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
   //               base.AsGpuRegister(), offset.Int32Value());
-  //Jalr(scratch.AsGpuRegister());
-  //Nop();
+  // Jalr(scratch.AsGpuRegister());
+  // Nop();
   // TODO: place reference map on call
 }
 
 void Riscv64Assembler::Call(FrameOffset base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //CHECK(scratch.IsGpuRegister()) << scratch;
-  //// Call *(*(SP + base) + offset)
-  //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // CHECK(scratch.IsGpuRegister()) << scratch;
+  // Call *(*(SP + base) + offset)
+  // LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
   //               SP, base.Int32Value());
-  //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
+  // LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(),
   //               scratch.AsGpuRegister(), offset.Int32Value());
-  //Jalr(scratch.AsGpuRegister());
-  //Nop();
+  // Jalr(scratch.AsGpuRegister());
+  // Nop();
   // TODO: place reference map on call
 }
 
@@ -4151,13 +4151,13 @@ void Riscv64Assembler::GetCurrentThread(FrameOffset offset) {
 }
 
 void Riscv64Assembler::ExceptionPoll(size_t stack_adjust ATTRIBUTE_UNUSED) {
-  //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
-  //exception_blocks_.emplace_back(scratch, stack_adjust);
-  //LoadFromOffset(kLoadDoubleword,
+  // Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
+  // exception_blocks_.emplace_back(scratch, stack_adjust);
+  // LoadFromOffset(kLoadDoubleword,
   //               scratch.AsGpuRegister(),
   //               S1,
   //               Thread::ExceptionOffset<kRiscv64PointerSize>().Int32Value());
-  //Bnezc(scratch.AsGpuRegister(), exception_blocks_.back().Entry());
+  // Bnezc(scratch.AsGpuRegister(), exception_blocks_.back().Entry());
 }
 
 void Riscv64Assembler::EmitExceptionPoll(Riscv64ExceptionSlowPath* exception) {

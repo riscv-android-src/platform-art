@@ -362,14 +362,14 @@ void IntrinsicCodeGeneratorRISCV64::VisitMathSqrt(HInvoke* invoke) {
   __ SqrtD(out, in);
 }
 
-//static void CreateFPToFP(ArenaAllocator* allocator,
+// static void CreateFPToFP(ArenaAllocator* allocator,
 //                         HInvoke* invoke,
 //                         Location::OutputOverlap overlaps = Location::kOutputOverlap) {
 //  LocationSummary* locations =
 //      new (allocator) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
 //  locations->SetInAt(0, Location::RequiresFpuRegister());
 //  locations->SetOut(Location::RequiresFpuRegister(), overlaps);
-//}
+// }
 
 // double java.lang.Math.rint(double)  // @TODO
 UNIMPLEMENTED_INTRINSIC(RISCV64, MathRint)
@@ -473,274 +473,274 @@ void IntrinsicLocationsBuilderRISCV64::VisitMemoryPokeIntNative(HInvoke* invoke)
 }
 
 void IntrinsicLocationsBuilderRISCV64::VisitStringBuilderAppendDouble(HInvoke*) {
-  //todo: follow arm64 to implement riscv version
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitReferenceRefersTo(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitReferenceRefersTo(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitMethodHandleInvokeExact(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitMethodHandleInvokeExact(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitMethodHandleInvoke(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitMethodHandleInvoke(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchange(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchange(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchangeAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchangeAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchangeRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndExchangeRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleCompareAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAdd(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAdd(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAddAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAddAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAddRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndAddRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAnd(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAnd(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAndAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAndAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAndRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseAndRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOr(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOr(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOrAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOrAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOrRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseOrRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXor(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXor(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXorAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXorAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXorRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndBitwiseXorRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetAndSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetOpaque(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetOpaque(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetVolatile(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleGetVolatile(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetOpaque(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetOpaque(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetVolatile(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleSetVolatile(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetPlain(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetPlain(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicLocationsBuilderRISCV64::VisitVarHandleWeakCompareAndSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitIntegerDivideUnsigned(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerDivideUnsigned(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitLongDivideUnsigned(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitLongDivideUnsigned(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitMathMultiplyHigh(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitMathMultiplyHigh(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16Ceil(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16Ceil(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16Floor(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16Floor(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16Rint(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16Rint(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16ToFloat(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16ToFloat(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16ToHalf(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16ToHalf(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16Greater(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16Greater(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16GreaterEquals(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16GreaterEquals(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16Less(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16Less(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitFP16LessEquals(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitFP16LessEquals(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendObject(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendObject(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendString(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendString(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendCharSequence(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendCharSequence(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendCharArray(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendCharArray(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendChar(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendChar(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendLong(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendLong(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendFloat(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendFloat(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendDouble(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendDouble(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitReferenceRefersTo(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitReferenceRefersTo(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitMethodHandleInvokeExact(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitMethodHandleInvokeExact(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitMethodHandleInvoke(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitMethodHandleInvoke(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchange(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchange(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchangeAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchangeAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
 void IntrinsicCodeGeneratorRISCV64::VisitStringBuilderAppendBoolean(HInvoke*) {
-  //todo: follow arm64 to implement riscv version
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchangeRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndExchangeRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleCompareAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAdd(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAdd(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAddAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAddAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAddRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndAddRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAnd(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAnd(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAndAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAndAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAndRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseAndRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOr(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOr(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOrAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOrAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOrRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseOrRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXor(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXor(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXorAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXorAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXorRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndBitwiseXorRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetAndSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetOpaque(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetOpaque(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetVolatile(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleGetVolatile(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetOpaque(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetOpaque(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetVolatile(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleSetVolatile(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSet(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSet(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetAcquire(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetAcquire(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetPlain(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetPlain(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
-void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetRelease(HInvoke*){
-  //todo: follow arm64 to implement riscv version
+void IntrinsicCodeGeneratorRISCV64::VisitVarHandleWeakCompareAndSetRelease(HInvoke*) {
+  // todo: follow arm64 to implement riscv version
 }
 
 void IntrinsicCodeGeneratorRISCV64::VisitMemoryPokeIntNative(HInvoke* invoke) {
@@ -1601,7 +1601,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringNewStringFromString(HInvoke* invo
   __ Bind(slow_path->GetExitLabel());
 }
 
-//static void GenIsInfinite(LocationSummary* locations,
+// static void GenIsInfinite(LocationSummary* locations,
 //                          bool is64bit,
 //                          Riscv64Assembler* assembler) {
 //  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
@@ -2183,15 +2183,15 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
       // Allocate and initialize a new j.l.Integer.
       // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
-      //codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+      // codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
       //                                       info.integer_boot_image_offset);
-      //auto allocate_instance = [&]() {
+      // auto allocate_instance = [&]() {
       //  DCHECK(out.X().Is(InvokeRuntimeCallingConvention().GetRegisterAt(0)));
       //  codegen_->LoadIntrinsicDeclaringClass(out, invoke);
       //  codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
       //  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-      //};
-      //allocate_instance();
+      // };
+      // allocate_instance();
 
       __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
       // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation
@@ -2218,15 +2218,15 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
 
     __ Bind(&allocate);
     // Otherwise allocate and initialize a new j.l.Integer.
-    //codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
+    // codegen_->AllocateInstanceForIntrinsic(invoke->AsInvokeStaticOrDirect(),
     //                                       info.integer_boot_image_offset);
-    //auto allocate_instance = [&]() {
+    // auto allocate_instance = [&]() {
       //  DCHECK(out.X().Is(InvokeRuntimeCallingConvention().GetRegisterAt(0)));
       //  codegen_->LoadIntrinsicDeclaringClass(out, invoke);
       //  codegen_->InvokeRuntime(kQuickAllocObjectInitialized, invoke, invoke->GetDexPc());
       //  CheckEntrypointTypes<kQuickAllocObjectWithChecks, void*, mirror::Class*>();
-      //};
-    //allocate_instance();
+      // };
+    // allocate_instance();
 
     __ StoreToOffset(kStoreWord, in, out, info.value_offset);
     // `value` is a final field :-( Ideally, we'd merge this memory barrier with the allocation

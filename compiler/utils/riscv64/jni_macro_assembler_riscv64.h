@@ -168,7 +168,7 @@ class Riscv64JNIMacroAssembler final : public JNIMacroAssemblerFwd<Riscv64Assemb
   // Emit an unconditional jump to the label.
   void Jump(JNIMacroLabel* label) override;
   // Emit a conditional jump to the label by applying a unary condition test to the register.
-  //void Jump(JNIMacroLabel* label, JNIMacroUnaryCondition cond, ManagedRegister test) override;
+  // void Jump(JNIMacroLabel* label, JNIMacroUnaryCondition cond, ManagedRegister test) override;
   void Jump(ManagedRegister base, Offset offset) override;
   // Code at this offset will serve as the target for the Jump call.
   void Bind(JNIMacroLabel* label) override;
@@ -180,9 +180,9 @@ class Riscv64JNIMacroAssembler final : public JNIMacroAssemblerFwd<Riscv64Assemb
                              bool null_allowed)  override;
   void CreateJObject(FrameOffset out_off,
                              FrameOffset spilled_reference_offset,
-                             bool null_allowed)  override;                          
+                             bool null_allowed)  override;
   void TestGcMarking(JNIMacroLabel* label, JNIMacroUnaryCondition cond)  override;
-  
+
  private:
  /*
   void StoreWToOffset(StoreOperandType type,

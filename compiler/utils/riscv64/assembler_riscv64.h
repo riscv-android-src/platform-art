@@ -1124,7 +1124,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
   void Bind(Label* label) override {
     Bind(down_cast<Riscv64Label*>(label));
   }
-  
+
   void Jump(Label* label ATTRIBUTE_UNUSED) override {
     UNIMPLEMENTED(FATAL) << "Do not use Jump for RISCV64";
   }
@@ -1141,7 +1141,7 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     UNREACHABLE();
   }
 
-  virtual void TestGcMarking(JNIMacroLabel* label ATTRIBUTE_UNUSED,
+  void TestGcMarking(JNIMacroLabel* label ATTRIBUTE_UNUSED,
                    JNIMacroUnaryCondition cond ATTRIBUTE_UNUSED) override {
     LOG(FATAL) << "Not implemented on RISCV64";
     UNREACHABLE();
@@ -1164,10 +1164,10 @@ class Riscv64Assembler final : public Assembler, public JNIMacroAssembler<Pointe
     UNREACHABLE();
   }
 
-  //void ExceptionPoll(size_t stack_adjust ATTRIBUTE_UNUSED) override {
+  // void ExceptionPoll(size_t stack_adjust ATTRIBUTE_UNUSED) override {
   //  LOG(FATAL) << "Not implemented on RISCV64";
   //  UNREACHABLE();
-  //}
+  // }
 
   void CopyRef(FrameOffset dest ATTRIBUTE_UNUSED,
                        ManagedRegister base ATTRIBUTE_UNUSED,

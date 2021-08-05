@@ -26,7 +26,7 @@ namespace art {
 namespace riscv64 {
 
 // Up to kow many args can be enregistered. The rest of the args must go on the stack.
-//constexpr size_t kMaxRegisterArguments = 8u;
+// constexpr size_t kMaxRegisterArguments = 8u;
 // Up to how many float-like (float, double) args can be enregistered.
 // The rest of the args must go on the stack.
 constexpr size_t kMaxFloatOrDoubleRegisterArguments = 8u;
@@ -73,11 +73,11 @@ static constexpr uint32_t kCoreCalleeSpillMask = CalculateCoreCalleeSpillMask();
 static constexpr uint32_t kFpCalleeSpillMask = 0u;
 
 // Calling convention
-//ManagedRegister Riscv64ManagedRuntimeCallingConvention::InterproceduralScratchRegister() {
+// ManagedRegister Riscv64ManagedRuntimeCallingConvention::InterproceduralScratchRegister() {
 //  return Riscv64ManagedRegister::FromGpuRegister(T6);
 //}
 //
-//ManagedRegister Riscv64JniCallingConvention::InterproceduralScratchRegister() {
+// ManagedRegister Riscv64JniCallingConvention::InterproceduralScratchRegister() {
 //  return Riscv64ManagedRegister::FromGpuRegister(T6);
 //}
 
@@ -131,7 +131,7 @@ FrameOffset Riscv64ManagedRuntimeCallingConvention::CurrentParamStackOffset() {
   return result;
 }
 
-//const ManagedRegisterEntrySpills& Riscv64ManagedRuntimeCallingConvention::EntrySpills() {
+// const ManagedRegisterEntrySpills& Riscv64ManagedRuntimeCallingConvention::EntrySpills() {
 //  if ((entry_spills_.size() == 0) && (NumArgs() > 0)) {
 //    int gp_reg_index = 1;   // we start from X1/W1, X0 holds ArtMethod*.
 //    int fp_reg_index = 0;   // D0/S0.
@@ -172,7 +172,7 @@ FrameOffset Riscv64ManagedRuntimeCallingConvention::CurrentParamStackOffset() {
 //    }
 //  }
 //  return entry_spills_;
-//}
+// }
 
 // JNI calling convention
 
@@ -214,8 +214,8 @@ size_t Riscv64JniCallingConvention::FrameSize() const {
 
   size_t total_size = frame_data_size;
 
-  //fixme: as no HasHandleScope definition
-  //if (LIKELY(HasHandleScope())) {
+  // fixme: as no HasHandleScope definition
+  // if (LIKELY(HasHandleScope())) {
     // HandleScope is sometimes excluded.
   //  total_size += handle_scope_size;                                 // Handle scope size.
   //}
@@ -227,15 +227,15 @@ size_t Riscv64JniCallingConvention::FrameSize() const {
   return RoundUp(total_size, kStackAlignment);
 }
 
-//todo: same as OutArgSize?
-size_t Riscv64JniCallingConvention::OutFrameSize() const{
+// todo: same as OutArgSize?
+size_t Riscv64JniCallingConvention::OutFrameSize() const {
   size_t all_args = NumberOfExtraArgumentsForJni() + NumArgs();
 
-  //todo: follow arm64 to get the size
-  //size_t num_fp_args = NumFloatOrDoubleArgs();
-  //DCHECK_GE(all_args, num_fp_args);
-  //size_t num_non_fp_args = all_args - num_fp_args;
-  
+  // todo: follow arm64 to get the size
+  // size_t num_fp_args = NumFloatOrDoubleArgs();
+  // DCHECK_GE(all_args, num_fp_args);
+  // size_t num_non_fp_args = all_args - num_fp_args;
+
   //  // @CriticalNative can use tail call as all managed callee saves are preserved by AAPCS64.
   //  static_assert((kCoreCalleeSpillMask & ~kAapcs64CoreCalleeSpillMask) == 0u);
   //  static_assert((kFpCalleeSpillMask & ~kAapcs64FpCalleeSpillMask) == 0u);
@@ -250,9 +250,9 @@ size_t Riscv64JniCallingConvention::OutFrameSize() const{
   //    DCHECK_EQ(out_args_size, GetCriticalNativeStubFrameSize(GetShorty(), NumArgs() + 1u));
   //  }
   //  return out_args_size;
-  
-  
-  //return RoundUp(NumberOfOutgoingStackArgs() * kFramePointerSize, kStackAlignment);
+
+
+  // return RoundUp(NumberOfOutgoingStackArgs() * kFramePointerSize, kStackAlignment);
   return RoundUp(all_args * kFramePointerSize, kStackAlignment);
 }
 
@@ -261,37 +261,37 @@ ArrayRef<const ManagedRegister> Riscv64JniCallingConvention::CalleeSaveRegisters
 }
 
 ManagedRegister Riscv64JniCallingConvention::SavedLocalReferenceCookieRegister() const {
-  //todo: arm based implementation.
+  // todo: arm based implementation.
   // The r5 is callee-save register in both managed and native ABIs.
   // It is saved in the stack frame and it has no special purpose like `tr`.
-  //static_assert((kCoreCalleeSpillMask & (1u << R5)) != 0u);  // Managed callee save register.
-  //return ArmManagedRegister::FromCoreRegister(R5);
+  // static_assert((kCoreCalleeSpillMask & (1u << R5)) != 0u);  // Managed callee save register.
+  // return ArmManagedRegister::FromCoreRegister(R5);
 
   return ManagedRegister::NoRegister();
 }
 
-ManagedRegister Riscv64JniCallingConvention::HiddenArgumentRegister() const{
-  //todo: arm based implementation.
-  //CHECK(IsCriticalNative());
+ManagedRegister Riscv64JniCallingConvention::HiddenArgumentRegister() const {
+  // todo: arm based implementation.
+  // CHECK(IsCriticalNative());
   //// R4 is neither managed callee-save, nor argument register, nor scratch register.
   //// (It is native callee-save but the value coming from managed code can be clobbered.)
   //// TODO: Change to static_assert; std::none_of should be constexpr since C++20.
-  //DCHECK(std::none_of(kCalleeSaveRegisters,
+  // DCHECK(std::none_of(kCalleeSaveRegisters,
   //                    kCalleeSaveRegisters + std::size(kCalleeSaveRegisters),
   //                    [](ManagedRegister callee_save) constexpr {
   //                      return callee_save.Equals(ArmManagedRegister::FromCoreRegister(R4));
   //                    }));
-  //DCHECK(std::none_of(kJniArgumentRegisters,
+  // DCHECK(std::none_of(kJniArgumentRegisters,
   //                    kJniArgumentRegisters + std::size(kJniArgumentRegisters),
   //                    [](Register reg) { return reg == R4; }));
-  //return ArmManagedRegister::FromCoreRegister(R4);
+  // return ArmManagedRegister::FromCoreRegister(R4);
   return ManagedRegister::NoRegister();
 }
 
 bool Riscv64JniCallingConvention::UseTailCall() const {
-  //todo: 
-  //CHECK(IsCriticalNative());
-  //return OutFrameSize() == 0u;
+  // todo:
+  // CHECK(IsCriticalNative());
+  // return OutFrameSize() == 0u;
   return true;
 }
 

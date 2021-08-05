@@ -138,7 +138,7 @@ void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest ATTRIBUTE_UNUSED,
                        ManagedRegister base ATTRIBUTE_UNUSED,
                        MemberOffset offs ATTRIBUTE_UNUSED,
                        bool unpoison_reference ATTRIBUTE_UNUSED) {
-  //todo: follow arm64 to implement a riscv version
+  // todo: follow arm64 to implement a riscv version
 }
 
 void Riscv64JNIMacroAssembler::Copy(FrameOffset dest,
@@ -256,10 +256,10 @@ void Riscv64JNIMacroAssembler::Jump(JNIMacroLabel* label) {
 }
 
 void Riscv64JNIMacroAssembler::Jump(ManagedRegister base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
-  //todo: reimplement it
-  //CHECK(label != nullptr);
-//
-  //switch (condition) {
+  // todo: reimplement it
+  // CHECK(label != nullptr);
+  //
+  // switch (condition) {
   //  case JNIMacroUnaryCondition::kZero:
   //    __ Beqzc(test.AsRiscv64().AsGpuRegister(), down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
   //    break;
@@ -269,7 +269,7 @@ void Riscv64JNIMacroAssembler::Jump(ManagedRegister base ATTRIBUTE_UNUSED, Offse
   //  default:
   //    LOG(FATAL) << "Not implemented unary condition: " << static_cast<int>(condition);
   //    UNREACHABLE();
-  //}
+  // }
 }
 
 void Riscv64JNIMacroAssembler::Bind(JNIMacroLabel* label) {
@@ -290,21 +290,21 @@ void Riscv64JNIMacroAssembler::RemoveFrame(size_t frame_size,
 }
 
 void Riscv64JNIMacroAssembler::MoveArguments(ArrayRef<art::ArgumentLocation>, ArrayRef<art::ArgumentLocation>) {
-  //todo: follow arm64 to implement a riscv version
+  // todo: follow arm64 to implement a riscv version
 }
 
 
-void Riscv64JNIMacroAssembler::CreateJObject(art::ManagedRegister ATTRIBUTE_UNUSED, 
-        art::FrameOffset ATTRIBUTE_UNUSED, art::ManagedRegister ATTRIBUTE_UNUSED, bool){
-  //todo: follow arm64 to implement a riscv version
+void Riscv64JNIMacroAssembler::CreateJObject(art::ManagedRegister ATTRIBUTE_UNUSED,
+        art::FrameOffset ATTRIBUTE_UNUSED, art::ManagedRegister ATTRIBUTE_UNUSED, bool) {
+  // todo: follow arm64 to implement a riscv version
 }
-void Riscv64JNIMacroAssembler::CreateJObject(art::FrameOffset ATTRIBUTE_UNUSED, 
-        art::FrameOffset ATTRIBUTE_UNUSED, bool){
-  //todo: follow arm64 to implement a riscv version
+void Riscv64JNIMacroAssembler::CreateJObject(art::FrameOffset ATTRIBUTE_UNUSED,
+        art::FrameOffset ATTRIBUTE_UNUSED, bool) {
+  // todo: follow arm64 to implement a riscv version
 }
 void Riscv64JNIMacroAssembler::TestGcMarking(art::JNIMacroLabel*,
-        art::JNIMacroUnaryCondition  ATTRIBUTE_UNUSED){
-  //todo: follow arm64 to implement a riscv version
+        art::JNIMacroUnaryCondition  ATTRIBUTE_UNUSED) {
+  // todo: follow arm64 to implement a riscv version
 }
 #undef ___
 

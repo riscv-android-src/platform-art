@@ -37,17 +37,17 @@ class Riscv64ManagedRuntimeCallingConvention final : public ManagedRuntimeCallin
   ~Riscv64ManagedRuntimeCallingConvention() override {}
   // Calling convention
   ManagedRegister ReturnRegister() override;
-  //ManagedRegister InterproceduralScratchRegister() override;
+  // ManagedRegister InterproceduralScratchRegister() override;
   // Managed runtime calling convention
   ManagedRegister MethodRegister() override;
   bool IsCurrentParamInRegister() override;
   bool IsCurrentParamOnStack() override;
   ManagedRegister CurrentParamRegister() override;
   FrameOffset CurrentParamStackOffset() override;
-  //const ManagedRegisterEntrySpills& EntrySpills() override;
+  // const ManagedRegisterEntrySpills& EntrySpills() override;
 
  private:
-  //ManagedRegisterEntrySpills entry_spills_;
+  // ManagedRegisterEntrySpills entry_spills_;
 
   DISALLOW_COPY_AND_ASSIGN(Riscv64ManagedRuntimeCallingConvention);
 };
@@ -62,10 +62,10 @@ class Riscv64JniCallingConvention final : public JniCallingConvention {
   // Calling convention
   ManagedRegister ReturnRegister() override;
   ManagedRegister IntReturnRegister() override;
-  //ManagedRegister InterproceduralScratchRegister() override;
+  // ManagedRegister InterproceduralScratchRegister() override;
   // JNI calling convention
   size_t FrameSize() const override;
-  //size_t OutArgSize() override;
+  // size_t OutArgSize() override;
   size_t OutFrameSize() const override;
   ManagedRegister SavedLocalReferenceCookieRegister() const override;
   ArrayRef<const ManagedRegister> CalleeSaveRegisters() const override;
