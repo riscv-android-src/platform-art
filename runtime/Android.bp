@@ -372,7 +372,7 @@ libart_cc_defaults {
         riscv64: {
             srcs: [
                 "interpreter/mterp/mterp.cc",
-                ":libart_mterp.riscv64",
+                ":libart_mterp.riscv64ng",
                 "arch/riscv64/context_riscv64.cc",
                 "arch/riscv64/entrypoints_init_riscv64.cc",
                 "arch/riscv64/jni_entrypoints_riscv64.S",
@@ -994,6 +994,20 @@ genrule {
 }
 
 genrule {
+    name: "libart_mterp.riscv64ng",
+    out: ["mterp_riscv64ng.S"],
+    srcs: [
+        "interpreter/mterp/riscv64ng/*.S",
+    ],
+    tool_files: [
+        "interpreter/mterp/gen_mterp.py",
+        "interpreter/mterp/common/gen_setup.py",
+        ":art_libdexfile_dex_instruction_list_header",
+    ],
+    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
+}
+
+genrule {
     name: "libart_mterp.armng",
     out: ["mterp_armng.S"],
     srcs: [
@@ -1042,11 +1056,4 @@ genrule {
     ],
 }
 
-genrule {
-  name: "libart_mterp.riscv64",
-  out: ["mterp_riscv64.S"],
-  srcs: ["interpreter/mterp/riscv64/*.S"],
-  tool_files: ["interpreter/mterp/gen_mterp.py", "interpreter/mterp/common/gen_setup.py"],
-  cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
-}
 

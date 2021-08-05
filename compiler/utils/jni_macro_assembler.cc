@@ -49,7 +49,7 @@ MacroAsm32UniquePtr JNIMacroAssembler<PointerSize::k32>::Create(
     const InstructionSetFeatures* instruction_set_features) {
   // TODO: Remove the parameter from API (not needed after Mips target was removed).
   UNUSED(instruction_set_features);
-
+  UNUSED(allocator);
   switch (instruction_set) {
 #ifdef ART_ENABLE_CODEGEN_arm
     case InstructionSet::kArm:

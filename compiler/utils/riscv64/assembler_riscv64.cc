@@ -713,7 +713,7 @@ void Riscv64Assembler::Dati(GpuRegister rs, uint16_t imm16) {
   Add(rs, rs, TMP2);
 }
 
-void Riscv64Assembler::Sync(uint32_t stype) {
+void Riscv64Assembler::Sync(uint32_t stype ATTRIBUTE_UNUSED) {
   // zhengxing: just for simplify, use normal fence here for all types.
   Fence(0xf, 0xf);
 }
@@ -1374,11 +1374,11 @@ void Riscv64Assembler::CmpNeD(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
   Sltiu(rd, rd, 1);
 }
 
-void Riscv64Assembler::Cvtsw(FpuRegister fd, FpuRegister fs) {
+void Riscv64Assembler::Cvtsw(FpuRegister fd ATTRIBUTE_UNUSED, FpuRegister fs ATTRIBUTE_UNUSED) {
   assert(0);
 }
 
-void Riscv64Assembler::Cvtdw(FpuRegister fd, FpuRegister fs) {
+void Riscv64Assembler::Cvtdw(FpuRegister fd ATTRIBUTE_UNUSED, FpuRegister fs ATTRIBUTE_UNUSED) {
   assert(0);
 }
 
@@ -1390,11 +1390,11 @@ void Riscv64Assembler::Cvtds(FpuRegister fd, FpuRegister fs) {
   FCvtDS(fd, fs);
 }
 
-void Riscv64Assembler::Cvtsl(FpuRegister fd, FpuRegister fs) {
+void Riscv64Assembler::Cvtsl(FpuRegister fd ATTRIBUTE_UNUSED, FpuRegister fs ATTRIBUTE_UNUSED) {
   assert(0);
 }
 
-void Riscv64Assembler::Cvtdl(FpuRegister fd, FpuRegister fs) {
+void Riscv64Assembler::Cvtdl(FpuRegister fd ATTRIBUTE_UNUSED, FpuRegister fs ATTRIBUTE_UNUSED) {
   assert(0);
 }
 
@@ -3818,7 +3818,7 @@ void Riscv64Assembler::StoreRawPtr(FrameOffset dest, ManagedRegister msrc) {
   StoreToOffset(kStoreDoubleword, src.AsGpuRegister(), SP, dest.Int32Value());
 }
 
-void Riscv64Assembler::StoreImmediateToFrame(FrameOffset dest, uint32_t imm) {
+void Riscv64Assembler::StoreImmediateToFrame(FrameOffset dest ATTRIBUTE_UNUSED, uint32_t imm ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //todo: follow below are ways to get the scratch
   //UseScratchRegisterScope temps(asm_.GetVIXLAssembler());
@@ -3829,8 +3829,8 @@ void Riscv64Assembler::StoreImmediateToFrame(FrameOffset dest, uint32_t imm) {
   //StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
 }
 
-void Riscv64Assembler::StoreStackOffsetToThread(ThreadOffset64 thr_offs,
-                                               FrameOffset fr_offs) {
+void Riscv64Assembler::StoreStackOffsetToThread(ThreadOffset64 thr_offs ATTRIBUTE_UNUSED,
+                                               FrameOffset fr_offs ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(scratch.IsGpuRegister()) << scratch;
   //Daddiu64(scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
@@ -3841,8 +3841,8 @@ void Riscv64Assembler::StoreStackPointerToThread(ThreadOffset64 thr_offs) {
   StoreToOffset(kStoreDoubleword, SP, S1, thr_offs.Int32Value());
 }
 
-void Riscv64Assembler::StoreSpanning(FrameOffset dest, ManagedRegister msrc,
-                                    FrameOffset in_off) {
+void Riscv64Assembler::StoreSpanning(FrameOffset dest ATTRIBUTE_UNUSED, ManagedRegister msrc ATTRIBUTE_UNUSED,
+                                    FrameOffset in_off ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister src = msrc.AsRiscv64();
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //StoreToOffset(kStoreDoubleword, src.AsGpuRegister(), SP, dest.Int32Value());
@@ -3919,15 +3919,15 @@ void Riscv64Assembler::Move(ManagedRegister mdest, ManagedRegister msrc, size_t 
   }
 }
 
-void Riscv64Assembler::CopyRef(FrameOffset dest, FrameOffset src) {
+void Riscv64Assembler::CopyRef(FrameOffset dest ATTRIBUTE_UNUSED, FrameOffset src ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(scratch.IsGpuRegister()) << scratch;
   //LoadFromOffset(kLoadWord, scratch.AsGpuRegister(), SP, src.Int32Value());
   //StoreToOffset(kStoreWord, scratch.AsGpuRegister(), SP, dest.Int32Value());
 }
 
-void Riscv64Assembler::CopyRawPtrFromThread(FrameOffset fr_offs,
-                                           ThreadOffset64 thr_offs) {
+void Riscv64Assembler::CopyRawPtrFromThread(FrameOffset fr_offs ATTRIBUTE_UNUSED,
+                                           ThreadOffset64 thr_offs ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(scratch.IsGpuRegister()) << scratch;
   //LoadFromOffset(kLoadDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
@@ -3945,8 +3945,8 @@ void Riscv64Assembler::CopyRawPtrToThread(ThreadOffset64 thr_offs,
                 S1, thr_offs.Int32Value());
 }
 
-void Riscv64Assembler::Copy(FrameOffset dest, FrameOffset src,
-                            size_t size) {
+void Riscv64Assembler::Copy(FrameOffset dest ATTRIBUTE_UNUSED, FrameOffset src ATTRIBUTE_UNUSED,
+                            size_t size ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(scratch.IsGpuRegister()) << scratch;
   //CHECK(size == 4 || size == 8) << size;
@@ -4113,7 +4113,7 @@ void Riscv64Assembler::VerifyObject(FrameOffset src ATTRIBUTE_UNUSED,
   // TODO: not validating references
 }
 
-void Riscv64Assembler::Call(ManagedRegister mbase, Offset offset) {
+void Riscv64Assembler::Call(ManagedRegister mbase ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister base = mbase.AsRiscv64();
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(base.IsGpuRegister()) << base;
@@ -4125,7 +4125,7 @@ void Riscv64Assembler::Call(ManagedRegister mbase, Offset offset) {
   // TODO: place reference map on call
 }
 
-void Riscv64Assembler::Call(FrameOffset base, Offset offset) {
+void Riscv64Assembler::Call(FrameOffset base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //CHECK(scratch.IsGpuRegister()) << scratch;
   //// Call *(*(SP + base) + offset)
@@ -4150,7 +4150,7 @@ void Riscv64Assembler::GetCurrentThread(FrameOffset offset) {
   StoreToOffset(kStoreDoubleword, S1, SP, offset.Int32Value());
 }
 
-void Riscv64Assembler::ExceptionPoll(size_t stack_adjust) {
+void Riscv64Assembler::ExceptionPoll(size_t stack_adjust ATTRIBUTE_UNUSED) {
   //Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   //exception_blocks_.emplace_back(scratch, stack_adjust);
   //LoadFromOffset(kLoadDoubleword,

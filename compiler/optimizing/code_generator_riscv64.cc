@@ -1886,7 +1886,7 @@ void InstructionCodeGeneratorRISCV64::GenerateClassInitializationCheck(SlowPathC
 }
 
 void InstructionCodeGeneratorRISCV64::VisitPredicatedInstanceFieldGet(
-    HPredicatedInstanceFieldGet* instruction) {
+    HPredicatedInstanceFieldGet* instruction ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //vixl::aarch64::Label finish;
   //__ Cbz(InputRegisterAt(instruction, 1), &finish);
@@ -1894,7 +1894,7 @@ void InstructionCodeGeneratorRISCV64::VisitPredicatedInstanceFieldGet(
   //__ Bind(&finish);
 }
 
-void InstructionCodeGeneratorRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
+void InstructionCodeGeneratorRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //__ Mov(w0, instruction->GetFormat()->GetValue());
   //codegen_->InvokeRuntime(kQuickStringBuilderAppend, instruction, instruction->GetDexPc());
@@ -1913,23 +1913,23 @@ void InstructionCodeGeneratorRISCV64::VisitVecPredCondition(HVecPredCondition* i
   UNREACHABLE();
 }
 
-void LocationsBuilderRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction) {
+void LocationsBuilderRISCV64::VisitStringBuilderAppend(HStringBuilderAppend* instruction ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //__ Mov(w0, instruction->GetFormat()->GetValue());
   //codegen_->InvokeRuntime(kQuickStringBuilderAppend, instruction, instruction->GetDexPc());
 }
 
-void IntrinsicLocationsBuilderRISCV64::VisitIntegerDivideUnsigned(HInvoke* invoke) {
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerDivideUnsigned(HInvoke* invoke ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //GenerateDivideUnsigned(invoke, codegen_);
 }
 
-void IntrinsicLocationsBuilderRISCV64::VisitLongDivideUnsigned(HInvoke* invoke) {
+void IntrinsicLocationsBuilderRISCV64::VisitLongDivideUnsigned(HInvoke* invoke ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //GenerateDivideUnsigned(invoke, codegen_);
 }
 
-void IntrinsicLocationsBuilderRISCV64::VisitMathMultiplyHigh(HInvoke* invoke) {
+void IntrinsicLocationsBuilderRISCV64::VisitMathMultiplyHigh(HInvoke* invoke ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //LocationSummary* locations = invoke->GetLocations();
   //MacroAssembler* masm = codegen_->GetVIXLAssembler();
@@ -1943,7 +1943,7 @@ void IntrinsicLocationsBuilderRISCV64::VisitMathMultiplyHigh(HInvoke* invoke) {
   //__ Smulh(out, x, y);
 }
 
-void IntrinsicLocationsBuilderRISCV64::VisitFP16Ceil(HInvoke* invoke) {
+void IntrinsicLocationsBuilderRISCV64::VisitFP16Ceil(HInvoke* invoke ATTRIBUTE_UNUSED) {
   //todo: follow below arm64 implement a version for riscv64
   //MacroAssembler* masm = GetVIXLAssembler();
   //auto roundOp = [masm](const VRegister& out, const VRegister& in) {

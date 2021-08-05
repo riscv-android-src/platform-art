@@ -134,10 +134,10 @@ void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest, FrameOffset src) {
   __ CopyRef(dest, src);
 }
 
-void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest,
-                       ManagedRegister base,
-                       MemberOffset offs,
-                       bool unpoison_reference) {
+void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest ATTRIBUTE_UNUSED,
+                       ManagedRegister base ATTRIBUTE_UNUSED,
+                       MemberOffset offs ATTRIBUTE_UNUSED,
+                       bool unpoison_reference ATTRIBUTE_UNUSED) {
   //todo: follow arm64 to implement a riscv version
 }
 
@@ -255,7 +255,7 @@ void Riscv64JNIMacroAssembler::Jump(JNIMacroLabel* label) {
   __ Bc(down_cast<Riscv64Label*>(Riscv64JNIMacroLabel::Cast(label)->AsRiscv64()));
 }
 
-void Riscv64JNIMacroAssembler::Jump(ManagedRegister base, Offset offset) {
+void Riscv64JNIMacroAssembler::Jump(ManagedRegister base ATTRIBUTE_UNUSED, Offset offset ATTRIBUTE_UNUSED) {
   //todo: reimplement it
   //CHECK(label != nullptr);
 //
@@ -294,13 +294,16 @@ void Riscv64JNIMacroAssembler::MoveArguments(ArrayRef<art::ArgumentLocation>, Ar
 }
 
 
-void Riscv64JNIMacroAssembler::CreateJObject(art::ManagedRegister, art::FrameOffset, art::ManagedRegister, bool){
+void Riscv64JNIMacroAssembler::CreateJObject(art::ManagedRegister ATTRIBUTE_UNUSED, 
+        art::FrameOffset ATTRIBUTE_UNUSED, art::ManagedRegister ATTRIBUTE_UNUSED, bool){
   //todo: follow arm64 to implement a riscv version
 }
-void Riscv64JNIMacroAssembler::CreateJObject(art::FrameOffset, art::FrameOffset, bool){
+void Riscv64JNIMacroAssembler::CreateJObject(art::FrameOffset ATTRIBUTE_UNUSED, 
+        art::FrameOffset ATTRIBUTE_UNUSED, bool){
   //todo: follow arm64 to implement a riscv version
 }
-void Riscv64JNIMacroAssembler::TestGcMarking(art::JNIMacroLabel*, art::JNIMacroUnaryCondition){
+void Riscv64JNIMacroAssembler::TestGcMarking(art::JNIMacroLabel*,
+        art::JNIMacroUnaryCondition  ATTRIBUTE_UNUSED){
   //todo: follow arm64 to implement a riscv version
 }
 #undef ___

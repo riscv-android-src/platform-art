@@ -26,7 +26,7 @@ namespace art {
 namespace riscv64 {
 
 // Up to kow many args can be enregistered. The rest of the args must go on the stack.
-constexpr size_t kMaxRegisterArguments = 8u;
+//constexpr size_t kMaxRegisterArguments = 8u;
 // Up to how many float-like (float, double) args can be enregistered.
 // The rest of the args must go on the stack.
 constexpr size_t kMaxFloatOrDoubleRegisterArguments = 8u;

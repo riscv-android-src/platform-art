@@ -236,6 +236,8 @@ std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline32(InstructionSet is
                                                                ThreadOffset32 offset) {
   MallocArenaPool pool;
   ArenaAllocator allocator(&pool);
+  UNUSED(abi);
+  UNUSED(offset);
   switch (isa) {
 #ifdef ART_ENABLE_CODEGEN_arm
     case InstructionSet::kArm:
@@ -247,6 +249,7 @@ std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline32(InstructionSet is
       UNUSED(abi);
       return x86::CreateTrampoline(&allocator, offset);
 #endif
+  
     default:
       LOG(FATAL) << "Unexpected InstructionSet: " << isa;
       UNREACHABLE();
