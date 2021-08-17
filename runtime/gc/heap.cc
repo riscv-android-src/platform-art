@@ -263,6 +263,9 @@ Heap::Heap(size_t initial_size,
            const std::vector<std::string>& boot_class_path,
            const std::vector<std::string>& boot_class_path_locations,
            const std::vector<int>& boot_class_path_fds,
+           const std::vector<int>& boot_class_path_image_fds,
+           const std::vector<int>& boot_class_path_vdex_fds,
+           const std::vector<int>& boot_class_path_oat_fds,
            const std::vector<std::string>& image_file_names,
            const InstructionSet image_instruction_set,
            CollectorType foreground_collector_type,
@@ -464,6 +467,9 @@ Heap::Heap(size_t initial_size,
   if (space::ImageSpace::LoadBootImage(boot_class_path,
                                        boot_class_path_locations,
                                        boot_class_path_fds,
+                                       boot_class_path_image_fds,
+                                       boot_class_path_vdex_fds,
+                                       boot_class_path_oat_fds,
                                        image_file_names,
                                        image_instruction_set,
                                        runtime->ShouldRelocate(),
@@ -3637,9 +3643,9 @@ void Heap::GrowForUtilization(collector::GarbageCollector* collector_ran,
           current_gc_iteration_.GetFreedRevokeBytes();
       // Bytes allocated will shrink by freed_bytes after the GC runs, so if we want to figure out
       // how many bytes were allocated during the GC we need to add freed_bytes back on.
-      CHECK_GE(bytes_allocated + freed_bytes, bytes_allocated_before_gc);
-      const size_t bytes_allocated_during_gc = bytes_allocated + freed_bytes -
-          bytes_allocated_before_gc;
+      // Almost always bytes_allocated + freed_bytes >= bytes_allocated_before_gc.
+      const size_t bytes_allocated_during_gc =
+          UnsignedDifference(bytes_allocated + freed_bytes, bytes_allocated_before_gc);
       // Calculate when to perform the next ConcurrentGC.
       // Estimate how many remaining bytes we will have when we need to start the next GC.
       size_t remaining_bytes = bytes_allocated_during_gc;

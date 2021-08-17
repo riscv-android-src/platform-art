@@ -223,7 +223,13 @@ class Runtime {
 
   bool IsShuttingDown(Thread* self);
   bool IsShuttingDownLocked() const REQUIRES(Locks::runtime_shutdown_lock_) {
-    return shutting_down_;
+    return shutting_down_.load(std::memory_order_relaxed);
+  }
+  bool IsShuttingDownUnsafe() const {
+    return shutting_down_.load(std::memory_order_relaxed);
+  }
+  void SetShuttingDown() REQUIRES(Locks::runtime_shutdown_lock_) {
+    shutting_down_.store(true, std::memory_order_relaxed);
   }
 
   size_t NumberOfThreadsBeingBorn() const REQUIRES(Locks::runtime_shutdown_lock_) {
@@ -290,6 +296,18 @@ class Runtime {
 
   const std::vector<int>& GetBootClassPathFds() const {
     return boot_class_path_fds_;
+  }
+
+  const std::vector<int>& GetBootClassPathImageFds() const {
+    return boot_class_path_image_fds_;
+  }
+
+  const std::vector<int>& GetBootClassPathVdexFds() const {
+    return boot_class_path_vdex_fds_;
+  }
+
+  const std::vector<int>& GetBootClassPathOatFds() const {
+    return boot_class_path_oat_fds_;
   }
 
   // Returns the checksums for the boot image, extensions and extra boot class path dex files,
@@ -1139,6 +1157,9 @@ class Runtime {
   std::vector<std::string> boot_class_path_locations_;
   std::string boot_class_path_checksums_;
   std::vector<int> boot_class_path_fds_;
+  std::vector<int> boot_class_path_image_fds_;
+  std::vector<int> boot_class_path_vdex_fds_;
+  std::vector<int> boot_class_path_oat_fds_;
   std::string class_path_string_;
   std::vector<std::string> properties_;
 
@@ -1200,8 +1221,10 @@ class Runtime {
   // Waited upon until no threads are being born.
   std::unique_ptr<ConditionVariable> shutdown_cond_ GUARDED_BY(Locks::runtime_shutdown_lock_);
 
-  // Set when runtime shutdown is past the point that new threads may attach.
-  bool shutting_down_ GUARDED_BY(Locks::runtime_shutdown_lock_);
+  // Set when runtime shutdown is past the point that new threads may attach.  Usually
+  // GUARDED_BY(Locks::runtime_shutdown_lock_). But we need to check it in Abort without the
+  // lock, because we may already own it.
+  std::atomic<bool> shutting_down_;
 
   // The runtime is starting to shutdown but is blocked waiting on shutdown_cond_.
   bool shutting_down_started_ GUARDED_BY(Locks::runtime_shutdown_lock_);
