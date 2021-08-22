@@ -80,12 +80,12 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
                                    const InstructionSet isa,
                                    ClassLoaderContext* context,
                                    bool load_executable,
-                                   bool only_load_system_executable)
+                                   bool only_load_trusted_executable)
     : OatFileAssistant(dex_location,
                        isa,
                        context,
                        load_executable,
-                       only_load_system_executable,
+                       only_load_trusted_executable,
                        /*vdex_fd=*/ -1,
                        /*oat_fd=*/ -1,
                        /*zip_fd=*/ -1) {}
@@ -95,14 +95,14 @@ OatFileAssistant::OatFileAssistant(const char* dex_location,
                                    const InstructionSet isa,
                                    ClassLoaderContext* context,
                                    bool load_executable,
-                                   bool only_load_system_executable,
+                                   bool only_load_trusted_executable,
                                    int vdex_fd,
                                    int oat_fd,
                                    int zip_fd)
     : context_(context),
       isa_(isa),
       load_executable_(load_executable),
-      only_load_system_executable_(only_load_system_executable),
+      only_load_trusted_executable_(only_load_trusted_executable),
       odex_(this, /*is_oat_location=*/ false),
       oat_(this, /*is_oat_location=*/ true),
       vdex_for_odex_(this, /*is_oat_location=*/ false),
@@ -453,8 +453,8 @@ OatFileAssistant::OatStatus OatFileAssistant::GivenOatFileStatus(const OatFile& 
 
   // zip_file_only_contains_uncompressed_dex_ is only set during fetching the dex checksums.
   DCHECK(required_dex_checksums_attempted_);
-  if (only_load_system_executable_ &&
-      !LocationIsOnSystem(file.GetLocation().c_str()) &&
+  if (only_load_trusted_executable_ &&
+      !LocationIsTrusted(file.GetLocation(), !Runtime::Current()->DenyArtApexDataFiles()) &&
       file.ContainsDexCode() &&
       zip_file_only_contains_uncompressed_dex_) {
     LOG(ERROR) << "Not loading "
@@ -565,7 +565,7 @@ bool OatFileAssistant::DexLocationToOatFilename(const std::string& location,
   // Check if `location` could have an oat file in the ART APEX data directory. If so, and the
   // file exists, use it.
   const std::string apex_data_file = GetApexDataOdexFilename(location, isa);
-  if (!apex_data_file.empty()) {
+  if (!apex_data_file.empty() && !Runtime::Current()->DenyArtApexDataFiles()) {
     if (OS::FileExists(apex_data_file.c_str(), /*check_file_type=*/true)) {
       *oat_filename = apex_data_file;
       return true;
@@ -646,14 +646,24 @@ bool OatFileAssistant::ValidateBootClassPathChecksums(const OatFile& oat_file) {
 
   Runtime* runtime = Runtime::Current();
   std::string error_msg;
-  bool result = gc::space::ImageSpace::VerifyBootClassPathChecksums(
-      oat_boot_class_path_checksums_view,
-      oat_boot_class_path_view,
-      runtime->GetImageLocation(),
-      ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
-      ArrayRef<const std::string>(runtime->GetBootClassPath()),
-      isa_,
-      &error_msg);
+  bool result = false;
+  // Fast path when the runtime boot classpath cheksums and boot classpath
+  // locations directly match.
+  if (oat_boot_class_path_checksums_view == runtime->GetBootClassPathChecksums() &&
+      isa_ == kRuntimeISA &&
+      oat_boot_class_path_view == android::base::Join(runtime->GetBootClassPathLocations(), ":")) {
+    result = true;
+  } else {
+    result = gc::space::ImageSpace::VerifyBootClassPathChecksums(
+        oat_boot_class_path_checksums_view,
+        oat_boot_class_path_view,
+        ArrayRef<const std::string>(runtime->GetImageLocations()),
+        ArrayRef<const std::string>(runtime->GetBootClassPathLocations()),
+        ArrayRef<const std::string>(runtime->GetBootClassPath()),
+        ArrayRef<const int>(runtime->GetBootClassPathFds()),
+        isa_,
+        &error_msg);
+  }
   if (!result) {
     VLOG(oat) << "Failed to verify checksums of oat file " << oat_file.GetLocation()
         << " error: " << error_msg;
@@ -808,6 +818,12 @@ const OatFile* OatFileAssistant::OatFileInfo::GetFile() {
     return nullptr;
   }
 
+  if (LocationIsOnArtApexData(filename_) && Runtime::Current()->DenyArtApexDataFiles()) {
+    LOG(WARNING) << "OatFileAssistant rejected file " << filename_
+                 << ": ART apexdata is untrusted.";
+    return nullptr;
+  }
+
   std::string error_msg;
   bool executable = oat_file_assistant_->load_executable_;
   if (android::base::EndsWith(filename_, kVdexExtension)) {
@@ -846,8 +862,8 @@ const OatFile* OatFileAssistant::OatFileInfo::GetFile() {
                                         &error_msg));
     }
   } else {
-    if (executable && oat_file_assistant_->only_load_system_executable_) {
-      executable = LocationIsOnSystem(filename_.c_str());
+    if (executable && oat_file_assistant_->only_load_trusted_executable_) {
+      executable = LocationIsTrusted(filename_, /*trust_art_apex_data_files=*/ true);
     }
     VLOG(oat) << "Loading " << filename_ << " with executable: " << executable;
     if (use_fd_) {
@@ -861,6 +877,7 @@ const OatFile* OatFileAssistant::OatFileInfo::GetFile() {
                                   executable,
                                   /*low_4gb=*/ false,
                                   dex_locations,
+                                  /*dex_fds=*/ ArrayRef<const int>(),
                                   /*reservation=*/ nullptr,
                                   &error_msg));
       }

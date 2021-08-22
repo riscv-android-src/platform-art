@@ -617,10 +617,13 @@ class LSEVisitor final : private HGraphDelegateVisitor {
 
   bool IsPartialNoEscape(HBasicBlock* blk, size_t idx) {
     auto* ri = heap_location_collector_.GetHeapLocation(idx)->GetReferenceInfo();
-    auto* sg = ri->GetNoEscapeSubgraph();
-    return ri->IsPartialSingleton() &&
-           std::none_of(sg->GetExcludedCohorts().cbegin(),
-                        sg->GetExcludedCohorts().cend(),
+    if (!ri->IsPartialSingleton()) {
+      return false;
+    }
+    ArrayRef<const ExecutionSubgraph::ExcludedCohort> cohorts =
+        ri->GetNoEscapeSubgraph()->GetExcludedCohorts();
+    return std::none_of(cohorts.cbegin(),
+                        cohorts.cend(),
                         [&](const ExecutionSubgraph::ExcludedCohort& ex) -> bool {
                           // Make sure we haven't yet and never will escape.
                           return ex.PrecedesBlock(blk) ||
@@ -656,13 +659,19 @@ class LSEVisitor final : private HGraphDelegateVisitor {
 
   Value ReplacementOrValue(Value value) const {
     if (current_phase_ == Phase::kPartialElimination) {
+      // In this phase we are materializing the default values which are used
+      // only if the partial singleton did not escape, so we can replace
+      // a partial unknown with the prior value.
       if (value.IsPartialUnknown()) {
         value = value.GetPriorValue().ToValue();
       }
-      if (value.IsMergedUnknown()) {
-        return phi_placeholder_replacements_[PhiPlaceholderIndex(value)].IsValid()
-            ? Replacement(value)
-            : Value::ForLoopPhiPlaceholder(value.GetPhiPlaceholder());
+      if ((value.IsMergedUnknown() || value.NeedsPhi()) &&
+          phi_placeholder_replacements_[PhiPlaceholderIndex(value)].IsValid()) {
+        value = phi_placeholder_replacements_[PhiPlaceholderIndex(value)];
+        DCHECK(!value.IsMergedUnknown());
+        DCHECK(!value.NeedsPhi());
+      } else if (value.IsMergedUnknown()) {
+        return Value::ForLoopPhiPlaceholder(value.GetPhiPlaceholder());
       }
       if (value.IsInstruction() && value.GetInstruction()->IsInstanceFieldGet()) {
         DCHECK_LT(static_cast<size_t>(value.GetInstruction()->GetId()),
@@ -674,6 +683,9 @@ class LSEVisitor final : private HGraphDelegateVisitor {
           return Value::ForInstruction(substitute);
         }
       }
+      DCHECK(!value.IsInstruction() ||
+             FindSubstitute(value.GetInstruction()) == value.GetInstruction());
+      return value;
     }
     if (value.NeedsPhi() && phi_placeholder_replacements_[PhiPlaceholderIndex(value)].IsValid()) {
       return Replacement(value);
@@ -735,7 +747,8 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   HInstruction* FindSubstitute(HInstruction* instruction) const {
     size_t id = static_cast<size_t>(instruction->GetId());
     if (id >= substitute_instructions_for_loads_.size()) {
-      DCHECK(!IsLoad(instruction));  // New Phi (may not be in the graph yet) or default value.
+      // New Phi (may not be in the graph yet), default value or PredicatedInstanceFieldGet.
+      DCHECK(!IsLoad(instruction) || instruction->IsPredicatedInstanceFieldGet());
       return instruction;
     }
     HInstruction* substitute = substitute_instructions_for_loads_[id];
@@ -1086,8 +1099,6 @@ class LSEVisitor final : private HGraphDelegateVisitor {
         heap_values_for_[instruction->GetBlock()->GetBlockId()];
     for (size_t i = 0u, size = heap_values.size(); i != size; ++i) {
       ReferenceInfo* ref_info = heap_location_collector_.GetHeapLocation(i)->GetReferenceInfo();
-      ArrayRef<const ExecutionSubgraph::ExcludedCohort> cohorts =
-          ref_info->GetNoEscapeSubgraph()->GetExcludedCohorts();
       HBasicBlock* blk = instruction->GetBlock();
       // We don't need to do anything if the reference has not escaped at this point.
       // This is true if either we (1) never escape or (2) sometimes escape but
@@ -1095,14 +1106,22 @@ class LSEVisitor final : private HGraphDelegateVisitor {
       // We count being in the excluded cohort as escaping. Technically, this is
       // a bit over-conservative (since we can have multiple non-escaping calls
       // before a single escaping one) but this simplifies everything greatly.
+      auto partial_singleton_did_not_escape = [](ReferenceInfo* ref_info, HBasicBlock* blk) {
+        DCHECK(ref_info->IsPartialSingleton());
+        if (!ref_info->GetNoEscapeSubgraph()->ContainsBlock(blk)) {
+          return false;
+        }
+        ArrayRef<const ExecutionSubgraph::ExcludedCohort> cohorts =
+            ref_info->GetNoEscapeSubgraph()->GetExcludedCohorts();
+        return std::none_of(cohorts.begin(),
+                            cohorts.end(),
+                            [&](const ExecutionSubgraph::ExcludedCohort& cohort) {
+                              return cohort.PrecedesBlock(blk);
+                            });
+      };
       if (ref_info->IsSingleton() ||
           // partial and we aren't currently escaping and we haven't escaped yet.
-          (ref_info->IsPartialSingleton() && ref_info->GetNoEscapeSubgraph()->ContainsBlock(blk) &&
-           std::none_of(cohorts.begin(),
-                        cohorts.end(),
-                        [&](const ExecutionSubgraph::ExcludedCohort& cohort) {
-                          return cohort.PrecedesBlock(blk);
-                        }))) {
+          (ref_info->IsPartialSingleton() && partial_singleton_did_not_escape(ref_info, blk))) {
         // Singleton references cannot be seen by the callee.
       } else {
         if (side_effects.DoesAnyRead() || side_effects.DoesAnyWrite()) {
@@ -1267,7 +1286,7 @@ class LSEVisitor final : private HGraphDelegateVisitor {
   ScopedArenaHashMap<HInstruction*, StoreRecord> store_records_;
 
   // Replacements for Phi placeholders.
-  // The unknown heap value is used to mark Phi placeholders that cannot be replaced.
+  // The invalid heap value is used to mark Phi placeholders that cannot be replaced.
   ScopedArenaVector<Value> phi_placeholder_replacements_;
 
   // Merged-unknowns that must have their predecessor values kept to ensure
@@ -2133,8 +2152,7 @@ bool LSEVisitor::MaterializeLoopPhis(ArrayRef<const size_t> phi_placeholder_inde
     size_t idx = phi_placeholder.GetHeapLocation();
     for (HBasicBlock* predecessor : block->GetPredecessors()) {
       Value value = ReplacementOrValue(heap_values_for_[predecessor->GetBlockId()][idx].value);
-      if (value.NeedsNonLoopPhi() ||
-          (current_phase_ == Phase::kPartialElimination && value.IsMergedUnknown())) {
+      if (value.NeedsNonLoopPhi()) {
         DCHECK(current_phase_ == Phase::kLoadElimination ||
                current_phase_ == Phase::kPartialElimination)
             << current_phase_;
@@ -2892,9 +2910,9 @@ class PartialLoadStoreEliminationHelper {
                                 nullptr,
                                 alloc_->Adapter(kArenaAllocLSE)),
         first_materialization_block_id_(GetGraph()->GetBlocks().size()) {
-    heap_refs_.reserve(lse_->heap_location_collector_.GetNumberOfReferenceInfos());
-    new_ref_phis_.reserve(lse_->heap_location_collector_.GetNumberOfReferenceInfos() *
-                          GetGraph()->GetBlocks().size());
+    size_t num_partial_singletons = lse_->heap_location_collector_.CountPartialSingletons();
+    heap_refs_.reserve(num_partial_singletons);
+    new_ref_phis_.reserve(num_partial_singletons * GetGraph()->GetBlocks().size());
     CollectInterestingHeapRefs();
   }
 
@@ -3225,6 +3243,13 @@ class PartialLoadStoreEliminationHelper {
             // Reference info is the same
             new_fget->SetReferenceTypeInfo(ins->GetReferenceTypeInfo());
           }
+          // In this phase, substitute instructions are used only for the predicated get
+          // default values which are used only if the partial singleton did not escape,
+          // so the out value of the `new_fget` for the relevant cases is the same as
+          // the default value.
+          // TODO: Use the default value for materializing default values used by
+          // other predicated loads to avoid some unnecessary Phis. (This shall
+          // complicate the search for replacement in `ReplacementOrValue()`.)
           DCHECK(helper_->lse_->substitute_instructions_for_loads_[ins->GetId()] == nullptr);
           helper_->lse_->substitute_instructions_for_loads_[ins->GetId()] = new_fget;
           ins->ReplaceWith(new_fget);

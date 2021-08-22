@@ -25,10 +25,10 @@ package {
 
 cc_defaults {
     name: "odrefresh-defaults",
-    host_supported: true,
-    defaults: ["art_defaults"],
     srcs: [
         "odrefresh.cc",
+        "odr_common.cc",
+        "odr_compilation_log.cc",
         "odr_fs_utils.cc",
         "odr_metrics.cc",
         "odr_metrics_record.cc",
@@ -36,38 +36,39 @@ cc_defaults {
     local_include_dirs: ["include"],
     header_libs: ["dexoptanalyzer_headers"],
     generated_sources: [
-        "apex-info-list",
+        "apex-info-list-tinyxml",
         "art-apex-cache-info",
         "art-odrefresh-operator-srcs",
     ],
     shared_libs: [
         "libartpalette",
         "libbase",
-        "libdexfile",
         "liblog",
     ],
-    static_libs: ["libxml2"],
-    target: {
-        android: {
-            // Use the 32-bit version of odrefresh on devices.
-            compile_multilib: "prefer32",
-        },
-        linux: {
-            enabled: true,
-        },
-        host: {
-            shared_libs: [
-                // Both these libraries for libxml2 on host for code derived from apex-info-list.
-                "libicui18n",
-                "libicuuc",
-            ],
-        },
-    },
+    static_libs: ["libtinyxml2"],
     tidy: true,
     tidy_flags: [
         "-format-style=file",
         "-header-filter=(art/odrefresh/|system/apex/)",
     ],
+}
+
+cc_defaults {
+    name: "odrefresh_binary_defaults",
+    host_supported: true,
+    defaults: [
+        "art_defaults",
+        "odrefresh-defaults",
+    ],
+    srcs: ["odrefresh_main.cc"],
+    shared_libs: [
+        "libdexfile",
+    ],
+    target: {
+        android: {
+            compile_multilib: "first",
+        },
+    },
 }
 
 cc_library_headers {
@@ -96,7 +97,7 @@ gensrcs {
 
 art_cc_binary {
     name: "odrefresh",
-    defaults: ["odrefresh-defaults"],
+    defaults: ["odrefresh_binary_defaults"],
     required: [
         "dexoptanalyzer",
         "dex2oat",
@@ -115,7 +116,7 @@ art_cc_binary {
     name: "odrefreshd",
     defaults: [
         "art_debug_defaults",
-        "odrefresh-defaults",
+        "odrefresh_binary_defaults",
     ],
     required: [
         "dexoptanalyzerd",
@@ -139,7 +140,6 @@ cc_library_static {
     defaults: ["art_defaults"],
     host_supported: true,
     export_include_dirs: ["include"],
-
     local_include_dirs: ["include"],
     shared_libs: ["libartbase"],
     target: {
@@ -162,24 +162,48 @@ cc_library_static {
     ],
 }
 
+art_cc_defaults {
+    name: "art_odrefresh_tests_defaults",
+    defaults: ["odrefresh-defaults"],
+    header_libs: ["odrefresh_headers"],
+    srcs: [
+        "odr_artifacts_test.cc",
+        "odr_compilation_log_test.cc",
+        "odr_fs_utils_test.cc",
+        "odr_metrics_test.cc",
+        "odr_metrics_record_test.cc",
+        "odrefresh_test.cc",
+    ],
+    static_libs: [
+        "libgmock",
+    ],
+}
+
+// Version of ART gtest `art_odrefresh_tests` bundled with the ART APEX on target.
+// TODO(b/192274705): Remove this module when the migration to standalone ART gtests is complete.
 art_cc_test {
     name: "art_odrefresh_tests",
     defaults: [
         "art_gtest_defaults",
+        "art_odrefresh_tests_defaults",
     ],
-    generated_sources: ["art-odrefresh-operator-srcs"],
-    header_libs: ["odrefresh_headers"],
-    srcs: [
-        "odr_artifacts_test.cc",
-        "odr_fs_utils.cc",
-        "odr_fs_utils_test.cc",
-        "odr_metrics.cc",
-        "odr_metrics_test.cc",
-        "odr_metrics_record.cc",
-        "odr_metrics_record_test.cc",
-        "odrefresh_test.cc",
+    shared_libs: [
+        "libdexfiled",
     ],
-    shared_libs: ["libbase"],
+    test_config_template: "art_odrefresh_tests.xml",
+}
+
+// Standalone version of ART gtest `art_odrefresh_tests`, not bundled with the ART APEX on target.
+art_cc_test {
+    name: "art_standalone_odrefresh_tests",
+    defaults: [
+        "art_standalone_gtest_defaults",
+        "art_odrefresh_tests_defaults",
+    ],
+    shared_libs: [
+        "libdexfile",
+    ],
+    test_config_template: "art_odrefresh_tests.xml",
 }
 
 genrule {
@@ -206,4 +230,5 @@ xsd_config {
     package_name: "com.android.art",
     api_dir: "schema",
     gen_writer: true,
+    tinyxml: true,
 }
