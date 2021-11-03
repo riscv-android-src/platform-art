@@ -125,11 +125,17 @@ static void DefaultInitEntryPoints(JniEntryPoints* jpoints, QuickEntryPoints* qp
   qpoints->pDeoptimize = art_quick_deoptimize_from_compiled_code;
 
   // StringBuilder append
-  qpoints->pStringBuilderAppend = art_quick_string_builder_append;
+  //qpoints->pStringBuilderAppend = art_quick_string_builder_append;
+  //todo: add riscv definiton art_quick_string_builder_append
+  qpoints->pStringBuilderAppend = nullptr;
 
   // Tiered JIT support
-  qpoints->pUpdateInlineCache = art_quick_update_inline_cache;
-  qpoints->pCompileOptimized = art_quick_compile_optimized;
+  //qpoints->pUpdateInlineCache = art_quick_update_inline_cache;
+  //todo: add riscv definiton art_quick_update_inline_cache
+  qpoints->pUpdateInlineCache = nullptr;
+  //qpoints->pCompileOptimized = art_quick_compile_optimized;
+  //todo: add riscv definiton art_quick_compile_optimized
+  qpoints->pCompileOptimized = nullptr;
 
   bool should_report = false;
   PaletteShouldReportJniInvocations(&should_report);

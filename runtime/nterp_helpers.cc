@@ -184,7 +184,9 @@ uint32_t NterpGetVRegReference(ArtMethod** frame, uint16_t vreg) {
 uintptr_t NterpGetCatchHandler() {
   // Nterp uses the same landing pad for all exceptions. The dex_pc_ptr set before
   // longjmp will actually be used to jmp to the catch handler.
-  return reinterpret_cast<uintptr_t>(artNterpAsmInstructionEnd);
+  //return reinterpret_cast<uintptr_t>(artNterpAsmInstructionEnd);
+  //todo: add definition of artNterpAsmInstructionEnd in riscv's main.S
+  return 0;
 }
 
 bool CanMethodUseNterp(ArtMethod* method, InstructionSet isa) {

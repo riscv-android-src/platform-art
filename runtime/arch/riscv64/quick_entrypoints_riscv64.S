@@ -2374,15 +2374,15 @@ ENTRY art_quick_imt_conflict_trampoline
     lwu     t1, ART_METHOD_DECLARING_CLASS_OFFSET(t1)  # $t1 = declaring class (no read barrier).
     lwu     t1, MIRROR_CLASS_DEX_CACHE_OFFSET(t1)  # $t1 = dex cache (without read barrier).
     UNPOISON_HEAP_REF t1
-    ld      t1, MIRROR_DEX_CACHE_RESOLVED_METHODS_OFFSET(t1)  # $t1 = dex cache methods array.
+    //ld      t1, MIRROR_DEX_CACHE_RESOLVED_METHODS_OFFSET(t1)  # $t1 = dex cache methods array.
 
     slli    s2, t0, 32                         # $s2 = zero-extended method index
     srli    s2, s2, 32                         # (callee-saved).
 
     ld      s3, ART_METHOD_JNI_OFFSET_64(a0)      # $s3 = ImtConflictTable (callee-saved).
 
-    slli    t0, t0, 64-METHOD_DEX_CACHE_HASH_BITS  # $t0 = slot index.
-    srli    t0, t0, 64-METHOD_DEX_CACHE_HASH_BITS
+    //slli    t0, t0, 64-METHOD_DEX_CACHE_HASH_BITS  # $t0 = slot index.
+    //srli    t0, t0, 64-METHOD_DEX_CACHE_HASH_BITS
 
     li      a1, STD_MEMORY_ORDER_RELAXED           # $a1 = std::memory_order_relaxed.
     slli    t0, t0, POINTER_SIZE_SHIFT+1   # dlsa    a0, t0, t1, POINTER_SIZE_SHIFT + 1   # $a0 = DexCache method slot address.
@@ -2422,7 +2422,7 @@ ENTRY art_quick_imt_conflict_trampoline
 .Limt_conflict_trampoline_dex_cache_miss:
     # We're not creating a proper runtime method frame here,
     # artLookupResolvedMethod() is not allowed to walk the stack.
-    la      t6, artLookupResolvedMethod
+    #la      t6, artLookupResolvedMethod
     ld      a1, FRAME_SIZE_SAVE_REFS_AND_ARGS(sp)  # $a1 = referrer.
     slliw   a0, s2, 0                              # $a0 = sign-extended method index.
     jalr    t6                                     # (uint32_t method_index, ArtMethod* referrer).

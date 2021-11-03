@@ -77,3 +77,8 @@ ENTRY art_jni_dlsym_lookup_stub
     jalr   zero, ra
     nop
 END art_jni_dlsym_lookup_stub
+
+#todo: add riscv implementation
+ENTRY art_jni_dlsym_lookup_critical_stub
+    jalr   zero, ra
+END art_jni_dlsym_lookup_critical_stub

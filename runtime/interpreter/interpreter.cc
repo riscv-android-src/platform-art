@@ -692,7 +692,7 @@ void ArtInterpreterToInterpreterBridge(Thread* self,
 
 void CheckInterpreterAsmConstants() {
   CheckMterpAsmConstants();
-  CheckNterpAsmConstants();
+  //CheckNterpAsmConstants();
 }
 
 void InitInterpreterTls(Thread* self) {

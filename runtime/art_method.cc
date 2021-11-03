@@ -739,9 +739,9 @@ void ArtMethod::CopyFrom(ArtMethod* src, PointerSize image_pointer_size) {
           image_pointer_size);
     }
   }
-  if (interpreter::IsNterpSupported() &&
+  if (/*interpreter::IsNterpSupported() &&
       (GetEntryPointFromQuickCompiledCodePtrSize(image_pointer_size) ==
-          interpreter::GetNterpEntryPoint())) {
+          interpreter::GetNterpEntryPoint())*/1) {
     // If the entrypoint is nterp, it's too early to check if the new method
     // will support it. So for simplicity, use the interpreter bridge.
     SetEntryPointFromQuickCompiledCodePtrSize(GetQuickToInterpreterBridge(), image_pointer_size);

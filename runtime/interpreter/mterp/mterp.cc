@@ -46,7 +46,8 @@ void CheckMterpAsmConstants() {
       LOG(FATAL) << "ERROR: unexpected asm interp size " << interp_size
                  << "(did an instruction handler exceed " << width << " bytes?)";
   }
-#if defined(__riscv)
+//#if defined(__riscv)
+#if 0
   int instruction_configs[256] = {
     // 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, a, b, c, d, e, f
      1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,  // 0x00
@@ -188,7 +189,6 @@ bool CanUseMterp()
   // zhengxing: hacking for running mterp without jit support.
   return
       runtime->IsStarted() &&
-      !Dbg::IsDebuggerActive() &&
       !runtime->GetInstrumentation()->IsActive() &&
       // mterp only knows how to deal with the normal exits. It cannot handle any of the
       // non-standard force-returns.
@@ -806,7 +806,7 @@ ALWAYS_INLINE bool MterpFieldAccessFast(Instruction* inst,
             : shadow_frame->GetVRegReference(inst->VRegB_22c(inst_data));
         // We check if nterp is supported as nterp and mterp use the cache in an
         // incompatible way.
-        if (!IsNterpSupported() && LIKELY(kIsStatic || obj != nullptr)) {
+        if (/*!IsNterpSupported() && */LIKELY(kIsStatic || obj != nullptr)) {
           // Only non-volatile fields are allowed in the thread-local cache.
           if (LIKELY(!field->IsVolatile())) {
             if (kIsStatic) {

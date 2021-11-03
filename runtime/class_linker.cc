@@ -238,7 +238,7 @@ static void ChangeInterpreterBridgeToNterp(ArtMethod* method, ClassLinker* class
       CanMethodUseNterp(method)) {
     if (method->GetDeclaringClass()->IsVisiblyInitialized() ||
         !NeedsClinitCheckBeforeCall(method)) {
-      runtime->GetInstrumentation()->UpdateMethodsCode(method, interpreter::GetNterpEntryPoint());
+      //runtime->GetInstrumentation()->UpdateMethodsCode(method, interpreter::GetNterpEntryPoint());
     } else {
       // Put the resolution stub, which will initialize the class and then
       // call the method with nterp.
@@ -259,11 +259,11 @@ static void EnsureSkipAccessChecksMethods(Handle<mirror::Class> klass, PointerSi
     klass->SetVerificationAttempted();
     // Now that the class has passed verification, try to set nterp entrypoints
     // to methods that currently use the switch interpreter.
-    if (interpreter::CanRuntimeUseNterp()) {
+    //if (interpreter::CanRuntimeUseNterp()) {
       for (ArtMethod& m : klass->GetMethods(pointer_size)) {
         ChangeInterpreterBridgeToNterp(&m, class_linker);
       }
-    }
+    //}
   }
 }
 
@@ -853,7 +853,7 @@ bool ClassLinker::InitWithoutImage(std::vector<std::unique_ptr<const DexFile>> b
     quick_imt_conflict_trampoline_ = GetQuickImtConflictStub();
     quick_generic_jni_trampoline_ = GetQuickGenericJniStub();
     quick_to_interpreter_bridge_trampoline_ = GetQuickToInterpreterBridge();
-    nterp_trampoline_ = interpreter::GetNterpEntryPoint();
+    //nterp_trampoline_ = interpreter::GetNterpEntryPoint();
   }
 
   // Object, String, ClassExt and DexCache need to be rerun through FindSystemClass to finish init
@@ -1984,7 +1984,8 @@ bool ClassLinker::AddImageSpace(
 
   if (!runtime->IsAotCompiler()) {
     ScopedTrace trace("AppImage:UpdateCodeItemAndNterp");
-    bool can_use_nterp = interpreter::CanRuntimeUseNterp();
+    /*bool can_use_nterp = interpreter::CanRuntimeUseNterp();*/
+    bool can_use_nterp = true;
     header.VisitPackedArtMethods([&](ArtMethod& method) REQUIRES_SHARED(Locks::mutator_lock_) {
       // In the image, the `data` pointer field of the ArtMethod contains the code
       // item offset. Change this to the actual pointer to the code item.
@@ -1999,7 +2000,7 @@ bool ClassLinker::AddImageSpace(
         if (can_use_nterp) {
           DCHECK(!NeedsClinitCheckBeforeCall(&method) ||
                  method.GetDeclaringClass()->IsVisiblyInitialized());
-          method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpEntryPoint());
+          //method.SetEntryPointFromQuickCompiledCode(interpreter::GetNterpEntryPoint());
         } else {
           method.SetEntryPointFromQuickCompiledCode(GetQuickToInterpreterBridge());
         }
@@ -3341,8 +3342,9 @@ const void* ClassLinker::GetQuickOatCodeFor(ArtMethod* method) {
     return GetQuickGenericJniStub();
   }
 
-  if (interpreter::CanRuntimeUseNterp() && CanMethodUseNterp(method)) {
-    return interpreter::GetNterpEntryPoint();
+  if (/*interpreter::CanRuntimeUseNterp() && */CanMethodUseNterp(method)) {
+    //return interpreter::GetNterpEntryPoint();
+    return nullptr;
   }
 
   return GetQuickToInterpreterBridge();
@@ -3469,9 +3471,9 @@ void ClassLinker::FixupStaticTrampolines(Thread* self, ObjPtr<mirror::Class> kla
     }
 
     if (quick_code == nullptr &&
-        interpreter::CanRuntimeUseNterp() &&
+        /*interpreter::CanRuntimeUseNterp() &&*/
         CanMethodUseNterp(method)) {
-      quick_code = interpreter::GetNterpEntryPoint();
+      //quick_code = interpreter::GetNterpEntryPoint();
     }
 
     // Check whether the method is native, in which case it's generic JNI.

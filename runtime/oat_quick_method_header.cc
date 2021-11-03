@@ -90,21 +90,21 @@ uintptr_t OatQuickMethodHeader::ToNativeQuickPc(ArtMethod* method,
 }
 
 static inline OatQuickMethodHeader* GetNterpMethodHeader() {
-  if (!interpreter::IsNterpSupported()) {
+  //if (!interpreter::IsNterpSupported()) {
     return nullptr;
-  }
-  uintptr_t nterp_entrypoint = reinterpret_cast<uintptr_t>(interpreter::GetNterpEntryPoint());
-  uintptr_t nterp_code_pointer = (kRuntimeISA == InstructionSet::kArm)
+  //}
+  //uintptr_t nterp_entrypoint = reinterpret_cast<uintptr_t>(interpreter::GetNterpEntryPoint());
+  //uintptr_t nterp_code_pointer = (kRuntimeISA == InstructionSet::kArm)
       // Remove the Thumb mode bit if present on ARM.
-      ? nterp_entrypoint & ~static_cast<uintptr_t>(1)
-      : nterp_entrypoint;
-  return reinterpret_cast<OatQuickMethodHeader*>(nterp_code_pointer - sizeof(OatQuickMethodHeader));
+  //    ? nterp_entrypoint & ~static_cast<uintptr_t>(1)
+  //    : nterp_entrypoint;
+  //return reinterpret_cast<OatQuickMethodHeader*>(nterp_code_pointer - sizeof(OatQuickMethodHeader));
 }
 
 OatQuickMethodHeader* OatQuickMethodHeader::NterpMethodHeader = GetNterpMethodHeader();
 
 bool OatQuickMethodHeader::IsNterpMethodHeader() const {
-  return interpreter::IsNterpSupported() ? (this == NterpMethodHeader) : false;
+  return /*interpreter::IsNterpSupported() ? (this == NterpMethodHeader) : */false;
 }
 
 }  // namespace art
