@@ -368,7 +368,7 @@ std::set<pid_t> PtraceSiblings(pid_t pid) {
 }
 
 void DumpABI(pid_t forked_pid) {
-  enum class ABI { kArm, kArm64, kX86, kX86_64 };
+  enum class ABI { kArm, kArm64, kX86, kX86_64, kRiscv64 };
 #if defined(__arm__)
   constexpr ABI kDumperABI = ABI::kArm;
 #elif defined(__aarch64__)
@@ -377,6 +377,8 @@ void DumpABI(pid_t forked_pid) {
   constexpr ABI kDumperABI = ABI::kX86;
 #elif defined(__x86_64__)
   constexpr ABI kDumperABI = ABI::kX86_64;
+#elif defined(__riscv) && (__riscv_xlen == 64)
+  constexpr ABI kDumperABI = ABI::kRiscv64;
 #else
 #error Unsupported architecture
 #endif
@@ -398,6 +400,9 @@ void DumpABI(pid_t forked_pid) {
       case ABI::kX86_64:
         to_print = ABI::kX86_64;
         break;
+      case ABI::kRiscv64:
+        to_print = ABI::kRiscv64;
+        break;
       default:
         __builtin_unreachable();
     }
@@ -411,6 +416,9 @@ void DumpABI(pid_t forked_pid) {
       case ABI::kX86:
       case ABI::kX86_64:
         to_print = io_vec.iov_len == 17 * sizeof(uint32_t) ? ABI::kX86 : ABI::kX86_64;
+        break;
+      case ABI::kRiscv64:
+        to_print = ABI::kRiscv64;
         break;
       default:
         __builtin_unreachable();
@@ -429,6 +437,9 @@ void DumpABI(pid_t forked_pid) {
       break;
     case ABI::kX86_64:
       abi_str = "x86_64";
+      break;
+    case ABI::kRiscv64:
+      abi_str = "riscv64";
       break;
   }
   LOG(ERROR) << "ABI: '" << abi_str << "'" << std::endl;

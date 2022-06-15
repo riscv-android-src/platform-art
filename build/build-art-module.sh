@@ -45,6 +45,7 @@ else
     art_module_arm64
     art_module_x86
     art_module_x86_64
+    art_module_riscv64
   )
 fi
 

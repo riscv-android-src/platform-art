@@ -34,6 +34,8 @@
 #include "scheduler_arm.h"
 #endif
 
+// XC-ART-TODO: scheduler for riscv64
+
 namespace art {
 
 // Return all combinations of ISA and code generator that are executable on

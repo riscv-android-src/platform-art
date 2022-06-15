@@ -72,6 +72,9 @@ class ElfDebugLineWriter {
       case InstructionSet::kArm64:
         code_factor_bits_ = 2;  // 32-bit instructions
         break;
+      case InstructionSet::kRiscv64:
+        code_factor_bits_ = 2;  // 32-bit instructions
+        break;
       case InstructionSet::kNone:
       case InstructionSet::kX86:
       case InstructionSet::kX86_64:

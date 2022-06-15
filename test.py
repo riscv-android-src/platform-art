@@ -56,11 +56,15 @@ if options.run_test or options.help_runner or not options.gtest:
     sys.exit(1)
 
 if options.gtest or not options.run_test:
+  build_size=''
+  for arg in sys.argv[1:]:
+    if arg == '--64':
+      build_size='64'
   build_target = ''
   if options.host or not options.target:
-    build_target += ' test-art-host-gtest'
+    build_target += ' test-art-host-gtest' + build_size
   if options.target or not options.host:
-    build_target += ' test-art-target-gtest'
+    build_target += ' test-art-target-gtest'  + build_size
 
   build_command = ANDROID_BUILD_TOP + '/build/soong/soong_ui.bash --make-mode'
   build_command += ' -j' + str(options.n_threads)

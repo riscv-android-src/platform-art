@@ -34,7 +34,11 @@
 #elif defined(__x86_64__)
 #include "x86_64/context_x86_64.h"
 #define RUNTIME_CONTEXT_TYPE x86_64::X86_64Context
+#elif defined(__riscv) && (__riscv_xlen == 64)
+#include "riscv64/context_riscv64.h"
+#define RUNTIME_CONTEXT_TYPE riscv64::Riscv64Context
 #else
+
 #error unimplemented
 #endif
 

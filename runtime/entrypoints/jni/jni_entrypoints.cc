@@ -21,6 +21,7 @@
 #include "arch/instruction_set.h"
 #include "arch/x86/jni_frame_x86.h"
 #include "arch/x86_64/jni_frame_x86_64.h"
+#include "arch/riscv64/jni_frame_riscv64.h"
 #include "art_method-inl.h"
 #include "dex/dex_instruction-inl.h"
 #include "dex/method_reference.h"
@@ -147,6 +148,8 @@ extern "C" size_t artCriticalNativeFrameSize(ArtMethod* method, uintptr_t caller
         return x86::GetCriticalNativeStubFrameSize(shorty, shorty_len);
       case InstructionSet::kX86_64:
         return x86_64::GetCriticalNativeStubFrameSize(shorty, shorty_len);
+      case InstructionSet::kRiscv64:
+        return riscv64::GetCriticalNativeStubFrameSize(shorty, shorty_len);
       default:
         UNIMPLEMENTED(FATAL) << kRuntimeISA;
         UNREACHABLE();
@@ -183,6 +186,8 @@ extern "C" size_t artCriticalNativeFrameSize(ArtMethod* method, uintptr_t caller
         return x86::GetCriticalNativeDirectCallFrameSize(shorty, shorty_len);
       case InstructionSet::kX86_64:
         return x86_64::GetCriticalNativeDirectCallFrameSize(shorty, shorty_len);
+      case InstructionSet::kRiscv64:
+        return riscv64::GetCriticalNativeDirectCallFrameSize(shorty, shorty_len);
       default:
         UNIMPLEMENTED(FATAL) << kRuntimeISA;
         UNREACHABLE();

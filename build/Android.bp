@@ -237,6 +237,9 @@ art_module_art_global_defaults {
         x86_64: {
             cflags: ["-DART_ENABLE_CODEGEN_x86_64"],
         },
+        riscv64: {
+            cflags: ["-DART_ENABLE_CODEGEN_riscv64"],
+        },
     },
 
     tidy_checks: art_clang_tidy_errors + art_clang_tidy_disabled,
@@ -270,6 +273,9 @@ cc_defaults {
         x86_64: {
             ldflags: ["-z max-page-size=0x200000"],
         },
+        riscv64: {
+            ldflags: ["-z max-page-size=0x200000"],
+        },
     },
 }
 
@@ -277,7 +283,7 @@ cc_defaults {
     name: "art_pgo_defaults",
     visibility: ["//art:__subpackages__"],
     pgo: {
-        sampling: true,
+        // sampling: true,
     },
     target: {
         android_arm64: {
@@ -298,6 +304,12 @@ cc_defaults {
         android_x86: {
             pgo: {
                 profile_file: "art/art_x86_x86_64.profdata",
+            },
+        },
+        android_riscv64: {
+            pgo: {
+                // XC_ART_TODO
+                // profile_file: "art/art_riscv_riscv64.profdata",
             },
         },
     },

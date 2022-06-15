@@ -198,6 +198,8 @@ constexpr int32_t EncodeInstructionSet(InstructionSet isa) {
       return statsd::ART_DATUM_REPORTED__ISA__ART_ISA_X86;
     case InstructionSet::kX86_64:
       return statsd::ART_DATUM_REPORTED__ISA__ART_ISA_X86_64;
+    case InstructionSet::kRiscv64:
+      return statsd::ART_DATUM_REPORTED__ISA__ART_ISA_RISCV64;
     case InstructionSet::kNone:
       return statsd::ART_DATUM_REPORTED__ISA__ART_ISA_UNKNOWN;
   }

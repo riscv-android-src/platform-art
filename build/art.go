@@ -29,7 +29,7 @@ import (
 	"android/soong/cc/config"
 )
 
-var supportedArches = []string{"arm", "arm64", "x86", "x86_64"}
+var supportedArches = []string{"arm", "arm64", "x86", "x86_64", "riscv64"}
 
 func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	var cflags []string
@@ -89,13 +89,15 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 			"-DART_STACK_OVERFLOW_GAP_arm=8192",
 			"-DART_STACK_OVERFLOW_GAP_arm64=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86=16384",
-			"-DART_STACK_OVERFLOW_GAP_x86_64=20480")
+			"-DART_STACK_OVERFLOW_GAP_x86_64=20480",
+		        "-DART_STACK_OVERFLOW_GAP_riscv64=16384")
 	} else {
 		cflags = append(cflags,
 			"-DART_STACK_OVERFLOW_GAP_arm=8192",
 			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
 			"-DART_STACK_OVERFLOW_GAP_x86=8192",
-			"-DART_STACK_OVERFLOW_GAP_x86_64=8192")
+			"-DART_STACK_OVERFLOW_GAP_x86_64=8192",
+		        "-DART_STACK_OVERFLOW_GAP_riscv64=8192")
 	}
 
 	if ctx.Config().IsEnvTrue("ART_ENABLE_ADDRESS_SANITIZER") {

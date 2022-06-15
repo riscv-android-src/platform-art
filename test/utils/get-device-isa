@@ -30,7 +30,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 ARCHITECTURES_32="(arm|x86|none)"
-ARCHITECTURES_64="(arm64|x86_64|none)"
+ARCHITECTURES_64="(arm64|x86_64|riscv64|none)"
 
 case "$1" in
   (--32)

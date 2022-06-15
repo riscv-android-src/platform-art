@@ -45,6 +45,7 @@
 #include "utils/jni_macro_assembler.h"
 #include "utils/managed_register.h"
 #include "utils/x86/managed_register_x86.h"
+#include "utils/riscv64/managed_register_riscv64.h"
 
 #define __ jni_asm->
 

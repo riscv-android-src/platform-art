@@ -1609,7 +1609,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
 /*
  * Instructions, shared across several (not all) architectures.
  */
-#if !defined(ART_ENABLE_CODEGEN_arm) && !defined(ART_ENABLE_CODEGEN_arm64)
+#if !defined(ART_ENABLE_CODEGEN_arm) && !defined(ART_ENABLE_CODEGEN_arm64) && !defined(ART_ENABLE_CODEGEN_riscv64)
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)
 #else
 #define FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                         \
@@ -1622,6 +1622,8 @@ class HLoopInformationOutwardIterator : public ValueObject {
 #define FOR_EACH_CONCRETE_INSTRUCTION_ARM(M)
 
 #define FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)
+
+#define FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)
 
 #ifndef ART_ENABLE_CODEGEN_x86
 #define FOR_EACH_CONCRETE_INSTRUCTION_X86(M)
@@ -1648,6 +1650,7 @@ class HLoopInformationOutwardIterator : public ValueObject {
   FOR_EACH_CONCRETE_INSTRUCTION_SHARED(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_ARM64(M)                                \
+  FOR_EACH_CONCRETE_INSTRUCTION_RISCV64(M)                              \
   FOR_EACH_CONCRETE_INSTRUCTION_X86(M)                                  \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_64(M)                               \
   FOR_EACH_CONCRETE_INSTRUCTION_X86_COMMON(M)
@@ -8314,7 +8317,7 @@ class HIntermediateAddress final : public HExpression<2> {
 
 #include "nodes_vector.h"
 
-#if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64)
+#if defined(ART_ENABLE_CODEGEN_arm) || defined(ART_ENABLE_CODEGEN_arm64) || defined(ART_ENABLE_CODEGEN_riscv64)
 #include "nodes_shared.h"
 #endif
 #if defined(ART_ENABLE_CODEGEN_x86) || defined(ART_ENABLE_CODEGEN_x86_64)

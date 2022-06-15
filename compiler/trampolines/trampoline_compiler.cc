@@ -36,6 +36,10 @@
 #include "utils/x86_64/assembler_x86_64.h"
 #endif
 
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#include "utils/riscv64/assembler_riscv64.h"
+#endif
+
 #define __ assembler.
 
 namespace art {
@@ -169,6 +173,38 @@ static std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline(ArenaAllocat
 }  // namespace x86_64
 #endif  // ART_ENABLE_CODEGEN_x86_64
 
+#ifdef ART_ENABLE_CODEGEN_riscv64
+namespace riscv64 {
+static std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline(
+    ArenaAllocator* allocator, EntryPointCallingConvention abi, ThreadOffset64 offset) {
+  Riscv64Assembler assembler(allocator);
+
+  switch (abi) {
+    case kInterpreterAbi:  // Thread* is first argument (A0) in interpreter ABI.
+      __ LoadFromOffset(kLoadDoubleword, T9, A0, offset.Int32Value());
+      break;
+    case kJniAbi:  // Load via Thread* held in JNIEnv* in first argument (A0).
+      __ LoadFromOffset(kLoadDoubleword, T9, A0, JNIEnvExt::SelfOffset(8).Int32Value());
+      __ LoadFromOffset(kLoadDoubleword, T9, T9, offset.Int32Value());
+      break;
+    case kQuickAbi:  // Fall-through.
+      __ LoadFromOffset(kLoadDoubleword, T9, S1, offset.Int32Value());
+  }
+  __ Jr(T9);
+  __ Nop();
+  __ Break();
+
+  __ FinalizeCode();
+  size_t cs = __ CodeSize();
+  std::unique_ptr<std::vector<uint8_t>> entry_stub(new std::vector<uint8_t>(cs));
+  MemoryRegion code(entry_stub->data(), entry_stub->size());
+  __ FinalizeInstructions(code);
+
+  return std::move(entry_stub);
+}
+}  // namespace riscv64
+#endif  // ART_ENABLE_CODEGEN_riscv64
+
 std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline64(InstructionSet isa,
                                                                EntryPointCallingConvention abi,
                                                                ThreadOffset64 offset) {
@@ -182,6 +218,10 @@ std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline64(InstructionSet is
 #ifdef ART_ENABLE_CODEGEN_x86_64
     case InstructionSet::kX86_64:
       return x86_64::CreateTrampoline(&allocator, offset);
+#endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64:
+      return riscv64::CreateTrampoline(&allocator, abi, offset);
 #endif
     default:
       UNUSED(abi);
@@ -208,6 +248,8 @@ std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline32(InstructionSet is
       return x86::CreateTrampoline(&allocator, offset);
 #endif
     default:
+      UNUSED(abi);
+      UNUSED(offset);
       LOG(FATAL) << "Unexpected InstructionSet: " << isa;
       UNREACHABLE();
   }

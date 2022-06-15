@@ -149,6 +149,11 @@ TEST_ISA(kX86)
 TEST_ISA(kX86_64)
 #endif
 
+#ifdef ART_ENABLE_CODEGEN_riscv64
+// XC-ART-WORKAROUND: Enable the test in the future
+// TEST_ISA(kRiscv64)
+#endif
+
 #endif  // ART_TARGET_ANDROID
 
 }  // namespace art

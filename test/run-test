@@ -635,7 +635,7 @@ function guess_target_arch_name() {
         fi
     else
         local grep32bit=`ls ${guess_path} | grep -E '^(arm|x86)$'`
-        local grep64bit=`ls ${guess_path} | grep -E '^(arm64|x86_64)$'`
+        local grep64bit=`ls ${guess_path} | grep -E '^(arm64|x86_64|riscv64)$'`
         if [ "x${suffix64}" = "x64" ]; then
             target_arch_name=${grep64bit}
         else

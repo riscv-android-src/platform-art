@@ -53,6 +53,9 @@ static ::std::vector<CodegenTargetConfig> GetTargetConfigs() {
 #ifdef ART_ENABLE_CODEGEN_x86_64
     CodegenTargetConfig(InstructionSet::kX86_64, create_codegen_x86_64),
 #endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    CodegenTargetConfig(InstructionSet::kRiscv64, create_codegen_riscv64),
+#endif
   };
 
   for (const CodegenTargetConfig& test_config : test_config_candidates) {

@@ -110,7 +110,7 @@ echo -e "${green}Kill stalled dalvikvm processes${nc}"
 timeout 2s adb shell "ps" >/dev/null
 if [[ $? == 124 ]] && [[ "$ART_TEST_RUN_ON_ARM_FVP" != true ]]; then
   echo -e "${green}Rebooting device to fix 'ps'${nc}"
-  adb reboot
+  #adb reboot
   adb wait-for-device root
 else
   processes=$(adb shell "ps" | grep dalvikvm | awk '{print $2}')

@@ -188,6 +188,11 @@ uintptr_t NterpGetCatchHandler() {
 }
 
 bool CanMethodUseNterp(ArtMethod* method, InstructionSet isa) {
+  // Don't use Nterp now.
+  UNUSED(method);
+  UNUSED(isa);
+  return false;
+#if 0
   return !method->IsNative() &&
       method->IsInvokable() &&
       // Nterp supports the same methods the compiler supports.
@@ -197,6 +202,7 @@ bool CanMethodUseNterp(ArtMethod* method, InstructionSet isa) {
       // run them with nterp.
       !method->IsProxyMethod() &&
       NterpGetFrameSize(method, isa) <= interpreter::kNterpMaxFrame;
+#endif
 }
 
 }  // namespace art

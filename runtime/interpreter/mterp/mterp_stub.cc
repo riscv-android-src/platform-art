@@ -30,9 +30,15 @@ void CheckMterpAsmConstants() {
 }
 
 void InitMterpTls(Thread* self) {
-  self->SetMterpDefaultIBase(nullptr);
-  self->SetMterpCurrentIBase(nullptr);
-  self->SetMterpAltIBase(nullptr);
+  UNUSED(self);
+  UNIMPLEMENTED(FATAL);
+  // self->SetMterpDefaultIBase(nullptr);
+  // self->SetMterpCurrentIBase(nullptr);
+  //self->SetMterpAltIBase(nullptr);
+}
+
+bool CanUseMterp() {
+  return false;
 }
 
 /*
@@ -43,8 +49,9 @@ extern "C" bool ExecuteMterpImpl(Thread* self,
                                  ShadowFrame* shadow_frame,
                                  JValue* result_register)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-  UNUSED(self); UNUSED(shadow_frame); UNUSED(code_item); UNUSED(result_register);
-  UNIMPLEMENTED(art::FATAL);
+  UNUSED(self); UNUSED(shadow_frame); UNUSED(result_register);
+  UNUSED(dex_instructions);
+  UNIMPLEMENTED(FATAL);
   return false;
 }
 

@@ -31,6 +31,9 @@
 #ifdef ART_ENABLE_CODEGEN_x86_64
 #include "x86_64/jni_macro_assembler_x86_64.h"
 #endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#include "riscv64/jni_macro_assembler_riscv64.h"
+#endif
 #include "base/casts.h"
 #include "base/globals.h"
 #include "base/memory_region.h"
@@ -46,6 +49,7 @@ MacroAsm32UniquePtr JNIMacroAssembler<PointerSize::k32>::Create(
     const InstructionSetFeatures* instruction_set_features) {
   // TODO: Remove the parameter from API (not needed after Mips target was removed).
   UNUSED(instruction_set_features);
+  UNUSED(allocator);
 
   switch (instruction_set) {
 #ifdef ART_ENABLE_CODEGEN_arm
@@ -81,6 +85,10 @@ MacroAsm64UniquePtr JNIMacroAssembler<PointerSize::k64>::Create(
 #ifdef ART_ENABLE_CODEGEN_x86_64
     case InstructionSet::kX86_64:
       return MacroAsm64UniquePtr(new (allocator) x86_64::X86_64JNIMacroAssembler(allocator));
+#endif
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64:
+      return MacroAsm64UniquePtr(new (allocator) riscv64::Riscv64JNIMacroAssembler(allocator));
 #endif
     default:
       UNUSED(allocator);

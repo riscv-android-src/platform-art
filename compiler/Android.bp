@@ -161,6 +161,17 @@ art_cc_defaults {
                 "utils/x86_64/managed_register_x86_64.cc",
             ],
         },
+        riscv64: {
+            srcs: [
+                "jni/quick/riscv64/calling_convention_riscv64.cc",
+                "optimizing/code_generator_riscv64.cc",
+                "optimizing/code_generator_vector_riscv64.cc",
+                "optimizing/intrinsics_riscv64.cc",
+                "utils/riscv64/assembler_riscv64.cc",
+                "utils/riscv64/jni_macro_assembler_riscv64.cc",
+                "utils/riscv64/managed_register_riscv64.cc",
+            ],
+        },
     },
     static: {
         cflags: ["-DART_STATIC_LIBART_COMPILER"],
@@ -239,7 +250,7 @@ art_cc_library {
     target: {
         android: {
             lto: {
-                thin: true,
+                thin: false,
             },
         },
     },
@@ -447,6 +458,11 @@ art_cc_defaults {
             srcs: [
                 // Is this test a bit-rotten copy of the x86 test? b/77951326
                 // "utils/x86_64/managed_register_x86_64_test.cc",
+            ],
+        },
+        riscv64: {
+            srcs: [
+                "utils/riscv64/managed_register_riscv64_test.cc",
             ],
         },
     },

@@ -109,7 +109,7 @@ if [[ $build_target == "yes" ]]; then
   fi
   make_command+=" build-art-target-tests"
   make_command+=" libnetd_client-target toybox sh libtombstoned_client"
-  make_command+=" debuggerd su gdbserver"
+  make_command+=" debuggerd su "
   # vogar requires the class files for conscrypt and ICU.
   make_command+=" conscrypt core-icu4j"
   make_command+=" ${ANDROID_PRODUCT_OUT#"${ANDROID_BUILD_TOP}/"}/system/etc/public.libraries.txt"
@@ -171,6 +171,8 @@ if [[ $build_target == "yes" ]]; then
     if [[ $TARGET_ARCH = arm* ]]; then
       arch32=arm
       arch64=arm64
+	elif [[ $TARGET_ARCH = riscv* ]]; then
+      arch64=riscv64
     else
       arch32=x86
       arch64=x86_64
@@ -365,5 +367,6 @@ EOF
   echo "Generating linkerconfig in $linkerconfig_out"
   rm -rf $linkerconfig_out
   mkdir -p $linkerconfig_out
+  echo "$ANDROID_HOST_OUT/bin/linkerconfig --target $linkerconfig_out --root $linkerconfig_root --vndk $platform_version"
   $ANDROID_HOST_OUT/bin/linkerconfig --target $linkerconfig_out --root $linkerconfig_root --vndk $platform_version
 fi

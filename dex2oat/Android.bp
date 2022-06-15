@@ -61,6 +61,11 @@ art_cc_defaults {
                 "linker/x86_64/relative_patcher_x86_64.cc",
             ],
         },
+        riscv64: {
+            srcs: [
+                "linker/riscv64/relative_patcher_riscv64.cc",
+            ],
+        },
     },
 
     generated_sources: ["art_dex2oat_operator_srcs"],
@@ -228,8 +233,8 @@ cc_defaults {
         "//external/vixl",
     ],
     pgo: {
-        instrumentation: true,
-        benchmarks: ["dex2oat"],
+       // instrumentation: true,
+       // benchmarks: ["dex2oat"],
     },
     target: {
         android_arm64: {
@@ -296,7 +301,7 @@ art_cc_binary {
                 "libart-dex2oat",
             ],
             lto: {
-                thin: true,
+                thin: false,
             },
         },
         host: {
@@ -518,6 +523,11 @@ art_cc_defaults {
         x86_64: {
             srcs: [
                 "linker/x86_64/relative_patcher_x86_64_test.cc",
+            ],
+        },
+        riscv64: {
+            srcs: [
+                "linker/riscv64/relative_patcher_riscv64_test.cc",
             ],
         },
     },

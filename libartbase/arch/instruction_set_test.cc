@@ -27,6 +27,7 @@ TEST(InstructionSetTest, GetInstructionSetFromString) {
   EXPECT_EQ(InstructionSet::kArm64, GetInstructionSetFromString("arm64"));
   EXPECT_EQ(InstructionSet::kX86, GetInstructionSetFromString("x86"));
   EXPECT_EQ(InstructionSet::kX86_64, GetInstructionSetFromString("x86_64"));
+  EXPECT_EQ(InstructionSet::kRiscv64, GetInstructionSetFromString("riscv64"));
   EXPECT_EQ(InstructionSet::kNone, GetInstructionSetFromString("none"));
   EXPECT_EQ(InstructionSet::kNone, GetInstructionSetFromString("random-string"));
 }
@@ -37,6 +38,7 @@ TEST(InstructionSetTest, GetInstructionSetString) {
   EXPECT_STREQ("arm64", GetInstructionSetString(InstructionSet::kArm64));
   EXPECT_STREQ("x86", GetInstructionSetString(InstructionSet::kX86));
   EXPECT_STREQ("x86_64", GetInstructionSetString(InstructionSet::kX86_64));
+  EXPECT_STREQ("riscv64", GetInstructionSetString(InstructionSet::kRiscv64));
   EXPECT_STREQ("none", GetInstructionSetString(InstructionSet::kNone));
 }
 

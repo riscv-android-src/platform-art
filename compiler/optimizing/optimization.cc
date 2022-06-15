@@ -33,6 +33,9 @@
 #ifdef ART_ENABLE_CODEGEN_x86_64
 #include "instruction_simplifier_x86_64.h"
 #endif
+// XC-ART-WORKAROUND
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#endif
 
 #include "bounds_check_elimination.h"
 #include "cha_guard_optimization.h"

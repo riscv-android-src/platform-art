@@ -47,6 +47,8 @@ class Reg {
     return Reg(num < 8 ? map[num] : num);
   }
   static Reg X86_64Fp(int num) { return Reg(17 + num); }
+  static Reg Riscv64Core(int num) { return Reg(num); }  // zhengxing TBD.
+  static Reg Riscv64Fp(int num) { return Reg(32 + num); }
 
  private:
   int num_;

@@ -29,6 +29,7 @@ void InstructionSetAbort(InstructionSet isa) {
     case InstructionSet::kArm64:
     case InstructionSet::kX86:
     case InstructionSet::kX86_64:
+    case InstructionSet::kRiscv64:
     case InstructionSet::kNone:
       LOG(FATAL) << "Unsupported instruction set " << isa;
       UNREACHABLE();
@@ -48,6 +49,8 @@ const char* GetInstructionSetString(InstructionSet isa) {
       return "x86";
     case InstructionSet::kX86_64:
       return "x86_64";
+    case InstructionSet::kRiscv64:
+      return "riscv64";
     case InstructionSet::kNone:
       return "none";
   }
@@ -66,6 +69,8 @@ InstructionSet GetInstructionSetFromString(const char* isa_str) {
     return InstructionSet::kX86;
   } else if (strcmp("x86_64", isa_str) == 0) {
     return InstructionSet::kX86_64;
+  } else if (strcmp("riscv64", isa_str) == 0) {
+    return InstructionSet::kRiscv64;
   }
 
   return InstructionSet::kNone;
@@ -83,6 +88,8 @@ size_t GetInstructionSetAlignment(InstructionSet isa) {
       // Fall-through.
     case InstructionSet::kX86_64:
       return kX86Alignment;
+    case InstructionSet::kRiscv64:
+      return kRiscv64Alignment;
     case InstructionSet::kNone:
       LOG(FATAL) << "ISA kNone does not have alignment.";
       UNREACHABLE();
@@ -98,6 +105,7 @@ static_assert(IsAligned<kPageSize>(kArm64StackOverflowReservedBytes), "ARM64 gap
 static_assert(IsAligned<kPageSize>(kX86StackOverflowReservedBytes), "X86 gap not page aligned");
 static_assert(IsAligned<kPageSize>(kX86_64StackOverflowReservedBytes),
               "X86_64 gap not page aligned");
+static_assert(IsAligned<kPageSize>(kRiscv64StackOverflowReservedBytes), "RISCV64 gap not page aligned");
 
 #if !defined(ART_FRAME_SIZE_LIMIT)
 #error "ART frame size limit missing"
@@ -110,6 +118,8 @@ static_assert(ART_FRAME_SIZE_LIMIT < kArm64StackOverflowReservedBytes,
 static_assert(ART_FRAME_SIZE_LIMIT < kX86StackOverflowReservedBytes,
               "Frame size limit too large");
 static_assert(ART_FRAME_SIZE_LIMIT < kX86_64StackOverflowReservedBytes,
+              "Frame size limit too large");
+static_assert(ART_FRAME_SIZE_LIMIT < kRiscv64StackOverflowReservedBytes,
               "Frame size limit too large");
 
 NO_RETURN void GetStackOverflowReservedBytesFailure(const char* error_msg) {

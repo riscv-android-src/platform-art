@@ -43,6 +43,10 @@
 #include "code_generator_x86_64.h"
 #endif
 
+#ifdef ART_ENABLE_CODEGEN_riscv64
+#include "code_generator_riscv64.h"
+#endif
+
 namespace art {
 
 typedef CodeGenerator* (*CreateCodegenFn)(HGraph*, const CompilerOptions&);
@@ -341,6 +345,12 @@ inline CodeGenerator* create_codegen_x86(HGraph* graph, const CompilerOptions& c
 #ifdef ART_ENABLE_CODEGEN_x86_64
 inline CodeGenerator* create_codegen_x86_64(HGraph* graph, const CompilerOptions& compiler_options) {
   return new (graph->GetAllocator()) x86_64::CodeGeneratorX86_64(graph, compiler_options);
+}
+#endif
+
+#ifdef ART_ENABLE_CODEGEN_riscv64
+inline CodeGenerator* create_codegen_riscv64(HGraph* graph, const CompilerOptions& compiler_options) {
+  return new (graph->GetAllocator()) riscv64::CodeGeneratorRISCV64(graph, compiler_options);
 }
 #endif
 
