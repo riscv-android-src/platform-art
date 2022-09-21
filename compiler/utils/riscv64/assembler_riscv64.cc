@@ -286,6 +286,22 @@ void Riscv64Assembler::EmitMsa2RF(int operation,
   Emit(encoding);
 }
 
+
+/////////////////////////////// RV64 Ali extension ////////////////
+void Riscv64Assembler::EmitRs1d(int funct7, GpuRegister rs1, GpuRegister rd, int opcode) {
+  CHECK_NE(rs1, kNoGpuRegister);
+  CHECK_NE(rd, kNoGpuRegister);
+  int funct3 = 1;
+
+  uint32_t encoding = static_cast<uint32_t>(funct7) << 25 |
+                      static_cast<uint32_t>(rs1) << 15 |
+                      static_cast<uint32_t>(funct3) << 12 |
+                      static_cast<uint32_t>(rd) << 7 |
+                      opcode;
+  Emit(encoding);
+}
+/////////////////////////////// RV64 Ali extension end ////////////
+
 void Riscv64Assembler::Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
   Addw(rd, rs, rt);
 }
@@ -1081,27 +1097,21 @@ void Riscv64Assembler::SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FSgnjD(fd, fs, fs);
 }
 
-#if 0
 void Riscv64Assembler::RintS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
   EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0x1a);
 }
 
 void Riscv64Assembler::RintD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
   EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0x1a);
 }
 
 void Riscv64Assembler::ClassS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
   EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0x1b);
 }
 
 void Riscv64Assembler::ClassD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
   EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0x1b);
 }
-#endif
 
 void Riscv64Assembler::MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FMinS(fd, fs, ft);
@@ -4839,6 +4849,20 @@ void Riscv64Assembler::FCvtDLu(FpuRegister rd, GpuRegister rs1) {
 void Riscv64Assembler::FMvDX(FpuRegister rd, GpuRegister rs1) {
   EmitR(0x79, 0x0, rs1, 0x0, rd, 0x53);
 }
+
+/////////////////////////////// RV64 Ali extension ////////////////
+void Riscv64Assembler::Ff1(GpuRegister rd, GpuRegister rs1) {
+  EmitRs1d(0x43, rs1, rd, 0x0b);
+}
+
+void Riscv64Assembler::Revw(GpuRegister rd, GpuRegister rs1) {
+  EmitRs1d(0x48, rs1, rd, 0x0b);
+}
+
+void Riscv64Assembler::Rev(GpuRegister rd, GpuRegister rs1) {
+  EmitRs1d(0x41, rs1, rd, 0x0b);
+}
+/////////////////////////////// RV64 Ali extension end ////////////
 
 }  // namespace riscv64
 }  // namespace art

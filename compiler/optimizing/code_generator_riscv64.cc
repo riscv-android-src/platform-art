@@ -222,8 +222,13 @@ class LoadClassSlowPathRISCV64 : public SlowPathCodeRISCV64 {
       DCHECK(IsSameDexFile(cls_->GetDexFile(), riscv64_codegen->GetGraph()->GetDexFile()));
       dex::TypeIndex type_index = cls_->GetTypeIndex();
       __ LoadConst32(calling_convention.GetRegisterAt(0), type_index.index_);
-      riscv64_codegen->InvokeRuntime(kQuickResolveType, instruction_, dex_pc, this);
-      CheckEntrypointTypes<kQuickResolveType, void*, uint32_t>();
+      if (cls_->NeedsAccessCheck()) {
+        CheckEntrypointTypes<kQuickResolveTypeAndVerifyAccess, void*, uint32_t>();
+        riscv64_codegen->InvokeRuntime(kQuickResolveTypeAndVerifyAccess, instruction_, dex_pc, this);
+      } else {
+        CheckEntrypointTypes<kQuickResolveType, void*, uint32_t>();
+        riscv64_codegen->InvokeRuntime(kQuickResolveType, instruction_, dex_pc, this);
+      }
       // If we also must_do_clinit, the resolved type is now in the correct register.
     } else {
       DCHECK(must_do_clinit);
@@ -1155,6 +1160,9 @@ void CodeGeneratorRISCV64::GenerateFrameEntry() {
   if (GetCompilerOptions().CountHotnessInCompiledCode()) {
     __ Lhu(TMP, kMethodRegisterArgument, ArtMethod::HotnessCountOffset().Int32Value());
     __ Addiu(TMP, TMP, 1);
+    // Subtract one if the counter would overflow.
+    __ Srl(TMP2, TMP, 16);
+    __ Sub(TMP, TMP, TMP2);
     __ Sh(TMP, kMethodRegisterArgument, ArtMethod::HotnessCountOffset().Int32Value());
   }
 
@@ -3787,6 +3795,9 @@ void InstructionCodeGeneratorRISCV64::HandleGoto(HInstruction* got, HBasicBlock*
       __ Ld(AT, SP, kCurrentMethodStackOffset);
       __ Lhu(TMP, AT, ArtMethod::HotnessCountOffset().Int32Value());
       __ Addiu(TMP, TMP, 1);
+     // Subtract one if the counter would overflow.
+     __ Srl(TMP2, TMP, 16);
+     __ Sub(TMP, TMP, TMP2);
       __ Sh(TMP, AT, ArtMethod::HotnessCountOffset().Int32Value());
     }
     GenerateSuspendCheck(info->GetSuspendCheck(), successor);
@@ -6064,6 +6075,31 @@ void LocationsBuilderRISCV64::VisitInvokeInterface(HInvokeInterface* invoke) {
   invoke->GetLocations()->AddTemp(Location::RegisterLocation(T0));
 }
 
+void CodeGeneratorRISCV64::MaybeGenerateInlineCacheCheck(HInstruction* instruction,
+                                                       GpuRegister klass) {
+  // We know the destination of an intrinsic, so no need to record inline caches.
+  if (!instruction->GetLocations()->Intrinsified() &&
+      GetGraph()->IsCompilingBaseline() &&
+      !Runtime::Current()->IsAotCompiler()) {
+    DCHECK(!instruction->GetEnvironment()->IsFromInlinedInvoke());
+    ScopedProfilingInfoUse spiu(
+        Runtime::Current()->GetJit(), GetGraph()->GetArtMethod(), Thread::Current());
+    ProfilingInfo* info = spiu.GetProfilingInfo();
+    if (info != nullptr) {
+      InlineCache* cache = info->GetInlineCache(instruction->GetDexPc());
+      uint64_t address = reinterpret_cast64<uint64_t>(cache);
+      Riscv64Label done;
+      __ LoadConst64(T0, address);
+      __ LoadFromOffset(kLoadDoubleword, T1, T0, InlineCache::ClassesOffset().Int32Value());
+      // Fast path for a monomorphic cache.
+      __ Beqc(klass, T1, &done);
+      InvokeRuntime(kQuickUpdateInlineCache, instruction, instruction->GetDexPc());
+
+      __ Bind(&done);
+    }
+  }
+}
+
 void InstructionCodeGeneratorRISCV64::VisitInvokeInterface(HInvokeInterface* invoke) {
   // TODO: b/18116999, our IMTs can miss an IncompatibleClassChangeError.
   GpuRegister temp = invoke->GetLocations()->GetTemp(0).AsRegister<GpuRegister>();
@@ -6090,8 +6126,7 @@ void InstructionCodeGeneratorRISCV64::VisitInvokeInterface(HInvokeInterface* inv
   __ MaybeUnpoisonHeapReference(temp);
 
   // If we're compiling baseline, update the inline cache.
-  // XC-ART-TBD
-  // codegen_->MaybeGenerateInlineCacheCheck(invoke, temp);
+  codegen_->MaybeGenerateInlineCacheCheck(invoke, temp);
 
   // The register T0 is required to be used for the hidden argument in
   // art_quick_imt_conflict_trampoline.
@@ -6436,6 +6471,10 @@ void CodeGeneratorRISCV64::GenerateVirtualCall(
   // intact/accessible until the end of the marking phase (the
   // concurrent copying collector may not in the future).
   __ MaybeUnpoisonHeapReference(temp);
+
+  // If we're compiling baseline, update the inline cache.
+  MaybeGenerateInlineCacheCheck(invoke, temp);
+
   // temp = temp->GetMethodAt(method_offset);
   __ LoadFromOffset(kLoadDoubleword, temp, temp, method_offset);
   // T6 = temp->GetEntryPoint();

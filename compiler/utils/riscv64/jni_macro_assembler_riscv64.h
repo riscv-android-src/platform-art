@@ -193,10 +193,10 @@ class Riscv64JNIMacroAssembler final : public JNIMacroAssemblerFwd<Riscv64Assemb
 
 class Riscv64JNIMacroLabel final
     : public JNIMacroLabelCommon<Riscv64JNIMacroLabel,
-                                 art::Label,
+                                 art::riscv64::Riscv64Label,
                                  InstructionSet::kRiscv64> {
  public:
-  art::Label* AsRiscv64() {
+   art::riscv64::Riscv64Label* AsRiscv64() {
     return AsPlatformLabel();
   }
 };

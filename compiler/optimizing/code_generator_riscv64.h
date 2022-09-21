@@ -507,6 +507,8 @@ class CodeGeneratorRISCV64 : public CodeGenerator {
 
   void MarkGCCard(GpuRegister object, GpuRegister value, bool value_can_be_null);
 
+  void MaybeGenerateInlineCacheCheck(HInstruction* instruction, GpuRegister klass);
+
   // Register allocation.
 
   void SetupBlockedRegisters() const override;

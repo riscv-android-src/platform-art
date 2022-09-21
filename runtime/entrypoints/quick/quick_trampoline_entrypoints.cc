@@ -821,6 +821,12 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
   }
 
   // No need to restore the args since the method has already been run by the interpreter.
+  #if defined(__riscv) && (__riscv_xlen == 64)
+  // Riscv64: Have to NaN-Boxing float return
+  if (shorty[0] == 'F') {
+    return result.GetJ() | 0xffffffff00000000;
+  }
+  #endif
   return result.GetJ();
 }
 

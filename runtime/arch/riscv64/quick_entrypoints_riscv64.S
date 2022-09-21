@@ -2694,10 +2694,61 @@ ENTRY art_quick_string_builder_append
   RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
 END art_quick_string_builder_append
 
-// x0 contains the class, x8 contains the inline cache. x9-x15 can be used.
+// a0 contains the class, t0 contains the inline cache. t1-t6 can be used.
 ENTRY art_quick_update_inline_cache
-  ebreak;
-  // TBD: Need implement it for Android 12
+#if (INLINE_CACHE_SIZE != 5)
+#error "INLINE_CACHE_SIZE not as expected."
+#endif
+#if defined(USE_READ_BARRIER) && defined(USE_BAKER_READ_BARRIER)
+    // Don't update the cache if we are marking.
+    ld    t6, THREAD_IS_GC_MARKING_OFFSET(rSELF)
+    bnez  t6, .Ldone
+#endif
+.Lentry1:
+    lw t1, INLINE_CACHE_CLASSES_OFFSET(t0)
+    beq t1, a0, .Ldone
+    bnez t1, .Lentry2
+    addi t5, t0, INLINE_CACHE_CLASSES_OFFSET
+    lr.w t1, (t5)
+    bnez t1, .Lentry1
+    sc.w t1, a0, (t5)
+    beqz  t1, .Ldone
+    j .Lentry1
+.Lentry2:
+    lw t1, (INLINE_CACHE_CLASSES_OFFSET+4)(t0)
+    beq t1, a0, .Ldone
+    bnez t1, .Lentry3
+    addi t5, t0, INLINE_CACHE_CLASSES_OFFSET+4
+    lr.w t1, (t5)
+    bnez t1, .Lentry2
+    sc.w t1, a0, (t5)
+    beqz   t1, .Ldone
+    j .Lentry2
+.Lentry3:
+    lw t1, (INLINE_CACHE_CLASSES_OFFSET+8)(t0)
+    beq t1, a0, .Ldone
+    bnez t1, .Lentry4
+    addi t5, t0, INLINE_CACHE_CLASSES_OFFSET+8
+    lr.w t1, (t5)
+    bnez t1, .Lentry3
+    sc.w t1, a0, (t5)
+    beqz   t1, .Ldone
+    j .Lentry3
+.Lentry4:
+    lw t1, (INLINE_CACHE_CLASSES_OFFSET+12)(t0)
+    beq t1, a0, .Ldone
+    bnez t1, .Lentry5
+    addi t5, t0, INLINE_CACHE_CLASSES_OFFSET+12
+    lr.w t1, (t5)
+    bnez t1, .Lentry4
+    sc.w t1, a0, (t5)
+    beqz   t1, .Ldone
+    j .Lentry4
+.Lentry5:
+    // Unconditionally store, the inline cache is megamorphic.
+    sw  a0, (INLINE_CACHE_CLASSES_OFFSET+16)(t0)
+.Ldone:
+      jalr   zero, ra
 END art_quick_update_inline_cache
 
 // On entry, method is at the bottom of the stack.

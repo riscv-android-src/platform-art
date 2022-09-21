@@ -56,6 +56,7 @@ inline mirror::Object* RegionSpace::AllocNonvirtual(size_t num_bytes,
   mirror::Object* obj;
   if (LIKELY(num_bytes <= kRegionSize)) {
     // Non-large object.
+    #ifndef __riscv
     obj = (kForEvac ? evac_region_ : current_region_)->Alloc(num_bytes,
                                                              bytes_allocated,
                                                              usable_size,
@@ -63,6 +64,7 @@ inline mirror::Object* RegionSpace::AllocNonvirtual(size_t num_bytes,
     if (LIKELY(obj != nullptr)) {
       return obj;
     }
+    #endif
     MutexLock mu(Thread::Current(), region_lock_);
     // Retry with current region since another thread may have updated
     // current_region_ or evac_region_.  TODO: fix race.

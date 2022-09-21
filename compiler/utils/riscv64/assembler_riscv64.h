@@ -1063,6 +1063,12 @@ class Riscv64Assembler final : public Assembler {
   void FMvDX(FpuRegister rd, GpuRegister rs1);
   ///////////////////////////////////////////////////////////////////
 
+  /////////////////////////////// RV64 Ali extension ////////////////
+  void Ff1(GpuRegister rd, GpuRegister rs1);
+  void Revw(GpuRegister rd, GpuRegister rs1);
+  void Rev(GpuRegister rd, GpuRegister rs1);
+  ///////////////////////////////////////////////////////////////////
+
   // Helper for replicating floating point value in all destination elements.
   void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
 
@@ -1777,6 +1783,10 @@ class Riscv64Assembler final : public Assembler {
   void EmitMsaI10(int operation, int df, int i10, VectorRegister wd, int minor_opcode);
   void EmitMsa2R(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
   void EmitMsa2RF(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
+
+  /////////////////////////////// RV64 Ali extension ////////////////
+  void EmitRs1d(int funct7, GpuRegister rs1, GpuRegister rd, int opcode);
+  ///////////////////////////////////////////////////////////////////
 
   // TODO dvt porting...
   template<typename Reg1, typename Reg2, typename Reg3>
