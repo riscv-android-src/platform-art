@@ -264,7 +264,7 @@ extern uint64_t GenericJniMethodEnd(Thread* self,
           double d = bit_cast<double, uint64_t>(result_f);
           return bit_cast<uint32_t, float>(static_cast<float>(d));
         } else if (kRuntimeISA == InstructionSet::kRiscv64) {
-          // zhengxing: Riscv64 need to NaN-Boxing float value
+          // Riscv64 need NaN-Boxing
           return result_f | 0xffffffff00000000;
         } else {
           return result_f;

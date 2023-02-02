@@ -22,46 +22,194 @@
     //.set noreorder
     .balign 16
 
-    /* Deliver the given exception */
-    .extern artDeliverExceptionFromCode
-    /* Deliver an exception pending on a thread */
-    .extern artDeliverPendingExceptionFromCode
+// XC-TODO: SETUP_SAVE_EVERYTHING_FRAME_DECREMENTED_SP_SKIP_X29_LR?
 
-    /*
-     * Macro that calls through to artDeliverPendingExceptionFromCode, where the pending
-     * exception is Thread::Current()->exception_.
-     */
-.macro DELIVER_PENDING_EXCEPTION
-    SETUP_GP
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME    # save callee saves for throw
-    DELIVER_PENDING_EXCEPTION_FRAME_READY
+.macro RETURN_IF_RESULT_IS_ZERO
+    bne  0, zero, 1f           // result non-zero branch over
+    ret                        // return
+1:
 .endm
 
+.macro RETURN_IF_RESULT_IS_NON_ZERO
+    beq  a0, zero, 1f         // result zero branch over
+    ret                       // return
+1:
+.endm
+
+.macro RETURN_OR_DELIVER_PENDING_EXCEPTION_T1
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG t1
+.endm
+
+
+// RETURN_IF_W0_IS_ZERO_OR_DELIVER?
+
 .macro RETURN_IF_NO_EXCEPTION
-    ld     t0, THREAD_EXCEPTION_OFFSET(rSELF) # load Thread::Current()->exception_
     RESTORE_SAVE_REFS_ONLY_FRAME
-    bne    t0, zero, 1f                      # success if no exception is pending
-    jalr   zero, 0(ra)
+
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG  t0
+.endm
+
+.macro RETURN_IF_ZERO_OR_DELIVER_EXCEPTION
+    bne    a0, zero, 1f                     # success?
+    jalr   zero, 0(ra)                      # return on success
 1:
     DELIVER_PENDING_EXCEPTION
 .endm
 
 .macro RETURN_IF_ZERO
     RESTORE_SAVE_REFS_ONLY_FRAME
-    bne    a0, zero, 1f                   # success?
-    jalr   zero, 0(ra)                    # return on success
+    bne    a0, zero, 1f                     # success?
+    jalr   zero, 0(ra)                      # return on success
 1:
     DELIVER_PENDING_EXCEPTION
 .endm
 
 .macro RETURN_IF_RESULT_IS_NON_ZERO_OR_DELIVER
     RESTORE_SAVE_REFS_ONLY_FRAME
-    beq    a0, zero, 1f                   # success?
-    jalr   zero, 0(ra)                    # return on success
+    beq    a0, zero, 1f                     # success?
+    jalr   zero, 0(ra)                      # return on success
 1:
     DELIVER_PENDING_EXCEPTION
 .endm
 
+.macro NO_ARG_RUNTIME_EXCEPTION c_name, cxx_name
+    .extern \cxx_name
+ENTRY \c_name
+    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME // save all registers as basis for long jump context
+    mv a0, rSELF                      // pass Thread::Current
+    la  t6, \cxx_name
+    jalr ra, 0(t6)                    // \cxx_name(Thread*)
+    ebreak
+END \c_name
+.endm
+
+.macro NO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING c_name, cxx_name
+    .extern \cxx_name
+ENTRY \c_name
+    SETUP_SAVE_EVERYTHING_FRAME       // save all registers as basis for long jump context
+    mv a0, rSELF                      // pass Thread::Current
+    la  t6, \cxx_name
+    jalr ra, 0(t6)                    // \cxx_name(Thread*)
+    ebreak
+END \c_name
+.endm
+
+.macro ONE_ARG_RUNTIME_EXCEPTION c_name, cxx_name
+    .extern \cxx_name
+ENTRY \c_name
+    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME // save all registers as basis for long jump context.
+    mv a1, rSELF                      // pass Thread::Current
+    la  t6, \cxx_name
+    jalr ra, 0(t6)                    // \cxx_name(arg, Thread*).
+    ebreak
+END \c_name
+.endm
+
+.macro TWO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING c_name, cxx_name
+    .extern \cxx_name
+ENTRY \c_name
+    SETUP_SAVE_EVERYTHING_FRAME       // save all registers as basis for long jump context
+    mv a2, rSELF                      // pass Thread::Current
+    la  t6, \cxx_name
+    jalr ra, 0(t6)                    // \cxx_name(arg1, arg2, Thread*)
+    ebreak
+END \c_name
+.endm
+
+    /*
+     * Called by managed code, saves callee saves and then calls artThrowException
+     * that will place a mock Method* at the bottom of the stack. Arg1 holds the exception.
+     */
+ONE_ARG_RUNTIME_EXCEPTION art_quick_deliver_exception, artDeliverExceptionFromCode
+
+    /*
+     * Called by managed code to create and deliver a NullPointerException.
+     */
+NO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING art_quick_throw_null_pointer_exception, artThrowNullPointerExceptionFromCode
+
+    /*
+     * Call installed by a signal handler to create and deliver a NullPointerException
+     */
+    .extern artThrowNullPointerExceptionFromSignal
+ENTRY_NO_GP_CFA art_quick_throw_null_pointer_exception_from_signal, FRAME_SIZE_SAVE_EVERYTHING
+    SETUP_SAVE_EVERYTHING_FRAME_DECREMENTED_SP
+    # Retrieve the fault address from the padding where the signal handler stores it.
+    ld   a0, (__SIZEOF_POINTER__)(sp)
+    la   t6, artThrowNullPointerExceptionFromSignal
+    mv   a1, rSELF                   # pass Thread::Current
+    jalr zero, 0(t6)                 # artThrowNullPointerExceptionFromSignal(uinptr_t, Thread*)
+END art_quick_throw_null_pointer_exception_from_signal
+
+
+    /*
+     * Called by managed code to create and deliver an ArithmeticException.
+     */
+NO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING art_quick_throw_div_zero, artThrowDivZeroFromCode
+
+    /*
+     * Called by managed code to create and deliver an ArrayIndexOutOfBoundsException. Arg1 holds
+     * index, arg2 holds limit.
+     */
+TWO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING art_quick_throw_array_bounds, artThrowArrayBoundsFromCode
+
+    /*
+     * Called by managed code to create and deliver a StringIndexOutOfBoundsException
+     * as if thrown from a call to String.charAt(). Arg1 holds index, arg2 holds limit.
+     */
+TWO_ARG_RUNTIME_EXCEPTION_SAVE_EVERYTHING art_quick_throw_string_bounds, artThrowStringBoundsFromCode
+
+    /*
+     * Called by managed code to create and deliver a StackOverflowError.
+     */
+NO_ARG_RUNTIME_EXCEPTION art_quick_throw_stack_overflow, artThrowStackOverflowFromCode
+
+
+    /*
+     * All generated callsites for interface invokes and invocation slow paths will load arguments
+     * as usual - except instead of loading arg0/$a0 with the target Method*, arg0/$a0 will contain
+     * the method_idx.  This wrapper will save arg1-arg3, load the caller's Method*, align the
+     * stack and call the appropriate C helper.
+     * NOTE: "this" is first visable argument of the target, and so can be found in arg1/$a1.
+     *
+     * The helper will attempt to locate the target and return a 128-bit result in $v0/$v1 consisting
+     * of the target Method* in $v0 and method->code_ in $v1.
+     *
+     * If unsuccessful, the helper will return null/null. There will be a pending exception in the
+     * thread and we branch to another stub to deliver it.
+     *
+     * On success this wrapper will restore arguments and *jump* to the target, leaving the ra
+     * pointing back to the original caller.
+     */
+.macro INVOKE_TRAMPOLINE_BODY cxx_name
+    .extern \cxx_name
+    SETUP_SAVE_REFS_AND_ARGS_FRAME  # save callee saves in case
+                                                          # allocation triggers GC
+    mv    a2, rSELF                        # pass Thread::Current
+    mv    a3, sp                           # pass $sp
+    jal   \cxx_name                        # (method_idx, this, Thread*, $sp)
+    mv    a0, a0                           # save target Method*
+    mv    t6, a1                           # save $v0->code_
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
+    beq   a0, zero, 1f
+    jalr  zero, 0(t6)
+1:
+    DELIVER_PENDING_EXCEPTION
+.endm
+
+.macro INVOKE_TRAMPOLINE c_name, cxx_name
+ENTRY \c_name
+    INVOKE_TRAMPOLINE_BODY \cxx_name
+END \c_name
+.endm
+
+
+/*  extern"C" void art_quick_osr_stub(void** stack,                a0
+ *                                    size_t stack_size_in_bytes,  a1
+ *                                    const uint8_t* native_pc,    a2
+ *                                    JValue *result,              a3
+ *                                    char   *shorty,              a4
+ *                                    Thread *self)                a5
+ */
     /*
      * On stack replacement stub.
      * On entry:
@@ -75,15 +223,14 @@
 ENTRY art_quick_osr_stub
     mv     t0, sp               # save stack pointer; pseudo instr
 
-    // Wendong: TBD, remove this, do NOT need this
     addi   t1, sp, -224         # reserve stack space
     srli   t1, t1, 4            # enforce 16 byte stack alignment
     slli   sp, t1, 4            # update stack pointer
     .cfi_adjust_cfa_offset 224
 
     // Save callee floating point registers. fs0 -- fs11
-    SAVE_FREG_CALLEE2   144
-    SAVE_FREG_CALLEE1   128
+    SAVE_FREG_CALLEE_S2_S11     144
+    SAVE_FREG_CALLEE_S0_S1      128
 
     // Save callee general purpose registers, SP, RA, A3, and A4 (8x14 bytes)
     sd     ra, 120(sp)
@@ -116,8 +263,8 @@ ENTRY art_quick_osr_stub
     .cfi_adjust_cfa_offset -16
 
     // Restore callee floating point registers. fs0 -- fs11
-    RESTORE_FREG_CALLEE2  144
-    RESTORE_FREG_CALLEE1  128
+    RESTORE_FREG_CALLEE_S2_S11  144
+    RESTORE_FREG_CALLEE_S0_S1   128
 
     // Restore callee registers
     ld     ra, 120(sp)
@@ -152,7 +299,7 @@ ENTRY art_quick_osr_stub
 .Losr_f_result:
     fmv.x.w  a0, f10                    # put Float result in a0
     sw     a0, 0(a3)
-    li     a0, -1                       # NaN-Boxing Float result
+    li     a0, -1                       # Riscv64 need NaN-Boxing
     sw     a0, 4(a3)
     jalr   zero, 0(ra)
 .Losr_d_result:
@@ -192,8 +339,9 @@ ENTRY art_quick_osr_stub
 
 .Losr_loop_exit:
     mv     t6, a2
-    jalr   zero, 0(t6)                        # Jump to the OSR entry point.
+    jalr   zero, 0(t6)          # Jump to the OSR entry point.
 END art_quick_osr_stub
+
 
     /*
      * On entry $a0 is uint32_t* gprs_ and $a1 is uint32_t* fprs_
@@ -249,137 +397,12 @@ ENTRY_NO_GP art_quick_do_long_jump
     # load a0 now.
     ld      a0, 80(a0)
 
-    jalr    zero, 0(t6)       # do long jump (do not use ra, it must not be clobbered)
+    jalr    zero, 0(t6)         # do long jump (do not use ra, it must not be clobbered)
 END art_quick_do_long_jump
 
-    /*
-     * Called by managed code, saves most registers (forms basis of long jump
-     * context) and passes the bottom of the stack.
-     * artDeliverExceptionFromCode will place the callee save Method* at
-     * the bottom of the thread. On entry a0 holds Throwable*
-     */
-ENTRY art_quick_deliver_exception
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    la   t6, artDeliverExceptionFromCode  #@dla  $t6, artDeliverExceptionFromCode
-    mv   a1, rSELF                 # pass Thread::Current
-    jalr ra, 0(t6)                 # artDeliverExceptionFromCode(Throwable*, Thread*)
-    ebreak;
-END art_quick_deliver_exception
 
-    .hidden art_quick_throw_null_pointer_exception
-    .extern artThrowNullPointerExceptionFromCode
-    /*
-     * Called by managed code to create and deliver a NullPointerException
-     */
-ENTRY_NO_GP art_quick_throw_null_pointer_exception
-    // Note that setting up $gp does not rely on $t6 here, so branching here directly is OK,
-    // even after clobbering any registers we don't need to preserve, such as $gp or $t0.
-    SETUP_SAVE_EVERYTHING_FRAME
-    la   t6, artThrowNullPointerExceptionFromCode
-    mv   a0, rSELF                   # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowNullPointerExceptionFromCode(Thread*)
-END art_quick_throw_null_pointer_exception
-
-    /*
-     * Call installed by a signal handler to create and deliver a NullPointerException
-     */
-    .extern artThrowNullPointerExceptionFromSignal
-ENTRY_NO_GP_CFA art_quick_throw_null_pointer_exception_from_signal, FRAME_SIZE_SAVE_EVERYTHING
-    SETUP_SAVE_EVERYTHING_FRAME_DECREMENTED_SP
-    # Retrieve the fault address from the padding where the signal handler stores it.
-    ld   a0, (__SIZEOF_POINTER__)(sp)
-    la   t6, artThrowNullPointerExceptionFromSignal
-    mv   a1, rSELF                   # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowNullPointerExceptionFromSignal(uinptr_t, Thread*)
-END art_quick_throw_null_pointer_exception_from_signal
-
-    /*
-     * Called by managed code to create and deliver an ArithmeticException
-     */
-    .extern artThrowDivZeroFromCode
-ENTRY_NO_GP art_quick_throw_div_zero
-    SETUP_SAVE_EVERYTHING_FRAME
-    la   t6, artThrowDivZeroFromCode
-    mv   a0, rSELF                   # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowDivZeroFromCode(Thread*)
-END art_quick_throw_div_zero
-
-    /*
-     * Called by managed code to create and deliver an
-     * ArrayIndexOutOfBoundsException
-     */
-    .extern artThrowArrayBoundsFromCode
-ENTRY_NO_GP art_quick_throw_array_bounds
-    // Note that setting up $gp does not rely on $t6 here, so branching here directly is OK,
-    // even after clobbering any registers we don't need to preserve, such as $gp or $t0.
-    SETUP_SAVE_EVERYTHING_FRAME
-    la   t6, artThrowArrayBoundsFromCode
-    mv   a2, rSELF                   # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowArrayBoundsFromCode(index, limit, Thread*)
-END art_quick_throw_array_bounds
-
-    /*
-     * Called by managed code to create and deliver a StringIndexOutOfBoundsException
-     * as if thrown from a call to String.charAt().
-     */
-    .extern artThrowStringBoundsFromCode
-ENTRY_NO_GP art_quick_throw_string_bounds
-    SETUP_SAVE_EVERYTHING_FRAME
-    la   t6, artThrowStringBoundsFromCode
-    mv   a2, rSELF                   # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowStringBoundsFromCode(index, limit, Thread*)
-END art_quick_throw_string_bounds
-
-    /*
-     * Called by managed code to create and deliver a StackOverflowError.
-     */
-    .extern artThrowStackOverflowFromCode
-ENTRY art_quick_throw_stack_overflow
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    la   t6, artThrowStackOverflowFromCode
-    mv   a0, rSELF                 # pass Thread::Current
-    jalr zero, 0(t6)                 # artThrowStackOverflowFromCode(Thread*)
-END art_quick_throw_stack_overflow
-
-    /*
-     * All generated callsites for interface invokes and invocation slow paths will load arguments
-     * as usual - except instead of loading arg0/$a0 with the target Method*, arg0/$a0 will contain
-     * the method_idx.  This wrapper will save arg1-arg3, load the caller's Method*, align the
-     * stack and call the appropriate C helper.
-     * NOTE: "this" is first visable argument of the target, and so can be found in arg1/$a1.
-     *
-     * The helper will attempt to locate the target and return a 128-bit result in $v0/$v1 consisting
-     * of the target Method* in $v0 and method->code_ in $v1.
-     *
-     * If unsuccessful, the helper will return null/null. There will be a pending exception in the
-     * thread and we branch to another stub to deliver it.
-     *
-     * On success this wrapper will restore arguments and *jump* to the target, leaving the ra
-     * pointing back to the original caller.
-     */
-.macro INVOKE_TRAMPOLINE_BODY cxx_name, save_s4_thru_s8_only=0
-    .extern \cxx_name
-    SETUP_SAVE_REFS_AND_ARGS_FRAME \save_s4_thru_s8_only  # save callee saves in case
-                                                          # allocation triggers GC
-    mv    a2, rSELF                        # pass Thread::Current
-    mv    a3, sp                           # pass $sp
-    jal   \cxx_name                        # (method_idx, this, Thread*, $sp)
-    mv    a0, a0                           # save target Method*
-    mv    t6, a1                           # save $v0->code_
-    RESTORE_SAVE_REFS_AND_ARGS_FRAME
-    beq   a0, zero, 1f
-    jalr  zero, 0(t6)
-1:
-    DELIVER_PENDING_EXCEPTION
-.endm
-.macro INVOKE_TRAMPOLINE c_name, cxx_name
-ENTRY \c_name
-    INVOKE_TRAMPOLINE_BODY \cxx_name
-END \c_name
-.endm
-
+// XC-TODO: If put all these 5 function in lines 200, 137-cfi will fail
 INVOKE_TRAMPOLINE art_quick_invoke_interface_trampoline_with_access_check, artInvokeInterfaceTrampolineWithAccessCheck
-
 INVOKE_TRAMPOLINE art_quick_invoke_static_trampoline_with_access_check, artInvokeStaticTrampolineWithAccessCheck
 INVOKE_TRAMPOLINE art_quick_invoke_direct_trampoline_with_access_check, artInvokeDirectTrampolineWithAccessCheck
 INVOKE_TRAMPOLINE art_quick_invoke_super_trampoline_with_access_check, artInvokeSuperTrampolineWithAccessCheck
@@ -393,41 +416,50 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
 .macro LOOP_OVER_SHORTY_LOADING_INTEGER_REG gpu label_in lable_out
 \label_in:
     lbu    t3, 0(t0)           # get argument type from shorty
-    c.addi   t0, 1
+    c.addi t0, 1
     beqz   t3, \lable_out          # jump out
 
-    li     t6, 68               # put char 'D' into t6
+    li     t6, 68              # put char 'D' into t6
     beq    t6, t3, 1f          # branch if result type char == 'D'
-    li     t6, 70               # put char 'F' into t6
+    li     t6, 70              # put char 'F' into t6
     beq    t6, t3, 2f          # branch if result type char == 'F'
-    li     t6, 74               # put char 'J' into t6
+    li     t6, 74              # put char 'J' into t6
     beq    t6, t3, 3f          # branch if result type char == 'J'
-    # found int (4 bytes)
+    li     t6, 76              # put char 'L' into t6
+    beq    t6, t3, 0f          # branch if result type char == 'L'
+    # found others (Z,B,C,S,I: 4 bytes)
     lw     \gpu, 0(t1)
     c.addi   t1, 4
     c.j      4f
 
+   # found object ref (L: 4 bytes)
+0:
+    lwu     \gpu, 0(t1)
+    c.addi   t1, 4
+    c.j      4f
+
+    ## XC-TODO: performace optimizing
 1:  # found double and skip it if the count < 8
     c.addi t5, 1
-    li t6, 8
-    ble t5, t6, 11f
-    ld \gpu, 0(t1)
-    c.addi   t1, 8
-    c.j      4f  
+    li     t6, 8
+    ble    t5, t6, 11f
+    ld     \gpu, 0(t1)
+    c.addi t1, 8
+    c.j    4f
 11:
     c.addi t1, 8
-    c.j      \label_in
+    c.j    \label_in
 
 2:  # found float and and skip it if the count < 8
     c.addi t5, 1
-    li t6, 8
-    ble t5, t6, 22f
-    lw \gpu, 0(t1)
-    c.addi   t1, 4
-    c.j      4f    
+    li     t6, 8
+    ble    t5, t6, 22f
+    lw     \gpu, 0(t1)
+    c.addi t1, 4
+    c.j    4f
 22:
-    c.addi   t1, 4
-    c.j      \label_in
+    c.addi t1, 4
+    c.j    \label_in
 
 3:  # found long (8 bytes)
     lwu    t3, 0(t1)
@@ -445,91 +477,97 @@ INVOKE_TRAMPOLINE art_quick_invoke_virtual_trampoline_with_access_check, artInvo
 .macro LOOP_OVER_SHORTY_LOADING_FLOAT_REG fpu label_in lable_out
 \label_in:
     lbu    t3, 0(t0)           # get argument type from shorty
-    c.addi   t0, 1
+    c.addi t0, 1
     beqz   t3, \lable_out      # jump out
 
-    li     t6, 68               # put char 'D' into t6
+    li     t6, 68              # put char 'D' into t6
     beq    t6, t3, 1f          # branch if result type char == 'D'
-    li     t6, 70               # put char 'F' into t6
+    li     t6, 70              # put char 'F' into t6
     beq    t6, t3, 2f          # branch if result type char == 'F'
-    li     t6, 74               # put char 'J' into t6
+    li     t6, 74              # put char 'J' into t6
     beq    t6, t3, 3f          # branch if result type char == 'J'
-    # found int (4 bytes) skip it
-    c.addi   t1, 4
-    c.j      \label_in
+    # found others (Z,B,C,S,I: 4 bytes) skip it
+    c.addi t1, 4
+    c.j    \label_in
 
 1:  # found double (8 bytes)
     fld    \fpu, 0(t1)              # load double arg into \fpu
     c.addi t1, 8
-    c.j      4f
+    c.j    4f
 
 2:  # found float (4 bytes)
     flw    \fpu, 0(t1)              # load float arg into \fpu
-    c.addi   t1, 4
-    c.j      4f
+    c.addi t1, 4
+    c.j    4f
 
 3:  # found long (8 bytes) skip it
     c.addi t1, 8
-    c.j      \label_in
+    c.j    \label_in
 4:
 .endm
 
-    /*
-     * Invocation stub for quick code.
-     * On entry:
-     *   a0 = method pointer
-     *   a1 = argument array that must at least contain the this ptr.
-     *   a2 = size of argument array in bytes
-     *   a3 = (managed) thread pointer
-     *   a4 = JValue* result
-     *   a5 = shorty
-     */
+/*
+* Invocation stub for quick code.
+*  extern"C" void art_quick_invoke_stub(ArtMethod *method,   a0
+*                                       uint32_t  *args,     a1
+*                                       uint32_t argsize,    a2
+*                                       Thread *self,        a3
+*                                       JValue *result,      a4
+*                                       char   *shorty);     a5
+*   a0 = method pointer
+*   a1 = argument array that must at least contain the this ptr.
+*   a2 = size of argument array in bytes (a2 & 0x3 == 0)
+*   a3 = (managed) thread pointer
+*   a4 = JValue* result
+*   a5 = shorty
+*/
 ENTRY_NO_GP art_quick_invoke_stub
-    # push a4, a5, s11(rSUSPEND), s1(rSELF), s0(fp), ra onto the stack
+    # push ra, s0(rFP), s1(rSELF), s11(rSUSPEND), a5, a4, onto the stack
     addi sp, sp, -48
     .cfi_adjust_cfa_offset 48
     sd     ra, 40(sp)
-    .cfi_rel_offset ra, 40
-    sd     s0, 32(sp)
-    .cfi_rel_offset s0, 32
-    sd     rSELF, 24(sp)
+    sd     rFP, 32(sp)          # s0 = rFP
+    .cfi_rel_offset rFP, 32
+    sd     rSELF, 24(sp)        # s1 = rSELF
     .cfi_rel_offset rSELF, 24
     sd     rSUSPEND, 16(sp)
-    .cfi_rel_offset rSUSPEND, 16
+    .cfi_rel_offset rSUSPEND, 16    # s11 = rSUSPEND
     sd     a5, 8(sp)
     .cfi_rel_offset a5, 8
     sd     a4, 0(sp)
     .cfi_rel_offset a4, 0
+    .cfi_rel_offset ra, 40
 
-    mv     rSELF, a3           # move managed thread pointer into s1 (rSELF)
-    mv     s0, sp              # save sp in s0 (fp)
-    .cfi_def_cfa_register s0
+    mv     rSELF, a3            # move managed thread pointer into s1 (rSELF)
+    mv     rFP, sp              # save sp in s0 (rFP)
+    .cfi_def_cfa_register rFP
 
-    addi   t3, a2, 24          # add 8 for ArtMethod* and 16 for stack alignment
-    srli   t3, t3, 4           # shift the frame size right 4
-    slli   t3, t3, 4           # shift the frame size left 4 to align to 16 bytes
-    sub    sp, sp, t3          # reserve stack space for argument array
+    addi   t3, a2, 24           # add 8 for ArtMethod* and 16 for stack alignment
+    srli   t3, t3, 4            # shift the frame size right 4
+    slli   t3, t3, 4            # shift the frame size left 4 to align to 16 bytes
+    sub    sp, sp, t3           # reserve stack space for argument array
 
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    addi   t1, a1, 4           # t1 = ptr to arg_array[4] (skip this ptr)
-    addi   t2, a2, -4          # t2 = number of argument bytes remain (skip this ptr)
-    addi   t4, sp, 12          # v0 (t4 in riscv64) points to where to copy arg_array
+    # Non-Static function has receiver(4 bytes)
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    addi   t1, a1, 4            # t1 = ptr to arg_array[4] (skip this ptr)
+    addi   t2, a2, -4           # t2 = number of argument bytes remain (skip this ptr)
+    addi   t4, sp, 12           # v0 (t4 in riscv64) points to where to copy arg_array
 
     # Copy all args into stack
 1:
     beqz   t2, 2f
     addi   t2, t2, -4
-    lw     t3, 0(t1)           # load from argument array
+    lw     t3, 0(t1)            # load from argument array
     addi   t1, t1, 4
-    sw     t3, 0(t4)           # save to stack
+    sw     t3, 0(t4)            # save to stack
     addi   t4, t4, 4
     j 1b
 2:
     sd     zero, 0(sp)
 
     # Load float/double args into Floating Argument Registers
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    addi   t1, a1, 4           # t1 = ptr to arg_array[4] (skip this ptr)
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    addi   t1, a1, 4            # t1 = ptr to arg_array[4] (skip this ptr)
 
     LOOP_OVER_SHORTY_LOADING_FLOAT_REG f10 f_a0 load_integer
     LOOP_OVER_SHORTY_LOADING_FLOAT_REG f11 f_a1 load_integer
@@ -542,9 +580,9 @@ ENTRY_NO_GP art_quick_invoke_stub
 
     # Load int/long args into Integer Argument Registers
 load_integer:
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    addi   t1, a1, 4           # t1 = ptr to arg_array[4] (skip this ptr)
-    li   t5, 0               # t5 = float/double arg count
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    addi   t1, a1, 4            # t1 = ptr to arg_array[4] (skip this ptr)
+    li     t5, 0                # t5 = float/double arg count
     
     LOOP_OVER_SHORTY_LOADING_INTEGER_REG a2 i_a2 call_fn
     LOOP_OVER_SHORTY_LOADING_INTEGER_REG a3 i_a3 call_fn
@@ -555,15 +593,15 @@ load_integer:
 
 call_fn:
     # call method (a0 and a1 have been untouched)
-    lwu    a1, 0(a1)           # make a1 = this ptr
-    sw     a1, 8(sp)           # copy this ptr (skip 8 bytes for ArtMethod*)
-    sd     zero, 0(sp)         # store null for ArtMethod* at bottom of frame
+    lwu    a1, 0(a1)            # make a1 = this ptr
+    sw     a1, 8(sp)            # copy this ptr (skip 8 bytes for ArtMethod*)
+    sd     zero, 0(sp)          # store null for ArtMethod* at bottom of frame
     ld     t6, ART_METHOD_QUICK_CODE_OFFSET_64(a0)  # get pointer to the code
-    jalr   t6                  # call the method
-    mv     sp, s0              # restore sp from fp(s0)
+    jalr   t6                   # call the method
+    mv     sp, rFP              # restore sp from rFP(s0)
     .cfi_def_cfa_register sp
 
-    # pop a4, a5, s9(rSUSPEND), s1(rSELF), s0(fp), ra off of the stack
+    # pop a4, a5, s11(rSUSPEND), s1(rSELF), s0(rFP), ra off of the stack
     ld     a4, 0(sp)
     .cfi_restore a4
     ld     a5, 8(sp)
@@ -572,8 +610,8 @@ call_fn:
     .cfi_restore rSUSPEND
     ld     rSELF, 24(sp)
     .cfi_restore rSELF
-    ld     s0, 32(sp)
-    .cfi_restore s0
+    ld     rFP, 32(sp)
+    .cfi_restore rFP
     ld     ra, 40(sp)
     .cfi_restore ra
     addi   sp, sp, 48
@@ -581,7 +619,7 @@ call_fn:
 
     # a4 = JValue* result
     # a5 = shorty string
-
+    # result is jvalue type
     lbu   t1, 0(a5)
     li    t2, 'V'
     beq   t1, t2, 3f
@@ -589,38 +627,44 @@ call_fn:
     beq   t1, t2, 1f
     li    t2, 'F'
     beq   t1, t2, 2f
-    sd    a0, 0(a4)
+    sd    a0, 0(a4)     # For all others: z,b,c,s,i,j
     ret
 1:
     fsd   f10, 0(a4)    # Double result
     ret
 2:
     fsw   f10, 0(a4)    # Float result
-    li    a0,  -1       # NaN-Boxing float result
+    li    a0,  -1       # Riscv64 need NaN-Boxing
     sw    a0,  4(a4)
     ret
 3:
     ret
 END art_quick_invoke_stub
 
-    /*
-     * Invocation static stub for quick code.
-     * On entry:
-     *   a0 = method pointer
-     *   a1 = argument array that must at least contain the this ptr.
-     *   a2 = size of argument array in bytes
-     *   a3 = (managed) thread pointer
-     *   a4 = JValue* result
-     *   a5 = shorty
-     */
+/*
+* Invocation static stub for quick code.
+*     void art_quick_invoke_static_stub(ArtMethod *method,   a0
+*                                       uint32_t  *args,     a1
+*                                       uint32_t argsize,    a2
+*                                       Thread *self,        a3
+*                                       JValue *result,      a4
+*                                       char   *shorty);     a5
+*   a0 = method pointer
+*   a1 = argument array that must at least contain the this ptr.
+*   a2 = size of argument array in bytes
+*   a3 = (managed) thread pointer
+*   a4 = JValue* result
+*   a5 = shorty
+*   Static NO this ptr in a1
+*/
 ENTRY_NO_GP art_quick_invoke_static_stub
     # push a4, a5, s11(rSUSPEND), s1(rSELF), s0(fp), ra, onto the stack
     addi sp, sp, -48
     .cfi_adjust_cfa_offset 48
     sd     ra, 40(sp)
     .cfi_rel_offset ra, 40
-    sd     s0, 32(sp)
-    .cfi_rel_offset s0, 32
+    sd     rFP, 32(sp)
+    .cfi_rel_offset rFP, 32
     sd     rSELF, 24(sp)
     .cfi_rel_offset rSELF, 24
     sd     rSUSPEND, 16(sp)
@@ -630,35 +674,35 @@ ENTRY_NO_GP art_quick_invoke_static_stub
     sd     a4, 0(sp)
     .cfi_rel_offset a4, 0
 
-    mv     rSELF, a3           # move managed thread pointer into s1 (rSELF)
-    mv     s0, sp              # save sp in s0 (fp)
-    .cfi_def_cfa_register s0
+    mv     rSELF, a3            # move managed thread pointer into s1 (rSELF)
+    mv     rFP, sp              # save sp in s0 (rFP)
+    .cfi_def_cfa_register rFP
 
-    addi   t3, a2, 24          # add 8 for ArtMethod* and 16 for stack alignment
-    srli   t3, t3, 4           # shift the frame size right 4
-    slli   t3, t3, 4           # shift the frame size left 4 to align to 16 bytes
-    sub    sp, sp, t3         # reserve stack space for argument array
+    addi   t3, a2, 24           # add 8 for ArtMethod* and 16 for stack alignment
+    srli   t3, t3, 4            # shift the frame size right 4
+    slli   t3, t3, 4            # shift the frame size left 4 to align to 16 bytes
+    sub    sp, sp, t3           # reserve stack space for argument array
 
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    mv     t1, a1              # t1 = arg_array
-    mv     t2, a2              # t2 = number of argument bytes remain
-    addi   t4, sp, 8           # v0 (t4 in riscv64) points to where to copy arg_array
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    mv     t1, a1               # t1 = arg_array
+    mv     t2, a2               # t2 = number of argument bytes remain
+    addi   t4, sp, 8            # v0 (t4 in riscv64) points to where to copy arg_array
 
     # Copy all args into stack
 1:
     beqz   t2, 2f
     addi   t2, t2, -4
-    lw     t3, 0(t1)           # load from argument array
+    lw     t3, 0(t1)            # load from argument array
     addi   t1, t1, 4
-    sw     t3, 0(t4)           # save to stack
+    sw     t3, 0(t4)            # save to stack
     addi   t4, t4, 4
     j 1b
 2:
     sd     zero, 0(sp)
 
     # Load float/double args into Floating Argument Registers
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    mv     t1, a1              # t1 = arg_array
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    mv     t1, a1               # t1 = arg_array
 
     LOOP_OVER_SHORTY_LOADING_FLOAT_REG f10 sf_a0 sload_integer
     LOOP_OVER_SHORTY_LOADING_FLOAT_REG f11 sf_a1 sload_integer
@@ -671,9 +715,9 @@ ENTRY_NO_GP art_quick_invoke_static_stub
 
     # Load int/long args into Integer Argument Registers
 sload_integer:
-    addi   t0, a5, 1           # t0 = shorty[1] (skip 1 for return type)
-    mv     t1, a1              # t1 = arg_array
-    li     t5, 0               # t5 = float/double arg count
+    addi   t0, a5, 1            # t0 = shorty[1] (skip 1 for return type)
+    mv     t1, a1               # t1 = arg_array
+    li     t5, 0                # t5 = float/double arg count
 
     LOOP_OVER_SHORTY_LOADING_INTEGER_REG a1 si_a1 call_sfn
     LOOP_OVER_SHORTY_LOADING_INTEGER_REG a2 si_a2 call_sfn
@@ -685,13 +729,13 @@ sload_integer:
 
 call_sfn:
     # call method (a0 has been untouched)
-    sd     zero, 0(sp)         # store null for ArtMethod* at bottom of frame
+    sd     zero, 0(sp)          # store null for ArtMethod* at bottom of frame
     ld     t6, ART_METHOD_QUICK_CODE_OFFSET_64(a0)  # get pointer to the code
     jalr   t6                   # call the method
-    mv     sp, s0              # restore sp
+    mv     sp, rFP              # restore sp
     .cfi_def_cfa_register sp
 
-    # pop a4, a5, s11(rSUSPEND), s1(rSELF), s0(fp), ra off of the stack
+    # pop a4, a5, s11(rSUSPEND), s1(rSELF), s0(rFP), ra off of the stack
     ld     a4, 0(sp)
     .cfi_restore a4
     ld     a5, 8(sp)
@@ -700,8 +744,8 @@ call_sfn:
     .cfi_restore rSUSPEND
     ld     rSELF, 24(sp)
     .cfi_restore rSELF
-    ld     s0, 32(sp)
-    .cfi_restore s0
+    ld     rFP, 32(sp)
+    .cfi_restore rFP
     ld     ra, 40(sp)
     .cfi_restore ra
     addi   sp, sp, 48
@@ -719,11 +763,11 @@ call_sfn:
     sd    a0, 0(a4)
     ret
 1:
-    fsd   f10, 0(a4)    # Double result
+    fsd   f10, 0(a4)            # Double result
     ret
 2:
-    fsw   f10, 0(a4)    # Float result
-    li    a0,  -1       # NaN-Boxing float result
+    fsw   f10, 0(a4)            # Float result
+    li    a0,  -1               # Riscv64 need NaN-Boxing
     sw    a0,  4(a4)
     ret
 3:
@@ -748,53 +792,6 @@ END art_quick_handle_fill_data
      */
     .extern artLockObjectFromCode
 ENTRY art_quick_lock_object
-#if 1
-    bnez    a0, 1f
-    # Jmp to art_quick_throw_null_pointer_exception if a0 == zero
-    la      t6, art_quick_throw_null_pointer_exception
-    jr      t6
-1:
-    li      t6, LOCK_WORD_THIN_LOCK_COUNT_ONE
-    li      t3, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
-.Lretry_lock:
-    lw      t0, THREAD_ID_OFFSET(rSELF)    # TODO: Can the thread ID really change during the loop?
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET
-    lr.w    t1, (t5)
-    and     t2, t1, t3                    # zero the gc bits   
-    bnez    t2, .Lnot_unlocked            # already thin locked
-    # Unlocked case - $t1: original lock word that's zero except for the read barrier bits.
-    or      t2, t1, t0                 # $t2 holds thread id with count of 0 with preserved read barrier bits
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET
-    sc.w    t2, t2, (t5)             # 
-    bnez    t2, .Lretry_lock               # store failed, retry
-    fence                                  # full (LoadLoad|LoadStore) memory barrier
-    #.long   0x01b0000b                     # sync.is
-    jr  ra
-.Lnot_unlocked:
-    # $t1: original lock word, $t0: thread_id with count of 0 and zero read barrier bits
-    srl     t2, t1, LOCK_WORD_STATE_SHIFT         # t2 = t1>>LOCK_WORD_STATE_SHIFT
-    bnez    t2, .Lslow_lock              # if either of the top two bits are set, go slow path
-    xor     t2, t1, t0                  # lock_word.ThreadId() ^ self->ThreadId()
-    li      t4, 0xFFFF
-    and     t2, t2, t4                   # zero top 16 bits
-    bnez    t2, .Lslow_lock              # lock word and self thread id's match -> recursive lock
-                                          # otherwise contention, go to slow path
-    and     t2, t1, t3                 # zero the gc bits
-    add     t2, t2, t6                 # increment count in lock word
-    srl     t2, t2, LOCK_WORD_STATE_SHIFT  # if the first gc state bit is set, we overflowed.
-    bnez    t2, .Lslow_lock              # if we overflow the count go slow path
-    add     t2, t1, t6                   # increment count for real
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET
-    sc.w    t2, t2, (t5)
-    bnez    t2, .Lretry_lock             # store failed, retry
-    jr  ra
-.Lslow_lock:
-    # .cpsetup $t9, $t8, art_quick_lock_object
-    SETUP_SAVE_REFS_ONLY_FRAME            # save callee saves in case we block
-    move    a1, rSELF                    # pass Thread::Current
-    jal     artLockObjectFromCode         # (Object* obj, Thread*)
-    RETURN_IF_ZERO 
-#else
     lw     a1, THREAD_ID_OFFSET(rSELF)
     beqz   a0, art_quick_lock_object_no_inline
                                       // Exclusive load/store has no immediate anymore.
@@ -806,108 +803,46 @@ ENTRY art_quick_lock_object
                                       // or prepare to compare thread id for recursive lock check
                                       //   (lock_word.ThreadId() ^ self->ThreadId()).
     li     t1, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
-    and   t0, a2, t1 // Test the non-gc bits.
-    bnez   t0, .Lnot_unlocked             // Check if unlocked.
+    and    t0, a2, t1 // Test the non-gc bits.
+    bnez   t0, .Lnot_unlocked               // Check if unlocked.
     // unlocked case - store w3: original lock word plus thread id, preserved read barrier bits.
     sc.w   a2, a3, (a4)
-    bnez   a2, .Lretry_lock           // If the store failed, retry.
+    bnez   a2, .Lretry_lock                 // If the store failed (a2 == 1), retry.
     ret
 .Lnot_unlocked:  // w2: original lock word, w1: thread id, w3: w2 ^ w1
-                                      // Check lock word state and thread id together,
+                                            // Check lock word state and thread id together,
     li     t1, LOCK_WORD_STATE_MASK_SHIFTED | LOCK_WORD_THIN_LOCK_OWNER_MASK_SHIFTED
     and    t0, a3, t1 
     bnez   t0, art_quick_lock_object_no_inline
     li     t1, LOCK_WORD_THIN_LOCK_COUNT_ONE
-    add    a3, a2, t1  // Increment the recursive lock count.
+    add    a3, a2, t1                       // Increment the recursive lock count.
     li     t1, LOCK_WORD_THIN_LOCK_COUNT_MASK_SHIFTED
-    and    t0, a3, t1  // Test the new thin lock count.
+    and    t0, a3, t1                       // Test the new thin lock count.
     beqz   t0, art_quick_lock_object_no_inline  // Zero as the new count indicates overflow, go slow path.
     sc.w   a2, a3, (a4)
-    bnez   a2, .Lretry_lock           // If the store failed, retry.
+    bnez   a2, .Lretry_lock                 // If the store failed (a2 == 1), retry.
     ret
-#endif
 END art_quick_lock_object
 
 
     .hidden art_quick_lock_object_no_inline
 ENTRY_NO_GP art_quick_lock_object_no_inline
-    #beq     a0, zero, art_quick_throw_null_pointer_exception
-    bnez    a0, 1f
-    # Jmp to art_quick_throw_null_pointer_exception if a0 == zero
-    la      t6, art_quick_throw_null_pointer_exception
-    jr      t6
-1:
-    SETUP_SAVE_REFS_ONLY_FRAME            # save callee saves in case we block
-    mv      a1, rSELF                    # pass Thread::Current
-    jal     artLockObjectFromCode         # (Object* obj, Thread*)
-    RETURN_IF_ZERO
+    SETUP_SAVE_REFS_ONLY_FRAME            // save callee saves in case we block
+    mv      a1, rSELF                     // pass Thread::Current
+    jal     artLockObjectFromCode         // (Object* obj, Thread*)
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    RETURN_IF_ZERO_OR_DELIVER_EXCEPTION
 END art_quick_lock_object_no_inline
 
     /*
      * Entry from managed code that calls artUnlockObjectFromCode and delivers exception on failure.
      */
-      .extern artUnlockObjectFromCode
+    .extern artUnlockObjectFromCode
 ENTRY_NO_GP art_quick_unlock_object
-#if 1
-    bnez    a0, 1f
-    # Jmp to art_quick_throw_null_pointer_exception if a0 == zero
-    la      t6, art_quick_throw_null_pointer_exception
-    jr      t6
-1:
-    li      t6, LOCK_WORD_THIN_LOCK_COUNT_ONE
-    li      t3, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
-.Lretry_unlock:
-#ifndef USE_READ_BARRIER
-    lw      t1, MIRROR_OBJECT_LOCK_WORD_OFFSET(a0)
-#else   
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET    # Need to use atomic read-modify-write for read barrier
-    lr.w    t1, (t5)
-#endif
-    srlw    t2, t1, LOCK_WORD_STATE_SHIFT
-    bnez    t2, .Lslow_unlock         # if either of the top two bits are set, go slow path
-    lw      t0, THREAD_ID_OFFSET(rSELF)
-    and     t2, t1, t3              # zero the gc bits
-    xor     t2, t2, t0              # lock_word.ThreadId() ^ self->ThreadId()
-    li      t4, 0xFFFF
-    and     t2, t2, t4                   # zero top 16 bits
-    bnez    t2, .Lslow_unlock         # do lock word and self thread id's match?
-    and     t2, t1, t3              # zero the gc bits
-    bgeu    t2, t6, .Lrecursive_thin_unlock
-    # transition to unlocked
-    or      t2, zero, t3            # t2 = LOCK_WORD_GC_STATE_MASK_SHIFTED
-    not     t2, t2
-    and     t2, t1, t2              # t2: zero except for the preserved gc bits
-    fence                           # full (LoadStore|StoreStore) memory barrier
-#ifndef USE_READ_BARRIER
-    sw      t2, MIRROR_OBJECT_LOCK_WORD_OFFSET(a0)
-#else
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET  # @todo sc      t2, MIRROR_OBJECT_LOCK_WORD_OFFSET(a0)
-    sc.w    t2, t2, (t5)
-    bnez    t2, .Lretry_unlock        # store failed, retry
-#endif
-    jr      ra    # @todo jic     ra, 0
-.Lrecursive_thin_unlock:
-    # t1: original lock word
-    sub     t2, t1, t6              # decrement count
-#ifndef USE_READ_BARRIER
-    sw      t2, MIRROR_OBJECT_LOCK_WORD_OFFSET(a0)
-#else
-    addi    t5, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET
-    sc.w    t2, t2, (t5)
-    bnez    t2, .Lretry_unlock        # store failed, retry
-#endif
-    jr      ra
-.Lslow_unlock:
-    SETUP_SAVE_REFS_ONLY_FRAME         # save callee saves in case exception allocation triggers GC
-    mv      a1, rSELF                 # pass Thread::Current
-    jal     artUnlockObjectFromCode    # (Object* obj, Thread*)
-    RETURN_IF_ZERO
-#else
     lw     a1, THREAD_ID_OFFSET(rSELF)
     beqz   a0, art_quick_unlock_object_no_inline
                                       // Exclusive load/store has no immediate anymore.
-    li     t1, MIRROR_OBJECT_LOCK_WORD_OFFSET
-    add    a4, a0, t1 
+    addi   a4, a0, MIRROR_OBJECT_LOCK_WORD_OFFSET   // MIRROR_OBJECT_LOCK_WORD_OFFSET==0x4
 .Lretry_unlock:
 #ifndef USE_READ_BARRIER
     lw     a2, (a4)
@@ -919,7 +854,7 @@ ENTRY_NO_GP art_quick_unlock_object
                                       // or prepare to compare thread id for recursive lock check
                                       //   (lock_word.ThreadId() ^ self->ThreadId()).
     li     t1, LOCK_WORD_GC_STATE_MASK_SHIFTED_TOGGLED
-    and    t0, a3, t1  // Test the non-gc bits.
+    and    t0, a3, t1                 // Test the non-gc bits.
     bnez   t0, .Lnot_simply_locked        // Locked recursively or by other thread?
     // Transition to unlocked.
 #ifndef USE_READ_BARRIER
@@ -935,7 +870,7 @@ ENTRY_NO_GP art_quick_unlock_object
     and    t0, a3, t1
     bnez   t0, art_quick_unlock_object_no_inline
     li     t1, LOCK_WORD_THIN_LOCK_COUNT_ONE
-    sub    a3, a2, t1  // decrement count
+    sub    a3, a2, t1               // decrement count
 #ifndef USE_READ_BARRIER
     sw     a3, (a4)
 #else
@@ -943,21 +878,15 @@ ENTRY_NO_GP art_quick_unlock_object
     bnez   a2, .Lretry_unlock         // If the store failed, retry.
 #endif
     ret
-#endif
 END art_quick_unlock_object
 
     .hidden art_quick_unlock_object_no_inline
 ENTRY_NO_GP art_quick_unlock_object_no_inline
-    # beq     a0, zero, art_quick_throw_null_pointer_exception
-    bnez    a0, 1f
-    # Jmp to art_quick_throw_null_pointer_exception if a0 == zero
-    la      t6, art_quick_throw_null_pointer_exception
-    jr      t6
-1:
     SETUP_SAVE_REFS_ONLY_FRAME         # save callee saves in case exception allocation triggers GC
     mv      a1, rSELF                 # pass Thread::Current
     jal     artUnlockObjectFromCode    # (Object* obj, Thread*)
-    RETURN_IF_ZERO
+    RESTORE_SAVE_REFS_ONLY_FRAME
+    RETURN_IF_ZERO_OR_DELIVER_EXCEPTION
 END art_quick_unlock_object_no_inline
 
     /*
@@ -1014,7 +943,7 @@ END art_quick_check_instance_of
     /*
      * Macro to insert read barrier, only used in art_quick_aput_obj.
      * rObj and rDest are registers, offset is a defined literal such as MIRROR_OBJECT_CLASS_OFFSET.
-     * TODO: When read barrier has a fast path, add heap unpoisoning support for the fast path.
+     * XC-TODO: When read barrier has a fast path, add heap unpoisoning support for the fast path.
      */
 .macro READ_BARRIER rDest, rObj, offset
 #ifdef USE_READ_BARRIER
@@ -1062,7 +991,6 @@ END art_quick_check_instance_of
     .cfi_restore ra
     addi   sp, sp, 64
     .cfi_adjust_cfa_offset -64
-    SETUP_GP                        # set up gp because we are not returning
 #else
     lwu     \rDest, \offset(\rObj)
     UNPOISON_HEAP_REF \rDest
@@ -1464,7 +1392,7 @@ GENERATE_ALLOC_OBJECT_TLAB art_quick_alloc_object_initialized_tlab, artAllocObje
     sw     a0, MIRROR_OBJECT_CLASS_OFFSET(t3)        # Store the class pointer.
     sw     a1, MIRROR_ARRAY_LENGTH_OFFSET(t3)        # Store the array length.
 
-    mv     a0, t3            ### zhengxing: TBD
+    mv     a0, t3
     jr     ra
 .endm
 
@@ -1691,8 +1619,8 @@ END art_quick_resolution_trampoline
     .extern artQuickGenericJniEndTrampoline
 ENTRY art_quick_generic_jni_trampoline
     SETUP_SAVE_REFS_AND_ARGS_FRAME_WITH_METHOD_IN_A0
-    mv      s0, sp               # save $sp to fp(s0)
-    .cfi_def_cfa_register s0
+    mv      rFP, sp               # save $sp to rFP(s0)
+    .cfi_def_cfa_register rFP
 
     # prepare for call to artQuickGenericJniTrampoline(Thread*, SP)
     // (Thread*, managed_sp, reserved_area)
@@ -1703,8 +1631,8 @@ ENTRY art_quick_generic_jni_trampoline
     addi    sp, sp, -2047
     addi    sp, sp, -1026
 
-    mv      a0, rSELF             # pass Thread::Current
-    mv      a1, s0               # pass $sp
+    mv      a0, rSELF            # pass Thread::Current
+    mv      a1, rFP              # pass $sp
     mv      a2, sp               # pass $sp
     jal     artQuickGenericJniTrampoline   # (Thread*, SP)
 
@@ -1759,7 +1687,7 @@ ENTRY art_quick_generic_jni_trampoline
     bne     t0, zero, .Lexception_in_native         # check for pending exceptions
 
     // Tear down the alloca.
-    mv      sp, s0               # tear down the alloca (fp(s0) --> sp)
+    mv      sp, rFP              # tear down the alloca (rFP(s0) --> sp)
     .cfi_remember_state
     .cfi_def_cfa_register sp
 
@@ -1771,7 +1699,7 @@ ENTRY art_quick_generic_jni_trampoline
 
     // Undo the unwinding information from above since it doesn't apply below.
     .cfi_restore_state
-    .cfi_def_cfa s0, FRAME_SIZE_SAVE_REFS_AND_ARGS
+    .cfi_def_cfa rFP, FRAME_SIZE_SAVE_REFS_AND_ARGS
 .Lexception_in_native:
     ld      t0, THREAD_TOP_QUICK_FRAME_OFFSET(rSELF)
     addi    sp, t0, -1  // Remove the GenericJNI tag.
@@ -1783,26 +1711,23 @@ END art_quick_generic_jni_trampoline
 ENTRY art_quick_to_interpreter_bridge
     SETUP_SAVE_REFS_AND_ARGS_FRAME
     mv      a1, rSELF             # pass Thread::Current
-    mv      a2, sp               # pass $sp
-    jal     artQuickToInterpreterBridge    # (Method* method, Thread*, SP)
+    mv      a2, sp
 
-    ld      t0, THREAD_EXCEPTION_OFFSET(rSELF) # load Thread::Current()->exception_
-    addi    sp, sp, REFS_AND_ARGS_MINUS_REFS_SIZE  # skip a0-a7 and f10-f17
-    RESTORE_SAVE_REFS_ONLY_FRAME
+    // uint64_t artQuickToInterpreterBridge(mirror::ArtMethod* method, Thread* self,
+    //                                      mirror::ArtMethod** sp)
+    jal     artQuickToInterpreterBridge
+
+    RESTORE_SAVE_REFS_AND_ARGS_FRAME
     fmv.d.x f10, a0               # place return value to FP return value
-    bne     t0, zero, 1f
-    jalr    zero, ra
-1:
-    DELIVER_PENDING_EXCEPTION
+
+    RETURN_OR_DELIVER_PENDING_EXCEPTION
 END art_quick_to_interpreter_bridge
 
+/*
+ * Called to attempt to execute an obsolete method.
+ */
+ONE_ARG_RUNTIME_EXCEPTION art_invoke_obsolete_method_stub, artInvokeObsoleteMethod
 
-    .extern artInvokeObsoleteMethod
-ENTRY art_invoke_obsolete_method_stub
-    SETUP_SAVE_ALL_CALLEE_SAVES_FRAME
-    mv      a1, rSELF                 # pass Thread::Current
-    jal     artInvokeObsoleteMethod    # (Method* method, Thread* self)
-END art_invoke_obsolete_method_stub
 
  .extern artInstrumentationMethodEntryFromCode
     .extern artInstrumentationMethodExitFromCode
@@ -2625,14 +2550,12 @@ ENTRY art_quick_invoke_polymorphic
     mv      a1, rSELF             # Make $a1 an alias for the current Thread.
     mv      a2, sp               # Make $a3 a pointer to the saved frame context.
     jal     artInvokePolymorphic   # artInvokePolymorphic(receiver, Thread*, context)
-    ld      t0, THREAD_EXCEPTION_OFFSET(rSELF) # load Thread::Current()->exception_
+
     addi    sp, sp, REFS_AND_ARGS_MINUS_REFS_SIZE  # skip a0-a7 and f12-f19
     RESTORE_SAVE_REFS_ONLY_FRAME
     fmv.d.x f10, a0                 # place return value to FP return value
-    bne     t0, zero, 1f
-    jalr      zero, ra
-1:
-    DELIVER_PENDING_EXCEPTION
+
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG  t0
 END art_quick_invoke_polymorphic
 
     /*
@@ -2646,14 +2569,12 @@ ENTRY art_quick_invoke_custom
     mv      a1, rSELF             # Make $a1 an alias for the current Thread.
     mv      a2, sp
     jal     artInvokeCustom        # Call artInvokeCustom(call_site_idx, Thread*, context).
-    ld      t0, THREAD_EXCEPTION_OFFSET(rSELF) # load Thread::Current()->exception_
+
     addi    sp, sp, REFS_AND_ARGS_MINUS_REFS_SIZE  # skip a0-a7 and f12-f19
     RESTORE_SAVE_REFS_ONLY_FRAME
     fmv.d.x f10, a0               # place return value to FP return value
-    bne     t0, zero, 1f
-    jalr     zero, ra
-1:
-    DELIVER_PENDING_EXCEPTION
+
+    RETURN_OR_DELIVER_PENDING_EXCEPTION_REG t0
 END art_quick_invoke_custom
   # .set pop                        # todo：lyh
 

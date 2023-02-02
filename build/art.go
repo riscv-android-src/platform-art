@@ -38,6 +38,12 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 	opt := ctx.Config().GetenvWithDefault("ART_NDEBUG_OPT_FLAG", "-O3")
 	cflags = append(cflags, opt)
 
+	if ctx.Config().IsEnvTrue("ART_CPU_RISCV64") {
+		// XC-TODO: flags for T-Head CPU variants. This should change when real cpp flags ready.
+		rv_variant := ctx.Config().GetenvWithDefault("ART_CPU_RISCV64_VARIANTS", "")
+		cflags = append(cflags, "-DRISCV64_VARIANTS_"+rv_variant)
+	}
+
 	tlab := false
 
 	gcType := ctx.Config().GetenvWithDefault("ART_DEFAULT_GC_TYPE", "CMS")
@@ -90,14 +96,14 @@ func globalFlags(ctx android.LoadHookContext) ([]string, []string) {
 			"-DART_STACK_OVERFLOW_GAP_arm64=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86=16384",
 			"-DART_STACK_OVERFLOW_GAP_x86_64=20480",
-		        "-DART_STACK_OVERFLOW_GAP_riscv64=16384")
+			"-DART_STACK_OVERFLOW_GAP_riscv64=16384")
 	} else {
 		cflags = append(cflags,
 			"-DART_STACK_OVERFLOW_GAP_arm=8192",
 			"-DART_STACK_OVERFLOW_GAP_arm64=8192",
 			"-DART_STACK_OVERFLOW_GAP_x86=8192",
 			"-DART_STACK_OVERFLOW_GAP_x86_64=8192",
-		        "-DART_STACK_OVERFLOW_GAP_riscv64=8192")
+			"-DART_STACK_OVERFLOW_GAP_riscv64=8192")
 	}
 
 	if ctx.Config().IsEnvTrue("ART_ENABLE_ADDRESS_SANITIZER") {

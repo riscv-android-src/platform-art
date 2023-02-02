@@ -59,14 +59,13 @@ enum GpuRegister {
   T6   = 31,
   PC   = 32,
 
-  FP   = S0,  // Frame pointer.
-  TMP  = T5,
-  TMP2 = T4,
-  AT   = T3,
-  V0   = A0,
-  V1   = A1,
+  FP   = S0,  // rFP, Frame pointer.
+  TR   = S1,  // rSELF, ART Thread Register (Same as the definition in asm_support_riscv64.S)
 
-  TR   = S1,  // ART Thread Register (Same as the definition in asm_support_riscv64.S)
+  AT   = T3,
+  TMP  = T4,
+  TMP2 = T5,
+
   T9   = T6,
   kNumberOfGpuRegisters = 32,
   kNoGpuRegister = -1  // Signals an illegal register.

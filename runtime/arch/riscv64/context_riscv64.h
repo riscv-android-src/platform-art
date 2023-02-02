@@ -41,13 +41,12 @@ class Riscv64Context : public Context {
     SetGPR(SP, new_sp);
   }
 
-  // Wendong: TBD performance issue
   void SetPC(uintptr_t new_pc) override {
     SetGPR(T6, new_pc);
   }
 
   void SetNterpDexPC(uintptr_t dex_pc_ptr) override {
-    DCHECK(0);  // Wendong: TBD reg？
+    DCHECK(0);
     SetGPR(T3, dex_pc_ptr);
   }
 

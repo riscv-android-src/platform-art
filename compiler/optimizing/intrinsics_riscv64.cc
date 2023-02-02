@@ -117,7 +117,7 @@ class IntrinsicSlowPathRISCV64 : public SlowPathCodeRISCV64 {
     // Copy the result back to the expected output.
     Location out = invoke_->GetLocations()->Out();
     if (out.IsValid()) {
-      DCHECK(out.IsRegister());  // TODO: Replace this when we support output in memory.
+      DCHECK(out.IsRegister());  // Replace this when we support output in memory.
       DCHECK(!invoke_->GetLocations()->GetLiveRegisters()->ContainsCoreRegister(out.reg()));
       MoveFromReturnRegister(out, invoke_->GetType(), codegen);
     }
@@ -157,9 +157,9 @@ static void MoveFPToInt(LocationSummary* locations, bool is64bit, Riscv64Assembl
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
   if (is64bit) {
-    __ Dmfc1(out, in);
+    __ FMvXD(out, in);
   } else {
-    __ Mfc1(out, in);
+    __ FMvXW(out, in);
   }
 }
 
@@ -193,9 +193,9 @@ static void MoveIntToFP(LocationSummary* locations, bool is64bit, Riscv64Assembl
   FpuRegister out = locations->Out().AsFpuRegister<FpuRegister>();
 
   if (is64bit) {
-    __ Dmtc1(in, out);
+    __ FMvDX(out, in);
   } else {
-    __ Mtc1(in, out);
+    __ FMvWX(out, in);
   }
 }
 
@@ -224,24 +224,212 @@ static void CreateIntToIntLocations(ArenaAllocator* allocator, HInvoke* invoke) 
   locations->SetOut(Location::RequiresRegister(), Location::kNoOutputOverlap);
 }
 
+#ifdef RISCV64_VARIANTS_THEAD
+static void GenReverseBytes(LocationSummary* locations,
+                            DataType::Type type,
+                            Riscv64Assembler* assembler) {
+  GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  switch (type) {
+    case DataType::Type::kInt16:
+      __ revw(out, in);
+      __ Sraiw(out, out, 16);
+      break;
+    case DataType::Type::kInt32:
+      __ revw(out, in);
+      break;
+    case DataType::Type::kInt64:
+      __ rev(out, in);
+      break;
+    default:
+      LOG(FATAL) << "Unexpected size for reverse-bytes: " << type;
+      UNREACHABLE();
+  }
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitShortReverseBytes(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitShortReverseBytes(HInvoke* invoke) {
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt16, GetAssembler());
+}
+
 // int java.lang.Integer.reverseBytes(int)
-UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerReverseBytes)
-// long java.lang.Long.reverseBytes(long)
-UNIMPLEMENTED_INTRINSIC(RISCV64, LongReverseBytes)
-// short java.lang.Short.reverseBytes(short)
-UNIMPLEMENTED_INTRINSIC(RISCV64, ShortReverseBytes)
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerReverseBytes(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerReverseBytes(HInvoke* invoke) {
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitLongReverseBytes(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitLongReverseBytes(HInvoke* invoke) {
+  GenReverseBytes(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
+}
+
+static void GenNumberOfLeadingZeroes(LocationSummary* locations,
+                                     bool is64bit,
+                                     Riscv64Assembler* assembler) {
+  GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  if (is64bit) {
+    __ ff1(out, in);
+  } else {
+    __ Extub(in, in, 0, 32);  // Clear High 32-bit
+    __ ff1(out, in);
+
+    __ Addi(out, out, -32);   // Don't count the leading 32 0's for high 32b.
+  }
+}
+
 // int java.lang.Integer.numberOfLeadingZeros(int i)
-UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerNumberOfLeadingZeros)
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerNumberOfLeadingZeros(HInvoke* invoke) {
+  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
+}
+
 // int java.lang.Long.numberOfLeadingZeros(long i)
+void IntrinsicLocationsBuilderRISCV64::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitLongNumberOfLeadingZeros(HInvoke* invoke) {
+  GenNumberOfLeadingZeroes(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
+}
+
+ // int java.lang.Integer.numberOfTrailingZeros(int i)
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerNumberOfTrailingZeros(HInvoke* invoke) {
+  // Reverse the input integer
+  VisitIntegerReverse(invoke);
+
+  // Count the leading zeros in the reversed val in 'out' register
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  __ Extub(out, out, 0, 32);  // Clear High 32-bit
+  __ ff1(out, out);
+  __ Addi(out, out, -32);
+}
+
+ // int java.lang.Long.numberOfTrailingZeros(long i)
+void IntrinsicLocationsBuilderRISCV64::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitLongNumberOfTrailingZeros(HInvoke* invoke) {
+  // Reverse the input long
+  VisitLongReverse(invoke);
+
+  // Count the leading zeros in the reversed val in 'out' register
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  __ ff1(out, out);
+}
+
+// int java.lang.Integer.reverse(int)
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerReverse(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+
+static void SwapBits(GpuRegister reg, GpuRegister temp, int32_t shift, int32_t mask,
+                     Riscv64Assembler* assembler) {
+  __ Move(temp, reg);
+  __ LoadConst32(AT, mask);
+  __ Srliw(reg, reg, shift);
+  __ And(temp, temp, AT);
+  __ And(reg, reg, AT);
+  __ Slliw(temp, temp, shift);
+  __ Or(reg, reg, temp);
+  __ Addiw(reg, reg, ZERO);  // Remove the useless high 32-bit
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerReverse(HInvoke* invoke) {
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  /*
+   * Use one bswap instruction to reverse byte order first and then use 3 rounds of
+   * swapping bits to reverse bits in a number x. Using bswap to save instructions
+   * compared to generic luni implementation which has 5 rounds of swapping bits.
+   * x = bswap x
+   * x = (x & 0x55555555) << 1 | (x >> 1) & 0x55555555;
+   * x = (x & 0x33333333) << 2 | (x >> 2) & 0x33333333;
+   * x = (x & 0x0F0F0F0F) << 4 | (x >> 4) & 0x0F0F0F0F;
+   */
+  __ revw(out, in);
+  SwapBits(out, TMP, 1, 0x55555555, assembler);
+  SwapBits(out, TMP, 2, 0x33333333, assembler);
+  SwapBits(out, TMP, 4, 0x0f0f0f0f, assembler);
+}
+
+static void SwapBits64(GpuRegister reg, GpuRegister temp, int32_t shift, int64_t mask,
+                       Riscv64Assembler* assembler) {
+  __ Move(temp, reg);
+  __ LoadConst64(AT, mask);
+  __ Srli(reg, reg, shift);
+  __ And(temp, temp, AT);
+  __ And(reg, reg, AT);
+  __ Slli(temp, temp, shift);
+  __ Or(reg, reg, temp);
+}
+// long java.lang.Long.reverse(long)
+void IntrinsicLocationsBuilderRISCV64::VisitLongReverse(HInvoke* invoke) {
+    CreateIntToIntLocations(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitLongReverse(HInvoke* invoke) {
+  Riscv64Assembler* assembler = GetAssembler();
+  LocationSummary* locations = invoke->GetLocations();
+
+  GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  /*
+   * Use one bswap instruction to reverse byte order first and then use 3 rounds of
+   * swapping bits to reverse bits in a long number x. Using bswap to save instructions
+   * compared to generic luni implementation which has 5 rounds of swapping bits.
+   * x = bswap x
+   * x = (x & 0x5555555555555555) << 1 | (x >> 1) & 0x5555555555555555;
+   * x = (x & 0x3333333333333333) << 2 | (x >> 2) & 0x3333333333333333;
+   * x = (x & 0x0F0F0F0F0F0F0F0F) << 4 | (x >> 4) & 0x0F0F0F0F0F0F0F0F;
+   */
+  __ rev(out, in);
+  SwapBits64(out, TMP, 1, INT64_C(0x5555555555555555), assembler);
+  SwapBits64(out, TMP, 2, INT64_C(0x3333333333333333), assembler);
+  SwapBits64(out, TMP, 4, INT64_C(0x0f0f0f0f0f0f0f0f), assembler);
+}
+#else
+UNIMPLEMENTED_INTRINSIC(RISCV64, ShortReverseBytes)
+UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerReverseBytes)
+UNIMPLEMENTED_INTRINSIC(RISCV64, LongReverseBytes)
+UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerNumberOfLeadingZeros)
 UNIMPLEMENTED_INTRINSIC(RISCV64, LongNumberOfLeadingZeros)
 // int java.lang.Integer.numberOfTrailingZeros(int i)
 UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerNumberOfTrailingZeros)
 // int java.lang.Long.numberOfTrailingZeros(long i)
 UNIMPLEMENTED_INTRINSIC(RISCV64, LongNumberOfTrailingZeros)
-// int java.lang.Integer.reverse(int)
 UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerReverse)
-// long java.lang.Long.reverse(long)
 UNIMPLEMENTED_INTRINSIC(RISCV64, LongReverse)
+#endif
+
 
 static void CreateFPToFPLocations(ArenaAllocator* allocator, HInvoke* invoke) {
   LocationSummary* locations =
@@ -283,49 +471,49 @@ static void GenBitCount(LocationSummary* locations,
   // are set.
   if (hasMsa) {
     if (type == DataType::Type::kInt32) {
-      __ Mtc1(in, FTMP);
+      __ FMvWX(FTMP, in);
       __ PcntW(static_cast<VectorRegister>(FTMP), static_cast<VectorRegister>(FTMP));
-      __ Mfc1(out, FTMP);
+      __ FMvXW(out, FTMP);
     } else {
-      __ Dmtc1(in, FTMP);
+      __ FMvDX(FTMP, in);
       __ PcntD(static_cast<VectorRegister>(FTMP), static_cast<VectorRegister>(FTMP));
-      __ Dmfc1(out, FTMP);
+      __ FMvXD(out, FTMP);
     }
   } else {
     if (type == DataType::Type::kInt32) {
-      __ Srl(TMP, in, 1);
+      __ Srliw(TMP, in, 1);
       __ LoadConst32(AT, 0x55555555);
       __ And(TMP, TMP, AT);
-      __ Subu(TMP, in, TMP);
+      __ Subw(TMP, in, TMP);
       __ LoadConst32(AT, 0x33333333);
       __ And(out, TMP, AT);
-      __ Srl(TMP, TMP, 2);
+      __ Srliw(TMP, TMP, 2);
       __ And(TMP, TMP, AT);
-      __ Addu(TMP, out, TMP);
-      __ Srl(out, TMP, 4);
-      __ Addu(out, out, TMP);
+      __ Addw(TMP, out, TMP);
+      __ Srliw(out, TMP, 4);
+      __ Addw(out, out, TMP);
       __ LoadConst32(AT, 0x0F0F0F0F);
       __ And(out, out, AT);
       __ LoadConst32(TMP, 0x01010101);
-      __ MulR6(out, out, TMP);
-      __ Srl(out, out, 24);
+      __ Mulw(out, out, TMP);
+      __ Srliw(out, out, 24);
     } else {
-      __ Dsrl(TMP, in, 1);
+      __ Srli(TMP, in, 1);
       __ LoadConst64(AT, 0x5555555555555555L);
       __ And(TMP, TMP, AT);
-      __ Dsubu(TMP, in, TMP);
+      __ Sub(TMP, in, TMP);
       __ LoadConst64(AT, 0x3333333333333333L);
       __ And(out, TMP, AT);
-      __ Dsrl(TMP, TMP, 2);
+      __ Srli(TMP, TMP, 2);
       __ And(TMP, TMP, AT);
-      __ Daddu(TMP, out, TMP);
-      __ Dsrl(out, TMP, 4);
-      __ Daddu(out, out, TMP);
+      __ Add(TMP, out, TMP);
+      __ Srli(out, TMP, 4);
+      __ Add(out, out, TMP);
       __ LoadConst64(AT, 0x0F0F0F0F0F0F0F0FL);
       __ And(out, out, AT);
       __ LoadConst64(TMP, 0x0101010101010101L);
-      __ Dmul(out, out, TMP);
-      __ Dsrl32(out, out, 24);
+      __ Mul(out, out, TMP);
+      __ Srli(out, out, 24 + 32);
     }
   }
 }
@@ -362,7 +550,6 @@ void IntrinsicCodeGeneratorRISCV64::VisitMathSqrt(HInvoke* invoke) {
   __ SqrtD(out, in);
 }
 
-/*
 static void CreateFPToFP(ArenaAllocator* allocator,
                          HInvoke* invoke,
                          Location::OutputOverlap overlaps = Location::kOutputOverlap) {
@@ -371,18 +558,203 @@ static void CreateFPToFP(ArenaAllocator* allocator,
   locations->SetInAt(0, Location::RequiresFpuRegister());
   locations->SetOut(Location::RequiresFpuRegister(), overlaps);
 }
-*/
 
-// double java.lang.Math.rint(double)  // @TODO
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathRint)
-// double java.lang.Math.floor(double)  // @TODO
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathFloor)
-// double java.lang.Math.ceil(double)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathCeil)
+const constexpr uint16_t kFPLeaveUnchanged = kPositiveZero |
+                                             kPositiveInfinity |
+                                             kNegativeZero |
+                                             kNegativeInfinity |
+                                             kQuietNaN |
+                                             kSignalingNaN;
+
+static void GenRoundingMode(LocationSummary* locations,
+                            FPRoundingMode mode,
+                            Riscv64Assembler* assembler) {
+  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
+  FpuRegister out = locations->Out().AsFpuRegister<FpuRegister>();
+
+  Riscv64Label done;
+
+  // double floor/ceil(double in) {
+  //     if in.isNaN || in.isInfinite || in.isZero {
+  //         return in;
+  //     }
+  __ FClassD(TMP, in);
+  __ Andi(TMP, TMP, kFPLeaveUnchanged);   // +0.0 | +Inf | -0.0 | -Inf | qNaN | sNaN
+  __ MovD(out, in);
+  __ Bnezc(TMP, &done);
+
+  // Long outLong = rint/floor/ceil(in);
+  __ FCvtLD(TMP, in, mode);
+
+  __ Move(AT, TMP);
+  __ MovD(out, in);
+  __ Addi(TMP, ZERO, -1);
+  __ Srli(TMP, TMP, 1);
+  __ Sub(TMP, AT, TMP);  // TMP = AT + 0x8000 0000 0000 0001
+                         // or    AT - 0x7FFF FFFF FFFF FFFF.
+                         // IOW, TMP = 1 if AT = Long.MIN_VALUE
+                         // or   TMP = 0 if AT = Long.MAX_VALUE.
+
+  __ Srli(TMP, TMP, 1);  // TMP = 0 if AT = Long.MIN_VALUE
+                         //         or AT = Long.MAX_VALUE.
+  __ Beqzc(TMP, &done);
+
+  // double out = outLong;
+  // return out;
+  __ FCvtDL(out, AT);
+  __ Bind(&done);
+  // }
+}
+
+// double java.lang.Math.rint(double)
+void IntrinsicLocationsBuilderRISCV64::VisitMathRint(HInvoke* invoke) {
+  CreateFPToFP(allocator_, invoke, Location::kNoOutputOverlap);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathRint(HInvoke* invoke) {
+  GenRoundingMode(invoke->GetLocations(), kFPRoundingModeRNE, GetAssembler());
+}
+
+// double java.lang.Math.floor(double)
+void IntrinsicLocationsBuilderRISCV64::VisitMathFloor(HInvoke* invoke) {
+  CreateFPToFP(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathFloor(HInvoke* invoke) {
+  GenRoundingMode(invoke->GetLocations(), kFPRoundingModeRDN, GetAssembler());
+}
+
+void IntrinsicLocationsBuilderRISCV64::VisitMathCeil(HInvoke* invoke) {
+  CreateFPToFP(allocator_, invoke);
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathCeil(HInvoke* invoke) {
+  GenRoundingMode(invoke->GetLocations(), kFPRoundingModeRUP, GetAssembler());
+}
+
+/*
+Returns the closest long to the argument, with ties rounding to positive infinity.
+Special cases:
+If the argument is NaN, the result is 0.
+If the argument is negative infinity or any value less than or equal to the value of
+    Long.MIN_VALUE, the result is equal to the value of Long.MIN_VALUE.
+If the argument is positive infinity or any value greater than or equal to the value of
+   Long.MAX_VALUE, the result is equal to the value of Long.MAX_VALUE.
+
+*** Due to fcvt.l.d has 00 mode -> Round to Nearest, ties to Even. So can not use the instruction directly
+*/
+static void GenRound(LocationSummary* locations, Riscv64Assembler* assembler, DataType::Type type) {
+  FpuRegister in = locations->InAt(0).AsFpuRegister<FpuRegister>();
+  FpuRegister half = locations->GetTemp(0).AsFpuRegister<FpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  DCHECK(type == DataType::Type::kFloat32 || type == DataType::Type::kFloat64);
+
+  Riscv64Label done;
+  Riscv64Label not_nan;
+
+  // Return 0 if in is NaN
+  if (type == DataType::Type::kFloat64) {
+    __ FEqD(TMP, in, in);
+  } else {
+    __ FEqS(TMP, in, in);
+  }
+
+  __ Bnezc(TMP, &not_nan);
+  __ Xor(out, out, out);  // return 0
+  __ Bc(&done);
+
+  __ Bind(&not_nan);
+  // out = floor(in);
+  //
+  // if (out != MAX_VALUE && out != MIN_VALUE) {
+  //   TMP = ((in - out) >= 0.5) ? 1 : 0;
+  //   return out += TMP;
+  // }
+  // return out;
+
+  // out = floor(in);
+  if (type == DataType::Type::kFloat64) {
+    __ FCvtLD(out, in, kFPRoundingModeRDN);    // Floor
+  } else {
+    __ FCvtWS(out, in, kFPRoundingModeRDN);    // Floor
+  }
+
+  // if (out != MAX_VALUE && out != MIN_VALUE)
+  if (type == DataType::Type::kFloat64) {
+    __ Addi(TMP, out, 1);
+    __ Addi(TMP2, ZERO, 1);
+    __ Slli(TMP2, TMP2, 63);  // TMP2 = 0x80000000 00000000
+    __ Add(TMP, TMP, TMP2);  // TMP = out + 0x8000 0000 0000 0001
+                             // or    out - 0x7FFF FFFF FFFF FFFF.
+                             // IOW, TMP = 1 if out = Long.MIN_VALUE
+                             // or   TMP = 0 if out = Long.MAX_VALUE.
+    __ Srli(TMP, TMP, 1);    // TMP = 0 if out = Long.MIN_VALUE
+                             //         or out = Long.MAX_VALUE.
+    __ Beqzc(TMP, &done);
+  } else {
+    __ Addiw(TMP, out, 1);
+    __ Addi(TMP2, ZERO, 1);
+    __ Slliw(TMP2, TMP2, 31);   // TMP2 = 0x80000000
+    __ Addw(TMP, TMP, TMP2);   // TMP = out + 0x8000 0001
+                               // or    out - 0x7FFF FFFF.
+                               // IOW, TMP = 1 if out = Int.MIN_VALUE
+                               // or   TMP = 0 if out = Int.MAX_VALUE.
+    __ Srliw(TMP, TMP, 1);     // TMP = 0 if out = Int.MIN_VALUE
+                               //         or out = Int.MAX_VALUE.
+    __ Beqzc(TMP, &done);
+  }
+
+  // TMP = (0.5 <= (in - out)) ? 1 : 0;
+  if (type == DataType::Type::kFloat64) {
+    __ FCvtDL(FTMP, out);  // Convert output of floor.l.d back to "double".
+    __ LoadConst64(AT, bit_cast<int64_t, double>(0.5f));
+    __ FSubD(FTMP, in, FTMP);
+    __ FMvDX(half, AT);
+    __ FLeD(TMP, half, FTMP);
+  } else {
+    __ FCvtSW(FTMP, out);  // Convert output of floor.w.s back to "float".
+    __ LoadConst32(AT, bit_cast<int32_t, float>(0.5f));
+    __ FSubS(FTMP, in, FTMP);
+    __ FMvWX(half, AT);
+    __ FLeS(TMP, half, FTMP);
+  }
+
+  // Return out += TMP.
+  if (type == DataType::Type::kFloat64) {
+    __ Add(out, out, TMP);
+  } else {
+    __ Addw(out, out, TMP);
+  }
+
+  __ Bind(&done);
+}
+
 // int java.lang.Math.round(float)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathRoundFloat)
+void IntrinsicLocationsBuilderRISCV64::VisitMathRoundFloat(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  locations->AddTemp(Location::RequiresFpuRegister());
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathRoundFloat(HInvoke* invoke) {
+  GenRound(invoke->GetLocations(), GetAssembler(), DataType::Type::kFloat32);
+}
+
 // long java.lang.Math.round(double)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathRoundDouble)
+void IntrinsicLocationsBuilderRISCV64::VisitMathRoundDouble(HInvoke* invoke) {
+  LocationSummary* locations =
+      new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
+  locations->SetInAt(0, Location::RequiresFpuRegister());
+  locations->AddTemp(Location::RequiresFpuRegister());
+  locations->SetOut(Location::RequiresRegister());
+}
+
+void IntrinsicCodeGeneratorRISCV64::VisitMathRoundDouble(HInvoke* invoke) {
+  GenRound(invoke->GetLocations(), GetAssembler(), DataType::Type::kFloat64);
+}
 
 // byte libcore.io.Memory.peekByte(long address)
 void IntrinsicLocationsBuilderRISCV64::VisitMemoryPeekByte(HInvoke* invoke) {
@@ -561,7 +933,7 @@ static void GenUnsafeGet(HInvoke* invoke,
   GpuRegister offset = offset_loc.AsRegister<GpuRegister>();
 
   if (!(kEmitCompilerReadBarrier && kUseBakerReadBarrier && (type == DataType::Type::kReference))) {
-    __ Daddu(TMP, base, offset);
+    __ Add(TMP, base, offset);
   }
 
   switch (type) {
@@ -701,7 +1073,7 @@ static void GenUnsafePut(LocationSummary* locations,
   GpuRegister offset = locations->InAt(2).AsRegister<GpuRegister>();
   GpuRegister value = locations->InAt(3).AsRegister<GpuRegister>();
 
-  __ Daddu(TMP, base, offset);
+  __ Add(TMP, base, offset);
   if (is_volatile || is_ordered) {
     __ Sync(0);
   }
@@ -729,7 +1101,7 @@ static void GenUnsafePut(LocationSummary* locations,
   }
 
   if (type == DataType::Type::kReference) {
-    bool value_can_be_null = true;  // TODO: Worth finding out this information?
+    bool value_can_be_null = true;  // XC-TODO: Worth finding out this information?
     codegen->MarkGCCard(base, value, value_can_be_null);
   }
 }
@@ -898,7 +1270,7 @@ static void GenCas(HInvoke* invoke, DataType::Type type, CodeGeneratorRISCV64* c
 
     // Mark card for object assuming new value is stored. Worst case we will mark an unchanged
     // object and scan the receiver at the next GC for nothing.
-    bool value_can_be_null = true;  // TODO: Worth finding out this information?
+    bool value_can_be_null = true;  // XC-TODO: Worth finding out this information?
     codegen->MarkGCCard(base, value, value_can_be_null);
 
     if (kEmitCompilerReadBarrier && kUseBakerReadBarrier) {
@@ -919,7 +1291,7 @@ static void GenCas(HInvoke* invoke, DataType::Type type, CodeGeneratorRISCV64* c
   }
 
   Riscv64Label loop_head, exit_loop;
-  __ Daddu(TMP, base, offset);
+  __ Add(TMP, base, offset);
 
   if (kPoisonHeapReferences && type == DataType::Type::kReference) {
     __ PoisonHeapReference(expected);
@@ -946,10 +1318,10 @@ static void GenCas(HInvoke* invoke, DataType::Type type, CodeGeneratorRISCV64* c
     if (type == DataType::Type::kReference) {
       // The LL instruction sign-extends the 32-bit value, but
       // 32-bit references must be zero-extended. Zero-extend `out`.
-      __ Dext(out, out, 0, 32);
+      __ Extub(out, out, 0, 32);
     }
   }
-  __ Dsubu(out, out, expected);         // If we didn't get the 'expected'
+  __ Sub(out, out, expected);         // If we didn't get the 'expected'
   __ Sltiu(out, out, 1);                // value, set 'out' to false, and
   __ Beqzc(out, &exit_loop);            // return.
   __ Move(out, value);  // Use 'out' for the 'store conditional' instruction.
@@ -1014,37 +1386,6 @@ void IntrinsicCodeGeneratorRISCV64::VisitUnsafeCASObject(HInvoke* invoke) {
   DCHECK(!kEmitCompilerReadBarrier || kUseBakerReadBarrier);
 
   GenCas(invoke, DataType::Type::kReference, codegen_);
-}
-
-// int java.lang.String.compareTo(String anotherString)  // @TODO
-void IntrinsicLocationsBuilderRISCV64::VisitStringCompareTo(HInvoke* invoke) {
-  #if 0
-  LocationSummary* locations = new (allocator_) LocationSummary(
-      invoke, LocationSummary::kCallOnMainAndSlowPath, kIntrinsified);
-  InvokeRuntimeCallingConvention calling_convention;
-  locations->SetInAt(0, Location::RegisterLocation(calling_convention.GetRegisterAt(0)));
-  locations->SetInAt(1, Location::RegisterLocation(calling_convention.GetRegisterAt(1)));
-  Location outLocation = calling_convention.GetReturnLocation(DataType::Type::kInt32);
-  locations->SetOut(Location::RegisterLocation(outLocation.AsRegister<GpuRegister>()));
-  #endif
-  UNUSED(invoke);
-}
-
-void IntrinsicCodeGeneratorRISCV64::VisitStringCompareTo(HInvoke* invoke) {
-  Riscv64Assembler* assembler = GetAssembler();
-  LocationSummary* locations = invoke->GetLocations();
-
-  // Note that the null check must have been done earlier.
-  DCHECK(!invoke->CanDoImplicitNullCheckOn(invoke->InputAt(0)));
-
-  GpuRegister argument = locations->InAt(1).AsRegister<GpuRegister>();
-  SlowPathCodeRISCV64* slow_path =
-      new (codegen_->GetScopedAllocator()) IntrinsicSlowPathRISCV64(invoke);
-  codegen_->AddSlowPath(slow_path);
-  __ Beqzc(argument, slow_path->GetEntryLabel());
-
-  codegen_->InvokeRuntime(kQuickStringCompareTo, invoke, invoke->GetDexPc(), slow_path);
-  __ Bind(slow_path->GetExitLabel());
 }
 
 // boolean java.lang.String.equals(Object anObject)
@@ -1143,9 +1484,9 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringEquals(HInvoke* invoke) {
 
   if (mirror::kUseStringCompression) {
     // For string compression, calculate the number of bytes to compare (not chars).
-    __ Dext(temp2, temp1, 0, 1);         // Extract compression flag.
-    __ Srl(temp1, temp1, 1);             // Extract length.
-    __ Sllv(temp1, temp1, temp2);        // Double the byte count if uncompressed.
+    __ Andi(temp2, temp1, 0x1);         // Extract compression flag.
+    __ Srliw(temp1, temp1, 1);          // Extract length.
+    __ Sllw(temp1, temp1, temp2);       // Double the byte count if uncompressed.
   }
 
   // Loop to compare strings 8 bytes at a time starting at the beginning of the string.
@@ -1154,10 +1495,10 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringEquals(HInvoke* invoke) {
   __ Ld(out, TMP, value_offset);
   __ Ld(temp2, temp3, value_offset);
   __ Bnec(out, temp2, &return_false);
-  __ Daddiu(TMP, TMP, 8);
-  __ Daddiu(temp3, temp3, 8);
+  __ Addiu(TMP, TMP, 8);
+  __ Addiu(temp3, temp3, 8);
   // With string compression, we have compared 8 bytes, otherwise 4 chars.
-  __ Addiu(temp1, temp1, mirror::kUseStringCompression ? -8 : -4);
+  __ Addiuw(temp1, temp1, mirror::kUseStringCompression ? -8 : -4);
   __ Bgtzc(temp1, &loop);
 
   // Return true and exit the function.
@@ -1332,7 +1673,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringNewStringFromString(HInvoke* invo
   CheckEntrypointTypes<kQuickAllocStringFromString, void*, void*>();
   __ Bind(slow_path->GetExitLabel());
 }
-/*
+
 static void GenIsInfinite(LocationSummary* locations,
                           bool is64bit,
                           Riscv64Assembler* assembler) {
@@ -1340,21 +1681,31 @@ static void GenIsInfinite(LocationSummary* locations,
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
   if (is64bit) {
-    __ ClassD(FTMP, in);
+    __ FClassD(out, in);
   } else {
-    __ ClassS(FTMP, in);
+    __ FClassS(out, in);
   }
-  __ Mfc1(out, FTMP);
   __ Andi(out, out, kPositiveInfinity | kNegativeInfinity);
   __ Sltu(out, ZERO, out);
 }
-*/
-// boolean java.lang.Float.isInfinite(float)
-UNIMPLEMENTED_INTRINSIC(RISCV64, FloatIsInfinite)
-// boolean java.lang.Double.isInfinite(double)
-UNIMPLEMENTED_INTRINSIC(RISCV64, DoubleIsInfinite)
 
-// void java.lang.String.getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin)  // @TODO
+// boolean java.lang.Float.isInfinite(float)
+void IntrinsicLocationsBuilderRISCV64::VisitFloatIsInfinite(HInvoke* invoke) {
+  CreateFPToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitFloatIsInfinite(HInvoke* invoke) {
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ false, GetAssembler());
+}
+
+// boolean java.lang.Double.isInfinite(double)
+void IntrinsicLocationsBuilderRISCV64::VisitDoubleIsInfinite(HInvoke* invoke) {
+  CreateFPToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitDoubleIsInfinite(HInvoke* invoke) {
+  GenIsInfinite(invoke->GetLocations(), /* is64bit= */ true, GetAssembler());
+}
+
+// void java.lang.String.getChars(int srcBegin, int srcEnd, char[] dst, int dstBegin)
 void IntrinsicLocationsBuilderRISCV64::VisitStringGetCharsNoCheck(HInvoke* invoke) {
   LocationSummary* locations =
       new (allocator_) LocationSummary(invoke, LocationSummary::kNoCall, kIntrinsified);
@@ -1400,30 +1751,30 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringGetCharsNoCheck(HInvoke* invoke) 
   __ Beqc(srcEnd, srcBegin, &done);  // No characters to move.
 
   // Calculate number of characters to be copied.
-  __ Dsubu(numChrs, srcEnd, srcBegin);
+  __ Sub(numChrs, srcEnd, srcBegin);
 
   // Calculate destination address.
-  __ Daddiu(dstPtr, dstObj, data_offset);
-  __ Dlsa(dstPtr, dstBegin, dstPtr, char_shift);
+  __ Addiu(dstPtr, dstObj, data_offset);
+  __ Addsl(dstPtr, dstBegin, dstPtr, char_shift);
 
   if (mirror::kUseStringCompression) {
     Riscv64Label uncompressed_copy, compressed_loop;
     const uint32_t count_offset = mirror::String::CountOffset().Uint32Value();
     // Load count field and extract compression flag.
     __ LoadFromOffset(kLoadWord, TMP, srcObj, count_offset);
-    __ Dext(TMP, TMP, 0, 1);
+    __ Andi(TMP, TMP, 0x1);
 
     // If string is uncompressed, use uncompressed path.
     __ Bnezc(TMP, &uncompressed_copy);
 
     // Copy loop for compressed src, copying 1 character (8-bit) to (16-bit) at a time.
-    __ Daddu(srcPtr, srcObj, srcBegin);
+    __ Add(srcPtr, srcObj, srcBegin);
     __ Bind(&compressed_loop);
     __ LoadFromOffset(kLoadUnsignedByte, TMP, srcPtr, value_offset);
     __ StoreToOffset(kStoreHalfword, TMP, dstPtr, 0);
-    __ Daddiu(numChrs, numChrs, -1);
-    __ Daddiu(srcPtr, srcPtr, 1);
-    __ Daddiu(dstPtr, dstPtr, 2);
+    __ Addiu(numChrs, numChrs, -1);
+    __ Addiu(srcPtr, srcPtr, 1);
+    __ Addiu(dstPtr, dstPtr, 2);
     __ Bnezc(numChrs, &compressed_loop);
 
     __ Bc(&done);
@@ -1431,15 +1782,15 @@ void IntrinsicCodeGeneratorRISCV64::VisitStringGetCharsNoCheck(HInvoke* invoke) 
   }
 
   // Calculate source address.
-  __ Daddiu(srcPtr, srcObj, value_offset);
-  __ Dlsa(srcPtr, srcBegin, srcPtr, char_shift);
+  __ Addiu(srcPtr, srcObj, value_offset);
+  __ Addsl(srcPtr, srcBegin, srcPtr, char_shift);
 
   __ Bind(&loop);
   __ Lh(AT, srcPtr, 0);
-  __ Daddiu(numChrs, numChrs, -1);
-  __ Daddiu(srcPtr, srcPtr, char_size);
+  __ Addiu(numChrs, numChrs, -1);
+  __ Addiu(srcPtr, srcPtr, char_size);
   __ Sh(AT, dstPtr, 0);
-  __ Daddiu(dstPtr, dstPtr, char_size);
+  __ Addiu(dstPtr, dstPtr, char_size);
   __ Bnezc(numChrs, &loop);
 
   __ Bind(&done);
@@ -1527,7 +1878,7 @@ static void CheckPosition(Riscv64Assembler* assembler,
       // Check that (length(input) - pos) >= zero.
       __ LoadFromOffset(kLoadWord, AT, input, length_offset);
       DCHECK_GT(pos_const, 0);
-      __ Addiu32(AT, AT, -pos_const);
+      __ Addiuw32(AT, AT, -pos_const);
       __ Bltzc(AT, slow_path->GetEntryLabel());
 
       // Verify that (length(input) - pos) >= length.
@@ -1544,7 +1895,7 @@ static void CheckPosition(Riscv64Assembler* assembler,
 
     // Check that (length(input) - pos) >= zero.
     __ LoadFromOffset(kLoadWord, AT, input, length_offset);
-    __ Subu(AT, AT, pos_reg);
+    __ Subw(AT, AT, pos_reg);
     __ Bltzc(AT, slow_path->GetEntryLabel());
 
     // Verify that (length(input) - pos) >= length.
@@ -1614,35 +1965,77 @@ void IntrinsicCodeGeneratorRISCV64::VisitSystemArrayCopyChar(HInvoke* invoke) {
   if (src_pos.IsConstant()) {
     int32_t src_pos_const = src_pos.GetConstant()->AsIntConstant()->GetValue();
 
-    __ Daddiu64(src_base, src, data_offset + char_size * src_pos_const, TMP);
+    __ Addiu64(src_base, src, data_offset + char_size * src_pos_const, TMP);
   } else {
-    __ Daddiu64(src_base, src, data_offset, TMP);
-    __ Dlsa(src_base, src_pos.AsRegister<GpuRegister>(), src_base, char_shift);
+    __ Addiu64(src_base, src, data_offset, TMP);
+    __ Addsl(src_base, src_pos.AsRegister<GpuRegister>(), src_base, char_shift);
   }
   if (dest_pos.IsConstant()) {
     int32_t dest_pos_const = dest_pos.GetConstant()->AsIntConstant()->GetValue();
 
-    __ Daddiu64(dest_base, dest, data_offset + char_size * dest_pos_const, TMP);
+    __ Addiu64(dest_base, dest, data_offset + char_size * dest_pos_const, TMP);
   } else {
-    __ Daddiu64(dest_base, dest, data_offset, TMP);
-    __ Dlsa(dest_base, dest_pos.AsRegister<GpuRegister>(), dest_base, char_shift);
+    __ Addiu64(dest_base, dest, data_offset, TMP);
+    __ Addsl(dest_base, dest_pos.AsRegister<GpuRegister>(), dest_base, char_shift);
   }
 
   __ Bind(&loop);
   __ Lh(TMP, src_base, 0);
-  __ Daddiu(src_base, src_base, char_size);
-  __ Daddiu(count, count, -1);
+  __ Addiu(src_base, src_base, char_size);
+  __ Addiu(count, count, -1);
   __ Sh(TMP, dest_base, 0);
-  __ Daddiu(dest_base, dest_base, char_size);
+  __ Addiu(dest_base, dest_base, char_size);
   __ Bnezc(count, &loop);
 
   __ Bind(slow_path->GetExitLabel());
 }
 
+#ifdef RISCV64_VARIANTS_THEAD
+static void GenHighestOneBit(LocationSummary* locations,
+                             DataType::Type type,
+                             Riscv64Assembler* assembler) {
+  DCHECK(type == DataType::Type::kInt32 || type == DataType::Type::kInt64) << type;
+
+  GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
+  GpuRegister out = locations->Out().AsRegister<GpuRegister>();
+
+  if (type == DataType::Type::kInt64) {
+    __ ff1(TMP2, in);
+    __ Addi(TMP, ZERO, 1);
+    __ Slli(TMP, TMP, 63);
+    __ Srl(TMP, TMP,  TMP2);
+  } else {
+    __ Slli(TMP2, in, 32);   // Clear High 32-bit
+    __ ff1(TMP2, TMP2);
+
+    __ Addi(TMP, ZERO, 1);
+    __ Slli(TMP, TMP, 31);
+    __ Srlw(TMP, TMP,  TMP2);
+  }
+  // For either value of "type", when "in" is zero, "out" should also
+  // be zero.
+  __ And(out, TMP, in);
+}
+
 // int java.lang.Integer.highestOneBit(int)
-UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerHighestOneBit)
+void IntrinsicLocationsBuilderRISCV64::VisitIntegerHighestOneBit(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitIntegerHighestOneBit(HInvoke* invoke) {
+  GenHighestOneBit(invoke->GetLocations(), DataType::Type::kInt32, GetAssembler());
+}
+
 // long java.lang.Long.highestOneBit(long)
+void IntrinsicLocationsBuilderRISCV64::VisitLongHighestOneBit(HInvoke* invoke) {
+  CreateIntToIntLocations(allocator_, invoke);
+}
+void IntrinsicCodeGeneratorRISCV64::VisitLongHighestOneBit(HInvoke* invoke) {
+  GenHighestOneBit(invoke->GetLocations(), DataType::Type::kInt64, GetAssembler());
+}
+#else
+UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerHighestOneBit)
 UNIMPLEMENTED_INTRINSIC(RISCV64, LongHighestOneBit)
+#endif
 
 static void GenLowestOneBit(LocationSummary* locations,
                             DataType::Type type,
@@ -1653,9 +2046,9 @@ static void GenLowestOneBit(LocationSummary* locations,
   GpuRegister out = locations->Out().AsRegister<GpuRegister>();
 
   if (type == DataType::Type::kInt64) {
-    __ Dsubu(TMP, ZERO, in);
+    __ Sub(TMP, ZERO, in);
   } else {
-    __ Subu(TMP, ZERO, in);
+    __ Subw(TMP, ZERO, in);
   }
   __ And(out, TMP, in);
 }
@@ -1920,7 +2313,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
     } else {
       DCHECK(locations->CanCall());
       // Allocate and initialize a new j.l.Integer.
-      // TODO: If we JIT, we could allocate the j.l.Integer now, and store it in the
+      // If we JIT, we could allocate the j.l.Integer now, and store it in the
       // JIT object table.
       allocate_instance();
       __ StoreConstToOffset(kStoreWord, value, out, info.value_offset, TMP);
@@ -1933,7 +2326,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
     GpuRegister in = locations->InAt(0).AsRegister<GpuRegister>();
     Riscv64Label allocate, done;
 
-    __ Addiu32(out, in, -info.low);
+    __ Addiuw32(out, in, -info.low);
     // As unsigned quantities is out < info.length ?
     __ LoadConst32(AT, info.length);
     // Branch if out >= info.length . This means that "in" is outside of the valid range.
@@ -1941,7 +2334,7 @@ void IntrinsicCodeGeneratorRISCV64::VisitIntegerValueOf(HInvoke* invoke) {
 
     // If the value is within the bounds, load the j.l.Integer directly from the array.
     codegen_->LoadBootImageAddress(TMP, info.array_data_boot_image_reference);
-    __ Dlsa(out, out, TMP, TIMES_4);
+    __ Addsl(out, out, TMP, TIMES_4);
     __ Lwu(out, out, 0);
     __ MaybeUnpoisonHeapReference(out);
     __ Bc(&done);
@@ -1985,14 +2378,13 @@ void IntrinsicLocationsBuilderRISCV64::VisitReachabilityFence(HInvoke* invoke) {
 
 void IntrinsicCodeGeneratorRISCV64::VisitReachabilityFence(HInvoke* invoke ATTRIBUTE_UNUSED) { }
 
-UNIMPLEMENTED_INTRINSIC(RISCV64, ReferenceGetReferent)
-UNIMPLEMENTED_INTRINSIC(RISCV64, SystemArrayCopy)
 UNIMPLEMENTED_INTRINSIC(RISCV64, CRC32Update)
 UNIMPLEMENTED_INTRINSIC(RISCV64, CRC32UpdateBytes)
 UNIMPLEMENTED_INTRINSIC(RISCV64, CRC32UpdateByteBuffer)
 
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringStringIndexOf);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringStringIndexOfAfter);
+UNIMPLEMENTED_INTRINSIC(RISCV64, StringCompareTo)
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferAppend);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferLength);
 UNIMPLEMENTED_INTRINSIC(RISCV64, StringBufferToString);
@@ -2015,11 +2407,9 @@ UNIMPLEMENTED_INTRINSIC(RISCV64, UnsafeGetAndAddLong)
 UNIMPLEMENTED_INTRINSIC(RISCV64, UnsafeGetAndSetInt)
 UNIMPLEMENTED_INTRINSIC(RISCV64, UnsafeGetAndSetLong)
 UNIMPLEMENTED_INTRINSIC(RISCV64, UnsafeGetAndSetObject)
+UNIMPLEMENTED_INTRINSIC(RISCV64, MethodHandleInvokeExact)
+UNIMPLEMENTED_INTRINSIC(RISCV64, MethodHandleInvoke)
 
-// XC-ART-TODO: might implement them in the future.
-UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerDivideUnsigned)
-UNIMPLEMENTED_INTRINSIC(RISCV64, LongDivideUnsigned)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MathMultiplyHigh)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FP16Ceil)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FP16Floor)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FP16Rint)
@@ -2030,8 +2420,14 @@ UNIMPLEMENTED_INTRINSIC(RISCV64, FP16GreaterEquals)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FP16Less)
 UNIMPLEMENTED_INTRINSIC(RISCV64, FP16LessEquals)
 UNIMPLEMENTED_INTRINSIC(RISCV64, ReferenceRefersTo)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MethodHandleInvokeExact)
-UNIMPLEMENTED_INTRINSIC(RISCV64, MethodHandleInvoke)
+
+// XC-TODO: might implement them in the future.
+UNIMPLEMENTED_INTRINSIC(RISCV64, ReferenceGetReferent)
+UNIMPLEMENTED_INTRINSIC(RISCV64, SystemArrayCopy)
+UNIMPLEMENTED_INTRINSIC(RISCV64, IntegerDivideUnsigned)
+UNIMPLEMENTED_INTRINSIC(RISCV64, LongDivideUnsigned)
+UNIMPLEMENTED_INTRINSIC(RISCV64, MathMultiplyHigh)
+
 UNIMPLEMENTED_INTRINSIC(RISCV64, VarHandleCompareAndExchange)
 UNIMPLEMENTED_INTRINSIC(RISCV64, VarHandleCompareAndExchangeAcquire)
 UNIMPLEMENTED_INTRINSIC(RISCV64, VarHandleCompareAndExchangeRelease)

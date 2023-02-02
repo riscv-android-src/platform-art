@@ -247,9 +247,13 @@ std::unique_ptr<const std::vector<uint8_t>> CreateTrampoline32(InstructionSet is
       UNUSED(abi);
       return x86::CreateTrampoline(&allocator, offset);
 #endif
-    default:
+#ifdef ART_ENABLE_CODEGEN_riscv64
+    case InstructionSet::kRiscv64:
       UNUSED(abi);
       UNUSED(offset);
+      UNREACHABLE();
+#endif
+    default:
       LOG(FATAL) << "Unexpected InstructionSet: " << isa;
       UNREACHABLE();
   }

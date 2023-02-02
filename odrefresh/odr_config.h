@@ -150,7 +150,6 @@ class OdrConfig final {
       case art::InstructionSet::kX86_64:
         return std::make_pair(art::InstructionSet::kX86, art::InstructionSet::kX86_64);
       case art::InstructionSet::kRiscv64:
-	// Use kRiscv64 for the first item as a workaround for compilation
         return std::make_pair(art::InstructionSet::kRiscv64, art::InstructionSet::kRiscv64);
       case art::InstructionSet::kThumb2:
       case art::InstructionSet::kNone:

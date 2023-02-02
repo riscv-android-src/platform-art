@@ -73,7 +73,7 @@
      */
     /* goto/32 +AAAAAAAA */
     lhu      rINST, 2(rPC)               # rINST <- aaaa (low)
-    lhu      a1, 4(rPC)                  # a1 <- AAAA (high)
+    lh       a1, 4(rPC)                  # a1 <- AAAA (high)
     slli     a1, a1, 16                  # rINST <- offset (sign-extended AAAAaaaa)
     or       rINST, rINST, a1
     j       MterpCommonTakenBranchNoFlags
@@ -132,7 +132,7 @@
     slli    a1, a1, 16
     or      a0, a1, a0                  # a0<- ssssssssBBBBbbbb
     GET_VREG a1, a3                     # a1 <- vAA
-    DLSA    a0, a0, rPC, 1              # a0 <- PC + ssssssssBBBBbbbb*2
+    ADDSL   a0, a0, rPC, 1              # a0 <- PC + ssssssssBBBBbbbb*2
     jal     $func                       # v0 <- code-unit branch offset
     move    rINST, a0
     j       MterpCommonTakenBranchNoFlags
@@ -148,7 +148,7 @@
     .extern MterpSuspendCheck
     jal     MterpThreadFenceForConstructor
     
-    lw      ra, THREAD_FLAGS_OFFSET(rSELF)    
+    lwu     ra, THREAD_FLAGS_OFFSET(rSELF)    # THREAD_FLAGS_OFFSET is defined as 0x0 by `cpp-define-generator`
     move    a0, rSELF
     andi    ra, ra, THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
     beqz    ra, 1f
@@ -166,7 +166,7 @@
     .extern MterpSuspendCheck
     jal     MterpThreadFenceForConstructor
     
-    lw      ra, THREAD_FLAGS_OFFSET(rSELF)
+    lwu     ra, THREAD_FLAGS_OFFSET(rSELF)    # THREAD_FLAGS_OFFSET is defined as 0x0 by `cpp-define-generator`
     move    a0, rSELF
     andi    ra, ra, THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
     beqz    ra, 1f
@@ -177,7 +177,7 @@
 
 %def op_return_void_no_barrier():
     .extern MterpSuspendCheck
-    lw      ra, THREAD_FLAGS_OFFSET(rSELF)
+    lwu     ra, THREAD_FLAGS_OFFSET(rSELF)    # THREAD_FLAGS_OFFSET is defined as 0x0 by `cpp-define-generator`
     move    a0, rSELF
     andi    ra, ra, THREAD_SUSPEND_OR_CHECKPOINT_REQUEST
     beqz    ra, 1f
@@ -185,6 +185,7 @@
 1:
     li      a0, 0
     j       MterpReturn
+
 
 %def op_return_wide():
     /*
@@ -194,8 +195,8 @@
     /* op vAA */
     .extern MterpThreadFenceForConstructor
     .extern MterpSuspendCheck
-    lw      ra, THREAD_FLAGS_OFFSET(rSELF)
     jal     MterpThreadFenceForConstructor
+    lwu     ra, THREAD_FLAGS_OFFSET(rSELF)    # THREAD_FLAGS_OFFSET is defined as 0x0 by `cpp-define-generator`
     
     move    a0, rSELF
     andi    ra, ra, THREAD_SUSPEND_OR_CHECKPOINT_REQUEST

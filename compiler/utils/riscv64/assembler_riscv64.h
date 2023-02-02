@@ -73,6 +73,8 @@ enum LoadConst64Path {
   kLoadConst64PathAllPaths       = 0x7ffff,
 };
 
+#define RISCV64_VARIANTS_HAS_VECTOR
+
 inline uint16_t Low12Bits(uint32_t value) {
   return static_cast<uint16_t>(value & 0xFFF);
 }
@@ -81,215 +83,9 @@ inline uint32_t High20Bits(uint32_t value) {
   return static_cast<uint32_t>(value >> 12);
 }
 
-template <typename Asm>
-void TemplateLoadConst32(Asm* a, GpuRegister rd, int32_t value) {
-  if (IsUint<16>(value)) {
-    // Use OR with (unsigned) immediate to encode 16b unsigned int.
-    a->Ori(rd, ZERO, value);
-  } else if (IsInt<16>(value)) {
-    // Use ADD with (signed) immediate to encode 16b signed int.
-    a->Addiw(rd, ZERO, value);
-  } else {
-    // Set 16 most significant bits of value. The "lui" instruction
-    // also clears the 16 least significant bits to zero.
-    a->Lui(rd, value >> 16);
-    if (value & 0xFFFF) {
-      // If the 16 least significant bits are non-zero, set them
-      // here.
-      a->Ori(rd, rd, value);
-    }
-  }
-}
 
-static inline int InstrCountForLoadReplicatedConst32(int64_t value) {
-  int32_t x = Low32Bits(value);
-  int32_t y = High32Bits(value);
-
-  if (x == y) {
-    return (IsUint<16>(x) || IsInt<16>(x) || ((x & 0xFFFF) == 0)) ? 2 : 3;
-  }
-
-  return INT_MAX;
-}
-
-template <typename Asm, typename Rtype, typename Vtype>
-void TemplateLoadConst64(Asm* a, Rtype rd, Vtype value) {
-  int bit31 = (value & UINT64_C(0x80000000)) != 0;
-  int rep32_count = InstrCountForLoadReplicatedConst32(value);
-
-  // Loads with 1 instruction.
-  if (IsUint<16>(value)) {
-    // 64-bit value can be loaded as an unsigned 16-bit number.
-    a->RecordLoadConst64Path(kLoadConst64PathOri);
-    a->Ori(rd, ZERO, value);
-  } else if (IsInt<16>(value)) {
-    // 64-bit value can be loaded as an signed 16-bit number.
-    a->RecordLoadConst64Path(kLoadConst64PathDaddiu);
-    a->Daddiu(rd, ZERO, value);
-  } else if ((value & 0xFFFF) == 0 && IsInt<16>(value >> 16)) {
-    // 64-bit value can be loaded as an signed 32-bit number which has all
-    // of its 16 least significant bits set to zero.
-    a->RecordLoadConst64Path(kLoadConst64PathLui);
-    a->Lui(rd, value >> 16);
-  } else if (IsInt<32>(value)) {
-    // Loads with 2 instructions.
-    // 64-bit value can be loaded as an signed 32-bit number which has some
-    // or all of its 16 least significant bits set to one.
-    a->RecordLoadConst64Path(kLoadConst64PathLuiOri);
-    a->Lui(rd, value >> 16);
-    a->Ori(rd, rd, value);
-  } else if ((value & 0xFFFF0000) == 0 && IsInt<16>(value >> 32)) {
-    // 64-bit value which consists of an unsigned 16-bit value in its
-    // least significant 32-bits, and a signed 16-bit value in its
-    // most significant 32-bits.
-    a->RecordLoadConst64Path(kLoadConst64PathOriDahi);
-    a->Ori(rd, ZERO, value);
-    a->Dahi(rd, value >> 32);
-  } else if ((value & UINT64_C(0xFFFFFFFF0000)) == 0) {
-    // 64-bit value which consists of an unsigned 16-bit value in its
-    // least significant 48-bits, and a signed 16-bit value in its
-    // most significant 16-bits.
-    a->RecordLoadConst64Path(kLoadConst64PathOriDati);
-    a->Ori(rd, ZERO, value);
-    a->Dati(rd, value >> 48);
-  } else if ((value & 0xFFFF) == 0 &&
-             (-32768 - bit31) <= (value >> 32) && (value >> 32) <= (32767 - bit31)) {
-    // 16 LSBs (Least Significant Bits) all set to zero.
-    // 48 MSBs (Most Significant Bits) hold a signed 32-bit value.
-    a->RecordLoadConst64Path(kLoadConst64PathLuiDahi);
-    a->Lui(rd, value >> 16);
-    a->Dahi(rd, (value >> 32) + bit31);
-  } else if ((value & 0xFFFF) == 0 && ((value >> 31) & 0x1FFFF) == ((0x20000 - bit31) & 0x1FFFF)) {
-    // 16 LSBs all set to zero.
-    // 48 MSBs hold a signed value which can't be represented by signed
-    // 32-bit number, and the middle 16 bits are all zero, or all one.
-    a->RecordLoadConst64Path(kLoadConst64PathLuiDati);
-    a->Lui(rd, value >> 16);
-    a->Dati(rd, (value >> 48) + bit31);
-  } else if (IsInt<16>(static_cast<int32_t>(value)) &&
-             (-32768 - bit31) <= (value >> 32) && (value >> 32) <= (32767 - bit31)) {
-    // 32 LSBs contain an unsigned 16-bit number.
-    // 32 MSBs contain a signed 16-bit number.
-    a->RecordLoadConst64Path(kLoadConst64PathDaddiuDahi);
-    a->Daddiu(rd, ZERO, value);
-    a->Dahi(rd, (value >> 32) + bit31);
-  } else if (IsInt<16>(static_cast<int32_t>(value)) &&
-             ((value >> 31) & 0x1FFFF) == ((0x20000 - bit31) & 0x1FFFF)) {
-    // 48 LSBs contain an unsigned 16-bit number.
-    // 16 MSBs contain a signed 16-bit number.
-    a->RecordLoadConst64Path(kLoadConst64PathDaddiuDati);
-    a->Daddiu(rd, ZERO, value);
-    a->Dati(rd, (value >> 48) + bit31);
-  } else if (IsPowerOfTwo(value + UINT64_C(1))) {
-    // 64-bit values which have their "n" MSBs set to one, and their
-    // "64-n" LSBs set to zero. "n" must meet the restrictions 0 < n < 64.
-    int shift_cnt = 64 - CTZ(value + UINT64_C(1));
-    a->RecordLoadConst64Path(kLoadConst64PathDaddiuDsrlX);
-    a->Daddiu(rd, ZERO, -1);
-    if (shift_cnt < 32) {
-      a->Dsrl(rd, rd, shift_cnt);
-    } else {
-      a->Dsrl32(rd, rd, shift_cnt & 31);
-    }
-  } else {
-    int shift_cnt = CTZ(value);
-    int64_t tmp = value >> shift_cnt;
-    a->RecordLoadConst64Path(kLoadConst64PathOriDsllX);
-    if (IsUint<16>(tmp)) {
-      // Value can be computed by loading a 16-bit unsigned value, and
-      // then shifting left.
-      a->Ori(rd, ZERO, tmp);
-      if (shift_cnt < 32) {
-        a->Dsll(rd, rd, shift_cnt);
-      } else {
-        a->Dsll32(rd, rd, shift_cnt & 31);
-      }
-    } else if (IsInt<16>(tmp)) {
-      // Value can be computed by loading a 16-bit signed value, and
-      // then shifting left.
-      a->RecordLoadConst64Path(kLoadConst64PathDaddiuDsllX);
-      a->Daddiu(rd, ZERO, tmp);
-      if (shift_cnt < 32) {
-        a->Dsll(rd, rd, shift_cnt);
-      } else {
-        a->Dsll32(rd, rd, shift_cnt & 31);
-      }
-    } else if (rep32_count < 3) {
-      // Value being loaded has 32 LSBs equal to the 32 MSBs, and the
-      // value loaded into the 32 LSBs can be loaded with a single
-      // MIPS instruction.
-      a->LoadConst32(rd, value);
-      a->Dinsu(rd, rd, 32, 32);
-      a->RecordLoadConst64Path(kLoadConst64PathDinsu1);
-    } else if (IsInt<32>(tmp)) {
-      // Loads with 3 instructions.
-      // Value can be computed by loading a 32-bit signed value, and
-      // then shifting left.
-      a->RecordLoadConst64Path(kLoadConst64PathLuiOriDsllX);
-      a->Lui(rd, tmp >> 16);
-      a->Ori(rd, rd, tmp);
-      if (shift_cnt < 32) {
-        a->Dsll(rd, rd, shift_cnt);
-      } else {
-        a->Dsll32(rd, rd, shift_cnt & 31);
-      }
-    } else {
-      shift_cnt = 16 + CTZ(value >> 16);
-      tmp = value >> shift_cnt;
-      if (IsUint<16>(tmp)) {
-        // Value can be computed by loading a 16-bit unsigned value,
-        // shifting left, and "or"ing in another 16-bit unsigned value.
-        a->RecordLoadConst64Path(kLoadConst64PathOriDsllXOri);
-        a->Ori(rd, ZERO, tmp);
-        if (shift_cnt < 32) {
-          a->Dsll(rd, rd, shift_cnt);
-        } else {
-          a->Dsll32(rd, rd, shift_cnt & 31);
-        }
-        a->Ori(rd, rd, value);
-      } else if (IsInt<16>(tmp)) {
-        // Value can be computed by loading a 16-bit signed value,
-        // shifting left, and "or"ing in a 16-bit unsigned value.
-        a->RecordLoadConst64Path(kLoadConst64PathDaddiuDsllXOri);
-        a->Daddiu(rd, ZERO, tmp);
-        if (shift_cnt < 32) {
-          a->Dsll(rd, rd, shift_cnt);
-        } else {
-          a->Dsll32(rd, rd, shift_cnt & 31);
-        }
-        a->Ori(rd, rd, value);
-      } else if (rep32_count < 4) {
-        // Value being loaded has 32 LSBs equal to the 32 MSBs, and the
-        // value in the 32 LSBs requires 2 MIPS instructions to load.
-        a->LoadConst32(rd, value);
-        a->Dinsu(rd, rd, 32, 32);
-        a->RecordLoadConst64Path(kLoadConst64PathDinsu2);
-      } else {
-        // Loads with 3-4 instructions.
-        // Catch-all case to get any other 64-bit values which aren't
-        // handled by special cases above.
-        uint64_t tmp2 = value;
-        a->RecordLoadConst64Path(kLoadConst64PathCatchAll);
-        a->LoadConst32(rd, value);
-        if (bit31) {
-          tmp2 += UINT64_C(0x100000000);
-        }
-        if (((tmp2 >> 32) & 0xFFFF) != 0) {
-          a->Dahi(rd, tmp2 >> 32);
-        }
-        if (tmp2 & UINT64_C(0x800000000000)) {
-          tmp2 += UINT64_C(0x1000000000000);
-        }
-        if ((tmp2 >> 48) != 0) {
-          a->Dati(rd, tmp2 >> 48);
-        }
-      }
-    }
-  }
-}
-
-static constexpr size_t kRiscv64HalfwordSize = 2;
-static constexpr size_t kRiscv64WordSize = 4;
+static constexpr size_t kRiscv64HalfwordSize   = 2;
+static constexpr size_t kRiscv64WordSize       = 4;
 static constexpr size_t kRiscv64DoublewordSize = 8;
 
 enum LoadOperandType {
@@ -313,16 +109,16 @@ enum StoreOperandType {
 
 // Used to test the values returned by ClassS/ClassD.
 enum FPClassMaskType {
-  kSignalingNaN      = 0x001,
-  kQuietNaN          = 0x002,
-  kNegativeInfinity  = 0x004,
-  kNegativeNormal    = 0x008,
-  kNegativeSubnormal = 0x010,
-  kNegativeZero      = 0x020,
-  kPositiveInfinity  = 0x040,
-  kPositiveNormal    = 0x080,
-  kPositiveSubnormal = 0x100,
-  kPositiveZero      = 0x200,
+  kNegativeInfinity  = 0x001,
+  kNegativeNormal    = 0x002,
+  kNegativeSubnormal = 0x004,
+  kNegativeZero      = 0x008,
+  kPositiveZero      = 0x010,
+  kPositiveSubnormal = 0x020,
+  kPositiveNormal    = 0x040,
+  kPositiveInfinity  = 0x080,
+  kSignalingNaN      = 0x100,
+  kQuietNaN          = 0x200,
 };
 
 class Riscv64Label : public Label {
@@ -447,9 +243,8 @@ class Riscv64Assembler final : public Assembler {
         jump_tables_(allocator->Adapter(kArenaAllocAssembler)),
         last_position_adjustment_(0),
         last_old_position_(0),
-        last_branch_id_(0),
-        has_msa_(false) {
-    (void) instruction_set_features;
+        last_branch_id_(0) {
+    (void) instruction_set_features;  // XC-TODO, set features, for example CRC32, Vector etc
     cfi().DelayEmittingAdvancePCs();
   }
 
@@ -462,90 +257,271 @@ class Riscv64Assembler final : public Assembler {
   size_t CodeSize() const override { return Assembler::CodeSize(); }
   DebugFrameOpCodeWriterForAssembler& cfi() { return Assembler::cfi(); }
 
-  // Emit Machine Instructions.
-  void Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void Addiu(GpuRegister rt, GpuRegister rs, int16_t imm16);
-  void Daddu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Daddiu(GpuRegister rt, GpuRegister rs, int16_t imm16);  // RISCV64
-  void Subu(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void Dsubu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  // Note that PC-relative literal loads are handled as pseudo branches because they need very
+  // similar relocation and may similarly expand in size to accomodate for larger offsets relative
+  // to PC.
+  enum BranchCondition {
+    kCondLT,
+    kCondGE,
+    kCondLE,
+    kCondGT,
+    kCondLTZ,
+    kCondGEZ,
+    kCondLEZ,
+    kCondGTZ,
+    kCondEQ,
+    kCondNE,
+    kCondEQZ,
+    kCondNEZ,
+    kCondLTU,
+    kCondGEU,
+    kUncond,
+  };
+  friend std::ostream& operator<<(std::ostream& os, const BranchCondition& rhs);
 
-  void MulR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void MuhR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void DivR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void ModR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void DivuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void ModuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void Dmul(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Dmuh(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Ddiv(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Dmod(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Ddivu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
-  void Dmodu(GpuRegister rd, GpuRegister rs, GpuRegister rt);  // RISCV64
+  /////////////////////////////// RV64 "IM" Instructions ///////////////////////////////
+  // Load instructions: opcode = 0x03, subfunc(func3) from 0x0 ~ 0x6
+  void Lb(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Lh(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Lw(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Ld(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Lbu(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Lhu(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Lwu(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
 
-  void Seb(GpuRegister rd, GpuRegister rt);
-  void Seh(GpuRegister rd, GpuRegister rt);
-  void Dext(GpuRegister rs, GpuRegister rt, int pos, int size);  // RISCV64
-  void Ins(GpuRegister rt, GpuRegister rs, int pos, int size);
-  void Dins(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  void Dinsm(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  void Dinsu(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  void DblIns(GpuRegister rt, GpuRegister rs, int pos, int size);  // RISCV64
-  void Lsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);
-  void Dlsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);  // RISCV64
-  void Sc(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
-  void Scd(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
-  void Ll(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);
-  void Lld(GpuRegister rt, GpuRegister base, int16_t imm9 = 0);  // RISCV64
+  // Store instructions: opcode = 0x23, subfunc(func3) from 0x0 ~ 0x3
+  void Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
+  void Sd(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
 
-  void Sll(GpuRegister rd, GpuRegister rt, int shamt);
-  void Srl(GpuRegister rd, GpuRegister rt, int shamt);
-  void Rotr(GpuRegister rd, GpuRegister rt, int shamt);
-  void Sra(GpuRegister rd, GpuRegister rt, int shamt);
-  void Sllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  void Srlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  void Rotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  void Srav(GpuRegister rd, GpuRegister rt, GpuRegister rs);
-  void Dsll(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsrl(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Drotr(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsra(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsll32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsrl32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Drotr32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsra32(GpuRegister rd, GpuRegister rt, int shamt);  // RISCV64
-  void Dsllv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  void Dsrlv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  void Drotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
-  void Dsrav(GpuRegister rd, GpuRegister rt, GpuRegister rs);  // RISCV64
+  // IMM ALU instructions: opcode = 0x13, subfunc(func3) from 0x0 ~ 0x7
+  void Addi(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Slli(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Slti(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
+  void Xori(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Srli(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Srai(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+  void Ori(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Andi(GpuRegister  rd, GpuRegister rs1, uint16_t offset);
+ 
+  // ALU instructions: opcode = 0x33, subfunc(func3) from 0x0 ~ 0x7; func7 also changed
+  void Add(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Sll(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Slt(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Sltu(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+  void Xor(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Srl(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Or(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+  void And(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
 
-  void Lwpc(GpuRegister rs, uint32_t imm19);
-  void Lwupc(GpuRegister rs, uint32_t imm19);  // RISCV64
-  void Ldpc(GpuRegister rs, uint32_t imm18);  // RISCV64
-  /*
-  void Lui(GpuRegister rt, uint16_t imm16);
-  */
-  void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
-  void Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16);  // RISCV64
-  void Dahi(GpuRegister rs, uint16_t imm16);  // RISCV64
-  void Dati(GpuRegister rs, uint16_t imm16);  // RISCV64
+  // RV64-M
+  void Mul(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulh(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulhu(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+  void Div(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+  void Divu(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Rem(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+  void Remu(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Sub(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+  void Sra(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2);
+
+  // 32bit Imm ALU instructions: opcode = 0x1b, subfunc(func3) - 0x0, 0x1, 0x5
+  void Addiw(GpuRegister  rd, GpuRegister rs1, int16_t imm12);
+  void Slliw(GpuRegister  rd, GpuRegister rs1, int16_t shamt);
+  void Srliw(GpuRegister  rd, GpuRegister rs1, int16_t shamt);
+  void Sraiw(GpuRegister  rd, GpuRegister rs1, int16_t shamt);
+
+  // 32bit ALU instructions: opcode = 0x3b, subfunc(func3) from 0x0 ~ 0x7
+  void Addw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Mulw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Subw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Sllw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Divw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Srlw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Divuw(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+  void Sraw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Remw(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2);
+  void Remuw(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+
+  // opcode = 0x17 & 0x37
+  void Auipc(GpuRegister  rd, uint32_t imm20);
+  void Lui(GpuRegister    rd, uint32_t imm20);
+
+  // Branch and Jump instructions, opcode = 0x63 (subfunc from 0x0 ~ 0x7), 0x67, 0x6f
+  void Beq(GpuRegister    rs1, GpuRegister rs2, uint16_t offset);
+  void Bne(GpuRegister    rs1, GpuRegister rs2, uint16_t offset);
+  void Blt(GpuRegister    rs1, GpuRegister rs2, uint16_t offset);
+  void Bge(GpuRegister    rs1, GpuRegister rs2, uint16_t offset);
+  void Bltu(GpuRegister   rs1, GpuRegister rs2, uint16_t offset);
+  void Bgeu(GpuRegister   rs1, GpuRegister rs2, uint16_t offset);
+
+  void Jalr(GpuRegister   rd, GpuRegister rs1, uint16_t offset);
+  void Jal(GpuRegister    rd, uint32_t imm20);
+
+  // opcode - 0xf 0xf and 0x73
+  void Fence(uint8_t pred, uint8_t succ);
+  void FenceI();
+  void Ecall();
+  void Ebreak();
+
+  // Control register instructions
+  void Csrrw(GpuRegister  rd, GpuRegister rs1, uint16_t csr);
+  void Csrrs(GpuRegister  rd, GpuRegister rs1, uint16_t csr);
+  void Csrrc(GpuRegister  rd, GpuRegister rs1, uint16_t csr);
+  void Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  void Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  void Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  /////////////////////////////// RV64 "IM" Instructions  END ///////////////////////////////
+
+
+  /////////////////////////////// RV64 "A" Instructions  START ///////////////////////////////
+  void LrW(GpuRegister rd, GpuRegister rs1, uint8_t aqrl);
+  void ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoAddW(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoXorW(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoAndW(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoOrW(GpuRegister   rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMinW(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMaxW(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+
+  void LrD(GpuRegister rd, GpuRegister rs1, uint8_t aqrl);
+  void ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoAddD(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoXorD(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoAndD(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoOrD(GpuRegister   rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMinD(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMaxD(GpuRegister  rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  void AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl);
+  /////////////////////////////// RV64 "A" Instructions  END ///////////////////////////////
+
+
+  /////////////////////////////// RV64 "FD" Instructions  START ///////////////////////////////
+  // opcode = 0x07 and 0x27
+  void FLw(FpuRegister  rd,  GpuRegister rs1, uint16_t offset);
+  void FLd(FpuRegister  rd,  GpuRegister rs1, uint16_t offset);
+  void FSw(FpuRegister  rs2, GpuRegister rs1, uint16_t offset);
+  void FSd(FpuRegister  rs2, GpuRegister rs1, uint16_t offset);
+
+  // opcode = 0x43, 0x47, 0x4b, 0x4f
+  void FMAddS(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FMAddD(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FMSubS(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FMSubD(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+  void FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
+
+  // opcode = 0x53, funct7 is even for float ops
+  void FAddS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FSubS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FMulS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FDivS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjS(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMinS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FMaxS(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FCvtSD(FpuRegister  rd, FpuRegister rs1);
+  void FSqrtS(FpuRegister  rd, FpuRegister rs1);
+  void FEqS(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+  void FLtS(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+  void FLeS(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+
+  void FCvtWS(GpuRegister  rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtWuS(GpuRegister rd, FpuRegister rs1);
+  void FCvtLS(GpuRegister  rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtLuS(GpuRegister rd, FpuRegister rs1);
+  void FCvtSW(FpuRegister  rd, GpuRegister rs1);
+  void FCvtSWu(FpuRegister rd, GpuRegister rs1);
+  void FCvtSL(FpuRegister  rd, GpuRegister rs1);
+  void FCvtSLu(FpuRegister rd, GpuRegister rs1);
+
+  void FMvXW(GpuRegister   rd, FpuRegister rs1);
+  void FClassS(GpuRegister rd, FpuRegister rs1);
+  void FMvWX(FpuRegister   rd, GpuRegister rs1);
+
+  // opcode = 0x53, funct7 is odd for float ops
+  void FAddD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FSubD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FMulD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FDivD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjD(FpuRegister  rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
+  void FMinD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FMaxD(FpuRegister   rd, FpuRegister rs1, FpuRegister rs2);
+  void FCvtDS(FpuRegister  rd, FpuRegister rs1);
+  void FSqrtD(FpuRegister  rd, FpuRegister rs1);
+
+  void FLeD(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+  void FLtD(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+  void FEqD(GpuRegister    rd, FpuRegister rs1, FpuRegister rs2);
+  void FCvtWD(GpuRegister  rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtWuD(GpuRegister rd, FpuRegister rs1);
+  void FCvtLD(GpuRegister  rd, FpuRegister rs1, FPRoundingMode frm = FRM);
+  void FCvtLuD(GpuRegister rd, FpuRegister rs1);
+  void FCvtDW(FpuRegister  rd, GpuRegister rs1);
+  void FCvtDWu(FpuRegister rd, GpuRegister rs1);
+  void FCvtDL(FpuRegister  rd, GpuRegister rs1);
+  void FCvtDLu(FpuRegister rd, GpuRegister rs1);
+
+  void FMvXD(GpuRegister   rd, FpuRegister rs1);
+  void FClassD(GpuRegister rd, FpuRegister rs1);
+  void FMvDX(FpuRegister   rd, GpuRegister rs1);
+
+  void MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  void MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  /////////////////////////////// RV64 "FD" Instructions  END ///////////////////////////////
+
+
+  ////////////////////////////// RV64 MACRO Instructions  START ///////////////////////////////
+  void Nop();
+  void Move(GpuRegister rd, GpuRegister rs);
+  void Clear(GpuRegister rd);
+  void Not(GpuRegister rd, GpuRegister rs);
+  void Break();
   void Sync(uint32_t stype);
 
+  // ALU
+  void Addiuw(GpuRegister  rt, GpuRegister rs, int16_t imm16);
+  void Addiu(GpuRegister rt, GpuRegister rs, int16_t imm16);
+  void Addiuw32(GpuRegister rt, GpuRegister rs, int32_t value);
+  void Addiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);
+  
+  void Srriw(GpuRegister rd, GpuRegister rs1, int imm5);
+  void Srri(GpuRegister rd, GpuRegister rs1, int imm6);
+  void Srrw(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+  void Srr(GpuRegister rd, GpuRegister rt, GpuRegister rs);
+
+  void Muhh(GpuRegister rd, GpuRegister rs, GpuRegister rt);
+
+  // Large const load
+  void Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16);
+  void Ahi(GpuRegister rs, uint16_t imm16);
+  void Ati(GpuRegister rs, uint16_t imm16);
+  void LoadConst32(GpuRegister rd, int32_t value);
+  void LoadConst64(GpuRegister rd, int64_t value);
+
+  // shift and add
+  void Addsl(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne);
+  void Extb(GpuRegister rs,  GpuRegister rt, int pos, int size);
+  void Extub(GpuRegister rs, GpuRegister rt, int pos, int size);
+
+  // Branches
   void Seleqz(GpuRegister rd, GpuRegister rs, GpuRegister rt);
   void Selnez(GpuRegister rd, GpuRegister rs, GpuRegister rt);
-  void Clz(GpuRegister rd, GpuRegister rs);
-  void Clo(GpuRegister rd, GpuRegister rs);
-  void Dclz(GpuRegister rd, GpuRegister rs);  // RISCV64
-  void Dclo(GpuRegister rd, GpuRegister rs);  // RISCV64
-
-  void Jalr(GpuRegister rd, GpuRegister rs);
-  void Jalr(GpuRegister rs);
-  void Jr(GpuRegister rs);
-  void Addiupc(GpuRegister rs, uint32_t imm19);
-  void Bc(uint32_t imm20);
-  void Balc(uint32_t imm20);
-  void Jic(GpuRegister rt, uint16_t imm16);
-  void Jialc(GpuRegister rt, uint16_t imm16);
   void Bltc(GpuRegister rs, GpuRegister rt, uint16_t imm12);
   void Bltzc(GpuRegister rt, uint16_t imm12);
   void Bgtzc(GpuRegister rt, uint16_t imm12);
@@ -558,61 +534,118 @@ class Riscv64Assembler final : public Assembler {
   void Bnec(GpuRegister rs, GpuRegister rt, uint16_t imm12);
   void Beqzc(GpuRegister rs, uint32_t imm12);
   void Bnezc(GpuRegister rs, uint32_t imm12);
+  void Bc(uint32_t imm20);
+  void Balc(uint32_t imm20);
+  void EmitBcond(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
 
-  void AddS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void SubS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void MulS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void DivS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void AddD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void SubD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void MulD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void DivD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
+  // Jump
+  void Jalr(GpuRegister  rd, GpuRegister rs);
+  void Jic(GpuRegister   rt, uint16_t imm16);
+  void Jalr(GpuRegister  rs);
+  void Jialc(GpuRegister rt, uint16_t imm16);
+  void Jr(GpuRegister    rs);
+
+  // When `is_bare` is false, the branches will promote to long (if the range
+  // of the individual branch instruction is insufficient) and the delay/
+  // forbidden slots will be taken care of.
+  // Use `is_bare = false` when the branch target may be out of reach of the
+  // individual branch instruction. IOW, this is for general purpose use.
+  //
+  // When `is_bare` is true, just the branch instructions will be generated
+  // leaving delay/forbidden slot filling up to the caller and the branches
+  // won't promote to long if the range is insufficient (you'll get a
+  // compilation error when the range is exceeded).
+  // Use `is_bare = true` when the branch target is known to be within reach
+  // of the individual branch instruction. This is intended for small local
+  // optimizations around delay/forbidden slots.
+  // Also prefer using `is_bare = true` if the code near the branch is to be
+  // patched or analyzed at run time (e.g. introspection) to
+  // - show the intent and
+  // - fail during compilation rather than during patching/execution if the
+  //   bare branch range is insufficent but the code size and layout are
+  //   expected to remain unchanged
+  //
+  // R6 compact branches without delay/forbidden slots.
+  void Bc(Riscv64Label* label, bool is_bare = false);
+  void Balc(Riscv64Label* label, bool is_bare = false);
+  void Jal(Riscv64Label* label, bool is_bare = false);
+  // R6 compact branches with forbidden slots.
+  void Bltc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bltzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgtzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Blezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bltuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bgeuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Beqc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Bnec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
+  void Beqzc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
+  void Bnezc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
+
+  void Bltz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgtz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Blez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Jal(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Beq(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bne(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Blt(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bge(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bltu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bgeu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
+  void Beqz(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
+  void Bnez(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
+
+  // atomic
+  void Sc(GpuRegister    rt, GpuRegister base);
+  void Scd(GpuRegister   rt, GpuRegister base);
+  void Ll(GpuRegister    rt, GpuRegister base);
+  void Lld(GpuRegister   rt, GpuRegister base);
+
+  // Float
+  void AddS(FpuRegister  fd, FpuRegister fs, FpuRegister ft);
+  void SubS(FpuRegister  fd, FpuRegister fs, FpuRegister ft);
+  void MulS(FpuRegister  fd, FpuRegister fs, FpuRegister ft);
+  void DivS(FpuRegister  fd, FpuRegister fs, FpuRegister ft);
+  void AbsS(FpuRegister  fd, FpuRegister fs);
+  void MovS(FpuRegister  fd, FpuRegister fs);
+  void NegS(FpuRegister  fd, FpuRegister fs);
   void SqrtS(FpuRegister fd, FpuRegister fs);
-  void SqrtD(FpuRegister fd, FpuRegister fs);
-  void AbsS(FpuRegister fd, FpuRegister fs);
-  void AbsD(FpuRegister fd, FpuRegister fs);
-  void MovS(FpuRegister fd, FpuRegister fs);
-  void MovD(FpuRegister fd, FpuRegister fs);
-  void NegS(FpuRegister fd, FpuRegister fs);
-  void NegD(FpuRegister fd, FpuRegister fs);
-  void RoundLS(FpuRegister fd, FpuRegister fs);
-  void RoundLD(FpuRegister fd, FpuRegister fs);
-  void RoundWS(FpuRegister fd, FpuRegister fs);
-  void RoundWD(FpuRegister fd, FpuRegister fs);
+
+  // Double
+  void AddD(FpuRegister   fd, FpuRegister fs, FpuRegister ft);
+  void SubD(FpuRegister   fd, FpuRegister fs, FpuRegister ft);
+  void MulD(FpuRegister   fd, FpuRegister fs, FpuRegister ft);
+  void DivD(FpuRegister   fd, FpuRegister fs, FpuRegister ft);
+  void AbsD(FpuRegister   fd, FpuRegister fs);
+  void MovD(FpuRegister   fd, FpuRegister fs);
+  void NegD(FpuRegister   fd, FpuRegister fs);
+  void SqrtD(FpuRegister  fd, FpuRegister fs);
+
+  void Cvtsd(FpuRegister  fd, FpuRegister fs);
+  void Cvtds(FpuRegister  fd, FpuRegister fs);
+
   void TruncLS(GpuRegister rd, FpuRegister fs);
   void TruncLD(GpuRegister rd, FpuRegister fs);
   void TruncWS(GpuRegister rd, FpuRegister fs);
   void TruncWD(GpuRegister rd, FpuRegister fs);
-  void CeilLS(FpuRegister fd, FpuRegister fs);
-  void CeilLD(FpuRegister fd, FpuRegister fs);
-  void CeilWS(FpuRegister fd, FpuRegister fs);
-  void CeilWD(FpuRegister fd, FpuRegister fs);
-  void FloorLS(FpuRegister fd, FpuRegister fs);
-  void FloorLD(FpuRegister fd, FpuRegister fs);
-  void FloorWS(FpuRegister fd, FpuRegister fs);
-  void FloorWD(FpuRegister fd, FpuRegister fs);
+
+
+  // float/double compare and branch
+  void FJMaxMinS(FpuRegister fd, FpuRegister fs, FpuRegister ft, bool is_min);
+  void FJMaxMinD(FpuRegister fd, FpuRegister fs, FpuRegister ft, bool is_min);
   void SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SelD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SeleqzS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SeleqzD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SelnezS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
   void SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void RintS(FpuRegister fd, FpuRegister fs);
-  void RintD(FpuRegister fd, FpuRegister fs);
-  void ClassS(FpuRegister fd, FpuRegister fs);
-  void ClassD(FpuRegister fd, FpuRegister fs);
-  void MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft);
-  void CmpUnS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  void CmpEqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  void CmpUeqS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  void CmpLtS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+
   void CmpUltS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpLeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpUleS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
-  void CmpOrS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+
   void CmpUneS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpNeS(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpUnD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
@@ -625,32 +658,14 @@ class Riscv64Assembler final : public Assembler {
   void CmpOrD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpUneD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
   void CmpNeD(GpuRegister rd, FpuRegister fs, FpuRegister ft);
+  /////////////////////////////// RV64 MACRO Instructions END ///////////////////////////////
 
-  void Cvtsw(FpuRegister fd, FpuRegister fs);
-  void Cvtdw(FpuRegister fd, FpuRegister fs);
-  void Cvtsd(FpuRegister fd, FpuRegister fs);
-  void Cvtds(FpuRegister fd, FpuRegister fs);
-  void Cvtsl(FpuRegister fd, FpuRegister fs);
-  void Cvtdl(FpuRegister fd, FpuRegister fs);
 
-  void Mfc1(GpuRegister rt, FpuRegister fs);
-  void Mfhc1(GpuRegister rt, FpuRegister fs);
-  void Mtc1(GpuRegister rt, FpuRegister fs);
-  void Mthc1(GpuRegister rt, FpuRegister fs);
-  void Dmfc1(GpuRegister rt, FpuRegister fs);  // RISCV64
-  void Dmtc1(GpuRegister rt, FpuRegister fs);  // RISCV64
-  void Lwc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  void Ldc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  void Swc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
-  void Sdc1(FpuRegister ft, GpuRegister rs, uint16_t imm12);
+  /////////////////////////////// RV64 "V" Instructions  START ///////////////////////////////
+  #ifdef RISCV64_VARIANTS_HAS_VECTOR
+  // Helper for replicating floating point value in all destination elements.
+  void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
 
-  void Break();
-  void Nop();
-  void Move(GpuRegister rd, GpuRegister rs);
-  void Clear(GpuRegister rd);
-  void Not(GpuRegister rd, GpuRegister rs);
-
-  // MSA instructions.
   void AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
   void NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt);
@@ -849,239 +864,65 @@ class Riscv64Assembler final : public Assembler {
   void PcntH(VectorRegister wd, VectorRegister ws);
   void PcntW(VectorRegister wd, VectorRegister ws);
   void PcntD(VectorRegister wd, VectorRegister ws);
+  #endif
 
 
-  // TODO dvt porting...
-  /////////////////////////////// RV32I ///////////////////////////////
-  // RV32I-R
-  void Add(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sub(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sll(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Slt(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sltu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Xor(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Srl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sra(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Or(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void And(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  // RV32I-I
-  void Jalr(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Lb(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Lh(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Lw(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Lbu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Lhu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Addi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Slti(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Xori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Ori(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Andi(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Slli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Srli(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Srai(GpuRegister rd, GpuRegister rs1, uint16_t offset);
-  void Fence(uint8_t pred, uint8_t succ);
-  void FenceI();
-  void Ecall();
-  void Ebreak();
-  void Csrrw(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  void Csrrs(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  void Csrrc(GpuRegister rd, GpuRegister rs1, uint16_t csr);  // the order is not consitence with instruction
-  void Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
-  void Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
-  void Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm /*imm5*/);
+  /////////////////////////////// RV64 VARIANTS extension ////////////////
+  #ifdef RISCV64_VARIANTS_THEAD
+  // alu, in spec 16.3.
+  void addsl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void mula(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+  void muls(GpuRegister  rd, GpuRegister rs1, GpuRegister rs2);
+  void mveqz(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void mvnez(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
+  void srri(GpuRegister  rd, GpuRegister rs1, uint8_t uimm6);
+  void srriw(GpuRegister  rd, GpuRegister rs1, uint8_t uimm5);
 
-  // RV32I-S
-  void Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  void Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  void Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  // RV32I-B
-  void Beq(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  void Bne(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  void Blt(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  void Bge(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  void Bltu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  void Bgeu(GpuRegister rs1, GpuRegister rs2, uint16_t offset);
-  // RV32I-U
-  void Lui(GpuRegister rd, uint32_t imm20);
-  void Auipc(GpuRegister rd, uint32_t imm20);
-  // RV32I-J
-  void Jal(GpuRegister rd, uint32_t imm20);
+  // bit ops, in spec 16.4.
+  void ext(GpuRegister   rd, GpuRegister rs1, uint8_t uimm6_1, uint8_t uimm6_2);
+  void extu(GpuRegister  rd, GpuRegister rs1, uint8_t uimm6_1, uint8_t uimm6_2);
+  void ff0(GpuRegister   rd, GpuRegister rs1);
+  void ff1(GpuRegister   rd, GpuRegister rs1);
+  void rev(GpuRegister   rd, GpuRegister rs1);
+  void revw(GpuRegister  rd, GpuRegister rs1);
+  void tst(GpuRegister   rd, GpuRegister rs1, uint8_t uimm6);
+  void tstnbz(GpuRegister rd, GpuRegister rs1);
+
+  // load & store, in spec 16.5.
+  void lbia(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lbib(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lbuia(GpuRegister  rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lbuib(GpuRegister  rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+
+  void lwia(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lwib(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lwuia(GpuRegister  rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void lwuib(GpuRegister  rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+
+  void sbia(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void sbib(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void swia(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void swib(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+
+  void ldia(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void ldib(GpuRegister   rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void sdia(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+  void sdib(GpuRegister  rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2);
+
+  void lrb(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void lrbu(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void lrw(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void lrwu(GpuRegister   rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void lrd(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void srb(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void srw(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+  void srd(GpuRegister    rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2);
+
+  void ldd(GpuRegister   rd1, GpuRegister rd2, GpuRegister rs1, uint8_t uimm2);
+  void sdd(GpuRegister   rd1, GpuRegister rd2, GpuRegister rs1, uint8_t uimm2);
+  #endif
   ///////////////////////////////////////////////////////////////////
 
-  /////////////////////////////// RV64I ///////////////////////////////
-  // RV64I-R
-  void Addw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Subw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sllw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Srlw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Sraw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  // RV64I-I
-  void Lwu(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
-  void Ld(GpuRegister rd, GpuRegister rs1, uint16_t imm12);
-  // void Slli(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
-  // void Srli(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
-  // void Srai(GpuRegister rd, GpuRegister rs1, uint16_t shamt); // Duplicated with RV32I, why?
-  void Addiw(GpuRegister rd, GpuRegister rs1, int16_t imm12);
-  void Slliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
-  void Srliw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
-  void Sraiw(GpuRegister rd, GpuRegister rs1, int16_t shamt);
-  // RV64I-S
-  void Sd(GpuRegister rs2, GpuRegister rs1, uint16_t imm12);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV32M ///////////////////////////////
-  // RV32M-R
-  void Mul(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Mulh(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Mulhu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Div(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Divu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Rem(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Remu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV32A ///////////////////////////////
-  // TODO confirm aq=? rl=?
-  void LrW(GpuRegister rd, GpuRegister rs1);
-  void ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoAddW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoXorW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoAndW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoOrW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMinW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMaxW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV64A ///////////////////////////////
-  // TODO confirm aq=? rl=?
-  void LrD(GpuRegister rd, GpuRegister rs1);
-  void ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoAddD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoXorD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoAndD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoOrD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMinD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMaxD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  void AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV64M ///////////////////////////////
-  // RV64M-R
-  void Mulw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Divw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Divuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Remw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-  void Remuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2);
-
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV32F ///////////////////////////////
-  // RV32F-I
-  void FLw(FpuRegister rd, GpuRegister rs1, uint16_t offset);
-  // RV32F-S
-  void FSw(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  // RV32F-R
-  void FMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMulS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FDivS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSqrtS(FpuRegister rd, FpuRegister rs1);
-  void FSgnjS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMinS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMaxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FCvtWS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  void FCvtWuS(GpuRegister rd, FpuRegister rs1);
-  void FMvXW(GpuRegister rd, FpuRegister rs1);
-  void FEqS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FLtS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FLeS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FClassS(GpuRegister rd, FpuRegister rs1);
-  void FCvtSW(FpuRegister rd, GpuRegister rs1);
-  void FCvtSWu(FpuRegister rd, GpuRegister rs1);
-  void FMvWX(FpuRegister rd, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV64F ///////////////////////////////
-  // RV64F-R
-  void FCvtLS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  void FCvtLuS(GpuRegister rd, FpuRegister rs1);
-  void FCvtSL(FpuRegister rd, GpuRegister rs1);
-  void FCvtSLu(FpuRegister rd, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV32D ///////////////////////////////
-  // RV32D-I
-  void FLd(FpuRegister rd, GpuRegister rs1, uint16_t offset);
-  // RV32D-S
-  void FSd(FpuRegister rs2, GpuRegister rs1, uint16_t offset);
-  // RV32D-R
-  void FMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3);
-  void FAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMulD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FDivD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSqrtD(FpuRegister rd, FpuRegister rs1);
-  void FSgnjD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMinD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FMaxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FCvtSD(FpuRegister rd, FpuRegister rs1);
-  void FCvtDS(FpuRegister rd, FpuRegister rs1);
-  void FEqD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FLtD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FLeD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2);
-  void FClassD(GpuRegister rd, FpuRegister rs1);
-  void FCvtWD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  void FCvtWuD(GpuRegister rd, FpuRegister rs1);
-  void FCvtDW(FpuRegister rd, GpuRegister rs1);
-  void FCvtDWu(FpuRegister rd, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV64D ///////////////////////////////
-  void FCvtLD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm = FRM);
-  void FCvtLuD(GpuRegister rd, FpuRegister rs1);
-  void FMvXD(GpuRegister rd, FpuRegister rs1);
-  void FCvtDL(FpuRegister rd, GpuRegister rs1);
-  void FCvtDLu(FpuRegister rd, GpuRegister rs1);
-  void FMvDX(FpuRegister rd, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  /////////////////////////////// RV64 Ali extension ////////////////
-  void Ff1(GpuRegister rd, GpuRegister rs1);
-  void Revw(GpuRegister rd, GpuRegister rs1);
-  void Rev(GpuRegister rd, GpuRegister rs1);
-  ///////////////////////////////////////////////////////////////////
-
-  // Helper for replicating floating point value in all destination elements.
-  void ReplicateFPToVectorRegister(VectorRegister dst, FpuRegister src, bool is_double);
-
-  // Higher level composite instructions.
-  int InstrCountForLoadReplicatedConst32(int64_t);
-  void LoadConst32(GpuRegister rd, int32_t value);
-  void LoadConst64(GpuRegister rd, int64_t value);  // RISCV64
-
-  // This function is only used for testing purposes.
-  void RecordLoadConst64Path(int value);
-
-  void Addiu32(GpuRegister rt, GpuRegister rs, int32_t value);
-  void Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp = AT);  // RISCV64
 
   //
   // Heap poisoning.
@@ -1091,9 +932,9 @@ class Riscv64Assembler final : public Assembler {
   void PoisonHeapReference(GpuRegister dst, GpuRegister src) {
     // dst = -src.
     // Negate the 32-bit ref.
-    Dsubu(dst, ZERO, src);
+    Sub(dst, ZERO, src);
     // And constrain it to 32 bits (zero-extend into bits 32 through 63) as on Arm64 and x86/64.
-    Dext(dst, dst, 0, 32);
+    Extub(dst, dst, 0, 32);
   }
   // Poison a heap reference contained in `reg`.
   void PoisonHeapReference(GpuRegister reg) {
@@ -1153,58 +994,6 @@ class Riscv64Assembler final : public Assembler {
   // The table location is determined by the location of its label (the label precedes
   // the table data) and should be loaded using LoadLabelAddress().
   JumpTable* CreateJumpTable(std::vector<Riscv64Label*>&& labels);
-
-  // When `is_bare` is false, the branches will promote to long (if the range
-  // of the individual branch instruction is insufficient) and the delay/
-  // forbidden slots will be taken care of.
-  // Use `is_bare = false` when the branch target may be out of reach of the
-  // individual branch instruction. IOW, this is for general purpose use.
-  //
-  // When `is_bare` is true, just the branch instructions will be generated
-  // leaving delay/forbidden slot filling up to the caller and the branches
-  // won't promote to long if the range is insufficient (you'll get a
-  // compilation error when the range is exceeded).
-  // Use `is_bare = true` when the branch target is known to be within reach
-  // of the individual branch instruction. This is intended for small local
-  // optimizations around delay/forbidden slots.
-  // Also prefer using `is_bare = true` if the code near the branch is to be
-  // patched or analyzed at run time (e.g. introspection) to
-  // - show the intent and
-  // - fail during compilation rather than during patching/execution if the
-  //   bare branch range is insufficent but the code size and layout are
-  //   expected to remain unchanged
-  //
-  // R6 compact branches without delay/forbidden slots.
-  void Bc(Riscv64Label* label, bool is_bare = false);
-  void Balc(Riscv64Label* label, bool is_bare = false);
-  void Jal(Riscv64Label* label, bool is_bare = false);
-  // R6 compact branches with forbidden slots.
-  void Bltc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bltzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bgtzc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bgec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bgezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Blezc(GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bltuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bgeuc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Beqc(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Bnec(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);
-  void Beqzc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
-  void Bnezc(GpuRegister rs, Riscv64Label* label, bool is_bare = false);
-
-  void Bltz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bgtz(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bgez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Blez(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Jal(GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Beq(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bne(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Blt(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bge(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bltu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bgeu(GpuRegister rs, GpuRegister rt, Riscv64Label* label, bool is_bare = false);  // R2
-  void Beqz(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
-  void Bnez(GpuRegister rs, Riscv64Label* label, bool is_bare = false);  // R2
 
   void EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset, size_t size);
   void AdjustBaseAndOffset(GpuRegister& base, int32_t& offset, bool is_doubleword);
@@ -1440,10 +1229,6 @@ class Riscv64Assembler final : public Assembler {
   // Emit data (e.g. encoded instruction or immediate) to the instruction stream.
   void Emit(uint32_t value);
 
-  //
-  // common assembler high-level functionality.
-  //
-
   // Emit code that will create an activation on the stack.
   void BuildFrame(size_t frame_size,
                   ManagedRegister method_reg,
@@ -1571,28 +1356,6 @@ class Riscv64Assembler final : public Assembler {
   // Get the final position of a label after local fixup based on the old position
   // recorded before FinalizeCode().
   uint32_t GetAdjustedPosition(uint32_t old_position);
-
-  // Note that PC-relative literal loads are handled as pseudo branches because they need very
-  // similar relocation and may similarly expand in size to accomodate for larger offsets relative
-  // to PC.
-  enum BranchCondition {
-    kCondLT,
-    kCondGE,
-    kCondLE,
-    kCondGT,
-    kCondLTZ,
-    kCondGEZ,
-    kCondLEZ,
-    kCondGTZ,
-    kCondEQ,
-    kCondNE,
-    kCondEQZ,
-    kCondNEZ,
-    kCondLTU,
-    kCondGEU,
-    kUncond,
-  };
-  friend std::ostream& operator<<(std::ostream& os, const BranchCondition& rhs);
 
  private:
   class Branch {
@@ -1763,35 +1526,18 @@ class Riscv64Assembler final : public Assembler {
   friend std::ostream& operator<<(std::ostream& os, const Branch::Type& rhs);
   friend std::ostream& operator<<(std::ostream& os, const Branch::OffsetBits& rhs);
 
-  void EmitRsd(int opcode, GpuRegister rs, GpuRegister rd, int shamt, int funct);
-  void EmitRtd(int opcode, GpuRegister rt, GpuRegister rd, int shamt, int funct);
-  void EmitI(int opcode, GpuRegister rs, GpuRegister rt, uint16_t imm);
-  void EmitI21(int opcode, GpuRegister rs, uint32_t imm21);
-  void EmitI26(int opcode, uint32_t imm26);
-  void EmitFR(int opcode, int fmt, FpuRegister ft, FpuRegister fs, FpuRegister fd, int funct);
-  void EmitFI(int opcode, int fmt, FpuRegister rt, uint16_t imm);
-  void EmitBcond(BranchCondition cond, GpuRegister rs, GpuRegister rt, uint32_t imm16_21);
-  void EmitMsa3R(int operation,
-                 int df,
-                 VectorRegister wt,
-                 VectorRegister ws,
-                 VectorRegister wd,
-                 int minor_opcode);
-  void EmitMsaBIT(int operation, int df_m, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  void EmitMsaELM(int operation, int df_n, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  void EmitMsaMI10(int s10, GpuRegister rs, VectorRegister wd, int minor_opcode, int df);
-  void EmitMsaI10(int operation, int df, int i10, VectorRegister wd, int minor_opcode);
-  void EmitMsa2R(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
-  void EmitMsa2RF(int operation, int df, VectorRegister ws, VectorRegister wd, int minor_opcode);
+  template<typename Reg1, typename Reg2>
+  void EmitI(uint16_t imm, Reg1 rs1, int funct3, Reg2 rd, int opcode) {
+    uint32_t encoding = static_cast<uint32_t>(imm) << 20 |
+                        static_cast<uint32_t>(rs1) << 15 |
+                        static_cast<uint32_t>(funct3) << 12 |
+                        static_cast<uint32_t>(rd) << 7 |
+                        opcode;
+    Emit(encoding);
+  }
 
-  /////////////////////////////// RV64 Ali extension ////////////////
-  void EmitRs1d(int funct7, GpuRegister rs1, GpuRegister rd, int opcode);
-  ///////////////////////////////////////////////////////////////////
-
-  // TODO dvt porting...
   template<typename Reg1, typename Reg2, typename Reg3>
   void EmitR(int funct7, Reg1 rs2, Reg2 rs1, int funct3, Reg3 rd, int opcode) {
-    // TODO validate params
     uint32_t encoding = static_cast<uint32_t>(funct7) << 25 |
                         static_cast<uint32_t>(rs2) << 20 |
                         static_cast<uint32_t>(rs1) << 15 |
@@ -1803,7 +1549,6 @@ class Riscv64Assembler final : public Assembler {
 
   template<typename Reg1, typename Reg2, typename Reg3, typename Reg4>
   void EmitR4(Reg1 rs3, int funct2, Reg2 rs2, Reg3 rs1, int funct3, Reg4 rd, int opcode) {
-    // TODO validate params
     uint32_t encoding = static_cast<uint32_t>(rs3) << 27 |
                         static_cast<uint32_t>(funct2) << 25 |
                         static_cast<uint32_t>(rs2) << 20 |
@@ -1815,21 +1560,7 @@ class Riscv64Assembler final : public Assembler {
   }
 
   template<typename Reg1, typename Reg2>
-  void EmitI(uint16_t imm, Reg1 rs1, int funct3, Reg2 rd, int opcode) {
-    uint32_t encoding = static_cast<uint32_t>(imm) << 20 |
-                        static_cast<uint32_t>(rs1) << 15 |
-                        static_cast<uint32_t>(funct3) << 12 |
-                        static_cast<uint32_t>(rd) << 7 |
-                        opcode;
-    Emit(encoding);
-  }
-
-  void EmitI5(uint16_t funct7, uint16_t imm5, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
-  void EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
-
-  template<typename Reg1, typename Reg2>
   void EmitS(uint16_t imm, Reg1 rs2, Reg2 rs1, int funct3, int opcode) {
-    // TODO validate params
     uint32_t encoding = (static_cast<uint32_t>(imm)&0xFE0) << 20 |
                         static_cast<uint32_t>(rs2) << 20 |
                         static_cast<uint32_t>(rs1) << 15 |
@@ -1839,9 +1570,25 @@ class Riscv64Assembler final : public Assembler {
     Emit(encoding);
   }
 
+  void EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
   void EmitB(uint16_t imm, GpuRegister rs2, GpuRegister rs1, int funct3, int opcode);
   void EmitU(uint32_t imm, GpuRegister rd, int opcode);
   void EmitJ(uint32_t imm, GpuRegister rd, int opcode);
+
+  /////////////////////////////// RV64 VARIANTS extension ////////////////
+  #ifdef RISCV64_VARIANTS_THEAD
+  void EmitRsd(int funct5, int funct2, int funct_rs, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
+  void EmitRsd(int funct5, int funct2, GpuRegister funct_rs, GpuRegister rs1, int funct3, GpuRegister rd, int opcode);
+  #endif
+  ///////////////////////////////////////////////////////////////////
+
+
+  void EmitLiterals();
+  void EmitBranch(Branch* branch);
+  void EmitBranches();
+  void EmitJumpTables();
+  // Emits exception block.
+  void EmitExceptionPoll(Riscv64ExceptionSlowPath* exception);
 
   void Buncond(Riscv64Label* label, bool is_bare);
   void Bcond(Riscv64Label* label,
@@ -1849,30 +1596,20 @@ class Riscv64Assembler final : public Assembler {
              BranchCondition condition,
              GpuRegister lhs,
              GpuRegister rhs = ZERO);
-  void Call(Riscv64Label* label, bool is_bare);
-  void FinalizeLabeledBranch(Riscv64Label* label);
+ 
 
   Branch* GetBranch(uint32_t branch_id);
   const Branch* GetBranch(uint32_t branch_id) const;
-
-  void EmitLiterals();
   void ReserveJumpTableSpace();
-  void EmitJumpTables();
   void PromoteBranches();
-  void EmitBranch(Branch* branch);
-  void EmitBranches();
   void PatchCFI();
 
-  // Emits exception block.
-  void EmitExceptionPoll(Riscv64ExceptionSlowPath* exception);
+  void Call(Riscv64Label* label, bool is_bare);
+  void FinalizeLabeledBranch(Riscv64Label* label);
 
-  bool HasMsa() const {
-    return has_msa_;
-  }
 
   // List of exception blocks to generate at the end of the code cache.
   std::vector<Riscv64ExceptionSlowPath> exception_blocks_;
-
   std::vector<Branch> branches_;
 
   // Whether appending instructions at the end of the buffer or overwriting the existing ones.
@@ -1892,8 +1629,6 @@ class Riscv64Assembler final : public Assembler {
   uint32_t last_position_adjustment_;
   uint32_t last_old_position_;
   uint32_t last_branch_id_;
-
-  const bool has_msa_;
 
   DISALLOW_COPY_AND_ASSIGN(Riscv64Assembler);
 };

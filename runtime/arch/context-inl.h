@@ -38,7 +38,6 @@
 #include "riscv64/context_riscv64.h"
 #define RUNTIME_CONTEXT_TYPE riscv64::Riscv64Context
 #else
-
 #error unimplemented
 #endif
 

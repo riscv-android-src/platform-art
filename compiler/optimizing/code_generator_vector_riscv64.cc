@@ -644,8 +644,7 @@ void InstructionCodeGeneratorRISCV64::VisitVecMin(HVecMin* instruction) {
       DCHECK_EQ(2u, instruction->GetVectorLength());
       __ Min_sD(dst, lhs, rhs);
       break;
-    // When one of arguments is NaN, fmin.df returns other argument, but Java expects a NaN value.
-    // TODO: Fix min(x, NaN) cases for float and double.
+    // XC-TODO: When one of arguments is NaN, fmin.df returns other argument, but Java expects a NaN value.
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
       __ FminW(dst, lhs, rhs);
@@ -702,8 +701,7 @@ void InstructionCodeGeneratorRISCV64::VisitVecMax(HVecMax* instruction) {
       DCHECK_EQ(2u, instruction->GetVectorLength());
       __ Max_sD(dst, lhs, rhs);
       break;
-    // When one of arguments is NaN, fmax.df returns other argument, but Java expects a NaN value.
-    // TODO: Fix max(x, NaN) cases for float and double.
+    // Fix max(x, NaN) cases for float and double.
     case DataType::Type::kFloat32:
       DCHECK_EQ(4u, instruction->GetVectorLength());
       __ FmaxW(dst, lhs, rhs);
@@ -1332,9 +1330,9 @@ int32_t InstructionCodeGeneratorRISCV64::VecAddress(LocationSummary* locations,
   } else {
     GpuRegister index_reg = index.AsRegister<GpuRegister>();
     if (scale != TIMES_1) {
-      __ Dlsa(AT, index_reg, base, scale);
+      __ Addsl(AT, index_reg, base, scale);
     } else {
-      __ Daddu(AT, base, index_reg);
+      __ Add(AT, base, index_reg);
     }
     *adjusted_base = AT;
   }
@@ -1363,7 +1361,7 @@ void InstructionCodeGeneratorRISCV64::VisitVecLoad(HVecLoad* instruction) {
       // Loading 8-bytes (needed if dealing with compressed strings in StringCharAt) from unaligned
       // memory address may cause a trap to the kernel if the CPU doesn't directly support unaligned
       // loads and stores.
-      // TODO: Implement support for StringCharAt.
+      // XC-TODO: Implement support for StringCharAt.
       DCHECK(!instruction->IsStringCharAt());
       DCHECK_EQ(8u, instruction->GetVectorLength());
       __ LdH(reg, base, offset);

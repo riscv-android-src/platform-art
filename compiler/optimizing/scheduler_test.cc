@@ -34,7 +34,7 @@
 #include "scheduler_arm.h"
 #endif
 
-// XC-ART-TODO: scheduler for riscv64
+// XC-TODO: scheduler for riscv64
 
 namespace art {
 

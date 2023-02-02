@@ -14,7 +14,7 @@
     jal     $helper
     beqz   a0, MterpException
     FETCH_ADVANCE_INST 3
-    lw      a0, THREAD_USE_MTERP_OFFSET(rSELF)
+    lwu     a0, THREAD_USE_MTERP_OFFSET(rSELF)
     beqz    a0, MterpFallback
     GET_INST_OPCODE a0
     GOTO_OPCODE a0
@@ -34,7 +34,7 @@
     jal     $helper
     beqz    a0, MterpException
     FETCH_ADVANCE_INST 4
-    lw      a0, THREAD_USE_MTERP_OFFSET(rSELF)
+    lwu     a0, THREAD_USE_MTERP_OFFSET(rSELF)
     beqz    a0, MterpFallback
     GET_INST_OPCODE a0
     GOTO_OPCODE a0

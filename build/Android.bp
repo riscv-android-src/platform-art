@@ -283,7 +283,7 @@ cc_defaults {
     name: "art_pgo_defaults",
     visibility: ["//art:__subpackages__"],
     pgo: {
-        // sampling: true,
+        sampling: true,
     },
     target: {
         android_arm64: {
@@ -308,8 +308,7 @@ cc_defaults {
         },
         android_riscv64: {
             pgo: {
-                // XC_ART_TODO
-                // profile_file: "art/art_riscv_riscv64.profdata",
+                profile_file: "art/art_riscv_riscv64.profdata",
             },
         },
     },

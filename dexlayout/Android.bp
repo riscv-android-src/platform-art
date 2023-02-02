@@ -76,7 +76,7 @@ art_cc_library {
     target: {
         android: {
             lto: {
-                thin: false,
+                thin: true,
             },
             shared_libs: [
                 "libartbase",

@@ -71,15 +71,17 @@ class Riscv64InstructionSetFeatures final : public InstructionSetFeatures {
   explicit Riscv64InstructionSetFeatures(uint32_t bits) : InstructionSetFeatures(), bits_(bits) {
   }
 
-  // Bitmap positions for encoding features as a bitmap.
+  // Bitmap positions for encoding features as a bitmap: same order as /proc/cpuinfo
   enum {
     kIBitfield = (1 << 0),
     kMBitfield = (1 << 1),
-    kFBitfield = (1 << 2),
-    kDBitfield = (1 << 3),
-    kCBitfield = (1 << 4),
-    kABitfield = (1 << 5),
+    kABitfield = (1 << 2),
+    kFBitfield = (1 << 3),
+    kDBitfield = (1 << 4),
+    kCBitfield = (1 << 5),
     kVBitfield = (1 << 6),
+    kSBitfield = (1 << 7),
+    kUBitfield = (1 << 8),
   };
 
   // Bits for AFDCM etc, will process late

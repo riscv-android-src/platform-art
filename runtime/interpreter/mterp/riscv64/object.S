@@ -20,7 +20,7 @@
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- BBBB
     srli     a1, rINST, 8                # a1 <- AA
-    DLSA    a1, a1, rFP, 2              # a1 <- &object
+    ADDSL   a1, a1, rFP, 2              # a1 <- &object
     ld      a2, OFF_FP_METHOD(rFP)      # a2 <- method
     move    a3, rSELF                   # a3 <- self    
     jal     MterpCheckCast              # (index, &obj, method, self)
@@ -61,7 +61,7 @@
     srli     a2, rINST, 12               # a2 <- B
     lhu     a1, 2(rPC)                  # a1 <- field byte offset
     EXPORT_PC
-    GET_VREG a0, a2                   # a0 <- object we're operating on
+    GET_VREG_U a0, a2                   # a0 <- object we're operating on
     jal     artIGetObjectFromMterp      # (obj, offset)
 
     ld      a3, THREAD_EXCEPTION_OFFSET(rSELF) 
@@ -78,7 +78,7 @@
     /* op vA, vB, offset//CCCC */
     srli     a2, rINST, 12               # a2 <- B
     lhu     a1, 2(rPC)                  # a1 <- field byte offset
-    GET_VREG a3, a2                     # a3 <- object we're operating on
+    GET_VREG_U a3, a2                     # a3 <- object we're operating on
     EXT     a2, rINST, 8, 4             # a2 <- A
     beqz    a3, common_errNullObject    # object was null
     add     a1, a1, a3
@@ -101,7 +101,7 @@
     /* iget-wide-quick vA, vB, offset//CCCC */
     srli     a2, rINST, 12               # a2 <- B
     lhu     a4, 2(rPC)                  # a4 <- field byte offset
-    GET_VREG a3, a2                   # a3 <- object we're operating on
+    GET_VREG_U a3, a2                   # a3 <- object we're operating on
     EXT   a2, rINST, 8, 4               # a2 <- A
     beqz    a3, common_errNullObject    # object was null
     add     a4, a3, a4                  # create direct pointer
@@ -123,7 +123,7 @@
     EXPORT_PC
     lhu     a0, 2(rPC)                  # a0 <- CCCC
     srli     a1, rINST, 12               # a1 <- B
-    DLSA    a1, a1, rFP, 2              # a1 <- &object
+    ADDSL   a1, a1, rFP, 2              # a1 <- &object
     ld      a2, OFF_FP_METHOD(rFP)      # a2 <- method
     move    a3, rSELF                   # a3 <- self
     jal     MterpInstanceOf             # (index, &obj, method, self)
@@ -178,7 +178,7 @@
     /* op vA, vB, offset//CCCC */
     srli     a2, rINST, 12               # a2 <- B
     lhu     a1, 2(rPC)                  # a1 <- field byte offset
-    GET_VREG a3, a2                   # a3 <- fp[B], the object pointer
+    GET_VREG_U a3, a2                   # a3 <- fp[B], the object pointer
     EXT   a2, rINST, 8, 4               # a2 <- A
     beqz    a3, common_errNullObject    # object was null
     GET_VREG a0, a2                     # a0 <- fp[A]
@@ -201,7 +201,7 @@
     /* iput-wide-quick vA, vB, offset//CCCC */
     srli     a2, rINST, 12               # a2 <- B
     lhu     a3, 2(rPC)                  # a3 <- field byte offset
-    GET_VREG a2, a2                   # a2 <- fp[B], the object pointer
+    GET_VREG_U a2, a2                   # a2 <- fp[B], the object pointer
     EXT     a0, rINST, 8, 4             # a0 <- A
     beqz    a2, common_errNullObject    # object was null
     GET_VREG_WIDE a0, a0                # a0 <- fp[A]

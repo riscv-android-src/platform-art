@@ -30,15 +30,9 @@ void CheckMterpAsmConstants() {
 }
 
 void InitMterpTls(Thread* self) {
-  UNUSED(self);
-  UNIMPLEMENTED(FATAL);
-  // self->SetMterpDefaultIBase(nullptr);
-  // self->SetMterpCurrentIBase(nullptr);
-  //self->SetMterpAltIBase(nullptr);
-}
-
-bool CanUseMterp() {
-  return false;
+  self->SetMterpDefaultIBase(nullptr);
+  self->SetMterpCurrentIBase(nullptr);
+  self->SetMterpAltIBase(nullptr);
 }
 
 /*

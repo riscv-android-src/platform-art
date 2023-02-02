@@ -90,7 +90,6 @@ void Riscv64RelativePatcherTest::TestStringBssEntry(uint32_t bss_begin,
 }
 
 TEST_F(Riscv64RelativePatcherTest, StringBssEntry) {
-  // TBD: update the gtests for riscv64 in the future
   // TestStringBssEntry(/* bss_begin */ 0x12345678, /* string_entry_offset */ 0x1234);
 }
 

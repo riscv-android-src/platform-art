@@ -131,12 +131,9 @@ void LibraryNamespaces::Initialize() {
   // For now we rely on CTS test to catch things like this but
   // it should probably be addressed in the future.
   for (const std::string& soname : android::base::Split(preloadable_public_libraries(), ":")) {
-	//FIXME: T-HEAD bypass missing librarys
-    if( (strcmp(soname.c_str(), "libcamera2ndk.so") == 0)  ||
-        (strcmp(soname.c_str(), "libneuralnetworks.so") == 0)  ||
-        (strcmp(soname.c_str(), "libOpenMAXAL.so") == 0) ||
-        (strcmp(soname.c_str(), "libRS.so") == 0) ) {
-          continue;
+	//XC-TODO: T-HEAD bypass missing librarys
+    if(strcmp(soname.c_str(), "libRS.so") == 0) {
+      continue;
     }
     void* handle = OpenSystemLibrary(soname.c_str(), RTLD_NOW | RTLD_NODELETE);
     LOG_ALWAYS_FATAL_IF(handle == nullptr,

@@ -75,7 +75,7 @@ void FaultManager::GetMethodAndReturnPcAndSp(siginfo_t* siginfo, void* context,
 }
 
 bool NullPointerHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, void* context) {
-  // zhengxing TBD:  use arm64 implementation here.
+  // Same as arm64 implementation here.
   if (!IsValidImplicitCheck(info)) {
     return false;
   }
@@ -146,7 +146,6 @@ bool StackOverflowHandler::Action(int sig ATTRIBUTE_UNUSED, siginfo_t* info, voi
   // caused this fault.  This will be inserted into a callee save frame by
   // the function to which this handler returns (art_quick_throw_stack_overflow).
   sc->sc_regs.pc = reinterpret_cast<uintptr_t>(art_quick_throw_stack_overflow);
-  // zhengxing: TBD
   sc->sc_regs.t6 = sc->sc_regs.pc;          // make sure T6 points to the function
 
   // The kernel will now return to the address in sc->arm_pc.

@@ -71,7 +71,7 @@ static constexpr size_t kArm64DefaultSVEVectorLength = 256;
 // X86 instruction alignment. This is the recommended alignment for maximum performance.
 static constexpr size_t kX86Alignment = 16;
 
-//TBD:  RISCV64 instruction alignment. This is the recommended alignment for maximum performance.
+// RISCV64 instruction alignment. This is the recommended alignment for maximum performance.
 static constexpr size_t kRiscv64Alignment = 16;
 
 // Different than code alignment since code alignment is only first instruction of method.

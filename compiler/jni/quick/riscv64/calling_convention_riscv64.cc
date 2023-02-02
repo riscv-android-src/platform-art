@@ -262,6 +262,7 @@ ArrayRef<const ManagedRegister> Riscv64JniCallingConvention::CalleeSaveRegisters
   }
 }
 
+// Use gpr for float/double paras?
 bool Riscv64JniCallingConvention::IsCurrentParamInRegister() {
   unsigned int gp_args = itr_args_ - itr_float_and_doubles_;
   if (IsCurrentParamAFloatOrDouble()) {
@@ -276,7 +277,6 @@ bool Riscv64JniCallingConvention::IsCurrentParamInRegister() {
                        (itr_float_and_doubles_ - kMaxFloatOrDoubleRegisterArguments) : 0;
     return ((gp_args + spilled_to_gp) < kMaxIntLikeRegisterArguments);
   }
-  // TODO: Can we just call CurrentParamRegister to figure this out?
 }
 
 bool Riscv64JniCallingConvention::IsCurrentParamOnStack() {
@@ -321,12 +321,9 @@ FrameOffset Riscv64JniCallingConvention::CurrentParamStackOffset() {
   CHECK_LT(offset, OutFrameSize());
 
   return FrameOffset(offset);
-  // XC-ART-TODO: Seems identical to X86_64 code.
 }
 
 ManagedRegister Riscv64JniCallingConvention::SavedLocalReferenceCookieRegister() const {
-  // XC-ART-TBD: double check selected S10 in the future. 
-
   // The S10 is callee-save register in both managed and native ABIs.
   // It is saved in the stack frame and it has no special purpose like `tr`.
   static_assert((kCoreCalleeSpillMask & (1u << S10)) != 0u);  // Managed callee save register.
@@ -335,11 +332,8 @@ ManagedRegister Riscv64JniCallingConvention::SavedLocalReferenceCookieRegister()
 
 ManagedRegister Riscv64JniCallingConvention::HiddenArgumentRegister() const {
   CHECK(IsCriticalNative());
-  // XC-ART-TBD: double check selected T0 in the future.
- 
-  // T0 is neither managed callee-save, nor argument register, nor scratch register.
-  //XC-ART- TODO: Change to static_assert; std::none_of should be constexpr since C++20.
 
+  // T0 is neither managed callee-save, nor argument register, nor scratch register.
   return Riscv64ManagedRegister::FromGpuRegister(T0);
 }
 

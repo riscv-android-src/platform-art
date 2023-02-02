@@ -250,7 +250,7 @@ art_cc_library {
     target: {
         android: {
             lto: {
-                thin: false,
+                thin: true,
             },
         },
     },

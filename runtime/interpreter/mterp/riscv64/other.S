@@ -27,7 +27,7 @@
     /* const vAA, #+BBBBbbbb */
     srli    a2, rINST, 8                # a2 <- AA
     lhu     a0, 2(rPC)                  # a0 <- bbbb (low)
-    lhu     a1, 4(rPC)                  # a1 <- BBBB (high)
+    lh      a1, 4(rPC)                  # a1 <- BBBB (high)
     FETCH_ADVANCE_INST 3                # advance rPC, load rINST         
     slli    a1, a1, 16                  # a0 = BBBBbbbb
     or     a0, a0, a1
@@ -158,7 +158,7 @@
     jal     artLockObjectFromCode
     bnez    a0, MterpException
     FETCH_ADVANCE_INST 1
-    lw      a0, THREAD_USE_MTERP_OFFSET(rSELF)
+    lwu     a0, THREAD_USE_MTERP_OFFSET(rSELF)  # boolean
     beqz    a0, MterpFallback
     GET_INST_OPCODE t4                  # extract opcode from rINST
     GOTO_OPCODE t4                      # jump to next instruction
@@ -180,7 +180,7 @@
     jal     artUnlockObjectFromCode     # v0 <- success for unlock(self, obj)
     bnez    a0, MterpException
     FETCH_ADVANCE_INST 1                # before throw: advance rPC, load rINST
-    lw      a0, THREAD_USE_MTERP_OFFSET(rSELF)
+    lwu     a0, THREAD_USE_MTERP_OFFSET(rSELF)  # boolean
     beqz    a0, MterpFallback
     GET_INST_OPCODE t4                  # extract opcode from rINST
     GOTO_OPCODE t4                      # jump to next instruction

@@ -27,7 +27,7 @@ TEST(Riscv64InstructionSetFeaturesTest, Riscv64FeaturesFromDefaultVariant) {
   ASSERT_TRUE(riscv64_features.get() != nullptr) << error_msg;
   EXPECT_EQ(riscv64_features->GetInstructionSet(), InstructionSet::kRiscv64);
   EXPECT_TRUE(riscv64_features->Equals(riscv64_features.get()));
-  EXPECT_EQ(riscv64_features->AsBitmap(), 47U);
+  EXPECT_EQ(riscv64_features->AsBitmap(), 63U);
 }
 
 

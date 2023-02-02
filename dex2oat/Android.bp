@@ -233,8 +233,8 @@ cc_defaults {
         "//external/vixl",
     ],
     pgo: {
-       // instrumentation: true,
-       // benchmarks: ["dex2oat"],
+        instrumentation: true,
+        benchmarks: ["dex2oat"],
     },
     target: {
         android_arm64: {
@@ -255,6 +255,11 @@ cc_defaults {
         android_x86: {
             pgo: {
                 profile_file: "art/dex2oat_x86_x86_64.profdata",
+            },
+        },
+        android_riscv64: {
+            pgo: {
+                profile_file: "art/art_riscv_riscv64.profdata",
             },
         },
     },
@@ -301,7 +306,7 @@ art_cc_binary {
                 "libart-dex2oat",
             ],
             lto: {
-                thin: false,
+                thin: true,
             },
         },
         host: {

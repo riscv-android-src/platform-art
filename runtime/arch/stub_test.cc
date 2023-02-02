@@ -388,6 +388,74 @@ class StubTest : public CommonRuntimeTest {
         : "memory");  // We spill and restore (almost) all registers, so only mention memory here.
 #undef PUSH
 #undef POP
+#elif defined(__riscv) && (__riscv_xlen == 64)
+    __asm__ __volatile__(
+        // Spill x0-x7 which we say we don't clobber. May contain args.
+        "addi sp, sp,   -80\n\t"
+        ".cfi_adjust_cfa_offset 80\n\t"
+        "sd   a0,       0(sp)\n\t"
+        "sd   a1,       8(sp)\n\t"
+        "sd   a2,      16(sp)\n\t"
+        "sd   a3,      24(sp)\n\t"
+        "sd   a4,      32(sp)\n\t"
+        "sd   a5,      40(sp)\n\t"
+        "sd   a6,      48(sp)\n\t"
+        "sd   a7,      56(sp)\n\t"
+        "sd   s1,      64(sp)\n\t" // rSELF
+        "sd   ra,      72(sp)\n\t"
+
+        "addi sp, sp,   -16\n\t"   // 16, make is 16B aligned
+        ".cfi_adjust_cfa_offset 16\n\t"
+        "sd   %[referrer],       0(sp)\n\t"
+
+        // Push everything on the stack, so we don't rely on the order. What a mess. :-(
+        "addi sp, sp,   -48\n\t"
+        ".cfi_adjust_cfa_offset 48\n\t"
+        "sd   %[arg0],     0(sp)\n\t"
+        "sd   %[arg1],     8(sp)\n\t"
+        "sd   %[arg2],    16(sp)\n\t"
+        "sd   %[code],    24(sp)\n\t"
+        "sd   %[self],    32(sp)\n\t"
+        "sd   %[hidden],  40(sp)\n\t"
+
+        // Fill f0-f7 some special value and check it after call function, will add later
+
+        // Load call params into the right registers.
+        "ld   a0,       0(sp)\n\t"
+        "ld   a1,       8(sp)\n\t"
+        "ld   a2,      16(sp)\n\t"
+        "ld   a3,      24(sp)\n\t"     // code
+        "ld   s1,      32(sp)\n\t"     // self->rSELF, and do not use hidden register
+        "addi sp, sp,    48\n\t"
+        ".cfi_adjust_cfa_offset -48\n\t"
+
+        "jalr ra,       0(a3)\n\t"    // Call the stub
+        "mv   t0,       a0\n\t"        // Store result
+
+        "addi sp, sp,    16\n\t"       // Drop the quick "frame"
+        ".cfi_adjust_cfa_offset -16\n\t"
+
+        "ld   ra,      72(sp)\n\t"
+        "ld   s1,      64(sp)\n\t"
+        "ld   a7,      56(sp)\n\t"
+        "ld   a6,      48(sp)\n\t"
+        "ld   a5,      40(sp)\n\t"
+        "ld   a4,      32(sp)\n\t"
+        "ld   a3,      24(sp)\n\t"
+        "ld   a2,      16(sp)\n\t"
+        "ld   a1,       8(sp)\n\t"
+        "ld   a0,       0(sp)\n\t"
+        "addi sp, sp,    80\n\t"       // Free stack space, now sp as on entry
+        ".cfi_adjust_cfa_offset -80\n"
+
+        "mv  %[result], t0\n\t"       // Store the call result
+        : [result] "=r" (result)
+          // Use the result from r0
+        : [arg0] "0"(arg0), [arg1] "r"(arg1), [arg2] "r"(arg2), [code] "r"(code), [self] "r"(self),
+          [referrer] "r"(referrer), [hidden] "r"(hidden)
+        : "x1", "x9", "x10", "x11", "x12", "x13", "x14", "x15", "x16", "x17",
+          "x5", "x6",
+          "memory");
 #else
     UNUSED(arg0, arg1, arg2, code, referrer, hidden);
     LOG(WARNING) << "Was asked to invoke for an architecture I do not understand.";
@@ -414,7 +482,7 @@ class StubTest : public CommonRuntimeTest {
 
 
 TEST_F(StubTest, Memcpy) {
-#if defined(__i386__) || (defined(__x86_64__) && !defined(__APPLE__))
+#if defined(__i386__) || (defined(__x86_64__) && !defined(__APPLE__)) || (defined(__riscv) && (__riscv_xlen == 64))
   Thread* self = Thread::Current();
 
   uint32_t orig[20];
@@ -452,7 +520,8 @@ TEST_F(StubTest, Memcpy) {
 
 TEST_F(StubTest, LockObject) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   static constexpr size_t kThinLockLoops = 100;
 
   Thread* self = Thread::Current();
@@ -526,7 +595,9 @@ class RandGen {
 // NO_THREAD_SAFETY_ANALYSIS as we do not want to grab exclusive mutator lock for MonitorInfo.
 static void TestUnlockObject(StubTest* test) NO_THREAD_SAFETY_ANALYSIS {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
+
   static constexpr size_t kThinLockLoops = 100;
 
   Thread* self = Thread::Current();
@@ -677,13 +748,15 @@ TEST_F(StubTest, UnlockObject) {
 }
 
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
 extern "C" void art_quick_check_instance_of(void);
 #endif
 
 TEST_F(StubTest, CheckCast) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   Thread* self = Thread::Current();
 
   const uintptr_t art_quick_check_instance_of =
@@ -782,7 +855,8 @@ TEST_F(StubTest, CheckCast) {
 
 TEST_F(StubTest, AllocObject) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   // This will lead to OOM  error messages in the log.
   ScopedLogSeverity sls(LogSeverity::FATAL);
 
@@ -899,7 +973,8 @@ TEST_F(StubTest, AllocObject) {
 
 TEST_F(StubTest, AllocObjectArray) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   // TODO: Check the "Unresolved" allocation stubs
 
   // This will lead to OOM  error messages in the log.
@@ -963,7 +1038,8 @@ TEST_F(StubTest, AllocObjectArray) {
 TEST_F(StubTest, StringCompareTo) {
   TEST_DISABLED_FOR_STRING_COMPRESSION();
   // There is no StringCompareTo runtime entrypoint for __arm__ or __aarch64__.
-#if defined(__i386__) || (defined(__x86_64__) && !defined(__APPLE__))
+#if defined(__i386__) || (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   // TODO: Check the "Unresolved" allocation stubs
 
   Thread* self = Thread::Current();
@@ -1046,7 +1122,8 @@ static void GetSetBooleanStatic(ArtField* f, Thread* self,
                                 ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   constexpr size_t num_values = 5;
   uint8_t values[num_values] = { 0, 1, 2, 128, 0xFF };
 
@@ -1077,7 +1154,8 @@ static void GetSetByteStatic(ArtField* f, Thread* self, ArtMethod* referrer,
                              StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   int8_t values[] = { -128, -64, 0, 64, 127 };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1108,7 +1186,8 @@ static void GetSetBooleanInstance(Handle<mirror::Object>* obj, ArtField* f, Thre
                                   ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint8_t values[] = { 0, true, 2, 128, 0xFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1143,7 +1222,8 @@ static void GetSetByteInstance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   int8_t values[] = { -128, -64, 0, 64, 127 };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1178,7 +1258,8 @@ static void GetSetCharStatic(ArtField* f, Thread* self, ArtMethod* referrer,
                              StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint16_t values[] = { 0, 1, 2, 255, 32768, 0xFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1208,7 +1289,8 @@ static void GetSetShortStatic(ArtField* f, Thread* self,
                               ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   int16_t values[] = { -0x7FFF, -32768, 0, 255, 32767, 0x7FFE };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1239,7 +1321,8 @@ static void GetSetCharInstance(Handle<mirror::Object>* obj, ArtField* f,
                                Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint16_t values[] = { 0, 1, 2, 255, 32768, 0xFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1273,7 +1356,8 @@ static void GetSetShortInstance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   int16_t values[] = { -0x7FFF, -32768, 0, 255, 32767, 0x7FFE };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1308,7 +1392,8 @@ static void GetSet32Static(ArtField* f, Thread* self, ArtMethod* referrer,
                            StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint32_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1325,7 +1410,7 @@ static void GetSet32Static(ArtField* f, Thread* self, ArtMethod* referrer,
                                            self,
                                            referrer);
 
-    EXPECT_EQ(res, values[i]) << "Iteration " << i;
+    EXPECT_EQ(static_cast<uint32_t>(res), values[i]) << "Iteration " << i;
   }
 #else
   UNUSED(f, self, referrer, test);
@@ -1340,7 +1425,8 @@ static void GetSet32Instance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint32_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1375,7 +1461,8 @@ static void GetSet32Instance(Handle<mirror::Object>* obj, ArtField* f,
 
 
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
 
 static void set_and_check_static(uint32_t f_idx,
                                  ObjPtr<mirror::Object> val,
@@ -1407,7 +1494,8 @@ static void GetSetObjStatic(ArtField* f, Thread* self, ArtMethod* referrer,
                             StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   set_and_check_static(f->GetDexFieldIndex(), nullptr, self, referrer, test);
 
   // Allocate a string object for simplicity.
@@ -1425,7 +1513,8 @@ static void GetSetObjStatic(ArtField* f, Thread* self, ArtMethod* referrer,
 
 
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
 static void set_and_check_instance(ArtField* f,
                                    ObjPtr<mirror::Object> trg,
                                    ObjPtr<mirror::Object> val,
@@ -1460,7 +1549,8 @@ static void GetSetObjInstance(Handle<mirror::Object>* obj, ArtField* f,
                               Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
 #if defined(__i386__) || defined(__arm__) || defined(__aarch64__) || \
-    (defined(__x86_64__) && !defined(__APPLE__))
+    (defined(__x86_64__) && !defined(__APPLE__)) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   set_and_check_instance(f, obj->Get(), nullptr, self, referrer, test);
 
   // Allocate a string object for simplicity.
@@ -1482,7 +1572,8 @@ static void GetSetObjInstance(Handle<mirror::Object>* obj, ArtField* f,
 static void GetSet64Static(ArtField* f, Thread* self, ArtMethod* referrer,
                            StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-#if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__)
+#if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint64_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF, 0xFFFFFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1514,7 +1605,8 @@ static void GetSet64Static(ArtField* f, Thread* self, ArtMethod* referrer,
 static void GetSet64Instance(Handle<mirror::Object>* obj, ArtField* f,
                              Thread* self, ArtMethod* referrer, StubTest* test)
     REQUIRES_SHARED(Locks::mutator_lock_) {
-#if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__)
+#if (defined(__x86_64__) && !defined(__APPLE__)) || defined(__aarch64__) || \
+    (defined(__riscv) && (__riscv_xlen == 64))
   uint64_t values[] = { 0, 1, 2, 255, 32768, 1000000, 0xFFFFFFFF, 0xFFFFFFFFFFFF };
 
   for (size_t i = 0; i < arraysize(values); ++i) {
@@ -1842,7 +1934,7 @@ TEST_F(StubTest, DISABLED_IMT) {
 }
 
 TEST_F(StubTest, StringIndexOf) {
-#if defined(__arm__) || defined(__aarch64__)
+#if defined(__arm__) || defined(__aarch64__) || (defined(__riscv) && (__riscv_xlen == 64))
   Thread* self = Thread::Current();
   ScopedObjectAccess soa(self);
   // garbage is created during ClassLinker::Init
@@ -1919,7 +2011,8 @@ TEST_F(StubTest, StringIndexOf) {
 
 TEST_F(StubTest, ReadBarrier) {
 #if defined(ART_USE_READ_BARRIER) && (defined(__i386__) || defined(__arm__) || \
-      defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__)))
+      defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))) || \
+      (defined(__riscv) && (__riscv_xlen == 64))
   Thread* self = Thread::Current();
 
   const uintptr_t readBarrierSlow = StubTest::GetEntrypoint(self, kQuickReadBarrierSlow);
@@ -1955,7 +2048,8 @@ TEST_F(StubTest, ReadBarrier) {
 
 TEST_F(StubTest, ReadBarrierForRoot) {
 #if defined(ART_USE_READ_BARRIER) && (defined(__i386__) || defined(__arm__) || \
-      defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__)))
+      defined(__aarch64__) || (defined(__x86_64__) && !defined(__APPLE__))) || \
+      (defined(__riscv) && (__riscv_xlen == 64))
   Thread* self = Thread::Current();
 
   const uintptr_t readBarrierForRootSlow =

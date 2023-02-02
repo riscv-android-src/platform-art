@@ -115,8 +115,8 @@ inline uint32_t Object::GetReadBarrierState(uintptr_t* fake_address_dependency) 
   std::atomic_signal_fence(std::memory_order_acquire);
   uint32_t rb_state = lw.ReadBarrierState();
   return rb_state;
-#elif defined(__riscv)
-  // RISCV64: use a memory barrier to prevent load-load reordering.
+#elif defined(__riscv) && (__riscv_xlen == 64)
+  // XC-TODO: use a memory barrier to prevent load-load reordering.
   LockWord lw = GetLockWord(false);
   *fake_address_dependency = 0;
   std::atomic_thread_fence(std::memory_order_acquire);

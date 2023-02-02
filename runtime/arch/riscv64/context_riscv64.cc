@@ -42,7 +42,7 @@ void Riscv64Context::FillCalleeSaves(uint8_t* frame, const QuickMethodFrameInfo&
   int spill_pos = 0;
   int gpr_spill_pos = spill_pos + 2;
 
-  // Wendong: TBD, just save all
+  // Just save all
   // Core registers come first, from the highest down to the lowest.
   for (uint32_t core_reg : HighToLowBits(frame_info.CoreSpillMask())) {
     if (core_reg == RA) {
@@ -82,7 +82,6 @@ void Riscv64Context::SetFPR(uint32_t reg, uintptr_t value) {
   *fprs_[reg] = value;
 }
 
-// Wendong: TBD, check smash crash
 void Riscv64Context::SmashCallerSaves() {
   // This needs to be 0 because we want a null/zero return value.
   // gprs_[A0] = const_cast<uintptr_t*>(&gZero);

@@ -379,9 +379,9 @@ libart_cc_defaults {
                 "interpreter/mterp/mterp.cc",
                 "interpreter/mterp/nterp_stub.cc",
                 ":libart_mterp.riscv64",
-               // TBD: Enable [n]terp in the future.
-               // "interpreter/mterp/nterp.cc",
-               // ":libart_mterp.riscv64ng",
+                // XC-TODO: Enable [n]terp in the future.
+                // "interpreter/mterp/nterp.cc",
+                // ":libart_mterp.riscv64ng",
                 "arch/riscv64/context_riscv64.cc",
                 "arch/riscv64/entrypoints_init_riscv64.cc",
                 "arch/riscv64/jni_entrypoints_riscv64.S",
@@ -393,7 +393,7 @@ libart_cc_defaults {
             ],
             asflags: [
               "-fno-omit-frame-pointer",
-                "-fno-integrated-as",
+              "-fno-integrated-as",
               "-Xassembler",
               "-mno-relax",
             ],
@@ -625,6 +625,7 @@ art_cc_library {
     target: {
         android: {
             lto: {
+				// XC-TODO: thin-lto need rewrite jal instruction
                 thin: false,
             },
         },
@@ -1031,24 +1032,6 @@ genrule {
     ],
     cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
 }
-
-/*
-genrule {
-    name: "libart_mterp.riscv64ng",
-    out: ["mterp_riscv64ng.S"],
-    srcs: [
-        "interpreter/mterp/riscv64ng/*.S",
-        "interpreter/mterp/riscv64/arithmetic.S",
-        "interpreter/mterp/riscv64/floating_point.S",
-    ],
-    tool_files: [
-        "interpreter/mterp/gen_mterp.py",
-        "interpreter/mterp/common/gen_setup.py",
-        ":art_libdexfile_dex_instruction_list_header",
-    ],
-    cmd: "$(location interpreter/mterp/gen_mterp.py) $(out) $(in)",
-}
-*/
 
 cc_library_static {
     name: "libstatslog_art",

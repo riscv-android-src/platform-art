@@ -46,17 +46,10 @@ namespace riscv64 {
 static constexpr int kCurrentMethodStackOffset = 0;
 static constexpr GpuRegister kMethodRegisterArgument = A0;
 
-// Flags controlling the use of thunks for Baker read barriers.
-// zhengxing: disable them for porting. enable them in the future.
-#if 0
-constexpr bool kBakerReadBarrierThunksEnableForFields = true;
-constexpr bool kBakerReadBarrierThunksEnableForArrays = true;
-constexpr bool kBakerReadBarrierThunksEnableForGcRoots = true;
-#else
+// XC-TODO: Flags controlling the use of thunks for Baker read barriers.
 constexpr bool kBakerReadBarrierThunksEnableForFields = false;
 constexpr bool kBakerReadBarrierThunksEnableForArrays = false;
 constexpr bool kBakerReadBarrierThunksEnableForGcRoots = false;
-#endif
 
 Location Riscv64ReturnLocation(DataType::Type return_type) {
   switch (return_type) {
@@ -684,7 +677,7 @@ class ReadBarrierMarkAndUpdateFieldSlowPathRISCV64 : public SlowPathCodeRISCV64 
     GpuRegister tmp_ptr = TMP;      // Pointer to actual memory.
     GpuRegister tmp = AT;           // Value in memory.
 
-    __ Daddu(tmp_ptr, base, offset);
+    __ Add(tmp_ptr, base, offset);
 
     if (kPoisonHeapReferences) {
       __ PoisonHeapReference(expected);
@@ -704,7 +697,7 @@ class ReadBarrierMarkAndUpdateFieldSlowPathRISCV64 : public SlowPathCodeRISCV64 
     __ Ll(tmp, tmp_ptr);
     // The LL instruction sign-extends the 32-bit value, but
     // 32-bit references must be zero-extended. Zero-extend `tmp`.
-    __ Dext(tmp, tmp, 0, 32);
+    __ Extub(tmp, tmp, 0, 32);
     __ Bnec(tmp, expected, &exit_loop);
     __ Move(tmp, value);
     __ Sc(tmp, tmp_ptr);
@@ -832,11 +825,11 @@ class ReadBarrierForHeapReferenceSlowPathRISCV64 : public SlowPathCodeRISCV64 {
         // factor (2) cannot overflow in practice, as the runtime is
         // unable to allocate object arrays with a size larger than
         // 2^26 - 1 (that is, 2^28 - 4 bytes).
-        __ Sll(index_reg, index_reg, TIMES_4);
+        __ Slliw(index_reg, index_reg, TIMES_4);
         static_assert(
             sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
             "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
-        __ Addiu32(index_reg, index_reg, offset_);
+        __ Addiuw32(index_reg, index_reg, offset_);
       } else {
         // In the case of the UnsafeGetObject/UnsafeGetObjectVolatile
         // intrinsics, `index_` is not shifted by a scale factor of 2
@@ -1121,7 +1114,7 @@ void ParallelMoveResolverRISCV64::Exchange(int index1, int index2, bool double_s
   // Allocate a scratch register other than TMP, if available.
   // Else, spill V0 (arbitrary choice) and use it as a scratch register (it will be
   // automatically unspilled when the scratch scope object is destroyed).
-  ScratchRegisterScope ensure_scratch(this, TMP, V0, codegen_->GetNumberOfCoreRegisters());
+  ScratchRegisterScope ensure_scratch(this, TMP, A0, codegen_->GetNumberOfCoreRegisters());
   // If V0 spills onto the stack, SP-relative offsets need to be adjusted.
   int stack_offset = ensure_scratch.IsSpilled() ? kRiscv64DoublewordSize : 0;
   __ LoadFromOffset(load_type,
@@ -1159,9 +1152,9 @@ void CodeGeneratorRISCV64::GenerateFrameEntry() {
 
   if (GetCompilerOptions().CountHotnessInCompiledCode()) {
     __ Lhu(TMP, kMethodRegisterArgument, ArtMethod::HotnessCountOffset().Int32Value());
-    __ Addiu(TMP, TMP, 1);
-    // Subtract one if the counter would overflow.
-    __ Srl(TMP2, TMP, 16);
+    __ Addiuw(TMP, TMP, 1);
+    // Subtract one if the counter would overflow (16b hotness).
+    __ Srliw(TMP2, TMP, 16);
     __ Sub(TMP, TMP, TMP2);
     __ Sh(TMP, kMethodRegisterArgument, ArtMethod::HotnessCountOffset().Int32Value());
   }
@@ -1304,11 +1297,16 @@ void CodeGeneratorRISCV64::MoveLocation(Location destination,
                              SP,
                              source.GetStackIndex());
       } else {
-        // TODO: use load_type = kLoadUnsignedWord when type == DataType::Type::kReference.
-        __ LoadFromOffset(load_type,
-                          destination.AsRegister<GpuRegister>(),
-                          SP,
-                          source.GetStackIndex());
+        if (dst_type != DataType::Type::kReference)
+          __ LoadFromOffset(load_type,
+                            destination.AsRegister<GpuRegister>(),
+                            SP,
+                            source.GetStackIndex());
+        else
+          __ LoadFromOffset(kLoadUnsignedWord,
+                            destination.AsRegister<GpuRegister>(),
+                            SP,
+                            source.GetStackIndex());
       }
     } else if (source.IsSIMDStackSlot()) {
       __ LoadFpuFromOffset(kLoadQuadword,
@@ -1337,9 +1335,9 @@ void CodeGeneratorRISCV64::MoveLocation(Location destination,
         }
       }
       if (dst_type == DataType::Type::kFloat32) {
-        __ Mtc1(gpr, destination.AsFpuRegister<FpuRegister>());
+        __ FMvWX(destination.AsFpuRegister<FpuRegister>(), gpr);
       } else if (dst_type == DataType::Type::kFloat64) {
-        __ Dmtc1(gpr, destination.AsFpuRegister<FpuRegister>());
+        __ FMvDX(destination.AsFpuRegister<FpuRegister>(), gpr);
       }
     } else if (source.IsRegister()) {
       if (destination.IsRegister()) {
@@ -1348,9 +1346,9 @@ void CodeGeneratorRISCV64::MoveLocation(Location destination,
       } else {
         DCHECK(destination.IsFpuRegister());
         if (DataType::Is64BitType(dst_type)) {
-          __ Dmtc1(source.AsRegister<GpuRegister>(), destination.AsFpuRegister<FpuRegister>());
+          __ FMvDX(destination.AsFpuRegister<FpuRegister>(), source.AsRegister<GpuRegister>());
         } else {
-          __ Mtc1(source.AsRegister<GpuRegister>(), destination.AsFpuRegister<FpuRegister>());
+          __ FMvWX(destination.AsFpuRegister<FpuRegister>(), source.AsRegister<GpuRegister>());
         }
       }
     } else if (source.IsFpuRegister()) {
@@ -1370,9 +1368,9 @@ void CodeGeneratorRISCV64::MoveLocation(Location destination,
       } else {
         DCHECK(destination.IsRegister());
         if (DataType::Is64BitType(dst_type)) {
-          __ Dmfc1(destination.AsRegister<GpuRegister>(), source.AsFpuRegister<FpuRegister>());
+          __ FMvXD(destination.AsRegister<GpuRegister>(), source.AsFpuRegister<FpuRegister>());
         } else {
-          __ Mfc1(destination.AsRegister<GpuRegister>(), source.AsFpuRegister<FpuRegister>());
+          __ FMvXW(destination.AsRegister<GpuRegister>(), source.AsFpuRegister<FpuRegister>());
         }
       }
     }
@@ -1502,18 +1500,20 @@ void CodeGeneratorRISCV64::SwapLocations(Location loc1, Location loc2, DataType:
     Location mem_loc = is_slot1 ? loc1 : loc2;
     LoadOperandType load_type = mem_loc.IsStackSlot() ? kLoadWord : kLoadDoubleword;
     StoreOperandType store_type = mem_loc.IsStackSlot() ? kStoreWord : kStoreDoubleword;
-    // TODO: use load_type = kLoadUnsignedWord when type == DataType::Type::kReference.
-    __ LoadFromOffset(load_type, TMP, SP, mem_loc.GetStackIndex());
+    if (type != DataType::Type::kReference)
+      __ LoadFromOffset(load_type, TMP, SP, mem_loc.GetStackIndex());
+    else
+      __ LoadFromOffset(kLoadUnsignedWord, TMP, SP, mem_loc.GetStackIndex());
     if (reg_loc.IsFpuRegister()) {
       __ StoreFpuToOffset(store_type,
                           reg_loc.AsFpuRegister<FpuRegister>(),
                           SP,
                           mem_loc.GetStackIndex());
       if (mem_loc.IsStackSlot()) {
-        __ Mtc1(TMP, reg_loc.AsFpuRegister<FpuRegister>());
+        __ FMvWX(reg_loc.AsFpuRegister<FpuRegister>(), TMP);
       } else {
         DCHECK(mem_loc.IsDoubleStackSlot());
-        __ Dmtc1(TMP, reg_loc.AsFpuRegister<FpuRegister>());
+        __ FMvDX(reg_loc.AsFpuRegister<FpuRegister>(), TMP);
       }
     } else {
       __ StoreToOffset(store_type, reg_loc.AsRegister<GpuRegister>(), SP, mem_loc.GetStackIndex());
@@ -1567,8 +1567,8 @@ void CodeGeneratorRISCV64::MarkGCCard(GpuRegister object,
                     TR,
                     Thread::CardTableOffset<kRiscv64PointerSize>().Int32Value());
   // Calculate the address of the card corresponding to `object`.
-  __ Dsrl(temp, object, gc::accounting::CardTable::kCardShift);
-  __ Daddu(temp, card, temp);
+  __ Srli(temp, object, gc::accounting::CardTable::kCardShift);
+  __ Add(temp, card, temp);
   // Write the `art::gc::accounting::CardTable::kCardDirty` value into the
   // `object`'s card.
   //
@@ -2019,7 +2019,7 @@ void InstructionCodeGeneratorRISCV64::GenerateBitstringTypeCheckCompare(HTypeChe
       __ Xor(temp, temp, TMP);
     }
     // Shift out bits that do not contribute to the comparison.
-    __ Sll(temp, temp, 32 - mask_bits);
+    __ Slliw(temp, temp, 32 - mask_bits);
   }
 }
 
@@ -2085,12 +2085,7 @@ void LocationsBuilderRISCV64::HandleBinaryOp(HBinaryOperation* instruction) {
               imm = -imm;
             }
           }
-
-          if (type == DataType::Type::kInt32) {
-            can_use_imm = IsInt<11>(imm);
-          } else {
-            can_use_imm = IsInt<11>(imm);
-          }
+          can_use_imm = IsInt<11>(imm);
         }
       }
       if (can_use_imm)
@@ -2112,7 +2107,7 @@ void LocationsBuilderRISCV64::HandleBinaryOp(HBinaryOperation* instruction) {
       LOG(FATAL) << "Unexpected " << instruction->DebugName() << " type " << type;
   }
 }
-
+// XC_TODO: merge add and shift using insturction like addsl
 void InstructionCodeGeneratorRISCV64::HandleBinaryOp(HBinaryOperation* instruction) {
   DataType::Type type = instruction->GetType();
   LocationSummary* locations = instruction->GetLocations();
@@ -2158,14 +2153,14 @@ void InstructionCodeGeneratorRISCV64::HandleBinaryOp(HBinaryOperation* instructi
               __ Addiw(dst, lhs, rhs_imm);
             } else {
               __ LoadConst32(TMP, rhs_imm);
-              __ Addu(dst, lhs, TMP);
+              __ Addw(dst, lhs, TMP);
             }
           } else {
             if (instruction->IsAdd()) {
-              __ Addu(dst, lhs, rhs_reg);
+              __ Addw(dst, lhs, rhs_reg);
             } else {
               DCHECK(instruction->IsSub());
-              __ Subu(dst, lhs, rhs_reg);
+              __ Subw(dst, lhs, rhs_reg);
             }
           }
         } else {
@@ -2174,16 +2169,16 @@ void InstructionCodeGeneratorRISCV64::HandleBinaryOp(HBinaryOperation* instructi
               __ Addi(dst, lhs, rhs_imm);
             } else if (IsInt<32>(rhs_imm)) {
               __ LoadConst32(TMP, rhs_imm);
-              __ Daddu(dst, lhs, TMP);
+              __ Add(dst, lhs, TMP);
             } else {
               __ LoadConst64(TMP, rhs_imm);
-              __ Daddu(dst, lhs, TMP);
+              __ Add(dst, lhs, TMP);
             }
           } else if (instruction->IsAdd()) {
-            __ Daddu(dst, lhs, rhs_reg);
+            __ Add(dst, lhs, rhs_reg);
           } else {
             DCHECK(instruction->IsSub());
-            __ Dsubu(dst, lhs, rhs_reg);
+            __ Sub(dst, lhs, rhs_reg);
           }
         }
       }
@@ -2263,58 +2258,45 @@ void InstructionCodeGeneratorRISCV64::HandleShift(HBinaryOperation* instr) {
           }
         } else if (type == DataType::Type::kInt32) {
           if (instr->IsShl()) {
-            __ Sll(dst, lhs, shift_value);
+            __ Slliw(dst, lhs, shift_value);
           } else if (instr->IsShr()) {
-            __ Sra(dst, lhs, shift_value);
+            __ Sraiw(dst, lhs, shift_value);
           } else if (instr->IsUShr()) {
-            __ Srl(dst, lhs, shift_value);
+            __ Srliw(dst, lhs, shift_value);
           } else {
-            __ Rotr(dst, lhs, shift_value);
+            __ Srriw(dst, lhs, shift_value);
           }
         } else {
-          if (shift_value < 32) {
-            if (instr->IsShl()) {
-              __ Dsll(dst, lhs, shift_value);
-            } else if (instr->IsShr()) {
-              __ Dsra(dst, lhs, shift_value);
-            } else if (instr->IsUShr()) {
-              __ Dsrl(dst, lhs, shift_value);
-            } else {
-              __ Drotr(dst, lhs, shift_value);
-            }
+          if (instr->IsShl()) {
+            __ Slli(dst, lhs, shift_value);
+          } else if (instr->IsShr()) {
+            __ Srai(dst, lhs, shift_value);
+          } else if (instr->IsUShr()) {
+            __ Srli(dst, lhs, shift_value);
           } else {
-            shift_value -= 32;
-            if (instr->IsShl()) {
-              __ Dsll32(dst, lhs, shift_value);
-            } else if (instr->IsShr()) {
-              __ Dsra32(dst, lhs, shift_value);
-            } else if (instr->IsUShr()) {
-              __ Dsrl32(dst, lhs, shift_value);
-            } else {
-              __ Drotr32(dst, lhs, shift_value);
-            }
+            __ Srri(dst, lhs, shift_value);
           }
         }
       } else {
         if (type == DataType::Type::kInt32) {
           if (instr->IsShl()) {
-            __ Sllv(dst, lhs, rhs_reg);
+            __ Sllw(dst, lhs, rhs_reg);
           } else if (instr->IsShr()) {
-            __ Srav(dst, lhs, rhs_reg);
+            __ Sraw(dst, lhs, rhs_reg);
           } else if (instr->IsUShr()) {
-            __ Srlv(dst, lhs, rhs_reg);
+            __ Srlw(dst, lhs, rhs_reg);
           } else {
-            __ Rotrv(dst, lhs, rhs_reg);
+            __ Srrw(dst, lhs, rhs_reg);
           }
         } else {
           if (instr->IsShl()) {
-            __ Dsllv(dst, lhs, rhs_reg);
+            __ Sll(dst, lhs, rhs_reg);
           } else if (instr->IsShr()) {
-            __ Dsrav(dst, lhs, rhs_reg);
+            __ Sra(dst, lhs, rhs_reg);
           } else if (instr->IsUShr()) {
-            __ Dsrlv(dst, lhs, rhs_reg);
+            __ Srl(dst, lhs, rhs_reg);
           } else {
-            __ Drotrv(dst, lhs, rhs_reg);
+            __ Srr(dst, lhs, rhs_reg);
           }
         }
       }
@@ -2406,7 +2388,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_1) + data_offset;
         __ LoadFromOffset(kLoadUnsignedByte, out, obj, offset, null_checker);
       } else {
-        __ Daddu(TMP, obj, index.AsRegister<GpuRegister>());
+        __ Add(TMP, obj, index.AsRegister<GpuRegister>());
         __ LoadFromOffset(kLoadUnsignedByte, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2419,7 +2401,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_1) + data_offset;
         __ LoadFromOffset(kLoadSignedByte, out, obj, offset, null_checker);
       } else {
-        __ Daddu(TMP, obj, index.AsRegister<GpuRegister>());
+        __ Add(TMP, obj, index.AsRegister<GpuRegister>());
         __ LoadFromOffset(kLoadSignedByte, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2430,7 +2412,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
       if (maybe_compressed_char_at) {
         uint32_t count_offset = mirror::String::CountOffset().Uint32Value();
         __ LoadFromOffset(kLoadWord, TMP, obj, count_offset, null_checker);
-        __ Dext(TMP, TMP, 0, 1);
+        __ Andi(TMP, TMP, 0x1);
         static_assert(static_cast<uint32_t>(mirror::StringCompressionFlag::kCompressed) == 0u,
                       "Expecting 0=compressed, 1=uncompressed");
       }
@@ -2462,15 +2444,15 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
         if (maybe_compressed_char_at) {
           Riscv64Label uncompressed_load, done;
           __ Bnezc(TMP, &uncompressed_load);
-          __ Daddu(TMP, obj, index_reg);
+          __ Add(TMP, obj, index_reg);
           __ LoadFromOffset(kLoadUnsignedByte, out, TMP, data_offset);
           __ Bc(&done);
           __ Bind(&uncompressed_load);
-          __ Dlsa(TMP, index_reg, obj, TIMES_2);
+          __ Addsl(TMP, index_reg, obj, TIMES_2);
           __ LoadFromOffset(kLoadUnsignedHalfword, out, TMP, data_offset);
           __ Bind(&done);
         } else {
-          __ Dlsa(TMP, index_reg, obj, TIMES_2);
+          __ Addsl(TMP, index_reg, obj, TIMES_2);
           __ LoadFromOffset(kLoadUnsignedHalfword, out, TMP, data_offset, null_checker);
         }
       }
@@ -2484,7 +2466,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_2) + data_offset;
         __ LoadFromOffset(kLoadSignedHalfword, out, obj, offset, null_checker);
       } else {
-        __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_2);
+        __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_2);
         __ LoadFromOffset(kLoadSignedHalfword, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2500,7 +2482,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4) + data_offset;
         __ LoadFromOffset(load_type, out, obj, offset, null_checker);
       } else {
-        __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+        __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
         __ LoadFromOffset(load_type, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2550,7 +2532,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
           // reference, if heap poisoning is enabled).
           codegen_->MaybeGenerateReadBarrierSlow(instruction, out_loc, out_loc, obj_loc, offset);
         } else {
-          __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+          __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
           __ LoadFromOffset(kLoadUnsignedWord, out, TMP, data_offset, null_checker);
           // If read barriers are enabled, emit read barriers other than
           // Baker's using a slow path (and also unpoison the loaded
@@ -2573,7 +2555,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_8) + data_offset;
         __ LoadFromOffset(kLoadDoubleword, out, obj, offset, null_checker);
       } else {
-        __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_8);
+        __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_8);
         __ LoadFromOffset(kLoadDoubleword, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2586,7 +2568,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4) + data_offset;
         __ LoadFpuFromOffset(kLoadWord, out, obj, offset, null_checker);
       } else {
-        __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+        __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_4);
         __ LoadFpuFromOffset(kLoadWord, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2599,7 +2581,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayGet(HArrayGet* instruction) {
             (index.GetConstant()->AsIntConstant()->GetValue() << TIMES_8) + data_offset;
         __ LoadFpuFromOffset(kLoadDoubleword, out, obj, offset, null_checker);
       } else {
-        __ Dlsa(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_8);
+        __ Addsl(TMP, index.AsRegister<GpuRegister>(), obj, TIMES_8);
         __ LoadFpuFromOffset(kLoadDoubleword, out, TMP, data_offset, null_checker);
       }
       break;
@@ -2628,7 +2610,7 @@ void InstructionCodeGeneratorRISCV64::VisitArrayLength(HArrayLength* instruction
   codegen_->MaybeRecordImplicitNullCheck(instruction);
   // Mask out compression flag from String's array length.
   if (mirror::kUseStringCompression && instruction->IsStringLength()) {
-    __ Srl(out, out, 1u);
+    __ Srliw(out, out, 1u);
   }
 }
 
@@ -2697,7 +2679,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_1;
       } else {
-        __ Daddu(base_reg, obj, index.AsRegister<GpuRegister>());
+        __ Add(base_reg, obj, index.AsRegister<GpuRegister>());
       }
       if (value_location.IsConstant()) {
         int32_t value = CodeGenerator::GetInt32ValueOf(value_location.GetConstant());
@@ -2715,7 +2697,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_2;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_2);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_2);
       }
       if (value_location.IsConstant()) {
         int32_t value = CodeGenerator::GetInt32ValueOf(value_location.GetConstant());
@@ -2732,7 +2714,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
       }
       if (value_location.IsConstant()) {
         int32_t value = CodeGenerator::GetInt32ValueOf(value_location.GetConstant());
@@ -2751,7 +2733,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
         if (index.IsConstant()) {
           data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4;
         } else {
-          __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+          __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
         }
         int32_t value = CodeGenerator::GetInt32ValueOf(value_location.GetConstant());
         DCHECK_EQ(value, 0);
@@ -2781,7 +2763,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
           if (index.IsConstant()) {
             data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4;
           } else {
-            __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+            __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
           }
           __ StoreToOffset(kStoreWord, value, base_reg, data_offset, null_checker);
           __ Bc(&done);
@@ -2839,7 +2821,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
       }
       __ StoreToOffset(kStoreWord, source, base_reg, data_offset);
 
@@ -2864,7 +2846,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_8;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_8);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_8);
       }
       if (value_location.IsConstant()) {
         int64_t value = CodeGenerator::GetInt64ValueOf(value_location.GetConstant());
@@ -2881,7 +2863,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_4;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_4);
       }
       if (value_location.IsConstant()) {
         int32_t value = CodeGenerator::GetInt32ValueOf(value_location.GetConstant());
@@ -2898,7 +2880,7 @@ void InstructionCodeGeneratorRISCV64::VisitArraySet(HArraySet* instruction) {
       if (index.IsConstant()) {
         data_offset += index.GetConstant()->AsIntConstant()->GetValue() << TIMES_8;
       } else {
-        __ Dlsa(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_8);
+        __ Addsl(base_reg, index.AsRegister<GpuRegister>(), obj, TIMES_8);
       }
       if (value_location.IsConstant()) {
         int64_t value = CodeGenerator::GetInt64ValueOf(value_location.GetConstant());
@@ -3210,8 +3192,8 @@ void InstructionCodeGeneratorRISCV64::VisitCheckCast(HCheckCast* instruction) {
       __ Lwu(AT, temp, object_array_data_offset);
       __ MaybeUnpoisonHeapReference(AT);
       // Go to next interface.
-      __ Daddiu(temp, temp, 2 * kHeapReferenceSize);
-      __ Addiu(TMP, TMP, -2);
+      __ Addiu(temp, temp, 2 * kHeapReferenceSize);
+      __ Addiuw(TMP, TMP, -2);
       // Compare the classes and continue the loop if they do not match.
       __ Bnec(AT, cls.AsRegister<GpuRegister>(), &loop);
       break;
@@ -3325,7 +3307,7 @@ void InstructionCodeGeneratorRISCV64::VisitCompare(HCompare* instruction) {
       }
       __ Slt(TMP, lhs, rhs);
       __ Slt(res, rhs, lhs);
-      __ Subu(res, res, TMP);
+      __ Sub(res, res, TMP);
       break;
     }
 
@@ -3333,16 +3315,16 @@ void InstructionCodeGeneratorRISCV64::VisitCompare(HCompare* instruction) {
       FpuRegister lhs = locations->InAt(0).AsFpuRegister<FpuRegister>();
       FpuRegister rhs = locations->InAt(1).AsFpuRegister<FpuRegister>();
       Riscv64Label done;
-      __ CmpEqS(TMP, lhs, rhs);
+      __ FEqS(TMP, lhs, rhs);
       __ LoadConst32(res, 0);
       __ Bnez(TMP, &done);
       if (instruction->IsGtBias()) {
-        __ CmpLtS(TMP, lhs, rhs);
+        __ FLtS(TMP, lhs, rhs);
         __ LoadConst32(res, -1);
         __ Bnez(TMP, &done);
         __ LoadConst32(res, 1);
       } else {
-        __ CmpLtS(TMP, rhs, lhs);
+        __ FLtS(TMP, rhs, lhs);
         __ LoadConst32(res, 1);
         __ Bnez(TMP, &done);
         __ LoadConst32(res, -1);
@@ -3355,7 +3337,7 @@ void InstructionCodeGeneratorRISCV64::VisitCompare(HCompare* instruction) {
       FpuRegister lhs = locations->InAt(0).AsFpuRegister<FpuRegister>();
       FpuRegister rhs = locations->InAt(1).AsFpuRegister<FpuRegister>();
       Riscv64Label done;
-      __ CmpEqD(TMP, lhs, rhs);
+      __ FEqD(TMP, lhs, rhs);
       __ LoadConst32(res, 0);
       __ Bnez(TMP, &done);
       if (instruction->IsGtBias()) {
@@ -3438,10 +3420,10 @@ void InstructionCodeGeneratorRISCV64::DivRemOneOrMinusOne(HBinaryOperation* inst
   } else {
     if (imm == -1) {
       if (type == DataType::Type::kInt32) {
-        __ Subu(out, ZERO, dividend);
+        __ Subw(out, ZERO, dividend);
       } else {
         DCHECK_EQ(type, DataType::Type::kInt64);
-        __ Dsubu(out, ZERO, dividend);
+        __ Sub(out, ZERO, dividend);
       }
     } else if (out != dividend) {
       __ Move(out, dividend);
@@ -3469,72 +3451,72 @@ void InstructionCodeGeneratorRISCV64::DivRemByPowerOfTwo(HBinaryOperation* instr
     if (type == DataType::Type::kInt32) {
       if (ctz_imm == 1) {
         // Fast path for division by +/-2, which is very common.
-        __ Srl(TMP, dividend, 31);
+        __ Srliw(TMP, dividend, 31);
       } else {
-        __ Sra(TMP, dividend, 31);
-        __ Srl(TMP, TMP, 32 - ctz_imm);
+        __ Sraiw(TMP, dividend, 31);
+        __ Srliw(TMP, TMP, 32 - ctz_imm);
       }
-      __ Addu(out, dividend, TMP);
-      __ Sra(out, out, ctz_imm);
+      __ Addw(out, dividend, TMP);
+      __ Sraiw(out, out, ctz_imm);
       if (imm < 0) {
-        __ Subu(out, ZERO, out);
+        __ Subw(out, ZERO, out);
       }
     } else {
       DCHECK_EQ(type, DataType::Type::kInt64);
       if (ctz_imm == 1) {
         // Fast path for division by +/-2, which is very common.
-        __ Dsrl32(TMP, dividend, 31);
+        __ Srli(TMP, dividend, 31 + 32);
       } else {
-        __ Dsra32(TMP, dividend, 31);
+        __ Srai(TMP, dividend, 31 + 32);
         if (ctz_imm > 32) {
-          __ Dsrl(TMP, TMP, 64 - ctz_imm);
+          __ Srli(TMP, TMP, 64 - ctz_imm);
         } else {
-          __ Dsrl32(TMP, TMP, 32 - ctz_imm);
+          __ Srli(TMP, TMP, 32 - ctz_imm + 32);
         }
       }
-      __ Daddu(out, dividend, TMP);
+      __ Add(out, dividend, TMP);
       if (ctz_imm < 32) {
-        __ Dsra(out, out, ctz_imm);
+        __ Srai(out, out, ctz_imm);
       } else {
-        __ Dsra32(out, out, ctz_imm - 32);
+        __ Srai(out, out, ctz_imm - 32 + 32);
       }
       if (imm < 0) {
-        __ Dsubu(out, ZERO, out);
+        __ Sub(out, ZERO, out);
       }
     }
   } else {
     if (type == DataType::Type::kInt32) {
       if (ctz_imm == 1) {
         // Fast path for modulo +/-2, which is very common.
-        __ Sra(TMP, dividend, 31);
-        __ Subu(out, dividend, TMP);
+        __ Sraiw(TMP, dividend, 31);
+        __ Subw(out, dividend, TMP);
         __ Andi(out, out, 1);
-        __ Addu(out, out, TMP);
+        __ Addw(out, out, TMP);
       } else {
-        __ Sra(TMP, dividend, 31);
-        __ Srl(TMP, TMP, 32 - ctz_imm);
-        __ Addu(out, dividend, TMP);
+        __ Sraiw(TMP, dividend, 31);
+        __ Srliw(TMP, TMP, 32 - ctz_imm);
+        __ Addw(out, dividend, TMP);
         __ Ins(out, ZERO, ctz_imm, 32 - ctz_imm);
-        __ Subu(out, out, TMP);
+        __ Subw(out, out, TMP);
       }
     } else {
       DCHECK_EQ(type, DataType::Type::kInt64);
       if (ctz_imm == 1) {
         // Fast path for modulo +/-2, which is very common.
-        __ Dsra32(TMP, dividend, 31);
-        __ Dsubu(out, dividend, TMP);
+        __ Srai(TMP, dividend, 31 + 32);
+        __ Sub(out, dividend, TMP);
         __ Andi(out, out, 1);
-        __ Daddu(out, out, TMP);
+        __ Add(out, out, TMP);
       } else {
-        __ Dsra32(TMP, dividend, 31);
+        __ Srai(TMP, dividend, 31 + 32);
         if (ctz_imm > 32) {
-          __ Dsrl(TMP, TMP, 64 - ctz_imm);
+          __ Srli(TMP, TMP, 64 - ctz_imm);
         } else {
-          __ Dsrl32(TMP, TMP, 32 - ctz_imm);
+          __ Srli(TMP, TMP, 64 - ctz_imm);
         }
-        __ Daddu(out, dividend, TMP);
+        __ Add(out, dividend, TMP);
         __ DblIns(out, ZERO, ctz_imm, 64 - ctz_imm);
-        __ Dsubu(out, out, TMP);
+        __ Sub(out, out, TMP);
       }
     }
   }
@@ -3564,53 +3546,53 @@ void InstructionCodeGeneratorRISCV64::GenerateDivRemWithAnyConstant(HBinaryOpera
 
   if (type == DataType::Type::kInt32) {
     __ LoadConst32(TMP, magic);
-    __ MuhR6(TMP, dividend, TMP);
+    __ Muhh(TMP, dividend, TMP);
 
     if (imm > 0 && magic < 0) {
-      __ Addu(TMP, TMP, dividend);
+      __ Addw(TMP, TMP, dividend);
     } else if (imm < 0 && magic > 0) {
-      __ Subu(TMP, TMP, dividend);
+      __ Subw(TMP, TMP, dividend);
     }
 
     if (shift != 0) {
-      __ Sra(TMP, TMP, shift);
+      __ Sraiw(TMP, TMP, shift);
     }
 
     if (instruction->IsDiv()) {
-      __ Sra(out, TMP, 31);
-      __ Subu(out, TMP, out);
+      __ Sraiw(out, TMP, 31);
+      __ Subw(out, TMP, out);
     } else {
-      __ Sra(AT, TMP, 31);
-      __ Subu(AT, TMP, AT);
+      __ Sraiw(AT, TMP, 31);
+      __ Subw(AT, TMP, AT);
       __ LoadConst32(TMP, imm);
-      __ MulR6(TMP, AT, TMP);
-      __ Subu(out, dividend, TMP);
+      __ Mulw(TMP, AT, TMP);
+      __ Subw(out, dividend, TMP);
     }
   } else {
     __ LoadConst64(TMP, magic);
-    __ Dmuh(TMP, dividend, TMP);
+    __ Mulh(TMP, dividend, TMP);
 
     if (imm > 0 && magic < 0) {
-      __ Daddu(TMP, TMP, dividend);
+      __ Add(TMP, TMP, dividend);
     } else if (imm < 0 && magic > 0) {
-      __ Dsubu(TMP, TMP, dividend);
+      __ Sub(TMP, TMP, dividend);
     }
 
     if (shift >= 32) {
-      __ Dsra32(TMP, TMP, shift - 32);
+      __ Srai(TMP, TMP, shift - 32 + 32);
     } else if (shift > 0) {
-      __ Dsra(TMP, TMP, shift);
+      __ Srai(TMP, TMP, shift);
     }
 
     if (instruction->IsDiv()) {
-      __ Dsra32(out, TMP, 31);
-      __ Dsubu(out, TMP, out);
+      __ Srai(out, TMP, 31 + 32);
+      __ Sub(out, TMP, out);
     } else {
-      __ Dsra32(AT, TMP, 31);
-      __ Dsubu(AT, TMP, AT);
+      __ Srai(AT, TMP, 31 + 32);
+      __ Sub(AT, TMP, AT);
       __ LoadConst64(TMP, imm);
-      __ Dmul(TMP, AT, TMP);
-      __ Dsubu(out, dividend, TMP);
+      __ Mul(TMP, AT, TMP);
+      __ Sub(out, dividend, TMP);
     }
   }
 }
@@ -3626,7 +3608,7 @@ void InstructionCodeGeneratorRISCV64::GenerateDivRemIntegral(HBinaryOperation* i
 
   if (second.IsConstant()) {
     int64_t imm = Int64FromConstant(second.GetConstant());
-    // Skip it to simplify the porting.
+    // XC-TODO: opt for int div
     #if 0
     if (imm == 0) {
       // Do not generate anything. DivZeroCheck would prevent any code to be executed.
@@ -3647,14 +3629,14 @@ void InstructionCodeGeneratorRISCV64::GenerateDivRemIntegral(HBinaryOperation* i
     GpuRegister dividend = locations->InAt(0).AsRegister<GpuRegister>();
     if (instruction->IsDiv()) {
       if (type == DataType::Type::kInt32)
-        __ DivR6(out, dividend, divisor);
+        __ Divw(out, dividend, divisor);
       else
-        __ Ddiv(out, dividend, divisor);
+        __ Div(out, dividend, divisor);
     } else {
       if (type == DataType::Type::kInt32)
-        __ ModR6(out, dividend, divisor);
+        __ Remw(out, dividend, divisor);
       else
-        __ Dmod(out, dividend, divisor);
+        __ Rem(out, dividend, divisor);
     }
     #endif
   } else {
@@ -3662,14 +3644,14 @@ void InstructionCodeGeneratorRISCV64::GenerateDivRemIntegral(HBinaryOperation* i
     GpuRegister divisor = second.AsRegister<GpuRegister>();
     if (instruction->IsDiv()) {
       if (type == DataType::Type::kInt32)
-        __ DivR6(out, dividend, divisor);
+        __ Divw(out, dividend, divisor);
       else
-        __ Ddiv(out, dividend, divisor);
+        __ Div(out, dividend, divisor);
     } else {
       if (type == DataType::Type::kInt32)
-        __ ModR6(out, dividend, divisor);
+        __ Remw(out, dividend, divisor);
       else
-        __ Dmod(out, dividend, divisor);
+        __ Rem(out, dividend, divisor);
     }
   }
 }
@@ -3794,9 +3776,9 @@ void InstructionCodeGeneratorRISCV64::HandleGoto(HInstruction* got, HBasicBlock*
     if (codegen_->GetCompilerOptions().CountHotnessInCompiledCode()) {
       __ Ld(AT, SP, kCurrentMethodStackOffset);
       __ Lhu(TMP, AT, ArtMethod::HotnessCountOffset().Int32Value());
-      __ Addiu(TMP, TMP, 1);
+      __ Addiuw(TMP, TMP, 1);
      // Subtract one if the counter would overflow.
-     __ Srl(TMP2, TMP, 16);
+     __ Srliw(TMP2, TMP, 16);
      __ Sub(TMP, TMP, TMP2);
       __ Sh(TMP, AT, ArtMethod::HotnessCountOffset().Int32Value());
     }
@@ -3862,9 +3844,9 @@ void InstructionCodeGeneratorRISCV64::GenerateIntLongCompare(IfCondition cond,
           }
         } else {
           if (is64bit) {
-            __ Daddiu(dst, lhs, -rhs_imm);
-          } else {
             __ Addiu(dst, lhs, -rhs_imm);
+          } else {
+            __ Addiuw(dst, lhs, -rhs_imm);
           }
           if (cond == kCondEQ) {
             __ Sltiu(dst, dst, 1);
@@ -4016,9 +3998,9 @@ bool InstructionCodeGeneratorRISCV64::MaterializeIntLongCompare(IfCondition cond
     case kCondNE:
       if (use_imm && IsInt<11>(-rhs_imm)) {
         if (is64bit) {
-          __ Daddiu(dst, lhs, -rhs_imm);
-        } else {
           __ Addiu(dst, lhs, -rhs_imm);
+        } else {
+          __ Addiuw(dst, lhs, -rhs_imm);
         }
       } else if (use_imm && IsUint<11>(rhs_imm)) {
       // Use 11-bit here for avoiding sign-extension.
@@ -4201,15 +4183,15 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompare(IfCondition cond,
   if (type == DataType::Type::kFloat32) {
     switch (cond) {
       case kCondEQ:
-        __ CmpEqS(dst, lhs, rhs);
+        __ FEqS(dst, lhs, rhs);
         break;
       case kCondNE:
-        __ CmpEqS(dst, lhs, rhs);
+        __ FEqS(dst, lhs, rhs);
         __ Xori(dst, dst, 1);
         break;
       case kCondLT:
         if (gt_bias) {
-          __ CmpLtS(dst, lhs, rhs);
+          __ FLtS(dst, lhs, rhs);
         } else {
           __ CmpUltS(dst, lhs, rhs);
         }
@@ -4225,7 +4207,7 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompare(IfCondition cond,
         if (gt_bias) {
           __ CmpUltS(dst, rhs, lhs);
         } else {
-          __ CmpLtS(dst, rhs, lhs);
+          __ FLtS(dst, rhs, lhs);
         }
         break;
       case kCondGE:
@@ -4243,10 +4225,10 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompare(IfCondition cond,
     DCHECK_EQ(type, DataType::Type::kFloat64);
     switch (cond) {
       case kCondEQ:
-        __ CmpEqD(dst, lhs, rhs);
+        __ FEqD(dst, lhs, rhs);
         break;
       case kCondNE:
-        __ CmpEqD(dst, lhs, rhs);
+        __ FEqD(dst, lhs, rhs);
         __ Xori(dst, dst, 1);
         break;
       case kCondLT:
@@ -4294,14 +4276,14 @@ bool InstructionCodeGeneratorRISCV64::MaterializeFpCompare(IfCondition cond,
   if (type == DataType::Type::kFloat32) {
     switch (cond) {
       case kCondEQ:
-        __ CmpEqS(dst, lhs, rhs);
+        __ FEqS(dst, lhs, rhs);
         return false;
       case kCondNE:
-        __ CmpEqS(dst, lhs, rhs);
+        __ FEqS(dst, lhs, rhs);
         return true;
       case kCondLT:
         if (gt_bias) {
-          __ CmpLtS(dst, lhs, rhs);
+          __ FLtS(dst, lhs, rhs);
         } else {
           __ CmpUltS(dst, lhs, rhs);
         }
@@ -4317,7 +4299,7 @@ bool InstructionCodeGeneratorRISCV64::MaterializeFpCompare(IfCondition cond,
         if (gt_bias) {
           __ CmpUltS(dst, rhs, lhs);
         } else {
-          __ CmpLtS(dst, rhs, lhs);
+          __ FLtS(dst, rhs, lhs);
         }
         return false;
       case kCondGE:
@@ -4335,10 +4317,10 @@ bool InstructionCodeGeneratorRISCV64::MaterializeFpCompare(IfCondition cond,
     DCHECK_EQ(type, DataType::Type::kFloat64);
     switch (cond) {
       case kCondEQ:
-        __ CmpEqD(dst, lhs, rhs);
+        __ FEqD(dst, lhs, rhs);
         return false;
       case kCondNE:
-        __ CmpEqD(dst, lhs, rhs);
+        __ FEqD(dst, lhs, rhs);
         return true;
       case kCondLT:
         if (gt_bias) {
@@ -4385,16 +4367,16 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompareAndBranch(IfCondition con
   if (type == DataType::Type::kFloat32) {
     switch (cond) {
       case kCondEQ:
-        __ CmpEqS(TMP, lhs, rhs);
+        __ FEqS(TMP, lhs, rhs);
         __ Bnez(TMP, label);
         break;
       case kCondNE:
-        __ CmpEqS(TMP, lhs, rhs);
+        __ FEqS(TMP, lhs, rhs);
         __ Beqz(TMP, label);
         break;
       case kCondLT:
         if (gt_bias) {
-          __ CmpLtS(TMP, lhs, rhs);
+          __ FLtS(TMP, lhs, rhs);
         } else {
           __ CmpUltS(TMP, lhs, rhs);
         }
@@ -4412,7 +4394,7 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompareAndBranch(IfCondition con
         if (gt_bias) {
           __ CmpUltS(TMP, rhs, lhs);
         } else {
-          __ CmpLtS(TMP, rhs, lhs);
+          __ FLtS(TMP, rhs, lhs);
         }
         __ Bnez(TMP, label);
         break;
@@ -4432,11 +4414,11 @@ void InstructionCodeGeneratorRISCV64::GenerateFpCompareAndBranch(IfCondition con
     DCHECK_EQ(type, DataType::Type::kFloat64);
     switch (cond) {
       case kCondEQ:
-        __ CmpEqD(TMP, lhs, rhs);
+        __ FEqD(TMP, lhs, rhs);
         __ Bnez(TMP, label);
         break;
       case kCondNE:
-        __ CmpEqD(TMP, lhs, rhs);
+        __ FEqD(TMP, lhs, rhs);
         __ Beqz(TMP, label);
         break;
       case kCondLT:
@@ -4793,9 +4775,6 @@ void InstructionCodeGeneratorRISCV64::GenConditionalMove(HSelect* select) {
 
   switch (dst_type) {
     default:
-      /*if (DataType::IsFloatingPointType(cond_type)) {
-        __ Mfc1(cond_reg, fcond_reg);
-      }*/
       if (true_src.IsConstant()) {
         if (cond_inverted) {
           __ Selnez(dst.AsRegister<GpuRegister>(), false_src.AsRegister<GpuRegister>(), cond_reg);
@@ -4824,9 +4803,9 @@ void InstructionCodeGeneratorRISCV64::GenConditionalMove(HSelect* select) {
       if (!DataType::IsFloatingPointType(cond_type)) {
         // sel*.fmt tests bit 0 of the condition register, account for that.
         __ Sltu(TMP, ZERO, cond_reg);
-        __ Mtc1(TMP, fcond_reg);
+        __ FMvWX(fcond_reg, TMP);
       } else {
-        __ Mtc1(cond_reg, fcond_reg);
+        __ FMvWX(fcond_reg, cond_reg);
       }
 
       FpuRegister dst_reg = dst.AsFpuRegister<FpuRegister>();
@@ -4862,9 +4841,9 @@ void InstructionCodeGeneratorRISCV64::GenConditionalMove(HSelect* select) {
       if (!DataType::IsFloatingPointType(cond_type)) {
         // sel*.fmt tests bit 0 of the condition register, account for that.
         __ Sltu(TMP, ZERO, cond_reg);
-        __ Mtc1(TMP, fcond_reg);
+        __ FMvWX(fcond_reg, TMP);
       } else {
-        __ Mtc1(cond_reg, fcond_reg);
+        __ FMvWX(fcond_reg, cond_reg);
       }
 
       FpuRegister dst_reg = dst.AsFpuRegister<FpuRegister>();
@@ -5374,7 +5353,7 @@ void InstructionCodeGeneratorRISCV64::GenerateGcRootFieldLoad(HInstruction* inst
         __ LoadFromOffset(kLoadDoubleword, T6, TR, entry_point_offset);
         if (!short_offset) {
           DCHECK(!label_low);
-          __ Daui(base, obj, offset_high);
+          __ Aui(base, obj, offset_high);
         }
         // /* GcRoot<mirror::Object> */ root = *(obj + offset)
         __ LoadFromOffset(kLoadUnsignedWord, root_reg, base, offset_low);  // Single instruction
@@ -5438,7 +5417,7 @@ void InstructionCodeGeneratorRISCV64::GenerateGcRootFieldLoad(HInstruction* inst
       // GC root loaded through a slow path for read barriers other
       // than Baker's.
       // /* GcRoot<mirror::Object>* */ root = obj + offset
-      __ Daddiu64(root_reg, obj, static_cast<int32_t>(offset));
+      __ Addiu64(root_reg, obj, static_cast<int32_t>(offset));
       // /* mirror::Object* */ root = root->Read()
       codegen_->GenerateReadBarrierForRootSlow(instruction, root, root);
     }
@@ -5517,7 +5496,7 @@ void CodeGeneratorRISCV64::GenerateFieldLoadWithBakerReadBarrier(HInstruction* i
     } else {
       int16_t offset_low = Low12Bits(offset);
       int16_t offset_high = High20Bits(offset - offset_low);  // Accounts for sign extension in lwu.
-      __ Daui(TMP, obj, offset_high);  // Shouldn't In delay slot.
+      __ Aui(TMP, obj, offset_high);  // Shouldn't In delay slot.
       __ Beqzc(T6, &skip_call, /* is_bare= */ true);
       __ Nop();  // Just for safety. Separate 2 jump instructions
       __ Jialc(T6, thunk_disp);
@@ -5558,7 +5537,6 @@ void CodeGeneratorRISCV64::GenerateArrayLoadWithBakerReadBarrier(HInstruction* i
   static_assert(
       sizeof(mirror::HeapReference<mirror::Object>) == sizeof(int32_t),
       "art::mirror::HeapReference<art::mirror::Object> and int32_t have different sizes.");
-  ScaleFactor scale_factor = TIMES_4;
 
   if (kBakerReadBarrierThunksEnableForArrays) {
     // Note that we do not actually check the value of `GetIsGcMarking()`
@@ -5598,13 +5576,13 @@ void CodeGeneratorRISCV64::GenerateArrayLoadWithBakerReadBarrier(HInstruction* i
     Riscv64Label skip_call;
     GpuRegister ref_reg = ref.AsRegister<GpuRegister>();
     GpuRegister index_reg = index.AsRegister<GpuRegister>();
-    __ Dlsa(TMP, index_reg, obj, scale_factor);  // Shouldn't be In delay slot.
+    __ Addsl(TMP, index_reg, obj, TIMES_4);  // Shouldn't be In delay slot.
     __ Beqzc(T6, &skip_call, /* is_bare= */ true);
 
     __ Nop();   // Just for safety. Separate 2 jump instructions
     __ Jialc(T6, thunk_disp);
     __ Bind(&skip_call);
-    // /* HeapReference<Object> */ ref = *(obj + data_offset + (index << scale_factor))
+    // /* HeapReference<Object> */ ref = *(obj + data_offset + (index << TIMES_4))
     DCHECK(IsInt<12>(static_cast<int32_t>(data_offset))) << data_offset;
     __ LoadFromOffset(kLoadUnsignedWord, ref_reg, TMP, data_offset);  // Single instruction.
     __ MaybeUnpoisonHeapReference(ref_reg);
@@ -5618,7 +5596,7 @@ void CodeGeneratorRISCV64::GenerateArrayLoadWithBakerReadBarrier(HInstruction* i
                                             obj,
                                             data_offset,
                                             index,
-                                            scale_factor,
+                                            TIMES_4,
                                             temp,
                                             needs_null_check);
 }
@@ -5682,9 +5660,9 @@ void CodeGeneratorRISCV64::GenerateReferenceLoadWithBakerReadBarrier(HInstructio
     } else {
       GpuRegister index_reg = index.AsRegister<GpuRegister>();
       if (scale_factor == TIMES_1) {
-        __ Daddu(TMP, index_reg, obj);
+        __ Add(TMP, index_reg, obj);
       } else {
-        __ Dlsa(TMP, index_reg, obj, scale_factor);
+        __ Addsl(TMP, index_reg, obj, scale_factor);
       }
       __ LoadFromOffset(kLoadUnsignedWord, ref_reg, TMP, offset);
     }
@@ -5724,7 +5702,7 @@ void CodeGeneratorRISCV64::GenerateReferenceLoadWithBakerReadBarrier(HInstructio
   static_assert(ReadBarrier::NonGrayState() == 0, "Expecting non-gray to have value 0");
   static_assert(ReadBarrier::GrayState() == 1, "Expecting gray to have value 1");
   static_assert(LockWord::kReadBarrierStateSize == 1, "Expecting 1-bit read barrier state size");
-  __ Sll(temp_reg, temp_reg, 31 - LockWord::kReadBarrierStateShift);
+  __ Slliw(temp_reg, temp_reg, 31 - LockWord::kReadBarrierStateShift);
   __ Bltzc(temp_reg, slow_path->GetEntryLabel());
   __ Bind(slow_path->GetExitLabel());
 }
@@ -5747,7 +5725,7 @@ void CodeGeneratorRISCV64::GenerateReadBarrierSlow(HInstruction* instruction,
   // poisoning is enabled), which is alright as the `ref` argument is
   // not used by the artReadBarrierSlow entry point.
   //
-  // TODO: Unpoison `ref` when it is used by artReadBarrierSlow.
+  // XC-TODO: Unpoison `ref` when it is used by artReadBarrierSlow.
   SlowPathCodeRISCV64* slow_path = new (GetScopedAllocator())
       ReadBarrierForHeapReferenceSlowPathRISCV64(instruction, out, ref, obj, offset, index);
   AddSlowPath(slow_path);
@@ -6396,20 +6374,16 @@ void CodeGeneratorRISCV64::GenerateStaticOrDirectCall(
       // Zero-/sign-extend the result when needed due to native and managed ABI mismatch.
       switch (invoke->GetType()) {
         case DataType::Type::kBool:
-          __ Slli(A0, A0, 24);
-          __ Srli(A0, A0, 24);
+          __ Extub(A0, A0, 0, 8);
           break;
         case DataType::Type::kInt8:
-          __ Slli(A0, A0, 24);
-          __ Srai(A0, A0, 24);
+          __ Extb(A0, A0, 0, 8);
           break;
         case DataType::Type::kUint16:
-          __ Slli(A0, A0, 16);
-          __ Srli(A0, A0, 16);
+          __ Extub(A0, A0, 0, 16);
           break;
         case DataType::Type::kInt16:
-          __ Slli(A0, A0, 16);
-          __ Srai(A0, A0, 16);
+          __ Extb(A0, A0, 0, 16);
           break;
         case DataType::Type::kInt32:
         case DataType::Type::kInt64:
@@ -6774,7 +6748,7 @@ void InstructionCodeGeneratorRISCV64::VisitLoadString(HLoadString* load) NO_THRE
       break;
   }
 
-  // TODO: Re-add the compiler code to do string dex cache lookup again.
+  // XC-TODO: Re-add the compiler code to do string dex cache lookup again.
   DCHECK(load_kind == HLoadString::LoadKind::kRuntimeCall);
   InvokeRuntimeCallingConvention calling_convention;
   DCHECK_EQ(calling_convention.GetRegisterAt(0), out);
@@ -6844,9 +6818,9 @@ void InstructionCodeGeneratorRISCV64::VisitMul(HMul* instruction) {
       GpuRegister lhs = locations->InAt(0).AsRegister<GpuRegister>();
       GpuRegister rhs = locations->InAt(1).AsRegister<GpuRegister>();
       if (type == DataType::Type::kInt32)
-        __ MulR6(dst, lhs, rhs);
+        __ Mulw(dst, lhs, rhs);
       else
-        __ Dmul(dst, lhs, rhs);
+        __ Mul(dst, lhs, rhs);
       break;
     }
     case DataType::Type::kFloat32:
@@ -6896,9 +6870,9 @@ void InstructionCodeGeneratorRISCV64::VisitNeg(HNeg* instruction) {
       GpuRegister dst = locations->Out().AsRegister<GpuRegister>();
       GpuRegister src = locations->InAt(0).AsRegister<GpuRegister>();
       if (type == DataType::Type::kInt32)
-        __ Subu(dst, ZERO, src);
+        __ Subw(dst, ZERO, src);
       else
-        __ Dsubu(dst, ZERO, src);
+        __ Sub(dst, ZERO, src);
       break;
     }
     case DataType::Type::kFloat32:
@@ -7194,10 +7168,6 @@ void InstructionCodeGeneratorRISCV64::GenerateMinMaxFP(LocationSummary* location
   FpuRegister b = locations->InAt(1).AsFpuRegister<FpuRegister>();
   FpuRegister out = locations->Out().AsFpuRegister<FpuRegister>();
 
-  Riscv64Label noNaNs;
-  Riscv64Label done;
-  FpuRegister ftmp = ((out != a) && (out != b)) ? out : FTMP;
-
   // When Java computes min/max it prefers a NaN to a number; the
   // behavior of MIPSR6 is to prefer numbers to NaNs, i.e., if one of
   // the inputs is a NaN and the other is a valid number, the MIPS
@@ -7206,55 +7176,11 @@ void InstructionCodeGeneratorRISCV64::GenerateMinMaxFP(LocationSummary* location
   // the MIPS min.fmt/max.fmt instructions. If either a, or b holds a
   // NaN, return the NaN, otherwise return the min/max.
   if (type == DataType::Type::kFloat64) {
-    __ CmpUnD(TMP, a, b);
-    __ Beqz(TMP, &noNaNs);
-
-    // One of the inputs is a NaN
-    __ CmpEqD(TMP, a, a);
-    // If a == a then b is the NaN, otherwise a is the NaN.
-    __ Dmtc1(TMP, ftmp);  // todo: checkout int 1 convert to float 1, bit0 is 1;
-    __ SelD(ftmp, a, b);
-
-    if (ftmp != out) {
-      __ MovD(out, ftmp);
-    }
-
-    __ Bc(&done);
-
-    __ Bind(&noNaNs);
-
-    if (is_min) {
-      __ MinD(out, a, b);
-    } else {
-      __ MaxD(out, a, b);
-    }
+    __ FJMaxMinD(out, a, b, is_min);
   } else {
     DCHECK_EQ(type, DataType::Type::kFloat32);
-    __ CmpUnS(TMP, a, b);
-    __ Beqz(TMP, &noNaNs);
-
-    // One of the inputs is a NaN
-    __ CmpEqS(TMP, a, a);
-    // If a == a then b is the NaN, otherwise a is the NaN.
-    __ Dmtc1(TMP, ftmp);  // todo: checkout int 1 convert to float 1, bit0 is 1;
-    __ SelS(ftmp, a, b);
-
-    if (ftmp != out) {
-      __ MovS(out, ftmp);
-    }
-
-    __ Bc(&done);
-
-    __ Bind(&noNaNs);
-
-    if (is_min) {
-      __ MinS(out, a, b);
-    } else {
-      __ MaxS(out, a, b);
-    }
+    __ FJMaxMinS(out, a, b, is_min);
   }
-
-  __ Bind(&done);
 }
 
 void InstructionCodeGeneratorRISCV64::GenerateMinMax(HBinaryOperation* minmax, bool is_min) {
@@ -7313,17 +7239,17 @@ void InstructionCodeGeneratorRISCV64::VisitAbs(HAbs* abs) {
     case DataType::Type::kInt32: {
       GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
       GpuRegister out = locations->Out().AsRegister<GpuRegister>();
-      __ Sra(AT, in, 31);
+      __ Sraiw(AT, in, 31);
       __ Xor(out, in, AT);
-      __ Subu(out, out, AT);
+      __ Subw(out, out, AT);
       break;
     }
     case DataType::Type::kInt64: {
       GpuRegister in  = locations->InAt(0).AsRegister<GpuRegister>();
       GpuRegister out = locations->Out().AsRegister<GpuRegister>();
-      __ Dsra32(AT, in, 31);
+      __ Srai(AT, in, 63);
       __ Xor(out, in, AT);
-      __ Dsubu(out, out, AT);
+      __ Sub(out, out, AT);
       break;
     }
     case DataType::Type::kFloat32: {
@@ -7582,16 +7508,13 @@ void InstructionCodeGeneratorRISCV64::VisitTypeConversion(HTypeConversion* conve
         __ Andi(dst, src, 0xFF);
         break;
       case DataType::Type::kInt8:
-        __ Slli(dst, src, 56);
-        __ Srai(dst, dst, 56);
+        __ Extb(dst, src, 0, 8);
         break;
       case DataType::Type::kUint16:
-        __ LoadConst32(TMP, 0xFFFF);
-        __ And(dst, src, TMP);
+        __ Extub(dst, src, 0, 16);
         break;
       case DataType::Type::kInt16:
-        __ Slli(dst, src, 48);
-        __ Srai(dst, dst, 48);
+        __ Extb(dst, src, 0, 16);
         break;
       case DataType::Type::kInt32:
       case DataType::Type::kInt64:
@@ -7617,7 +7540,6 @@ void InstructionCodeGeneratorRISCV64::VisitTypeConversion(HTypeConversion* conve
         __ FCvtDL(dst, src);
       }
     } else {
-      __ Mtc1(src, FTMP);
       if (result_type == DataType::Type::kFloat32) {
         __ FCvtSW(dst, src);
       } else {
@@ -7777,7 +7699,7 @@ void InstructionCodeGeneratorRISCV64::GenPackedSwitchWithCompares(GpuRegister va
                                                                  HBasicBlock* default_block) {
   // Create a set of compare/jumps.
   GpuRegister temp_reg = TMP;
-  __ Addiu32(temp_reg, value_reg, -lower_bound);
+  __ Addiuw32(temp_reg, value_reg, -lower_bound);
   // Jump to default if index is negative
   // Note: We don't check the case that index is positive while value < lower_bound, because in
   // this case, index >= num_entries must be true. So that we can save one branch instruction.
@@ -7788,7 +7710,7 @@ void InstructionCodeGeneratorRISCV64::GenPackedSwitchWithCompares(GpuRegister va
   __ Beqzc(temp_reg, codegen_->GetLabelOf(successors[0]));
   int32_t last_index = 0;
   for (; num_entries - last_index > 2; last_index += 2) {
-    __ Addiu(temp_reg, temp_reg, -2);
+    __ Addiuw(temp_reg, temp_reg, -2);
     // Jump to successors[last_index + 1] if value < case_value[last_index + 2].
     __ Bltzc(temp_reg, codegen_->GetLabelOf(successors[last_index + 1]));
     // Jump to successors[last_index + 2] if value == case_value[last_index + 2].
@@ -7796,7 +7718,7 @@ void InstructionCodeGeneratorRISCV64::GenPackedSwitchWithCompares(GpuRegister va
   }
   if (num_entries - last_index == 2) {
     // The last missing case_value.
-    __ Addiu(temp_reg, temp_reg, -1);
+    __ Addiuw(temp_reg, temp_reg, -1);
     __ Beqzc(temp_reg, codegen_->GetLabelOf(successors[last_index + 1]));
   }
 
@@ -7820,18 +7742,18 @@ void InstructionCodeGeneratorRISCV64::GenTableBasedPackedSwitch(GpuRegister valu
   JumpTable* table = __ CreateJumpTable(std::move(labels));
 
   // Is the value in range?
-  __ Addiu32(TMP, value_reg, -lower_bound);
+  __ Addiuw32(TMP, value_reg, -lower_bound);
   __ LoadConst32(AT, num_entries);
   __ Bgeuc(TMP, AT, codegen_->GetLabelOf(default_block));
 
   // We are in the range of the table.
   // Load the target address from the jump table, indexing by the value.
   __ LoadLabelAddress(AT, table->GetLabel());
-  __ Dlsa(TMP, TMP, AT, 2);
+  __ Addsl(TMP, TMP, AT, 2);
   __ Lw(TMP, TMP, 0);
   // Compute the absolute target address by adding the table start address
   // (the table contains offsets to targets relative to its start).
-  __ Daddu(TMP, TMP, AT);
+  __ Add(TMP, TMP, AT);
   // And jump.
   __ Jr(TMP);
   __ Nop();

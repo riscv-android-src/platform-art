@@ -96,219 +96,799 @@ void Riscv64Assembler::Emit(uint32_t value) {
   }
 }
 
-void Riscv64Assembler::EmitRsd(int opcode, GpuRegister rs, GpuRegister rd,
-                              int shamt, int funct) {
-  CHECK_NE(rs, kNoGpuRegister);
-  CHECK_NE(rd, kNoGpuRegister);
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      static_cast<uint32_t>(rs) << kRsShift |
-                      static_cast<uint32_t>(ZERO) << kRtShift |
-                      static_cast<uint32_t>(rd) << kRdShift |
-                      shamt << kShamtShift |
-                      funct;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitRtd(int opcode, GpuRegister rt, GpuRegister rd,
-                              int shamt, int funct) {
-  CHECK_NE(rt, kNoGpuRegister);
-  CHECK_NE(rd, kNoGpuRegister);
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      static_cast<uint32_t>(ZERO) << kRsShift |
-                      static_cast<uint32_t>(rt) << kRtShift |
-                      static_cast<uint32_t>(rd) << kRdShift |
-                      shamt << kShamtShift |
-                      funct;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitI(int opcode, GpuRegister rs, GpuRegister rt, uint16_t imm) {
-  CHECK_NE(rs, kNoGpuRegister);
-  CHECK_NE(rt, kNoGpuRegister);
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      static_cast<uint32_t>(rs) << kRsShift |
-                      static_cast<uint32_t>(rt) << kRtShift |
-                      imm;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitI21(int opcode, GpuRegister rs, uint32_t imm21) {
-  CHECK_NE(rs, kNoGpuRegister);
-  CHECK(IsUint<21>(imm21)) << imm21;
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      static_cast<uint32_t>(rs) << kRsShift |
-                      imm21;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitI26(int opcode, uint32_t imm26) {
-  CHECK(IsUint<26>(imm26)) << imm26;
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift | imm26;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitFR(int opcode, int fmt, FpuRegister ft, FpuRegister fs, FpuRegister fd,
-                             int funct) {
-  CHECK_NE(ft, kNoFpuRegister);
-  CHECK_NE(fs, kNoFpuRegister);
-  CHECK_NE(fd, kNoFpuRegister);
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      fmt << kFmtShift |
-                      static_cast<uint32_t>(ft) << kFtShift |
-                      static_cast<uint32_t>(fs) << kFsShift |
-                      static_cast<uint32_t>(fd) << kFdShift |
-                      funct;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitFI(int opcode, int fmt, FpuRegister ft, uint16_t imm) {
-  CHECK_NE(ft, kNoFpuRegister);
-  uint32_t encoding = static_cast<uint32_t>(opcode) << kOpcodeShift |
-                      fmt << kFmtShift |
-                      static_cast<uint32_t>(ft) << kFtShift |
-                      imm;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsa3R(int operation,
-                                int df,
-                                VectorRegister wt,
-                                VectorRegister ws,
-                                VectorRegister wd,
-                                int minor_opcode) {
-  CHECK_NE(wt, kNoVectorRegister);
-  CHECK_NE(ws, kNoVectorRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsaOperationShift |
-                      df << kDfShift |
-                      static_cast<uint32_t>(wt) << kWtShift |
-                      static_cast<uint32_t>(ws) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsaBIT(int operation,
-                                 int df_m,
-                                 VectorRegister ws,
-                                 VectorRegister wd,
-                                 int minor_opcode) {
-  CHECK_NE(ws, kNoVectorRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsaOperationShift |
-                      df_m << kDfMShift |
-                      static_cast<uint32_t>(ws) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsaELM(int operation,
-                                 int df_n,
-                                 VectorRegister ws,
-                                 VectorRegister wd,
-                                 int minor_opcode) {
-  CHECK_NE(ws, kNoVectorRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsaELMOperationShift |
-                      df_n << kDfNShift |
-                      static_cast<uint32_t>(ws) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsaMI10(int s10,
-                                  GpuRegister rs,
-                                  VectorRegister wd,
-                                  int minor_opcode,
-                                  int df) {
-  CHECK_NE(rs, kNoGpuRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  CHECK(IsUint<10>(s10)) << s10;
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      s10 << kS10Shift |
-                      static_cast<uint32_t>(rs) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode << kS10MinorShift |
-                      df;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsaI10(int operation,
-                                 int df,
-                                 int i10,
-                                 VectorRegister wd,
-                                 int minor_opcode) {
-  CHECK_NE(wd, kNoVectorRegister);
-  CHECK(IsUint<10>(i10)) << i10;
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsaOperationShift |
-                      df << kDfShift |
-                      i10 << kI10Shift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsa2R(int operation,
-                                int df,
-                                VectorRegister ws,
-                                VectorRegister wd,
-                                int minor_opcode) {
-  CHECK_NE(ws, kNoVectorRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsa2ROperationShift |
-                      df << kDf2RShift |
-                      static_cast<uint32_t>(ws) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-void Riscv64Assembler::EmitMsa2RF(int operation,
-                                 int df,
-                                 VectorRegister ws,
-                                 VectorRegister wd,
-                                 int minor_opcode) {
-  CHECK_NE(ws, kNoVectorRegister);
-  CHECK_NE(wd, kNoVectorRegister);
-  uint32_t encoding = static_cast<uint32_t>(kMsaMajorOpcode) << kOpcodeShift |
-                      operation << kMsa2RFOperationShift |
-                      df << kDf2RShift |
-                      static_cast<uint32_t>(ws) << kWsShift |
-                      static_cast<uint32_t>(wd) << kWdShift |
-                      minor_opcode;
-  Emit(encoding);
-}
-
-
-/////////////////////////////// RV64 Ali extension ////////////////
-void Riscv64Assembler::EmitRs1d(int funct7, GpuRegister rs1, GpuRegister rd, int opcode) {
-  CHECK_NE(rs1, kNoGpuRegister);
-  CHECK_NE(rd, kNoGpuRegister);
-  int funct3 = 1;
-
-  uint32_t encoding = static_cast<uint32_t>(funct7) << 25 |
+void Riscv64Assembler::EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode) {
+  uint32_t encoding = static_cast<uint32_t>(funct6) << 26 |
+                      (static_cast<uint32_t>(imm6) & 0x3F) << 20 |
                       static_cast<uint32_t>(rs1) << 15 |
                       static_cast<uint32_t>(funct3) << 12 |
                       static_cast<uint32_t>(rd) << 7 |
                       opcode;
   Emit(encoding);
 }
-/////////////////////////////// RV64 Ali extension end ////////////
 
-void Riscv64Assembler::Addu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Addw(rd, rs, rt);
+void Riscv64Assembler::EmitB(uint16_t imm, GpuRegister rs2, GpuRegister rs1, int funct3, int opcode) {
+  CHECK(IsUint<13>(imm)) << imm;
+  uint32_t encoding = (static_cast<uint32_t>(imm)&0x1000) >> 12 << 31 |
+                      (static_cast<uint32_t>(imm)&0x07E0) >> 5 << 25 |
+                      static_cast<uint32_t>(rs2) << 20 |
+                      static_cast<uint32_t>(rs1) << 15 |
+                      static_cast<uint32_t>(funct3) << 12 |
+                      (static_cast<uint32_t>(imm)&0x1E) >> 1 << 8 |
+                      (static_cast<uint32_t>(imm)&0x0800) >> 11 << 7|
+                      opcode;
+  Emit(encoding);
+}
+
+void Riscv64Assembler::EmitU(uint32_t imm, GpuRegister rd, int opcode) {
+  uint32_t encoding = static_cast<uint32_t>(imm) << 12 |
+                      static_cast<uint32_t>(rd) << 7 |
+                      opcode;
+  Emit(encoding);
+}
+
+void Riscv64Assembler::EmitJ(uint32_t imm20, GpuRegister rd, int opcode) {
+  CHECK(IsUint<21>(imm20)) << imm20;
+  // RV JAL: J-Imm = (offset x 2), encode (imm20>>1) into instruction.
+  uint32_t encoding = (static_cast<uint32_t>(imm20)&0x100000) >>20<< 31 |
+                      (static_cast<uint32_t>(imm20)&0x07FE) >> 1 << 21 |
+                      (static_cast<uint32_t>(imm20)&0x800) >> 11 << 20 |
+                      (static_cast<uint32_t>(imm20)&0xFF000) >> 12 << 12 |
+                      static_cast<uint32_t>(rd) << 7 |
+                      opcode;
+  Emit(encoding);
+}
+
+
+/////////////////////////////// RV64 VARIANTS extension ///////////////////////////////
+#ifdef RISCV64_VARIANTS_THEAD
+void Riscv64Assembler::EmitRsd(int funct5, int funct2, int funct_rs, GpuRegister rs1, int funct3, GpuRegister rd, int opcode) {
+  CHECK_NE(rs1, kNoGpuRegister);
+  CHECK_NE(rd, kNoGpuRegister);
+
+  uint32_t encoding = static_cast<uint32_t>(funct5)   << 27 |
+                      static_cast<uint32_t>(funct2 & 0x3) << 25 |
+                      static_cast<uint32_t>(funct_rs) << 20 |
+                      static_cast<uint32_t>(rs1)      << 15 |
+                      static_cast<uint32_t>(funct3)   << 12 |
+                      static_cast<uint32_t>(rd)        << 7 |
+                      opcode;
+  Emit(encoding);
+}
+
+void Riscv64Assembler::EmitRsd(int funct5, int funct2, GpuRegister funct_rs, GpuRegister rs1, int funct3, GpuRegister rd, int opcode) {
+  CHECK_NE(rs1, kNoGpuRegister);
+  CHECK_NE(rd, kNoGpuRegister);
+  CHECK_NE(funct_rs, kNoGpuRegister);
+
+  uint32_t encoding = static_cast<uint32_t>(funct5)   << 27 |
+                      static_cast<uint32_t>(funct2)   << 25 |
+                      static_cast<uint32_t>(funct_rs) << 20 |
+                      static_cast<uint32_t>(rs1)      << 15 |
+                      static_cast<uint32_t>(funct3)   << 12 |
+                      static_cast<uint32_t>(rd)        << 7 |
+                      opcode;
+  Emit(encoding);
+}
+#endif
+/////////////////////////////// RV64 VARIANTS extension end //////////////////////////
+
+
+/////////////////////////////// RV64 "IM" Instructions ///////////////////////////////
+// Load instructions: opcode = 0x03, subfunc(func3) from 0x0 ~ 0x6
+void Riscv64Assembler::Lb(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x0, rd, 0x03);
+}
+
+void Riscv64Assembler::Lh(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x1, rd, 0x03);
+}
+
+void Riscv64Assembler::Lw(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x2, rd, 0x03);
+}
+
+void Riscv64Assembler::Ld(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x3, rd, 0x03);
+}
+
+void Riscv64Assembler::Lbu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x4, rd, 0x03);
+}
+
+void Riscv64Assembler::Lhu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x5, rd, 0x03);
+}
+
+void Riscv64Assembler::Lwu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x6, rd, 0x3);
+}
+
+// Store instructions: opcode = 0x23, subfunc(func3) from 0x0 ~ 0x3
+void Riscv64Assembler::Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x0, 0x23);
+}
+
+void Riscv64Assembler::Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x1, 0x23);
+}
+
+void Riscv64Assembler::Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x2, 0x23);
+}
+
+void Riscv64Assembler::Sd(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x3, 0x23);
+}
+
+// IMM ALU instructions: opcode = 0x13, subfunc(func3) from 0x0 ~ 0x7
+void Riscv64Assembler::Addi(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x0, rd, 0x13);
+}
+
+// 0x1 Split: 0x0(6b) + offset(6b)
+void Riscv64Assembler::Slli(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  if((rd != rs1)  || (offset != 0))
+    EmitI6(0x0, offset, rs1, 0x1, rd, 0x13);
+}
+
+void Riscv64Assembler::Slti(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x2, rd, 0x13);
+}
+
+void Riscv64Assembler::Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x3, rd, 0x13);
+}
+
+void Riscv64Assembler::Xori(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x4, rd, 0x13);
+}
+
+// 0x5 Split: 0x0(6b) + offset(6b)
+void Riscv64Assembler::Srli(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  if((rd != rs1)  || (offset != 0))
+    EmitI6(0x0, offset, rs1, 0x5, rd, 0x13);
+}
+
+void Riscv64Assembler::Srai(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI6(0x10, offset, rs1, 0x5, rd, 0x13);
+}
+
+void Riscv64Assembler::Ori(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x6, rd, 0x13);
+}
+
+void Riscv64Assembler::Andi(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x7, rd, 0x13);
+}
+
+// ALU instructions: opcode = 0x33, subfunc(func3) from 0x0 ~ 0x7
+void Riscv64Assembler::Add(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x0, rd, 0x33);
+}
+
+void Riscv64Assembler::Sll(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x01, rd, 0x33);
+}
+
+void Riscv64Assembler::Slt(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x02, rd, 0x33);
+}
+
+void Riscv64Assembler::Sltu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x03, rd, 0x33);
+}
+
+void Riscv64Assembler::Xor(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x04, rd, 0x33);
+}
+
+void Riscv64Assembler::Srl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x05, rd, 0x33);
+}
+
+void Riscv64Assembler::Or(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x06, rd, 0x33);
+}
+
+void Riscv64Assembler::And(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x07, rd, 0x33);
+}
+
+void Riscv64Assembler::Mul(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x0, rd, 0x33);
+}
+
+void Riscv64Assembler::Mulh(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x1, rd, 0x33);
+}
+
+void Riscv64Assembler::Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x2, rd, 0x33);
+}
+
+void Riscv64Assembler::Mulhu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x3, rd, 0x33);
+}
+
+void Riscv64Assembler::Div(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x4, rd, 0x33);
+}
+
+void Riscv64Assembler::Divu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x5, rd, 0x33);
+}
+
+void Riscv64Assembler::Rem(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x6, rd, 0x33);
+}
+
+void Riscv64Assembler::Remu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x7, rd, 0x33);
+}
+
+void Riscv64Assembler::Sub(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x20, rs2, rs1, 0x0, rd, 0x33);
+}
+
+void Riscv64Assembler::Sra(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x20, rs2, rs1, 0x05, rd, 0x33);
+}
+
+// 32bit Imm ALU instructions: opcode = 0x1b, subfunc(func3) - 0x0, 0x1, 0x5
+void Riscv64Assembler::Addiw(GpuRegister rd, GpuRegister rs1, int16_t imm12) {
+  EmitI(imm12, rs1, 0x0, rd, 0x1b);
+}
+
+void Riscv64Assembler::Slliw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
+  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
+  EmitR(0x0, shamt, rs1, 0x1, rd, 0x1b);
+}
+
+void Riscv64Assembler::Srliw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
+  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
+  EmitR(0x0, shamt, rs1, 0x5, rd, 0x1b);
+}
+
+void Riscv64Assembler::Sraiw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
+  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
+  EmitR(0x20, shamt, rs1, 0x5, rd, 0x1b);
+}
+
+// 32bit ALU instructions: opcode = 0x3b, subfunc(func3) from 0x0 ~ 0x7
+void Riscv64Assembler::Addw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x0, rd, 0x3b);
+}
+
+void Riscv64Assembler::Mulw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x0, rd, 0x3b);
+}
+
+void Riscv64Assembler::Subw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x20, rs2, rs1, 0x0, rd, 0x3b);
+}
+
+void Riscv64Assembler::Sllw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x1, rd, 0x3b);
+}
+
+void Riscv64Assembler::Divw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x4, rd, 0x3b);
+}
+
+void Riscv64Assembler::Srlw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, 0x5, rd, 0x3b);
+}
+
+void Riscv64Assembler::Divuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x5, rd, 0x3b);
+}
+
+void Riscv64Assembler::Sraw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x20, rs2, rs1, 0x5, rd, 0x3b);
+}
+
+void Riscv64Assembler::Remw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x6, rd, 0x3b);
+}
+
+void Riscv64Assembler::Remuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, 0x7, rd, 0x3b);
+}
+
+// opcode = 0x17 & 0x37
+void Riscv64Assembler::Auipc(GpuRegister rd, uint32_t imm20) {
+  EmitU(imm20, rd, 0x17);
+}
+
+void Riscv64Assembler::Lui(GpuRegister rd, uint32_t imm20) {
+  EmitU(imm20, rd, 0x37);
+}
+
+// Branch and Jump instructions, opcode = 0x63 (subfunc from 0x0 ~ 0x7), 0x67, 0x6f
+void Riscv64Assembler::Beq(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x0, 0x63);
+}
+
+void Riscv64Assembler::Bne(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x1, 0x63);
+}
+
+void Riscv64Assembler::Blt(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x4, 0x63);
+}
+
+void Riscv64Assembler::Bge(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x5, 0x63);
+}
+
+void Riscv64Assembler::Bltu(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x6, 0x63);
+}
+
+void Riscv64Assembler::Bgeu(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
+  EmitB(offset, rs2, rs1, 0x7, 0x63);
+}
+
+void Riscv64Assembler::Jalr(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x0, rd, 0x67);
+}
+
+void Riscv64Assembler::Jal(GpuRegister rd, uint32_t imm20) {
+  EmitJ(imm20, rd, 0x6F);
+}
+
+// opcode - 0xf 0xf and 0x73
+void Riscv64Assembler::Fence(uint8_t pred, uint8_t succ) {
+  EmitI(0x0 << 8 | pred << 4 | succ, 0x0, 0x0, 0x0, 0xf);
+}
+
+void Riscv64Assembler::FenceI() {
+  EmitI(0x0 << 6| 0x0 << 4 | 0x0, 0x0, 0x1, 0x0, 0xf);
+}
+
+void Riscv64Assembler::Ecall() {
+  EmitI(0x0, 0x0, 0x0, 0x0, 0x73);
+}
+
+void Riscv64Assembler::Ebreak() {
+  EmitI(0x1, 0x0, 0x0, 0x0, 0x73);
+}
+
+void Riscv64Assembler::Csrrw(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
+  EmitI(csr, rs1, 0x1, rd, 0x73);
+}
+
+void Riscv64Assembler::Csrrs(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
+  EmitI(csr, rs1, 0x2, rd, 0x73);
+}
+
+void Riscv64Assembler::Csrrc(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
+  EmitI(csr, rs1, 0x3, rd, 0x73);
+}
+
+void Riscv64Assembler::Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm) {
+  EmitI(csr, zimm, 0x5, rd, 0x73);
+}
+
+void Riscv64Assembler::Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm) {
+  EmitI(csr, zimm, 0x6, rd, 0x73);
+}
+
+void Riscv64Assembler::Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm) {
+  EmitI(csr, zimm, 0x7, rd, 0x73);
+}
+/////////////////////////////// RV64 "IM" Instructions  END ///////////////////////////////
+
+
+
+/////////////////////////////// RV64 "A" Instructions  START ///////////////////////////////
+void Riscv64Assembler::LrW(GpuRegister rd, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x2, aqrl, 0x0, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x3, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x1, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoAddW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x0, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoXorW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x4, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoAndW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0xc, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoOrW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x8, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMinW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x10, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMaxW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x14, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x18, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x1c, aqrl, rs2, rs1, 0x2, rd, 0x2f);
+}
+
+void Riscv64Assembler::LrD(GpuRegister rd, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x2, aqrl, 0x0, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x3, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x1, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoAddD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x0, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoXorD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x4, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoAndD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0xc, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoOrD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x8, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMinD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x10, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMaxD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x14, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x18, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+
+void Riscv64Assembler::AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1, uint8_t aqrl) {
+  EmitR4(0x1c, aqrl, rs2, rs1, 0x3, rd, 0x2f);
+}
+/////////////////////////////// RV64 "A" Instructions  END ///////////////////////////////
+
+
+
+/////////////////////////////// RV64 "FD" Instructions  START ///////////////////////////////
+void Riscv64Assembler::FLw(FpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x2, rd, 0x07);
+}
+
+void Riscv64Assembler::FLd(FpuRegister rd, GpuRegister rs1, uint16_t offset) {
+  EmitI(offset, rs1, 0x3, rd, 0x07);
+}
+
+void Riscv64Assembler::FSw(FpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x2, 0x27);
+}
+
+void Riscv64Assembler::FSd(FpuRegister rs2, GpuRegister rs1, uint16_t offset) {
+  EmitS(offset, rs2, rs1, 0x3, 0x27);
+}
+
+void Riscv64Assembler::FMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x43);
+}
+
+void Riscv64Assembler::FMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x43);
+}
+
+void Riscv64Assembler::FMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x47);
+}
+
+void Riscv64Assembler::FMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x47);
+}
+
+void Riscv64Assembler::FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x4b);
+}
+
+void Riscv64Assembler::FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x4b);
+}
+
+void Riscv64Assembler::FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x4f);
+}
+
+void Riscv64Assembler::FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
+  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x4f);
+}
+
+// opcode = 0x53, funct7 is even for float ops
+void Riscv64Assembler::FAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x0, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x4, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FMulS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x8, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FDivS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0xc, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x10, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x10, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x10, rs2, rs1, 0x2, rd, 0x53);
+}
+
+void Riscv64Assembler::FMinS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x14, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FMaxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x14, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtSD(FpuRegister rd, FpuRegister rs1) {
+  EmitR(0x20, 0x1, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FSqrtS(FpuRegister rd, FpuRegister rs1) {
+  EmitR(0x2c, 0x0, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FEqS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x50, rs2, rs1, 0x2, rd, 0x53);
+}
+
+void Riscv64Assembler::FLtS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x50, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FLeS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x50, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtWS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
+  EmitR(0x60, 0x0, rs1, frm, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtWuS(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x60, 0x1, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtLS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
+  EmitR(0x60, 0x2, rs1, frm, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtLuS(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x60, 0x3, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtSW(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x68, 0x0, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtSWu(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x68, 0x1, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtSL(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x68, 0x2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtSLu(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x68, 0x3, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FMvXW(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x70, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FClassS(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x70, 0x0, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FMvWX(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x78, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+// opcode = 0x53, funct7 is odd for float ops
+void Riscv64Assembler::FAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x1, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x5, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FMulD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x9, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FDivD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0xd, rs2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x11, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x11, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x11, rs2, rs1, 0x2, rd, 0x53);
+}
+
+void Riscv64Assembler::FMinD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x15, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FMaxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x15, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtDS(FpuRegister rd, FpuRegister rs1) {
+  EmitR(0x21, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FSqrtD(FpuRegister rd, FpuRegister rs1) {
+  EmitR(0x2d, 0x0, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FLeD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x51, rs2, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FLtD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x51, rs2, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FEqD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
+  EmitR(0x51, rs2, rs1, 0x2, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtWD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
+  EmitR(0x61, 0x0, rs1, frm, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtWuD(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x61, 0x1, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtLD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
+  EmitR(0x61, 0x2, rs1, frm, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtLuD(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x61, 0x3, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtDW(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x69, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtDWu(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x69, 0x1, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtDL(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x69, 0x2, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FCvtDLu(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x69, 0x3, rs1, FRM, rd, 0x53);
+}
+
+void Riscv64Assembler::FMvXD(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x71, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::FClassD(GpuRegister rd, FpuRegister rs1) {
+  EmitR(0x71, 0x0, rs1, 0x1, rd, 0x53);
+}
+
+void Riscv64Assembler::FMvDX(FpuRegister rd, GpuRegister rs1) {
+  EmitR(0x79, 0x0, rs1, 0x0, rd, 0x53);
+}
+
+void Riscv64Assembler::MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  FMinS(fd, fs, ft);
+}
+
+void Riscv64Assembler::MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  FMinD(fd, fs, ft);
+}
+
+void Riscv64Assembler::MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  FMaxS(fd, fs, ft);
+}
+
+void Riscv64Assembler::MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
+  FMaxD(fd, fs, ft);
+}
+/////////////////////////////// RV64 "FD" Instructions  END ///////////////////////////////
+
+
+////////////////////////////// RV64 MACRO Instructions  START ///////////////////////////////
+void Riscv64Assembler::Nop() {
+  Addi(ZERO, ZERO, 0);
+}
+
+void Riscv64Assembler::Move(GpuRegister rd, GpuRegister rs) {
+  Or(rd, rs, ZERO);
+}
+
+void Riscv64Assembler::Clear(GpuRegister rd) {
+  Or(rd, ZERO, ZERO);
+}
+
+void Riscv64Assembler::Not(GpuRegister rd, GpuRegister rs) {
+  Xori(rd, rs, -1);
+}
+
+void Riscv64Assembler::Break() {
+  Ebreak();
+}
+
+void Riscv64Assembler::Sync(uint32_t stype) {
+  UNUSED(stype);
+  // XC-TODO: for performance, need set fence according to stype
+  Fence(0xf, 0xf);
+}
+
+void Riscv64Assembler::Addiuw(GpuRegister rd, GpuRegister rs, int16_t imm16) {
+  if (IsInt<12>(imm16)) {
+    Addiw(rd, rs, imm16);
+  } else {
+    int32_t l = imm16 & 0xFFF;  // Higher 20b is ZERO
+    int32_t h = imm16 >> 12;
+    if ((l & 0x800) != 0) {
+      h += 1;
+    }
+    // rs and rd may be same or be TMP, use TMP2 here.
+    Lui(TMP2, h);
+    if (l)
+      Addiw(TMP2, TMP2, l);
+    Addw(rd, TMP2, rs);
+  }
 }
 
 void Riscv64Assembler::Addiu(GpuRegister rd, GpuRegister rs, int16_t imm16) {
   if (IsInt<12>(imm16)) {
-    Addiw(rd, rs, imm16);
+    Addi(rd, rs, imm16);
   } else {
     int32_t l = imm16 & 0xFFF;
     int32_t h = imm16 >> 12;
@@ -317,408 +897,237 @@ void Riscv64Assembler::Addiu(GpuRegister rd, GpuRegister rs, int16_t imm16) {
     }
     // rs and rd may be same or be TMP, use TMP2 here.
     Lui(TMP2, h);
-    Addiw(TMP2, TMP2, l);
-    Addu(rd, TMP2, rs);
+    if (l)
+      Addiw(TMP2, TMP2, l);
+    Add(rd, TMP2, rs);
   }
 }
 
-void Riscv64Assembler::Daddu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Add(rd, rs, rt);;
-}
-
-void Riscv64Assembler::Daddiu(GpuRegister rd, GpuRegister rs, int16_t imm16) {
-  if (IsInt<12>(imm16)) {
-    Addi(rd, rs, imm16);
+void Riscv64Assembler::Addiuw32(GpuRegister rt, GpuRegister rs, int32_t value) {
+  if (IsInt<12>(value)) {
+    Addiw(rt, rs, value);
   } else {
-    int32_t l = imm16 & 0xFFF;
-    int32_t h = imm16 >> 12;
-    if ((l & 0x800) != 0) {
-      h += 1;  // overflow ?
-    }
-    // rs and rd may be same or be TMP, use TMP2 here.
-    Lui(TMP2, h);
-    Addiw(TMP2, TMP2, l);
-    Daddu(rd, TMP2, rs);
+    LoadConst32(TMP2, value);
+    Addw(rt, rs, TMP2);
   }
 }
 
-void Riscv64Assembler::Subu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Subw(rd, rs, rt);
-}
-
-void Riscv64Assembler::Dsubu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Sub(rd, rs, rt);
-}
-
-void Riscv64Assembler::MulR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  // MulR6 --> Mulw in Riscv64
-  Mulw(rd, rs, rt);
-}
-
-void Riscv64Assembler::MuhR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  // There's no instruction in Riscv64 can get the high 32bit of 32-bit Multiplication.
-  // Shift left 32 for both of source operands
-  // Use TMP2 and T6 here
-  Slli(TMP2, rs, 32);
-  Slli(T6, rt, 32);
-  Mul(rd, TMP2, T6);   // rd <-- (rs x rt)'s 64-bit result
-  Srai(rd, rd, 32);  // get the high 32bit result and keep sign
-}
-
-void Riscv64Assembler::DivR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  // DivR6 --> Divw in Riscv64
-  Divw(rd, rs, rt);
-}
-
-void Riscv64Assembler::ModR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Remw(rd, rs, rt);
-}
-
-void Riscv64Assembler::DivuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  // DivuR6 --> Divuw in Riscv64
-  Divuw(rd, rs, rt);
-}
-
-void Riscv64Assembler::ModuR6(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Remuw(rd, rs, rt);
-}
-
-void Riscv64Assembler::Dmul(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  // Dmul --> Mul in Riscv64
-  Mul(rd, rs, rt);
-}
-
-void Riscv64Assembler::Dmuh(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Mulh(rd, rs, rt);
-}
-
-void Riscv64Assembler::Ddiv(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Div(rd, rs, rt);
-}
-
-void Riscv64Assembler::Dmod(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Rem(rd, rs, rt);
-}
-
-void Riscv64Assembler::Ddivu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Divu(rd, rs, rt);
-}
-
-void Riscv64Assembler::Dmodu(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Remu(rd, rs, rt);
-}
-
-void Riscv64Assembler::Seb(GpuRegister rd, GpuRegister rt) {
-  Srliw(rd, rt, 24);  // Sign extend bit 7 to hight 32-bit
-  Srai(rd, rd, 24);
-}
-
-void Riscv64Assembler::Seh(GpuRegister rd, GpuRegister rt) {
-  Srliw(rd, rt, 16);  // Sign extend bit 15 to hight 32-bit
-  Srai(rd, rd, 16);
-}
-
-void Riscv64Assembler::Dext(GpuRegister rt, GpuRegister rs, int pos, int size) {
-  CHECK(IsUint<5>(pos)) << pos;
-  CHECK(IsUint<5>(size - 1)) << size;
-  Srli(rt, rs, pos);
-  Slli(rt, rt, (64-size));
-  Srli(rt, rt, (64-size));
-}
-
-void Riscv64Assembler::Lsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne) {
-  CHECK(1 <= saPlusOne && saPlusOne <= 4) << saPlusOne;
-  Slli(TMP2, rs, saPlusOne);
-  Addw(rd, TMP2, rt);
-}
-
-void Riscv64Assembler::Dlsa(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne) {
-  CHECK(1 <= saPlusOne && saPlusOne <= 4) << saPlusOne;
-  Slli(TMP2, rs, saPlusOne);
-  Add(rd, TMP2, rt);
-}
-
-void Riscv64Assembler::Sc(GpuRegister rt, GpuRegister base, int16_t imm9) {
-  CHECK(IsInt<9>(imm9));
-  if (imm9 != 0) {
-    Addi(TMP2, base, imm9);
-    ScW(rt, rt, TMP2);   // todo: sucess, 0; fail, 1, which is opposite to mips;
+void Riscv64Assembler::Addiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp) {
+  CHECK_NE(rs, rtmp);
+  if (IsInt<12>(value)) {
+    Addi(rt, rs, value);
   } else {
-    ScW(rt, rt, base);
-  }
-  Xori(rt, rt, 0x01);
-}
-
-void Riscv64Assembler::Scd(GpuRegister rt, GpuRegister base, int16_t imm9) {
-  CHECK(IsInt<9>(imm9));
-  if (imm9 != 0) {
-    Addi(TMP2, base, imm9);
-    ScD(rt, rt, TMP2);   // todo: sucess, 0; fail, 1, which is opposite to mips;
-  } else {
-    ScD(rt, rt, base);
-  }
-  Xori(rt, rt, 0x01);
-}
-
-void Riscv64Assembler::Ll(GpuRegister rt, GpuRegister base, int16_t imm9) {
-  CHECK(IsInt<9>(imm9));
-  if (imm9 != 0) {
-    Addi(TMP2, base, imm9);
-    LrW(rt, TMP2);   // todo: sucess, 0; fail, 1, which is opposite to mips;
-  } else {
-    LrW(rt, base);
+    LoadConst64(rtmp, value);
+    Add(rt, rs, rtmp);
   }
 }
 
-void Riscv64Assembler::Lld(GpuRegister rt, GpuRegister base, int16_t imm9) {
-  CHECK(IsInt<9>(imm9));
-  if (imm9 != 0) {
-    Addi(TMP2, base, imm9);
-    LrD(rt, TMP2);   // todo: sucess, 0; fail, 1, which is opposite to mips;
-  } else {
-    LrD(rt, base);
-  }
-}
-
-void Riscv64Assembler::Sll(GpuRegister rd, GpuRegister rt, int shamt) {
-  Slliw(rd, rt, shamt);
-}
-
-void Riscv64Assembler::Srl(GpuRegister rd, GpuRegister rt, int shamt) {
-  Srliw(rd, rt, shamt);
-}
-
-void Riscv64Assembler::Rotr(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
+void Riscv64Assembler::Srriw(GpuRegister rd, GpuRegister rs1, int imm5) {
+  CHECK(0 <= imm5 < 32) << imm5;
+#ifdef RISCV64_VARIANTS_THEAD
+  srriw(rd, rs1, imm5);
+#else
   // Riscv64 codegen don't use the blocked registers for rd, rt, rs till now.
   // It's safe to use scratch registers here.
-  Srliw(TMP, rt, shamt);
-  Slliw(rd, rt, 32-shamt);  // logical shift left (32 -shamt)
+  Srliw(TMP, rs1, imm5);
+  Slliw(rd, rs1, 32-imm5);  // logical shift left (32 -shamt)
   Or(rd, rd, TMP);
+#endif
 }
 
-void Riscv64Assembler::Sra(GpuRegister rd, GpuRegister rt, int shamt) {
-  Sraiw(rd, rt, shamt);
+void Riscv64Assembler::Srri(GpuRegister rd, GpuRegister rs1, int imm6) {
+  CHECK(0 <= imm6 < 64) << imm6;
+#ifdef RISCV64_VARIANTS_THEAD
+  srri(rd, rs1, imm6);
+#else
+  // Riscv64 codegen don't use the blocked registers for rd, rt, rs till now.
+  // It's safe to use scratch registers here.
+  Srli(TMP, rs1, imm6);
+  Slli(rd, rs1, (64 - imm6));
+  Or(rd, rd, TMP);
+#endif
 }
 
-void Riscv64Assembler::Sllv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Sllw(rd, rt, rs);
-}
-
-void Riscv64Assembler::Rotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
+void Riscv64Assembler::Srrw(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
   // Riscv64 codegen don't use the blocked registers for rd, rt, rs till now.
   // It's safe to use TMP scratch registers here.
   Srlw(TMP, rt, rs);
-  Subw(TMP2, ZERO, rs);  // TMP2 = -rs
+  Subw(TMP2, ZERO, rs);    // TMP2 = -rs
   Addiw(TMP2, TMP2, 32);   // TMP2 = 32 -rs
   Andi(TMP2, TMP2, 0x1F);
   Sllw(rd, rt, TMP2);
   Or(rd, rd, TMP);
 }
 
-void Riscv64Assembler::Srlv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Srlw(rd, rt, rs);
-}
-
-void Riscv64Assembler::Srav(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Sraw(rd, rt, rs);
-}
-
-void Riscv64Assembler::Dsll(GpuRegister rd, GpuRegister rt, int shamt) {
-  Slli(rd, rt, shamt);
-}
-
-void Riscv64Assembler::Dsrl(GpuRegister rd, GpuRegister rt, int shamt) {
-  Srli(rd, rt, shamt);
-}
-
-void Riscv64Assembler::Drotr(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
-  // Riscv64 codegen don't use the blocked registers for rd, rt, rs till now.
-  // It's safe to use scratch registers here.
-  Srli(TMP, rt, shamt);
-  Slli(rd, rt, (64 - shamt));
-  Or(rd, rd, TMP);
-}
-
-void Riscv64Assembler::Dsra(GpuRegister rd, GpuRegister rt, int shamt) {
-  Srai(rd, rt, shamt);
-}
-
-void Riscv64Assembler::Dsll32(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
-
-  Slli(rd, rt, shamt+32);
-}
-
-void Riscv64Assembler::Dsrl32(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
-
-  Srli(rd, rt, shamt+32);
-}
-
-void Riscv64Assembler::Drotr32(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
-  Drotr(rd, rt, 32+shamt);
-}
-
-void Riscv64Assembler::Dsra32(GpuRegister rd, GpuRegister rt, int shamt) {
-  CHECK(0 <= shamt < 32) << shamt;
-
-  Srai(rd, rt, shamt+32);
-}
-
-void Riscv64Assembler::Dsllv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Sll(rd, rt, rs);
-}
-
-void Riscv64Assembler::Dsrlv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Srl(rd, rt, rs);
-}
-
-void Riscv64Assembler::Drotrv(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
+void Riscv64Assembler::Srr(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
   // Riscv64 codegen don't use the blocked registers for rd, rt, rs till now.
   // It's safe to use scratch registers here.
   Srl(TMP, rt, rs);
-  Sub(TMP2, ZERO, rs);  // TMP2 = -rs
+  Sub(TMP2, ZERO, rs);    // TMP2 = -rs
   Addi(TMP2, TMP2, 64);   // TMP2 = 64 -rs
   Sll(rd, rt, TMP2);
   Or(rd, rd, TMP);
 }
 
-void Riscv64Assembler::Dsrav(GpuRegister rd, GpuRegister rt, GpuRegister rs) {
-  Sra(rd, rt, rs);
-}
-
-void Riscv64Assembler::Lwpc(GpuRegister rs, uint32_t imm19) {
-  Auipc(rs, (imm19<<2)>>12);
-  Lw(rs, rs, (imm19<<2)&0xFFF);
-}
-
-void Riscv64Assembler::Lwupc(GpuRegister rs, uint32_t imm19) {
-  Auipc(rs, (imm19<<2)>>12);
-  Lwu(rs, rs, (imm19<<2)&0xFFF);
-}
-
-void Riscv64Assembler::Ldpc(GpuRegister rs, uint32_t imm18) {
-  Auipc(rs, (imm18<<2)>>12);
-  Ld(rs, rs, (imm18<<2)&0xFFF);
+void Riscv64Assembler::Muhh(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
+  // There's no instruction in Riscv64 can get the high 32bit of 32-bit Multiplication.
+  // Shift left 32 for both of source operands
+  // Use TMP2 and T6 here
+  Slli(TMP2, rs, 32);
+  Slli(T6, rt, 32);
+  Mul(rd, TMP2, T6);   // rd <-- (rs x rt)'s 64-bit result
+  Srai(rd, rd, 32);    // get the high 32bit result and keep sign
 }
 
 void Riscv64Assembler::Aui(GpuRegister rt, GpuRegister rs, uint16_t imm16) {
   int32_t l = imm16 & 0xFFF;
   int32_t h = imm16 >> 12;
   if ((l & 0x800) != 0) {
-    h += 1;  // overflow ?
+    h += 1;
   }
 
   // rs and rd may be same or be TMP, use TMP2 here.
   Lui(TMP2, h);
-  Addiw(TMP2, TMP2, l);
-  Slliw(TMP2, TMP2, 16);
-  Addw(rt, rs, TMP2);
-}
-
-void Riscv64Assembler::Daui(GpuRegister rt, GpuRegister rs, uint16_t imm16) {
-  int32_t l = imm16 & 0xFFF;
-  int32_t h = imm16 >> 12;
-  if ((l & 0x800) != 0) {
-    h += 1;  // overflow ?
-  }
-
-  // rs and rd may be same or be TMP, use TMP2 here.
-  Lui(TMP2, h);
-  Addi(TMP2, TMP2, l);
+  if (l)
+    Addi(TMP2, TMP2, l);
   Slli(TMP2, TMP2, 16);
   Add(rt, rs, TMP2);
 }
 
-void Riscv64Assembler::Dahi(GpuRegister rs, uint16_t imm16) {
+void Riscv64Assembler::Ahi(GpuRegister rs, uint16_t imm16) {
   int32_t l = imm16 & 0xFFF;
   int32_t h = imm16 >> 12;
   if ((l & 0x800) != 0) {
-    h += 1;  // overflow ?
+    h += 1;
   }
 
   // rs and rd may be same or be TMP, use TMP2 here.
   Lui(TMP2, h);
-  Addi(TMP2, TMP2, l);
+  if (l)
+    Addi(TMP2, TMP2, l);
   Slli(TMP2, TMP2, 32);
   Add(rs, rs, TMP2);
 }
 
-void Riscv64Assembler::Dati(GpuRegister rs, uint16_t imm16) {
+void Riscv64Assembler::Ati(GpuRegister rs, uint16_t imm16) {
   int32_t l = imm16 & 0xFFF;
   int32_t h = imm16 >> 12;
   if ((l & 0x800) != 0) {
-    h += 1;  // overflow ?
+    h += 1;
   }
 
   // rs and rd may be same or be TMP, use TMP2 here.
   Lui(TMP2, h);
-  Addi(TMP2, TMP2, l);
+  if (l)
+    Addi(TMP2, TMP2, l);
   Slli(TMP2, TMP2, 48);
   Add(rs, rs, TMP2);
 }
 
-void Riscv64Assembler::Sync(uint32_t stype) {
-  UNUSED(stype);
-  // zhengxing: just for simplify, use normal fence here for all types.
-  Fence(0xf, 0xf);
+void Riscv64Assembler::LoadConst32(GpuRegister rd, int32_t value) {
+  if (IsInt<12>(value)) {
+    Addi(rd, ZERO, value);
+  } else {
+    int32_t l = value & 0xFFF;
+    int32_t h = value >> 12;
+    if ((l & 0x800) != 0) {
+      h += 1;
+    }
+    Lui(rd, h);
+    if(l)
+      Addiw(rd, rd, l);
+  }
 }
 
+void Riscv64Assembler::LoadConst64(GpuRegister rd, int64_t value) {
+  if (IsInt<32>(value)) {
+    LoadConst32(rd, value);
+  } else {
+    // Need to optimize in the future.
+    int32_t hi = value >> 32;
+    int32_t lo = value;
+
+    GpuRegister scratch = TMP2;
+
+    LoadConst32(scratch, lo);
+    LoadConst32(rd, hi);
+    Slli(rd, rd, 32);
+    Slli(scratch, scratch, 32);
+    Srli(scratch, scratch, 32);
+    Or(rd, rd, scratch);
+  }
+}
+
+// shift and add
+void Riscv64Assembler::Addsl(GpuRegister rd, GpuRegister rs, GpuRegister rt, int saPlusOne) {
+  CHECK(1 <= saPlusOne && saPlusOne < 4) << saPlusOne;
+#ifdef RISCV64_VARIANTS_THEAD
+  addsl(rd, rt, rs, saPlusOne);
+#else
+  Slli(TMP2, rs, saPlusOne);
+  Add(rd, TMP2, rt);
+#endif
+}
+
+void Riscv64Assembler::Extb(GpuRegister rt, GpuRegister rs, int pos, int size) {
+  CHECK(IsUint<6>(pos)) << pos;
+  CHECK(IsUint<6>(size - 1)) << size;
+#ifdef RISCV64_VARIANTS_THEAD
+  ext(rt, rs, pos + size -1, pos);
+#else
+  Srli(rt, rs, pos);
+  Slli(rt, rs, (64-size));
+  Srai(rt, rt, (64-size));
+#endif
+}
+
+void Riscv64Assembler::Extub(GpuRegister rt, GpuRegister rs, int pos, int size) {
+  CHECK(IsUint<6>(pos)) << pos;
+  CHECK(IsUint<6>(size - 1)) << size;
+#ifdef RISCV64_VARIANTS_THEAD
+  extu(rt, rs, pos + size -1, pos);
+#else
+  Srli(rt, rs, pos);
+  Slli(rt, rt, (64-size));
+  Srli(rt, rt, (64-size));
+#endif
+}
+
+// Branches
 void Riscv64Assembler::Seleqz(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Move(TMP2, rt);
-  Move(rd, rs);
-  Beq(TMP2, ZERO, 8);
-  Move(rd, ZERO);
+  if( rt == rd) {
+    Move(TMP2, rt);
+    Move(rd, rs);
+    Beq(TMP2, ZERO, 8);
+    Move(rd, ZERO);
+  } else {
+    #ifdef RISCV64_VARIANTS_THEAD
+    Move(rd, ZERO);
+    mveqz(rd, rs, rt);
+    #else
+    Move(rd, rs);
+    Beq(rt, ZERO, 8);
+    Move(rd, ZERO);
+    #endif
+  }
 }
 
 void Riscv64Assembler::Selnez(GpuRegister rd, GpuRegister rs, GpuRegister rt) {
-  Move(TMP2, rt);
-  Move(rd, rs);
-  Bne(TMP2, ZERO, 8);
-  Move(rd, ZERO);
-}
-
-#if 0
-void Riscv64Assembler::Clz(GpuRegister rd, GpuRegister rs) {
-  assert(0);
-  EmitRsd(0, rs, rd, 0x01, 0x10);
-}
-
-void Riscv64Assembler::Clo(GpuRegister rd, GpuRegister rs) {
-  assert(0);
-  EmitRsd(0, rs, rd, 0x01, 0x11);
-}
-
-void Riscv64Assembler::Dclz(GpuRegister rd, GpuRegister rs) {
-  assert(0);
-  EmitRsd(0, rs, rd, 0x01, 0x12);
-}
-
-void Riscv64Assembler::Dclo(GpuRegister rd, GpuRegister rs) {
-  assert(0);
-  EmitRsd(0, rs, rd, 0x01, 0x13);
-}
-#endif
-
-void Riscv64Assembler::Jalr(GpuRegister rd, GpuRegister rs) {
-  Jalr(rd, rs, 0);
-}
-
-void Riscv64Assembler::Jalr(GpuRegister rs) {
-  Jalr(RA, rs, 0);
-}
-
-void Riscv64Assembler::Jr(GpuRegister rs) {
-  Jalr(ZERO, rs, 0);
-}
-
-void Riscv64Assembler::Addiupc(GpuRegister rs, uint32_t imm19) {
-  CHECK(IsUint<19>(imm19)) << imm19;
-  Auipc(rs, (imm19<<2)>>12);
-  Addi(rs, rs, (imm19<<2)&0xFFF);
+  if( rt == rd) {
+    Move(TMP2, rt);
+    Move(rd, rs);
+    Bne(TMP2, ZERO, 8);
+    Move(rd, ZERO);
+  } else {
+    #ifdef RISCV64_VARIANTS_THEAD
+    Move(rd, ZERO);
+    mvnez(rd, rs, rt);
+    #else
+    Move(rd, rs);
+    Bne(rt, ZERO, 8);
+    Move(rd, ZERO);
+    #endif
+  }
 }
 
 void Riscv64Assembler::Bc(uint32_t imm20) {
@@ -727,14 +1136,6 @@ void Riscv64Assembler::Bc(uint32_t imm20) {
 
 void Riscv64Assembler::Balc(uint32_t imm20) {
   Jal(RA, imm20);
-}
-
-void Riscv64Assembler::Jic(GpuRegister rt, uint16_t imm16) {
-  Jalr(ZERO, rt, imm16);
-}
-
-void Riscv64Assembler::Jialc(GpuRegister rt, uint16_t imm16) {
-  Jalr(RA, rt, imm16);
 }
 
 void Riscv64Assembler::Bltc(GpuRegister rs, GpuRegister rt, uint16_t imm12) {
@@ -869,6 +1270,50 @@ void Riscv64Assembler::EmitBcond(BranchCondition cond,
   }
 }
 
+// Jump
+void Riscv64Assembler::Jalr(GpuRegister rd, GpuRegister rs) {
+  Jalr(rd, rs, 0);
+}
+
+void Riscv64Assembler::Jic(GpuRegister rt, uint16_t imm16) {
+  Jalr(ZERO, rt, imm16);
+}
+
+void Riscv64Assembler::Jalr(GpuRegister rs) {
+  Jalr(RA, rs, 0);
+}
+
+void Riscv64Assembler::Jialc(GpuRegister rt, uint16_t imm16) {
+  Jalr(RA, rt, imm16);
+}
+
+void Riscv64Assembler::Jr(GpuRegister rs) {
+  Jalr(ZERO, rs, 0);
+}
+
+
+// Atomic Ops
+// MIPS: 0->fail
+// RV  : 0-> sucess
+void Riscv64Assembler::Sc(GpuRegister rt, GpuRegister base) {
+  ScW(rt, rt, base, 0x0);
+  Xori(rt, rt, 0x01);
+}
+
+void Riscv64Assembler::Scd(GpuRegister rt, GpuRegister base) {
+  ScD(rt, rt, base, 0x0);
+  Xori(rt, rt, 0x01);
+}
+
+void Riscv64Assembler::Ll(GpuRegister rt, GpuRegister base) {
+  LrW(rt, base, 0x0);  // aq, rl
+}
+
+void Riscv64Assembler::Lld(GpuRegister rt, GpuRegister base) {
+  LrD(rt, base, 0x0);
+}
+
+// Float Ops
 void Riscv64Assembler::AddS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FAddS(fd, fs, ft);
 }
@@ -885,6 +1330,23 @@ void Riscv64Assembler::DivS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FDivS(fd, fs, ft);
 }
 
+void Riscv64Assembler::AbsS(FpuRegister fd, FpuRegister fs) {
+  FSgnjxS(fd, fs, fs);
+}
+
+void Riscv64Assembler::MovS(FpuRegister fd, FpuRegister fs) {
+  FSgnjS(fd, fs, fs);
+}
+
+void Riscv64Assembler::NegS(FpuRegister fd, FpuRegister fs) {
+  FSgnjnS(fd, fs, fs);
+}
+
+void Riscv64Assembler::SqrtS(FpuRegister fd, FpuRegister fs) {
+  FSqrtS(fd, fs);
+}
+
+// Double Ops
 void Riscv64Assembler::AddD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FAddD(fd, fs, ft);
 }
@@ -901,138 +1363,148 @@ void Riscv64Assembler::DivD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FDivD(fd, fs, ft);
 }
 
-void Riscv64Assembler::SqrtS(FpuRegister fd, FpuRegister fs) {
-  FSqrtS(fd, fs);
+void Riscv64Assembler::AbsD(FpuRegister fd, FpuRegister fs) {
+  FSgnjxD(fd, fs, fs);
+}
+
+
+void Riscv64Assembler::MovD(FpuRegister fd, FpuRegister fs) {
+  FSgnjD(fd, fs, fs);
+}
+
+
+void Riscv64Assembler::NegD(FpuRegister fd, FpuRegister fs) {
+  FSgnjnD(fd, fs, fs);
 }
 
 void Riscv64Assembler::SqrtD(FpuRegister fd, FpuRegister fs) {
   FSqrtD(fd, fs);
 }
 
-void Riscv64Assembler::AbsS(FpuRegister fd, FpuRegister fs) {
-  FSgnjxS(fd, fs, fs);
+// Float <-> double
+void Riscv64Assembler::Cvtsd(FpuRegister fd, FpuRegister fs) {
+  FCvtSD(fd, fs);
 }
 
-void Riscv64Assembler::AbsD(FpuRegister fd, FpuRegister fs) {
-  FSgnjxD(fd, fs, fs);
+void Riscv64Assembler::Cvtds(FpuRegister fd, FpuRegister fs) {
+  FCvtDS(fd, fs);
 }
 
-void Riscv64Assembler::MovS(FpuRegister fd, FpuRegister fs) {
-  FSgnjS(fd, fs, fs);
-}
-
-void Riscv64Assembler::MovD(FpuRegister fd, FpuRegister fs) {
-  FSgnjD(fd, fs, fs);
-}
-
-void Riscv64Assembler::NegS(FpuRegister fd, FpuRegister fs) {
-  FSgnjnS(fd, fs, fs);
-}
-
-void Riscv64Assembler::NegD(FpuRegister fd, FpuRegister fs) {
-  FSgnjnD(fd, fs, fs);
-}
-
-#if 0
-void Riscv64Assembler::RoundLS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0x8);
-}
-
-void Riscv64Assembler::RoundLD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0x8);
-}
-
-void Riscv64Assembler::RoundWS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0xc);
-}
-
-void Riscv64Assembler::RoundWD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0xc);
-}
-#endif
-
+// According to VM spec, If the value' is NaN, the result of the conversion is a long 0.
+// Acoording to IEEE-754, NaN should be convert to 2^63 -1
+// NaN != NaN
 void Riscv64Assembler::TruncLS(GpuRegister rd, FpuRegister fs) {
+#ifdef RISCV64_VARIANTS_THEAD
+  FEqS(TMP, fs, fs);  // zero means NaN
+  FCvtLS(rd, fs, kFPRoundingModeRTZ);
+  mveqz(rd, ZERO, TMP);
+#else
   Xor(rd, rd, rd);
   FEqS(TMP, fs, fs);
   riscv64::Riscv64Label label;
   Beqzc(TMP, &label);
   FCvtLS(rd, fs, kFPRoundingModeRTZ);
   Bind(&label);
+#endif
 }
 
 void Riscv64Assembler::TruncLD(GpuRegister rd, FpuRegister fs) {
+#ifdef RISCV64_VARIANTS_THEAD
+  FEqD(TMP, fs, fs);
+  FCvtLD(rd, fs, kFPRoundingModeRTZ);
+  mveqz(rd, ZERO, TMP);
+#else
   Xor(rd, rd, rd);
   FEqD(TMP, fs, fs);
   riscv64::Riscv64Label label;
   Beqzc(TMP, &label);
   FCvtLD(rd, fs, kFPRoundingModeRTZ);
   Bind(&label);
+#endif
 }
 
 void Riscv64Assembler::TruncWS(GpuRegister rd, FpuRegister fs) {
+#ifdef RISCV64_VARIANTS_THEAD
+  FEqS(TMP, fs, fs);
+  FCvtWS(rd, fs, kFPRoundingModeRTZ);
+  mveqz(rd, ZERO, TMP);
+#else
   Xor(rd, rd, rd);
   FEqS(TMP, fs, fs);
   riscv64::Riscv64Label label;
   Beqzc(TMP, &label);
   FCvtWS(rd, fs, kFPRoundingModeRTZ);
   Bind(&label);
+#endif
 }
 
 void Riscv64Assembler::TruncWD(GpuRegister rd, FpuRegister fs) {
+#ifdef RISCV64_VARIANTS_THEAD
+  FEqD(TMP, fs, fs);
+  FCvtWD(rd, fs, kFPRoundingModeRTZ);
+  mveqz(rd, ZERO, TMP);
+#else
   Xor(rd, rd, rd);
   FEqD(TMP, fs, fs);
   riscv64::Riscv64Label label;
   Beqzc(TMP, &label);
   FCvtWD(rd, fs, kFPRoundingModeRTZ);
   Bind(&label);
-}
-
-#if 0
-void Riscv64Assembler::CeilLS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0xa);
-}
-
-void Riscv64Assembler::CeilLD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0xa);
-}
-
-void Riscv64Assembler::CeilWS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0xe);
-}
-
-void Riscv64Assembler::CeilWD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0xe);
-}
-
-void Riscv64Assembler::FloorLS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0xb);
-}
-
-void Riscv64Assembler::FloorLD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0xb);
-}
-
-void Riscv64Assembler::FloorWS(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0xf);
-}
-
-void Riscv64Assembler::FloorWD(FpuRegister fd, FpuRegister fs) {
-  assert(0);
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0xf);
-}
 #endif
+}
 
+// Java spec says: if one is NaN, return NaN, otherwise ...
+void Riscv64Assembler::FJMaxMinS(FpuRegister fd, FpuRegister fs, FpuRegister ft, bool is_min) {
+  riscv64::Riscv64Label labelFS, labelFT, labelDone;
+  FEqS(TMP, fs, fs);
+  Beqzc(TMP, &labelFS);  // fs is NaN
+  FEqS(TMP, ft, ft);
+  Beqzc(TMP, &labelFT);  // fs is NaN
+
+  // All are not NaN
+  if(is_min) {
+    FMinS(fd, fs, ft);
+  } else {
+    FMaxS(fd, fs, ft);
+  }
+  Bc(&labelDone);
+
+  Bind(&labelFS);  // fs is NaN
+  MovS(fd, fs);
+  Bc(&labelDone);
+
+  Bind(&labelFT);  // ft is NaN
+  MovS(fd, ft);
+
+  Bind(&labelDone);
+}
+
+void Riscv64Assembler::FJMaxMinD(FpuRegister fd, FpuRegister fs, FpuRegister ft, bool is_min) {
+  riscv64::Riscv64Label labelFS, labelFT, labelDone;
+  FEqD(TMP, fs, fs);
+  Beqzc(TMP, &labelFS);  // fs is NaN
+  FEqD(TMP, ft, ft);
+  Beqzc(TMP, &labelFT);  // fs is NaN
+
+  // All are not NaN
+  if(is_min) {
+    FMinD(fd, fs, ft);
+  } else {
+    FMaxD(fd, fs, ft);
+  }
+  Bc(&labelDone);
+
+  Bind(&labelFS);  // fs is NaN
+  MovD(fd, fs);
+  Bc(&labelDone);
+
+  Bind(&labelFT);  // ft is NaN
+  MovD(fd, ft);
+
+  Bind(&labelDone);
+}
+
+// XC-TODO: there are no FSel instrctions in RVGC
 void Riscv64Assembler::SelS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FMvXW(TMP, fd);
   Andi(TMP, TMP, 1);
@@ -1097,76 +1569,10 @@ void Riscv64Assembler::SelnezD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
   FSgnjD(fd, fs, fs);
 }
 
-void Riscv64Assembler::RintS(FpuRegister fd, FpuRegister fs) {
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0x1a);
-}
-
-void Riscv64Assembler::RintD(FpuRegister fd, FpuRegister fs) {
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0x1a);
-}
-
-void Riscv64Assembler::ClassS(FpuRegister fd, FpuRegister fs) {
-  EmitFR(0x11, 0x10, static_cast<FpuRegister>(0), fs, fd, 0x1b);
-}
-
-void Riscv64Assembler::ClassD(FpuRegister fd, FpuRegister fs) {
-  EmitFR(0x11, 0x11, static_cast<FpuRegister>(0), fs, fd, 0x1b);
-}
-
-void Riscv64Assembler::MinS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
-  FMinS(fd, fs, ft);
-}
-
-void Riscv64Assembler::MinD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
-  FMinD(fd, fs, ft);
-}
-
-void Riscv64Assembler::MaxS(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
-  FMaxS(fd, fs, ft);
-}
-
-void Riscv64Assembler::MaxD(FpuRegister fd, FpuRegister fs, FpuRegister ft) {
-  FMaxD(fd, fs, ft);
-}
-
-void Riscv64Assembler::CmpUnS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
-  FClassS(TMP, fs);
-  Srli(TMP, TMP, 8);
-  Bne(TMP, ZERO, 24);
-
-  FClassS(TMP, ft);
-  Srli(TMP, TMP, 8);
-  Bne(TMP, ZERO, 12);
-
-  Addi(rd, ZERO, 0);  // unordered false;
-  Jal(ZERO, 8);
-
-  Addi(rd, ZERO, 1);  // unordered true;
-}
-
-void Riscv64Assembler::CmpEqS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
-  FEqS(rd, fs, ft);
-}
-
-void Riscv64Assembler::CmpUeqS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
-  FClassS(TMP, fs);
-  Srli(TMP, TMP, 8);
-  Bne(TMP, ZERO, 24);
-
-  FClassS(TMP, ft);
-  Srli(TMP, TMP, 8);
-  Bne(TMP, ZERO, 12);
-
-  FEqS(rd, fs, ft);
-  Jal(ZERO, 8);
-
-  Addi(rd, ZERO, 1);  // unordered true;
-}
-
-void Riscv64Assembler::CmpLtS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
-  FLtS(rd, fs, ft);
-}
-
+// Java VM says. All values other than NaN are ordered, with negative infinity less than all finite values 
+//   and positive infinity greater than all finite values. Positive zero and negative zero are considered equal.
+// one of value1' or value2' is NaN. The fcmpg instruction pushes the int value 1 onto the operand stack 
+// and the fcmpl instruction pushes the int value -1 onto the operand stack
 void Riscv64Assembler::CmpUltS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
   FClassS(TMP, fs);
   Srli(TMP, TMP, 8);
@@ -1198,12 +1604,8 @@ void Riscv64Assembler::CmpUleS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
   FLeS(rd, fs, ft);
   Jal(ZERO, 8);
 
+  // NaN, RV will return 0 if we do not do this
   Addi(rd, ZERO, 1);  // unordered true;
-}
-
-void Riscv64Assembler::CmpOrS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
-  CmpUnS(rd, fs, ft);
-  Sub(rd, ZERO, rd);
 }
 
 void Riscv64Assembler::CmpUneS(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
@@ -1325,1156 +1727,6 @@ void Riscv64Assembler::CmpNeD(GpuRegister rd, FpuRegister fs, FpuRegister ft) {
   Sltiu(rd, rd, 1);
 }
 
-#if 0
-void Riscv64Assembler::Cvtsw(FpuRegister fd, FpuRegister fs) {
-  UNUSED(fd);
-  UNUSED(fs);
-  assert(0);
-}
-
-void Riscv64Assembler::Cvtdw(FpuRegister fd, FpuRegister fs) {
-  UNUSED(fd);
-  UNUSED(fs);
-  assert(0);
-}
-#endif
-
-void Riscv64Assembler::Cvtsd(FpuRegister fd, FpuRegister fs) {
-  FCvtSD(fd, fs);
-}
-
-void Riscv64Assembler::Cvtds(FpuRegister fd, FpuRegister fs) {
-  FCvtDS(fd, fs);
-}
-
-#if 0
-void Riscv64Assembler::Cvtsl(FpuRegister fd, FpuRegister fs) {
-  UNUSED(fd);
-  UNUSED(fs);
-  assert(0);
-}
-
-void Riscv64Assembler::Cvtdl(FpuRegister fd, FpuRegister fs) {
-  UNUSED(fd);
-  UNUSED(fs);
-  assert(0);
-}
-#endif
-
-void Riscv64Assembler::Mfc1(GpuRegister rt, FpuRegister fs) {
-  // Move float32 in fs to rt
-  FMvXW(rt, fs);
-}
-
-void Riscv64Assembler::Mfhc1(GpuRegister rt, FpuRegister fs) {
-  FMvXD(rt, fs);
-  Srli(rt, rt, 32);
-}
-
-void Riscv64Assembler::Mtc1(GpuRegister rt, FpuRegister fs) {
-  // Move float32 in rt to fs
-  FMvWX(fs, rt);
-}
-
-void Riscv64Assembler::Mthc1(GpuRegister rt, FpuRegister fs) {
-  FMvXD(TMP, fs);
-  Slli(TMP, TMP, 32);
-  Srli(TMP, TMP, 32);
-  Slli(rt, rt, 32);
-  Or(rt, rt, TMP);
-  FMvDX(fs, rt);
-}
-
-void Riscv64Assembler::Dmfc1(GpuRegister rt, FpuRegister fs) {
-  // Move double in fs to rt
-  FMvXD(rt, fs);
-}
-
-void Riscv64Assembler::Dmtc1(GpuRegister rt, FpuRegister fs) {
-  // Move double in rt to fs
-  FMvDX(fs, rt);
-}
-
-void Riscv64Assembler::Lwc1(FpuRegister ft, GpuRegister rs, uint16_t imm12) {
-  FLw(ft, rs, imm12);  // warning: lw offset max is 12bits, not 16bits
-}
-
-void Riscv64Assembler::Ldc1(FpuRegister ft, GpuRegister rs, uint16_t imm12) {
-  FLd(ft, rs, imm12);  // warning: lw offset max is 12bits, not 16bits
-}
-
-void Riscv64Assembler::Swc1(FpuRegister ft, GpuRegister rs, uint16_t imm12) {
-  FSw(ft, rs, imm12);  // warning: lw offset max is 12bits, not 16bits
-}
-
-void Riscv64Assembler::Sdc1(FpuRegister ft, GpuRegister rs, uint16_t imm12) {
-  FSd(ft, rs, imm12);  // warning: lw offset max is 12bits, not 16bits
-}
-
-void Riscv64Assembler::Break() {
-  Ebreak();
-}
-
-void Riscv64Assembler::Nop() {
-  Addi(ZERO, ZERO, 0);
-}
-
-void Riscv64Assembler::Move(GpuRegister rd, GpuRegister rs) {
-  Or(rd, rs, ZERO);
-}
-
-void Riscv64Assembler::Clear(GpuRegister rd) {
-  Move(rd, ZERO);
-}
-
-void Riscv64Assembler::Not(GpuRegister rd, GpuRegister rs) {
-  Xori(rd, rs, -1);
-}
-
-void Riscv64Assembler::AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Asub_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::Asub_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x11);
-}
-
-void Riscv64Assembler::MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x10);
-}
-
-void Riscv64Assembler::Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x3, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x3, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x3, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x3, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0xe);
-}
-
-void Riscv64Assembler::FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::Ffint_sW(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2RF(0x19e, 0x0, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::Ffint_sD(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2RF(0x19e, 0x1, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::Ftint_sW(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2RF(0x19c, 0x0, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::Ftint_sD(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2RF(0x19c, 0x1, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x0, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x1, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x2, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x0, 0x3, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0xd);
-}
-
-void Riscv64Assembler::SlliB(VectorRegister wd, VectorRegister ws, int shamt3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(shamt3)) << shamt3;
-  EmitMsaBIT(0x0, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SlliH(VectorRegister wd, VectorRegister ws, int shamt4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(shamt4)) << shamt4;
-  EmitMsaBIT(0x0, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SlliW(VectorRegister wd, VectorRegister ws, int shamt5) {
-  CHECK(HasMsa());
-  CHECK(IsUint<5>(shamt5)) << shamt5;
-  EmitMsaBIT(0x0, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SlliD(VectorRegister wd, VectorRegister ws, int shamt6) {
-  CHECK(HasMsa());
-  CHECK(IsUint<6>(shamt6)) << shamt6;
-  EmitMsaBIT(0x0, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SraiB(VectorRegister wd, VectorRegister ws, int shamt3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(shamt3)) << shamt3;
-  EmitMsaBIT(0x1, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SraiH(VectorRegister wd, VectorRegister ws, int shamt4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(shamt4)) << shamt4;
-  EmitMsaBIT(0x1, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SraiW(VectorRegister wd, VectorRegister ws, int shamt5) {
-  CHECK(HasMsa());
-  CHECK(IsUint<5>(shamt5)) << shamt5;
-  EmitMsaBIT(0x1, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SraiD(VectorRegister wd, VectorRegister ws, int shamt6) {
-  CHECK(HasMsa());
-  CHECK(IsUint<6>(shamt6)) << shamt6;
-  EmitMsaBIT(0x1, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SrliB(VectorRegister wd, VectorRegister ws, int shamt3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(shamt3)) << shamt3;
-  EmitMsaBIT(0x2, shamt3 | kMsaDfMByteMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SrliH(VectorRegister wd, VectorRegister ws, int shamt4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(shamt4)) << shamt4;
-  EmitMsaBIT(0x2, shamt4 | kMsaDfMHalfwordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SrliW(VectorRegister wd, VectorRegister ws, int shamt5) {
-  CHECK(HasMsa());
-  CHECK(IsUint<5>(shamt5)) << shamt5;
-  EmitMsaBIT(0x2, shamt5 | kMsaDfMWordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::SrliD(VectorRegister wd, VectorRegister ws, int shamt6) {
-  CHECK(HasMsa());
-  CHECK(IsUint<6>(shamt6)) << shamt6;
-  EmitMsaBIT(0x2, shamt6 | kMsaDfMDoublewordMask, ws, wd, 0x9);
-}
-
-void Riscv64Assembler::MoveV(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsaBIT(0x1, 0x3e, ws, wd, 0x19);
-}
-
-void Riscv64Assembler::SplatiB(VectorRegister wd, VectorRegister ws, int n4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(n4)) << n4;
-  EmitMsaELM(0x1, n4 | kMsaDfNByteMask, ws, wd, 0x19);
-}
-
-void Riscv64Assembler::SplatiH(VectorRegister wd, VectorRegister ws, int n3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(n3)) << n3;
-  EmitMsaELM(0x1, n3 | kMsaDfNHalfwordMask, ws, wd, 0x19);
-}
-
-void Riscv64Assembler::SplatiW(VectorRegister wd, VectorRegister ws, int n2) {
-  CHECK(HasMsa());
-  CHECK(IsUint<2>(n2)) << n2;
-  EmitMsaELM(0x1, n2 | kMsaDfNWordMask, ws, wd, 0x19);
-}
-
-void Riscv64Assembler::SplatiD(VectorRegister wd, VectorRegister ws, int n1) {
-  CHECK(HasMsa());
-  CHECK(IsUint<1>(n1)) << n1;
-  EmitMsaELM(0x1, n1 | kMsaDfNDoublewordMask, ws, wd, 0x19);
-}
-
-void Riscv64Assembler::Copy_sB(GpuRegister rd, VectorRegister ws, int n4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(n4)) << n4;
-  EmitMsaELM(0x2, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_sH(GpuRegister rd, VectorRegister ws, int n3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(n3)) << n3;
-  EmitMsaELM(0x2, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_sW(GpuRegister rd, VectorRegister ws, int n2) {
-  CHECK(HasMsa());
-  CHECK(IsUint<2>(n2)) << n2;
-  EmitMsaELM(0x2, n2 | kMsaDfNWordMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_sD(GpuRegister rd, VectorRegister ws, int n1) {
-  CHECK(HasMsa());
-  CHECK(IsUint<1>(n1)) << n1;
-  EmitMsaELM(0x2, n1 | kMsaDfNDoublewordMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_uB(GpuRegister rd, VectorRegister ws, int n4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(n4)) << n4;
-  EmitMsaELM(0x3, n4 | kMsaDfNByteMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_uH(GpuRegister rd, VectorRegister ws, int n3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(n3)) << n3;
-  EmitMsaELM(0x3, n3 | kMsaDfNHalfwordMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::Copy_uW(GpuRegister rd, VectorRegister ws, int n2) {
-  CHECK(HasMsa());
-  CHECK(IsUint<2>(n2)) << n2;
-  EmitMsaELM(0x3, n2 | kMsaDfNWordMask, ws, static_cast<VectorRegister>(rd), 0x19);
-}
-
-void Riscv64Assembler::InsertB(VectorRegister wd, GpuRegister rs, int n4) {
-  CHECK(HasMsa());
-  CHECK(IsUint<4>(n4)) << n4;
-  EmitMsaELM(0x4, n4 | kMsaDfNByteMask, static_cast<VectorRegister>(rs), wd, 0x19);
-}
-
-void Riscv64Assembler::InsertH(VectorRegister wd, GpuRegister rs, int n3) {
-  CHECK(HasMsa());
-  CHECK(IsUint<3>(n3)) << n3;
-  EmitMsaELM(0x4, n3 | kMsaDfNHalfwordMask, static_cast<VectorRegister>(rs), wd, 0x19);
-}
-
-void Riscv64Assembler::InsertW(VectorRegister wd, GpuRegister rs, int n2) {
-  CHECK(HasMsa());
-  CHECK(IsUint<2>(n2)) << n2;
-  EmitMsaELM(0x4, n2 | kMsaDfNWordMask, static_cast<VectorRegister>(rs), wd, 0x19);
-}
-
-void Riscv64Assembler::InsertD(VectorRegister wd, GpuRegister rs, int n1) {
-  CHECK(HasMsa());
-  CHECK(IsUint<1>(n1)) << n1;
-  EmitMsaELM(0x4, n1 | kMsaDfNDoublewordMask, static_cast<VectorRegister>(rs), wd, 0x19);
-}
-
-void Riscv64Assembler::FillB(VectorRegister wd, GpuRegister rs) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc0, 0x0, static_cast<VectorRegister>(rs), wd, 0x1e);
-}
-
-void Riscv64Assembler::FillH(VectorRegister wd, GpuRegister rs) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc0, 0x1, static_cast<VectorRegister>(rs), wd, 0x1e);
-}
-
-void Riscv64Assembler::FillW(VectorRegister wd, GpuRegister rs) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc0, 0x2, static_cast<VectorRegister>(rs), wd, 0x1e);
-}
-
-void Riscv64Assembler::FillD(VectorRegister wd, GpuRegister rs) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc0, 0x3, static_cast<VectorRegister>(rs), wd, 0x1e);
-}
-
-void Riscv64Assembler::LdiB(VectorRegister wd, int imm8) {
-  CHECK(HasMsa());
-  CHECK(IsInt<8>(imm8)) << imm8;
-  EmitMsaI10(0x6, 0x0, imm8 & kMsaS10Mask, wd, 0x7);
-}
-
-void Riscv64Assembler::LdiH(VectorRegister wd, int imm10) {
-  CHECK(HasMsa());
-  CHECK(IsInt<10>(imm10)) << imm10;
-  EmitMsaI10(0x6, 0x1, imm10 & kMsaS10Mask, wd, 0x7);
-}
-
-void Riscv64Assembler::LdiW(VectorRegister wd, int imm10) {
-  CHECK(HasMsa());
-  CHECK(IsInt<10>(imm10)) << imm10;
-  EmitMsaI10(0x6, 0x2, imm10 & kMsaS10Mask, wd, 0x7);
-}
-
-void Riscv64Assembler::LdiD(VectorRegister wd, int imm10) {
-  CHECK(HasMsa());
-  CHECK(IsInt<10>(imm10)) << imm10;
-  EmitMsaI10(0x6, 0x3, imm10 & kMsaS10Mask, wd, 0x7);
-}
-
-void Riscv64Assembler::LdB(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<10>(offset)) << offset;
-  EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x8, 0x0);
-}
-
-void Riscv64Assembler::LdH(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<11>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64HalfwordSize);
-  EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x8, 0x1);
-}
-
-void Riscv64Assembler::LdW(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<12>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64WordSize);
-  EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x8, 0x2);
-}
-
-void Riscv64Assembler::LdD(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<13>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64DoublewordSize);
-  EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x8, 0x3);
-}
-
-void Riscv64Assembler::StB(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<10>(offset)) << offset;
-  EmitMsaMI10(offset & kMsaS10Mask, rs, wd, 0x9, 0x0);
-}
-
-void Riscv64Assembler::StH(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<11>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64HalfwordSize);
-  EmitMsaMI10((offset >> TIMES_2) & kMsaS10Mask, rs, wd, 0x9, 0x1);
-}
-
-void Riscv64Assembler::StW(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<12>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64WordSize);
-  EmitMsaMI10((offset >> TIMES_4) & kMsaS10Mask, rs, wd, 0x9, 0x2);
-}
-
-void Riscv64Assembler::StD(VectorRegister wd, GpuRegister rs, int offset) {
-  CHECK(HasMsa());
-  CHECK(IsInt<13>(offset)) << offset;
-  CHECK_ALIGNED(offset, kRiscv64DoublewordSize);
-  EmitMsaMI10((offset >> TIMES_8) & kMsaS10Mask, rs, wd, 0x9, 0x3);
-}
-
-void Riscv64Assembler::IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x0, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x0, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x0, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x1, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x2, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x6, 0x3, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x0, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x1, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x2, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x7, 0x3, wt, ws, wd, 0x14);
-}
-
-void Riscv64Assembler::MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x1, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x12);
-}
-
-void Riscv64Assembler::FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x0, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x1, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x2, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x2, 0x3, wt, ws, wd, 0x1b);
-}
-
-void Riscv64Assembler::Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x1, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x2, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x4, 0x3, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x1, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x2, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
-  CHECK(HasMsa());
-  EmitMsa3R(0x5, 0x3, wt, ws, wd, 0x15);
-}
-
-void Riscv64Assembler::PcntB(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc1, 0x0, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::PcntH(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc1, 0x1, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::PcntW(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc1, 0x2, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::PcntD(VectorRegister wd, VectorRegister ws) {
-  CHECK(HasMsa());
-  EmitMsa2R(0xc1, 0x3, ws, wd, 0x1e);
-}
-
-void Riscv64Assembler::ReplicateFPToVectorRegister(VectorRegister dst,
-                                                  FpuRegister src,
-                                                  bool is_double) {
-  // Float or double in FPU register Fx can be considered as 0th element in vector register Wx.
-  if (is_double) {
-    SplatiD(dst, static_cast<VectorRegister>(src), 0);
-  } else {
-    SplatiW(dst, static_cast<VectorRegister>(src), 0);
-  }
-}
-
-void Riscv64Assembler::LoadConst32(GpuRegister rd, int32_t value) {
-  // Use 11-bit check here for avoiding sign-extension.
-  if (IsInt<11>(value)) {
-    Addiw(rd, ZERO, value);
-  } else {
-    int32_t l = value & 0xFFF;
-    int32_t h = value >> 12;
-    if ((l & 0x800) != 0) {
-      h += 1;  // overflow ?
-    }
-    Lui(rd, h);
-    Addiw(rd, rd, l);
-  }
-}
-
-// This function is only used for testing purposes.
-void Riscv64Assembler::RecordLoadConst64Path(int value ATTRIBUTE_UNUSED) {
-}
-
-void Riscv64Assembler::LoadConst64(GpuRegister rd, int64_t value) {
-  // TemplateLoadConst64(this, rd, value);
-  if (IsInt<32>(value)) {
-    LoadConst32(rd, value);
-  } else {
-    // Need to optimize in the future.
-    int32_t hi = value >> 32;
-    int32_t lo = value;
-
-    GpuRegister scratch = TMP2;
-
-    LoadConst32(scratch, lo);
-    LoadConst32(rd, hi);
-    Slli(rd, rd, 32);
-    Slli(scratch, scratch, 32);
-    Srli(scratch, scratch, 32);
-    Or(rd, rd, scratch);
-  }
-}
-
-void Riscv64Assembler::Addiu32(GpuRegister rt, GpuRegister rs, int32_t value) {
-  if (IsInt<12>(value)) {
-    Addiw(rt, rs, value);
-  } else {
-    LoadConst32(TMP2, value);
-    Addw(rt, rs, TMP2);
-  }
-}
-
-// TODO: don't use rtmp, use daui, dahi, dati.
-void Riscv64Assembler::Daddiu64(GpuRegister rt, GpuRegister rs, int64_t value, GpuRegister rtmp) {
-  CHECK_NE(rs, rtmp);
-  if (IsInt<12>(value)) {
-    Addi(rt, rs, value);
-  } else {
-    LoadConst64(rtmp, value);
-    Add(rt, rs, rtmp);
-  }
-}
 
 void Riscv64Assembler::Branch::InitShortOrLong(Riscv64Assembler::Branch::OffsetBits offset_size,
                                               Riscv64Assembler::Branch::Type short_type,
@@ -2573,7 +1825,6 @@ Riscv64Assembler::Branch::Branch(uint32_t location,
       lhs_reg_(lhs_reg),
       rhs_reg_(rhs_reg),
       condition_(condition) {
-  // XC-ART-TBD.
   // CHECK_NE(condition, kUncond);
   switch (condition) {
     case kCondEQ:
@@ -3411,6 +2662,22 @@ void Riscv64Assembler::Bnez(GpuRegister rs, Riscv64Label* label, bool is_bare) {
   Bcond(label, is_bare, kCondNEZ, rs);
 }
 
+void Riscv64Assembler::LoadFromOffset(LoadOperandType type,
+                                     GpuRegister reg,
+                                     GpuRegister base,
+                                     int32_t offset) {
+  LoadFromOffset<>(type, reg, base, offset);
+}
+
+void Riscv64Assembler::LoadFpuFromOffset(LoadOperandType type,
+                                        FpuRegister reg,
+                                        GpuRegister base,
+                                        int32_t offset) {
+  LoadFpuFromOffset<>(type, reg, base, offset);
+}
+
+/////////////////////////////// RV64 MACRO Instructions END ///////////////////////////////
+
 void Riscv64Assembler::AdjustBaseAndOffset(GpuRegister& base,
                                           int32_t& offset,
                                           bool is_doubleword) {
@@ -3537,13 +2804,13 @@ void Riscv64Assembler::AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
   const int32_t kMaxOffsetForSimpleAdjustment = kMaxDeltaForSimpleAdjustment + kMaxLoadStoreOffset;
 
   if (IsInt<12>(offset)) {
-    Daddiu(AT, base, offset);
+    Addiu(AT, base, offset);
     offset = 0;
   } else if (0 <= offset && offset <= kMaxOffsetForSimpleAdjustment) {
-    Daddiu(AT, base, kMaxDeltaForSimpleAdjustment);
+    Addiu(AT, base, kMaxDeltaForSimpleAdjustment);
     offset -= kMaxDeltaForSimpleAdjustment;
   } else if (-kMaxOffsetForSimpleAdjustment <= offset && offset < 0) {
-    Daddiu(AT, base, -kMaxDeltaForSimpleAdjustment);
+    Addiu(AT, base, -kMaxDeltaForSimpleAdjustment);
     offset += kMaxDeltaForSimpleAdjustment;
   } else {
     // Let's treat `offset` as 64-bit to simplify handling of sign
@@ -3564,13 +2831,13 @@ void Riscv64Assembler::AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
     int16_t mid = Low16Bits(tmp);
     int16_t upper = High16Bits(tmp);
     int16_t hi = Low16Bits(High32Bits(tmp));
-    Daui(AT, base, upper);
+    Aui(AT, base, upper);
     if (hi != 0) {
       CHECK_EQ(hi, 1);
-      Dahi(AT, hi);
+      Ahi(AT, hi);
     }
     if (mid != 0) {
-      Daddiu(AT, AT, mid);
+      Addiu(AT, AT, mid);
     }
     offset = low;
   }
@@ -3579,19 +2846,6 @@ void Riscv64Assembler::AdjustBaseOffsetAndElementSizeShift(GpuRegister& base,
   CHECK(IsInt<10>(offset >> element_size_shift));
 }
 
-void Riscv64Assembler::LoadFromOffset(LoadOperandType type,
-                                     GpuRegister reg,
-                                     GpuRegister base,
-                                     int32_t offset) {
-  LoadFromOffset<>(type, reg, base, offset);
-}
-
-void Riscv64Assembler::LoadFpuFromOffset(LoadOperandType type,
-                                        FpuRegister reg,
-                                        GpuRegister base,
-                                        int32_t offset) {
-  LoadFpuFromOffset<>(type, reg, base, offset);
-}
 
 void Riscv64Assembler::EmitLoad(ManagedRegister m_dst, GpuRegister src_register, int32_t src_offset,
                                size_t size) {
@@ -3732,14 +2986,14 @@ void Riscv64Assembler::RemoveFrame(size_t frame_size,
 void Riscv64Assembler::IncreaseFrameSize(size_t adjust) {
   CHECK_ALIGNED(adjust, kFramePointerSize);
   DCHECK(!overwriting_);
-  Daddiu64(SP, SP, static_cast<int32_t>(-adjust));
+  Addiu64(SP, SP, static_cast<int32_t>(-adjust));
   cfi_.AdjustCFAOffset(adjust);
 }
 
 void Riscv64Assembler::DecreaseFrameSize(size_t adjust) {
   CHECK_ALIGNED(adjust, kFramePointerSize);
   DCHECK(!overwriting_);
-  Daddiu64(SP, SP, static_cast<int32_t>(adjust));
+  Addiu64(SP, SP, static_cast<int32_t>(adjust));
   cfi_.AdjustCFAOffset(-adjust);
 }
 
@@ -3793,7 +3047,7 @@ void Riscv64Assembler::StoreStackOffsetToThread(ThreadOffset64 thr_offs,
                                                ManagedRegister mscratch) {
   Riscv64ManagedRegister scratch = mscratch.AsRiscv64();
   CHECK(scratch.IsGpuRegister()) << scratch;
-  Daddiu64(scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
+  Addiu64(scratch.AsGpuRegister(), SP, fr_offs.Int32Value());
   StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), S1, thr_offs.Int32Value());
 }
 
@@ -3993,7 +3247,7 @@ void Riscv64Assembler::Copy(FrameOffset dest ATTRIBUTE_UNUSED,
 }
 
 void Riscv64Assembler::MemoryBarrier(ManagedRegister mreg ATTRIBUTE_UNUSED) {
-  // TODO: sync?
+  // sync?
   UNIMPLEMENTED(FATAL) << "No RISCV64 implementation";
 }
 
@@ -4019,10 +3273,10 @@ void Riscv64Assembler::CreateHandleScopeEntry(ManagedRegister mout_reg,
       LoadConst32(out_reg.AsGpuRegister(), 0);
     }
     Beqzc(in_reg.AsGpuRegister(), &null_arg);
-    Daddiu64(out_reg.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
+    Addiu64(out_reg.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
     Bind(&null_arg);
   } else {
-    Daddiu64(out_reg.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
+    Addiu64(out_reg.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
   }
 }
 
@@ -4040,10 +3294,10 @@ void Riscv64Assembler::CreateHandleScopeEntry(FrameOffset out_off,
     // the address in the handle scope holding the reference.
     // e.g. scratch = (scratch == 0) ? 0 : (SP+handle_scope_offset)
     Beqzc(scratch.AsGpuRegister(), &null_arg);
-    Daddiu64(scratch.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
+    Addiu64(scratch.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
     Bind(&null_arg);
   } else {
-    Daddiu64(scratch.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
+    Addiu64(scratch.AsGpuRegister(), SP, handle_scope_offset.Int32Value());
   }
   StoreToOffset(kStoreDoubleword, scratch.AsGpuRegister(), SP, out_off.Int32Value());
 }
@@ -4067,12 +3321,12 @@ void Riscv64Assembler::LoadReferenceFromHandleScope(ManagedRegister mout_reg,
 
 void Riscv64Assembler::VerifyObject(ManagedRegister src ATTRIBUTE_UNUSED,
                                    bool could_be_null ATTRIBUTE_UNUSED) {
-  // TODO: not validating references
+  UNIMPLEMENTED(FATAL) << "No RISCV64 implementation";
 }
 
 void Riscv64Assembler::VerifyObject(FrameOffset src ATTRIBUTE_UNUSED,
                                    bool could_be_null ATTRIBUTE_UNUSED) {
-  // TODO: not validating references
+  UNIMPLEMENTED(FATAL) << "No RISCV64 implementation";
 }
 
 void Riscv64Assembler::Call(ManagedRegister mbase, Offset offset, ManagedRegister mscratch) {
@@ -4084,7 +3338,6 @@ void Riscv64Assembler::Call(ManagedRegister mbase, Offset offset, ManagedRegiste
                  base.AsGpuRegister(), offset.Int32Value());
   Jalr(scratch.AsGpuRegister());
   Nop();
-  // TODO: place reference map on call
 }
 
 void Riscv64Assembler::Call(FrameOffset base, Offset offset, ManagedRegister mscratch) {
@@ -4097,7 +3350,6 @@ void Riscv64Assembler::Call(FrameOffset base, Offset offset, ManagedRegister msc
                  scratch.AsGpuRegister(), offset.Int32Value());
   Jalr(scratch.AsGpuRegister());
   Nop();
-  // TODO: place reference map on call
 }
 
 void Riscv64Assembler::CallFromThread(ThreadOffset64 offset ATTRIBUTE_UNUSED,
@@ -4145,724 +3397,1290 @@ void Riscv64Assembler::EmitExceptionPoll(Riscv64ExceptionSlowPath* exception) {
   Break();
 }
 
-// TODO dvt porting...
-void Riscv64Assembler::EmitI5(uint16_t funct7, uint16_t imm5, GpuRegister rs1, int funct3, GpuRegister rd, int opcode) {
-  uint32_t encoding = static_cast<uint32_t>(funct7) << 25 |
-                      (static_cast<uint32_t>(imm5) & 0x1F) << 20 |
-                      static_cast<uint32_t>(rs1) << 15 |
-                      static_cast<uint32_t>(funct3) << 12 |
-                      static_cast<uint32_t>(rd) << 7 |
-                      opcode;
-  Emit(encoding);
+
+/////////////////////////////// RV64 "V" Instructions  START ///////////////////////////////
+#ifdef RISCV64_VARIANTS_HAS_VECTOR
+void Riscv64Assembler::AndV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::OrV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::NorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::XorV(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::AddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::AddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::AddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::AddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::SubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::SubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::SubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::SubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Asub_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::MulvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::MulvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::MulvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::MulvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Div_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
+}
+
+void Riscv64Assembler::Mod_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::EmitI6(uint16_t funct6, uint16_t imm6, GpuRegister rs1, int funct3, GpuRegister rd, int opcode) {
-  uint32_t encoding = static_cast<uint32_t>(funct6) << 25 |
-                      (static_cast<uint32_t>(imm6) & 0x3F) << 20 |
-                      static_cast<uint32_t>(rs1) << 15 |
-                      static_cast<uint32_t>(funct3) << 12 |
-                      static_cast<uint32_t>(rd) << 7 |
-                      opcode;
-  Emit(encoding);
+void Riscv64Assembler::Mod_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::EmitB(uint16_t imm, GpuRegister rs2, GpuRegister rs1, int funct3, int opcode) {
-  CHECK(IsUint<13>(imm)) << imm;
-  uint32_t encoding = (static_cast<uint32_t>(imm)&0x1000) >> 12 << 31 |
-                      (static_cast<uint32_t>(imm)&0x07E0) >> 5 << 25 |
-                      static_cast<uint32_t>(rs2) << 20 |
-                      static_cast<uint32_t>(rs1) << 15 |
-                      static_cast<uint32_t>(funct3) << 12 |
-                      (static_cast<uint32_t>(imm)&0x1E) >> 1 << 8 |
-                      (static_cast<uint32_t>(imm)&0x0800) >> 11 << 7|
-                      opcode;
-  Emit(encoding);
+void Riscv64Assembler::Mod_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::EmitU(uint32_t imm, GpuRegister rd, int opcode) {
-  uint32_t encoding = static_cast<uint32_t>(imm) << 12 |
-                      static_cast<uint32_t>(rd) << 7 |
-                      opcode;
-  Emit(encoding);
+void Riscv64Assembler::Mod_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::EmitJ(uint32_t imm20, GpuRegister rd, int opcode) {
-  CHECK(IsUint<21>(imm20)) << imm20;
-  // Riscv JAL: J-Imm = (offset x 2), encode (imm20>>1) into instruction.
-  uint32_t encoding = (static_cast<uint32_t>(imm20)&0x100000) >>20<< 31 |
-                      (static_cast<uint32_t>(imm20)&0x07FE) >> 1 << 21 |
-                      (static_cast<uint32_t>(imm20)&0x800) >> 11 << 20 |
-                      (static_cast<uint32_t>(imm20)&0xFF000) >> 12 << 12 |
-                      static_cast<uint32_t>(rd) << 7 |
-                      opcode;
-  Emit(encoding);
+void Riscv64Assembler::Mod_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Add(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x0, rs2, rs1, 0x0, rd, 0x33);
+void Riscv64Assembler::Mod_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sub(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x20, rs2, rs1, 0x0, rd, 0x33);
+void Riscv64Assembler::Mod_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sll(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x01, rd, 0x33);
+void Riscv64Assembler::Mod_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Slt(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x02, rd, 0x33);
+void Riscv64Assembler::Add_aB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sltu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x03, rd, 0x33);
+void Riscv64Assembler::Add_aH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Xor(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x04, rd, 0x33);
+void Riscv64Assembler::Add_aW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Srl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x05, rd, 0x33);
+void Riscv64Assembler::Add_aD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sra(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x20, rs2, rs1, 0x05, rd, 0x33);
+void Riscv64Assembler::Ave_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Or(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x06, rd, 0x33);
+void Riscv64Assembler::Ave_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::And(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x00, rs2, rs1, 0x07, rd, 0x33);
+void Riscv64Assembler::Ave_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32I-I
-void Riscv64Assembler::Jalr(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x0, rd, 0x67);
+void Riscv64Assembler::Ave_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Lb(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x0, rd, 0x03);
+void Riscv64Assembler::Ave_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Lh(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x1, rd, 0x03);
+void Riscv64Assembler::Ave_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Lw(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x2, rd, 0x03);
+void Riscv64Assembler::Ave_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Lbu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x4, rd, 0x03);
+void Riscv64Assembler::Ave_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Lhu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x5, rd, 0x03);
+void Riscv64Assembler::Aver_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Addi(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x0, rd, 0x13);
+void Riscv64Assembler::Aver_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Slti(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x2, rd, 0x13);
+void Riscv64Assembler::Aver_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sltiu(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x3, rd, 0x13);
+void Riscv64Assembler::Aver_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Xori(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x4, rd, 0x13);
+void Riscv64Assembler::Aver_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Ori(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x6, rd, 0x13);
+void Riscv64Assembler::Aver_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Andi(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x7, rd, 0x13);
+void Riscv64Assembler::Aver_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Slli(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI6(0x0, offset, rs1, 0x1, rd, 0x13);
+void Riscv64Assembler::Aver_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Srli(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI6(0x0, offset, rs1, 0x5, rd, 0x13);
+void Riscv64Assembler::Max_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Srai(GpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI6(0x20, offset, rs1, 0x5, rd, 0x13);
+void Riscv64Assembler::Max_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Fence(uint8_t pred, uint8_t succ) {
-  EmitI(0x0 << 8 | pred << 4 | succ, 0x0, 0x0, 0x0, 0xf);
+void Riscv64Assembler::Max_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FenceI() {
-  EmitI(0x0 << 6| 0x0 << 4 | 0x0, 0x0, 0x1, 0x0, 0xf);
+void Riscv64Assembler::Max_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Ecall() {
-  EmitI(0x0, 0x0, 0x0, 0x0, 0x73);
+void Riscv64Assembler::Max_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Ebreak() {
-  EmitI(0x1, 0x0, 0x0, 0x0, 0x73);
+void Riscv64Assembler::Max_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrw(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
-  EmitI(csr, rs1, 0x1, rd, 0x73);
+void Riscv64Assembler::Max_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrs(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
-  EmitI(csr, rs1, 0x2, rd, 0x73);
+void Riscv64Assembler::Max_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrc(GpuRegister rd, GpuRegister rs1, uint16_t csr) {
-  EmitI(csr, rs1, 0x3, rd, 0x73);
+void Riscv64Assembler::Min_sB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrwi(GpuRegister rd, uint16_t csr, uint8_t zimm) {
-  EmitI(csr, zimm, 0x5, rd, 0x73);
+void Riscv64Assembler::Min_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrsi(GpuRegister rd, uint16_t csr, uint8_t zimm) {
-  EmitI(csr, zimm, 0x6, rd, 0x73);
+void Riscv64Assembler::Min_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Csrrci(GpuRegister rd, uint16_t csr, uint8_t zimm) {
-  EmitI(csr, zimm, 0x7, rd, 0x73);
+void Riscv64Assembler::Min_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32I-S
-void Riscv64Assembler::Sb(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
-  EmitS(offset, rs2, rs1, 0x0, 0x23);
+void Riscv64Assembler::Min_uB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sh(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
-  EmitS(offset, rs2, rs1, 0x1, 0x23);
+void Riscv64Assembler::Min_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sw(GpuRegister rs2, GpuRegister rs1, uint16_t offset) {
-  EmitS(offset, rs2, rs1, 0x2, 0x23);
+void Riscv64Assembler::Min_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32I-B
-void Riscv64Assembler::Beq(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x0, 0x63);
+void Riscv64Assembler::Min_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Bne(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x1, 0x63);
+void Riscv64Assembler::FaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Blt(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x4, 0x63);
+void Riscv64Assembler::FaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Bge(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x5, 0x63);
+void Riscv64Assembler::FsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Bltu(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x6, 0x63);
+void Riscv64Assembler::FsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Bgeu(GpuRegister rs1, GpuRegister rs2, uint16_t offset) {
-  EmitB(offset, rs2, rs1, 0x7, 0x63);
+void Riscv64Assembler::FmulW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32I-U
-void Riscv64Assembler::Lui(GpuRegister rd, uint32_t imm20) {
-  EmitU(imm20, rd, 0x37);
+void Riscv64Assembler::FmulD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Auipc(GpuRegister rd, uint32_t imm20) {
-  EmitU(imm20, rd, 0x17);
+void Riscv64Assembler::FdivW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32I-J
-void Riscv64Assembler::Jal(GpuRegister rd, uint32_t imm20) {
-  EmitJ(imm20, rd, 0x6F);
+void Riscv64Assembler::FdivD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV64I-R
-void Riscv64Assembler::Addw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x0, rs2, rs1, 0x0, rd, 0x3b);
+void Riscv64Assembler::FmaxW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Subw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x20, rs2, rs1, 0x0, rd, 0x3b);
+void Riscv64Assembler::FmaxD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sllw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x0, rs2, rs1, 0x1, rd, 0x3b);
+void Riscv64Assembler::FminW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Srlw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x0, rs2, rs1, 0x5, rd, 0x3b);
+void Riscv64Assembler::FminD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sraw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x20, rs2, rs1, 0x5, rd, 0x3b);
+void Riscv64Assembler::Ffint_sW(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-// RV64I-I
-void Riscv64Assembler::Lwu(GpuRegister rd, GpuRegister rs1, uint16_t imm12) {
-  EmitI(imm12, rs1, 0x6, rd, 0x3);
+void Riscv64Assembler::Ffint_sD(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::Ld(GpuRegister rd, GpuRegister rs1, uint16_t imm12) {
-  EmitI(imm12, rs1, 0x3, rd, 0x3);
+void Riscv64Assembler::Ftint_sW(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::Addiw(GpuRegister rd, GpuRegister rs1, int16_t imm12) {
-  CHECK(imm12 >= -2048) << imm12;
-  CHECK(imm12 < 4096) << imm12;
-  EmitI(imm12, rs1, 0x0, rd, 0x1b);
+void Riscv64Assembler::Ftint_sD(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::Slliw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
-  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
-  EmitR(0x0, shamt, rs1, 0x1, rd, 0x1b);  // borrow EmitR to implement this function
+void Riscv64Assembler::SllB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Srliw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
-  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
-  EmitR(0x0, shamt, rs1, 0x5, rd, 0x1b);  // borrow EmitR to implement this function
+void Riscv64Assembler::SllH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Sraiw(GpuRegister rd, GpuRegister rs1, int16_t shamt) {
-  CHECK(static_cast<uint16_t>(shamt) < 32) << shamt;
-  EmitR(0x20, shamt, rs1, 0x5, rd, 0x1b);  // borrow EmitR to implement this function
+void Riscv64Assembler::SllW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV64I-S
-void Riscv64Assembler::Sd(GpuRegister rs2, GpuRegister rs1, uint16_t imm12) {
-  EmitS(imm12, rs2, rs1, 0x3, 0x23);
+void Riscv64Assembler::SllD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32M-R
-void Riscv64Assembler::Mul(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x0, rd, 0x33);
+void Riscv64Assembler::SraB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Mulh(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x1, rd, 0x33);
+void Riscv64Assembler::SraH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Mulhsu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x2, rd, 0x33);
+void Riscv64Assembler::SraW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Mulhu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x3, rd, 0x33);
+void Riscv64Assembler::SraD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Div(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x4, rd, 0x33);
+void Riscv64Assembler::SrlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Divu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x5, rd, 0x33);
+void Riscv64Assembler::SrlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Rem(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x6, rd, 0x33);
+void Riscv64Assembler::SrlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::Remu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x7, rd, 0x33);
+void Riscv64Assembler::SrlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV64M-R
-void Riscv64Assembler::Mulw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x0, rd, 0x3b);
+void Riscv64Assembler::SlliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt3);
 }
 
-void Riscv64Assembler::Divw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x4, rd, 0x3b);
+void Riscv64Assembler::SlliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt4);
 }
 
-void Riscv64Assembler::Divuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x5, rd, 0x3b);
+void Riscv64Assembler::SlliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt5);
 }
 
-void Riscv64Assembler::Remw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x6, rd, 0x3b);
+void Riscv64Assembler::SlliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt6);
 }
 
-void Riscv64Assembler::Remuw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, 0x7, rd, 0x3b);
+void Riscv64Assembler::SraiB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt3);
 }
 
-// RV32A
-void Riscv64Assembler::LrW(GpuRegister rd, GpuRegister rs1) {
-  EmitR4(0x2, 0x0, 0x0, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SraiH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt4);
 }
 
-void Riscv64Assembler::ScW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x3, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SraiW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt5);
 }
 
-void Riscv64Assembler::AmoSwapW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x1, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SraiD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt6);
 }
 
-void Riscv64Assembler::AmoAddW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x0, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SrliB(VectorRegister wd, VectorRegister ws, int shamt3) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt3);
 }
 
-void Riscv64Assembler::AmoXorW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x4, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SrliH(VectorRegister wd, VectorRegister ws, int shamt4) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt4);
 }
 
-void Riscv64Assembler::AmoAndW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0xc, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SrliW(VectorRegister wd, VectorRegister ws, int shamt5) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt5);
 }
 
-void Riscv64Assembler::AmoOrW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x8, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SrliD(VectorRegister wd, VectorRegister ws, int shamt6) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(shamt6);
 }
 
-void Riscv64Assembler::AmoMinW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x10, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::MoveV(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::AmoMaxW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x14, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SplatiB(VectorRegister wd, VectorRegister ws, int n4) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(n4);
 }
 
-void Riscv64Assembler::AmoMinuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x18, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SplatiH(VectorRegister wd, VectorRegister ws, int n3) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(n3);
 }
 
-void Riscv64Assembler::AmoMaxuW(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x1c, 0x0, rs2, rs1, 0x2, rd, 0x2f);
+void Riscv64Assembler::SplatiW(VectorRegister wd, VectorRegister ws, int n2) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(n2);
 }
 
-// RV64A
-void Riscv64Assembler::LrD(GpuRegister rd, GpuRegister rs1) {
-  EmitR4(0x2, 0x0, 0x0, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::SplatiD(VectorRegister wd, VectorRegister ws, int n1) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(n1);
 }
 
-void Riscv64Assembler::ScD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x3, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_sB(GpuRegister rd, VectorRegister ws, int n4) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n4);
 }
 
-void Riscv64Assembler::AmoSwapD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x1, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_sH(GpuRegister rd, VectorRegister ws, int n3) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n3);
 }
 
-void Riscv64Assembler::AmoAddD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x0, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_sW(GpuRegister rd, VectorRegister ws, int n2) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n2);
 }
 
-void Riscv64Assembler::AmoXorD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x4, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_sD(GpuRegister rd, VectorRegister ws, int n1) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n1);
 }
 
-void Riscv64Assembler::AmoAndD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0xc, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_uB(GpuRegister rd, VectorRegister ws, int n4) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n4);
 }
 
-void Riscv64Assembler::AmoOrD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x8, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_uH(GpuRegister rd, VectorRegister ws, int n3) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n3);
 }
 
-void Riscv64Assembler::AmoMinD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x10, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::Copy_uW(GpuRegister rd, VectorRegister ws, int n2) {
+  UNUSED(rd);
+  UNUSED(ws);
+  UNUSED(n2);
 }
 
-void Riscv64Assembler::AmoMaxD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x14, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::InsertB(VectorRegister wd, GpuRegister rs, int n4) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(n4);
 }
 
-void Riscv64Assembler::AmoMinuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x18, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::InsertH(VectorRegister wd, GpuRegister rs, int n3) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(n3);
 }
 
-void Riscv64Assembler::AmoMaxuD(GpuRegister rd, GpuRegister rs2, GpuRegister rs1) {
-  EmitR4(0x1c, 0x0, rs2, rs1, 0x3, rd, 0x2f);
+void Riscv64Assembler::InsertW(VectorRegister wd, GpuRegister rs, int n2) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(n2);
 }
 
-// RV32F-I
-void Riscv64Assembler::FLw(FpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x2, rd, 0x7);
+void Riscv64Assembler::InsertD(VectorRegister wd, GpuRegister rs, int n1) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(n1);
 }
 
-// RV32F-S
-void Riscv64Assembler::FSw(FpuRegister rs2, GpuRegister rs1, uint16_t offset) {
-  EmitS(offset, rs2, rs1, 0x2, 0x27);
+void Riscv64Assembler::FillB(VectorRegister wd, GpuRegister rs) {
+  UNUSED(wd);
+  UNUSED(rs);
 }
 
-// RV32F-R
-void Riscv64Assembler::FMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x43);
+void Riscv64Assembler::FillH(VectorRegister wd, GpuRegister rs) {
+  UNUSED(wd);
+  UNUSED(rs);
 }
 
-void Riscv64Assembler::FMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x47);
+void Riscv64Assembler::FillW(VectorRegister wd, GpuRegister rs) {
+  UNUSED(wd);
+  UNUSED(rs);
 }
 
-void Riscv64Assembler::FNMSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x4b);
+void Riscv64Assembler::FillD(VectorRegister wd, GpuRegister rs) {
+  UNUSED(wd);
+  UNUSED(rs);
 }
 
-void Riscv64Assembler::FNMAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x0, rs2, rs1, FRM, rd, 0x4f);
+void Riscv64Assembler::LdiB(VectorRegister wd, int imm8) {
+  UNUSED(wd);
+  UNUSED(imm8);
 }
 
-void Riscv64Assembler::FAddS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x0, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::LdiH(VectorRegister wd, int imm10) {
+  UNUSED(wd);
+  UNUSED(imm10);
 }
 
-void Riscv64Assembler::FSubS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x4, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::LdiW(VectorRegister wd, int imm10) {
+  UNUSED(wd);
+  UNUSED(imm10);
 }
 
-void Riscv64Assembler::FMulS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x8, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::LdiD(VectorRegister wd, int imm10) {
+  UNUSED(wd);
+  UNUSED(imm10);
 }
 
-void Riscv64Assembler::FDivS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0xc, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::LdB(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FSqrtS(FpuRegister rd, FpuRegister rs1) {
-  EmitR(0x2c, 0x0, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::LdH(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FSgnjS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x10, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::LdW(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FSgnjnS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x10, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::LdD(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FSgnjxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x10, rs2, rs1, 0x2, rd, 0x53);
+void Riscv64Assembler::StB(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FMinS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x14, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::StH(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FMaxS(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x14, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::StW(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FCvtWS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
-  EmitR(0x60, 0x0, rs1, frm, rd, 0x53);
+void Riscv64Assembler::StD(VectorRegister wd, GpuRegister rs, int offset) {
+  UNUSED(wd);
+  UNUSED(rs);
+  UNUSED(offset);
 }
 
-void Riscv64Assembler::FCvtWuS(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x60, 0x1, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvlB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMvXW(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x70, 0x0, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::IlvlH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FEqS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x50, rs2, rs1, 0x2, rd, 0x53);
+void Riscv64Assembler::IlvlW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FLtS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x50, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::IlvlD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FLeS(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x50, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::IlvrB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FClassS(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x70, 0x0, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::IlvrH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtSW(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x68, 0x0, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvrW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtSWu(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x68, 0x1, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvrD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMvWX(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x78, 0x0, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::IlvevB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV64F-R
-void Riscv64Assembler::FCvtLS(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
-  EmitR(0x60, 0x2, rs1, frm, rd, 0x53);
+void Riscv64Assembler::IlvevH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtLuS(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x60, 0x3, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvevW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtSL(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x68, 0x2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvevD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtSLu(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x68, 0x3, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::IlvodB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32D-I
-void Riscv64Assembler::FLd(FpuRegister rd, GpuRegister rs1, uint16_t offset) {
-  EmitI(offset, rs1, 0x3, rd, 0x7);
+void Riscv64Assembler::IlvodH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32D-S
-void Riscv64Assembler::FSd(FpuRegister rs2, GpuRegister rs1, uint16_t offset) {
-  EmitS(offset, rs2, rs1, 0x3, 0x27);
+void Riscv64Assembler::IlvodW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-// RV32D-R
-void Riscv64Assembler::FMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x43);
+void Riscv64Assembler::IlvodD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x47);
+void Riscv64Assembler::MaddvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FNMSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x4b);
+void Riscv64Assembler::MaddvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FNMAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2, FpuRegister rs3) {
-  EmitR4(rs3, 0x1, rs2, rs1, FRM, rd, 0x4f);
+void Riscv64Assembler::MaddvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FAddD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x1, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::MaddvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FSubD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x5, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::MsubvB(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMulD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x9, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::MsubvH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FDivD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0xd, rs2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::MsubvW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FSqrtD(FpuRegister rd, FpuRegister rs1) {
-  EmitR(0x2d, 0x0, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::MsubvD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FSgnjD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x11, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::FmaddW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FSgnjnD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x11, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::FmaddD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FSgnjxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x11, rs2, rs1, 0x2, rd, 0x53);
+void Riscv64Assembler::FmsubW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMinD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x15, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::FmsubD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FMaxD(FpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x15, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::Hadd_sH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtSD(FpuRegister rd, FpuRegister rs1) {
-  EmitR(0x20, 0x1, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::Hadd_sW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FCvtDS(FpuRegister rd, FpuRegister rs1) {
-  // EmitR(0x21, 0x0, rs1, FRM, rd, 0x53);
-  EmitR(0x21, 0x0, rs1, 0x0, rd, 0x53);  // TODO need confirm:FRM=0x0 gived by gcc compiler, why?
+void Riscv64Assembler::Hadd_sD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FEqD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x51, rs2, rs1, 0x2, rd, 0x53);
+void Riscv64Assembler::Hadd_uH(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FLtD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x51, rs2, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::Hadd_uW(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FLeD(GpuRegister rd, FpuRegister rs1, FpuRegister rs2) {
-  EmitR(0x51, rs2, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::Hadd_uD(VectorRegister wd, VectorRegister ws, VectorRegister wt) {
+  UNUSED(wd);
+  UNUSED(ws);
+  UNUSED(wt);
 }
 
-void Riscv64Assembler::FClassD(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x71, 0x0, rs1, 0x1, rd, 0x53);
+void Riscv64Assembler::PcntB(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::FCvtWD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
-  EmitR(0x61, 0x0, rs1, frm, rd, 0x53);
+void Riscv64Assembler::PcntH(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::FCvtWuD(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x61, 0x1, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::PcntW(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::FCvtDW(FpuRegister rd, GpuRegister rs1) {
-  // EmitR(0x69, 0x0, rs1, FRM, rd, 0x53);// TODO confirm FRM='000' or '111'
-  EmitR(0x69, 0x0, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::PcntD(VectorRegister wd, VectorRegister ws) {
+  UNUSED(wd);
+  UNUSED(ws);
 }
 
-void Riscv64Assembler::FCvtDWu(FpuRegister rd, GpuRegister rs1) {
-  // EmitR(0x69, 0x1, rs1, FRM, rd, 0x53);// TODO confirm FRM='000' or '111'
-  EmitR(0x69, 0x1, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::ReplicateFPToVectorRegister(VectorRegister dst,
+                                                  FpuRegister src,
+                                                  bool is_double) {
+  // Float or double in FPU register Fx can be considered as 0th element in vector register Wx.
+  if (is_double) {
+    SplatiD(dst, static_cast<VectorRegister>(src), 0);
+  } else {
+    SplatiW(dst, static_cast<VectorRegister>(src), 0);
+  }
 }
+#endif
+/////////////////////////////// RV64 "V" Instructions  END ///////////////////////////////
 
-// RV64D-R
-void Riscv64Assembler::FCvtLD(GpuRegister rd, FpuRegister rs1, FPRoundingMode frm) {
-  EmitR(0x61, 0x2, rs1, frm, rd, 0x53);
+/////////////////////////////// RV64 VARIANTS extension ////////////////
+#ifdef RISCV64_VARIANTS_THEAD
+void Riscv64Assembler::addsl(GpuRegister rd, GpuRegister rs1, GpuRegister rs2, uint8_t uimm2) {
+  EmitRsd(0x0, uimm2, rs2, rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::FCvtLuD(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x61, 0x3, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::mula(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitRsd(0x04, 0x0, rs2, rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::FMvXD(GpuRegister rd, FpuRegister rs1) {
-  EmitR(0x71, 0x0, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::muls(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitRsd(0x04, 0x1, rs2, rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::FCvtDL(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x69, 0x2, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::mveqz(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitRsd(0x08, 0x0, rs2, rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::FCvtDLu(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x69, 0x3, rs1, FRM, rd, 0x53);
+void Riscv64Assembler::mvnez(GpuRegister rd, GpuRegister rs1, GpuRegister rs2) {
+  EmitRsd(0x08, 0x1, rs2, rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::FMvDX(FpuRegister rd, GpuRegister rs1) {
-  EmitR(0x79, 0x0, rs1, 0x0, rd, 0x53);
+void Riscv64Assembler::srri(GpuRegister rd, GpuRegister rs1, uint8_t uimm6) {
+  EmitI6(0x04, uimm6, rs1, 0x1, rd, 0x0b);
 }
 
-/////////////////////////////// RV64 Ali extension ////////////////
-void Riscv64Assembler::Ff1(GpuRegister rd, GpuRegister rs1) {
-  EmitRs1d(0x43, rs1, rd, 0x0b);
+void Riscv64Assembler::srriw(GpuRegister rd, GpuRegister rs1, uint8_t uimm5) {
+  EmitR(0x0A, (uimm5 & 0x1F), rs1, 0x1, rd, 0x0b);
 }
 
-void Riscv64Assembler::Revw(GpuRegister rd, GpuRegister rs1) {
-  EmitRs1d(0x48, rs1, rd, 0x0b);
+void Riscv64Assembler::ext(GpuRegister rd, GpuRegister rs1, uint8_t uimm6_1, uint8_t uimm6_2) {
+  EmitI6(uimm6_1, uimm6_2, rs1, 0x2, rd, 0x0b);
 }
 
-void Riscv64Assembler::Rev(GpuRegister rd, GpuRegister rs1) {
-  EmitRs1d(0x41, rs1, rd, 0x0b);
+void Riscv64Assembler::extu(GpuRegister rd, GpuRegister rs1, uint8_t uimm6_1, uint8_t uimm6_2) {
+  EmitI6(uimm6_1, uimm6_2, rs1, 0x3, rd, 0x0b);
 }
-/////////////////////////////// RV64 Ali extension end ////////////
+
+void Riscv64Assembler::ff0(GpuRegister rd, GpuRegister rs1) {
+  EmitRsd(0x10, 0x2, 0x0, rs1, 0x1, rd, 0x0b);
+}
+
+void Riscv64Assembler::ff1(GpuRegister rd, GpuRegister rs1) {
+  EmitRsd(0x10, 0x3, 0x0, rs1, 0x1, rd, 0x0b);
+}
+
+void Riscv64Assembler::rev(GpuRegister rd, GpuRegister rs1) {
+  EmitRsd(0x10, 0x1, 0x0, rs1, 0x1, rd, 0x0b);
+}
+
+void Riscv64Assembler::revw(GpuRegister rd, GpuRegister rs1) {
+  EmitRsd(0x12, 0x0, 0x0, rs1, 0x1, rd, 0x0b);
+}
+
+void Riscv64Assembler::tst(GpuRegister rd, GpuRegister rs1, uint8_t uimm6) {
+  EmitI6(0x22, uimm6, rs1, 0x1, rd, 0x0b);
+}
+
+void Riscv64Assembler::tstnbz(GpuRegister rd, GpuRegister rs1) {
+  EmitRsd(0x10, 0x0, 0x0, rs1, 0x1, rd, 0x0b);
+}
+
+// load & store, in spec 16.5.
+void Riscv64Assembler::lbia(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x03, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lbib(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x01, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lbuia(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x13, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lbuib(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x11, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lwia(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0b, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lwib(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x09, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lwuia(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x1b, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lwuib(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x19, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::sbia(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x03, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::sbib(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x01, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::swia(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0b, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::swib(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x09, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::ldia(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0F, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::ldib(GpuRegister rd, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0D, uimm2, imm5, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::sdia(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0F, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::sdib(GpuRegister rs2, GpuRegister rs1, int8_t imm5, uint8_t uimm2) {
+  EmitRsd(0x0D, uimm2, imm5, rs1, 0x5, rs2, 0x0b);
+}
+
+void Riscv64Assembler::lrb(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x00, uimm2, rs2, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lrbu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x10, uimm2, rs2, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lrw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x08, uimm2, rs2, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lrwu(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x18, uimm2, rs2, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::lrd(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x0C, uimm2, rs2, rs1, 0x4, rd, 0x0b);
+}
+
+void Riscv64Assembler::srb(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x00, uimm2, rs2, rs1, 0x5, rd, 0x0b);
+}
+
+void Riscv64Assembler::srw(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x08, uimm2, rs2, rs1, 0x5, rd, 0x0b);
+}
+
+void Riscv64Assembler::srd(GpuRegister rd, GpuRegister rs1, GpuRegister rs2,  uint8_t uimm2) {
+  EmitRsd(0x0C, uimm2, rs2, rs1, 0x5, rd, 0x0b);
+}
+
+void Riscv64Assembler::ldd(GpuRegister rd1, GpuRegister rd2, GpuRegister rs1, uint8_t uimm2) {
+  EmitRsd(0x1F, uimm2, rd2, rs1, 0x4, rd1, 0x0b);
+}
+
+void Riscv64Assembler::sdd(GpuRegister rd1, GpuRegister rd2, GpuRegister rs1, uint8_t uimm2) {
+  EmitRsd(0x1F, uimm2, rd2, rs1, 0x5, rd1, 0x0b);
+}
+#endif
+/////////////////////////////// RV64 VARIANTS extension end ////////////
+
 
 }  // namespace riscv64
 }  // namespace art

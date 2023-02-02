@@ -309,17 +309,17 @@ class AssemblerRISCV64Test : public AssemblerTest<riscv64::Riscv64Assembler,
     (Base::GetAssembler()->*f)(&label1, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     __ Bind(&label1);
     (Base::GetAssembler()->*f)(&label2, is_bare);
     constexpr size_t kAdduCount2 = 64;
     for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     __ Bind(&label2);
     (Base::GetAssembler()->*f)(&label1, is_bare);
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
@@ -375,15 +375,15 @@ class AssemblerRISCV64Test : public AssemblerTest<riscv64::Riscv64Assembler,
     (Base::GetAssembler()->*f)(riscv64::A0, &label, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     __ Bind(&label);
     constexpr size_t kAdduCount2 = 64;
     for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     (Base::GetAssembler()->*f)(riscv64::A1, &label, is_bare);
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
@@ -408,15 +408,15 @@ class AssemblerRISCV64Test : public AssemblerTest<riscv64::Riscv64Assembler,
     (Base::GetAssembler()->*f)(riscv64::A0, riscv64::A1, &label, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     __ Bind(&label);
     constexpr size_t kAdduCount2 = 64;
     for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     (Base::GetAssembler()->*f)(riscv64::A2, riscv64::A3, &label, is_bare);
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
@@ -472,15 +472,15 @@ class AssemblerRISCV64Test : public AssemblerTest<riscv64::Riscv64Assembler,
     (Base::GetAssembler()->*f)(riscv64::F0, &label, is_bare);
     constexpr size_t kAdduCount1 = 63;
     for (size_t i = 0; i != kAdduCount1; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     __ Bind(&label);
     constexpr size_t kAdduCount2 = 64;
     for (size_t i = 0; i != kAdduCount2; ++i) {
-      __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+      __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
     }
     (Base::GetAssembler()->*f)(riscv64::FT11, &label, is_bare);
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
 
     std::string expected =
         ".set noreorder\n" +
@@ -577,53 +577,6 @@ TEST_F(AssemblerRISCV64Test, NegD) {
   DriverStr(RepeatFF(&riscv64::Riscv64Assembler::NegD, "neg.d ${reg1}, ${reg2}"), "neg.d");
 }
 
-TEST_F(AssemblerRISCV64Test, RoundLS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::RoundLS, "round.l.s ${reg1}, ${reg2}"), "round.l.s");
-}
-
-TEST_F(AssemblerRISCV64Test, RoundLD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::RoundLD, "round.l.d ${reg1}, ${reg2}"), "round.l.d");
-}
-
-TEST_F(AssemblerRISCV64Test, RoundWS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::RoundWS, "round.w.s ${reg1}, ${reg2}"), "round.w.s");
-}
-
-TEST_F(AssemblerRISCV64Test, RoundWD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::RoundWD, "round.w.d ${reg1}, ${reg2}"), "round.w.d");
-}
-
-TEST_F(AssemblerRISCV64Test, CeilLS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::CeilLS, "ceil.l.s ${reg1}, ${reg2}"), "ceil.l.s");
-}
-
-TEST_F(AssemblerRISCV64Test, CeilLD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::CeilLD, "ceil.l.d ${reg1}, ${reg2}"), "ceil.l.d");
-}
-
-TEST_F(AssemblerRISCV64Test, CeilWS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::CeilWS, "ceil.w.s ${reg1}, ${reg2}"), "ceil.w.s");
-}
-
-TEST_F(AssemblerRISCV64Test, CeilWD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::CeilWD, "ceil.w.d ${reg1}, ${reg2}"), "ceil.w.d");
-}
-
-TEST_F(AssemblerRISCV64Test, FloorLS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::FloorLS, "floor.l.s ${reg1}, ${reg2}"), "floor.l.s");
-}
-
-TEST_F(AssemblerRISCV64Test, FloorLD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::FloorLD, "floor.l.d ${reg1}, ${reg2}"), "floor.l.d");
-}
-
-TEST_F(AssemblerRISCV64Test, FloorWS) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::FloorWS, "floor.w.s ${reg1}, ${reg2}"), "floor.w.s");
-}
-
-TEST_F(AssemblerRISCV64Test, FloorWD) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::FloorWD, "floor.w.d ${reg1}, ${reg2}"), "floor.w.d");
-}
 
 TEST_F(AssemblerRISCV64Test, SelS) {
   DriverStr(RepeatFFF(&riscv64::Riscv64Assembler::SelS, "sel.s ${reg1}, ${reg2}, ${reg3}"), "sel.s");
@@ -785,29 +738,15 @@ TEST_F(AssemblerRISCV64Test, CmpNeD) {
             "cmp.ne.d");
 }
 
-TEST_F(AssemblerRISCV64Test, CvtDL) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtdl, "cvt.d.l ${reg1}, ${reg2}"), "cvt.d.l");
-}
-
 TEST_F(AssemblerRISCV64Test, CvtDS) {
   DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtds, "cvt.d.s ${reg1}, ${reg2}"), "cvt.d.s");
 }
 
-TEST_F(AssemblerRISCV64Test, CvtDW) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtdw, "cvt.d.w ${reg1}, ${reg2}"), "cvt.d.w");
-}
-
-TEST_F(AssemblerRISCV64Test, CvtSL) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtsl, "cvt.s.l ${reg1}, ${reg2}"), "cvt.s.l");
-}
 
 TEST_F(AssemblerRISCV64Test, CvtSD) {
   DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtsd, "cvt.s.d ${reg1}, ${reg2}"), "cvt.s.d");
 }
 
-TEST_F(AssemblerRISCV64Test, CvtSW) {
-  DriverStr(RepeatFF(&riscv64::Riscv64Assembler::Cvtsw, "cvt.s.w ${reg1}, ${reg2}"), "cvt.s.w");
-}
 
 TEST_F(AssemblerRISCV64Test, TruncWS) {
   DriverStr(RepeatFF(&riscv64::Riscv64Assembler::TruncWS, "trunc.w.s ${reg1}, ${reg2}"), "trunc.w.s");
@@ -823,30 +762,6 @@ TEST_F(AssemblerRISCV64Test, TruncLS) {
 
 TEST_F(AssemblerRISCV64Test, TruncLD) {
   DriverStr(RepeatFF(&riscv64::Riscv64Assembler::TruncLD, "trunc.l.d ${reg1}, ${reg2}"), "trunc.l.d");
-}
-
-TEST_F(AssemblerRISCV64Test, Mfc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Mfc1, "mfc1 ${reg1}, ${reg2}"), "Mfc1");
-}
-
-TEST_F(AssemblerRISCV64Test, Mfhc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Mfhc1, "mfhc1 ${reg1}, ${reg2}"), "Mfhc1");
-}
-
-TEST_F(AssemblerRISCV64Test, Mtc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Mtc1, "mtc1 ${reg1}, ${reg2}"), "Mtc1");
-}
-
-TEST_F(AssemblerRISCV64Test, Mthc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Mthc1, "mthc1 ${reg1}, ${reg2}"), "Mthc1");
-}
-
-TEST_F(AssemblerRISCV64Test, Dmfc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Dmfc1, "dmfc1 ${reg1}, ${reg2}"), "Dmfc1");
-}
-
-TEST_F(AssemblerRISCV64Test, Dmtc1) {
-  DriverStr(RepeatRF(&riscv64::Riscv64Assembler::Dmtc1, "dmtc1 ${reg1}, ${reg2}"), "Dmtc1");
 }
 
 TEST_F(AssemblerRISCV64Test, Lwc1) {
@@ -1043,12 +958,12 @@ TEST_F(AssemblerRISCV64Test, LongBeqc) {
   __ Beqc(riscv64::A0, riscv64::A1, &label);
   constexpr uint32_t kAdduCount1 = (1u << 15) + 1;
   for (uint32_t i = 0; i != kAdduCount1; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
   __ Bind(&label);
   constexpr uint32_t kAdduCount2 = (1u << 15) + 1;
   for (uint32_t i = 0; i != kAdduCount2; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
   __ Beqc(riscv64::A2, riscv64::A3, &label);
 
@@ -1178,17 +1093,6 @@ TEST_F(AssemblerRISCV64Test, LongBalc) {
 // MISC //
 //////////
 
-TEST_F(AssemblerRISCV64Test, Lwpc) {
-  // Lwpc() takes an unsigned 19-bit immediate, while the GNU assembler needs a signed offset,
-  // hence the sign extension from bit 18 with `imm - ((imm & 0x40000) << 1)`.
-  // The GNU assembler also wants the offset to be a multiple of 4, which it will shift right
-  // by 2 positions when encoding, hence `<< 2` to compensate for that shift.
-  // We capture the value of the immediate with `.set imm, {imm}` because the value is needed
-  // twice for the sign extension, but `{imm}` is substituted only once.
-  const char* code = ".set imm, {imm}\nlw ${reg}, ((imm - ((imm & 0x40000) << 1)) << 2)($pc)";
-  DriverStr(RepeatRIb(&riscv64::Riscv64Assembler::Lwpc, 19, code), "Lwpc");
-}
-
 TEST_F(AssemblerRISCV64Test, Lwupc) {
   // The comment for the Lwpc test applies here as well.
   const char* code = ".set imm, {imm}\nlwu ${reg}, ((imm - ((imm & 0x40000) << 1)) << 2)($pc)";
@@ -1203,12 +1107,6 @@ TEST_F(AssemblerRISCV64Test, Ldpc) {
 
 TEST_F(AssemblerRISCV64Test, Auipc) {
   DriverStr(RepeatRIb(&riscv64::Riscv64Assembler::Auipc, 16, "auipc ${reg}, {imm}"), "Auipc");
-}
-
-TEST_F(AssemblerRISCV64Test, Addiupc) {
-  // The comment from the Lwpc() test applies to this Addiupc() test as well.
-  const char* code = ".set imm, {imm}\naddiupc ${reg}, (imm - ((imm & 0x40000) << 1)) << 2";
-  DriverStr(RepeatRIb(&riscv64::Riscv64Assembler::Addiupc, 19, code), "Addiupc");
 }
 
 TEST_F(AssemblerRISCV64Test, Addu) {
@@ -1235,48 +1133,6 @@ TEST_F(AssemblerRISCV64Test, Subu) {
 
 TEST_F(AssemblerRISCV64Test, Dsubu) {
   DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dsubu, "dsubu ${reg1}, ${reg2}, ${reg3}"), "dsubu");
-}
-
-TEST_F(AssemblerRISCV64Test, MulR6) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::MulR6, "mul ${reg1}, ${reg2}, ${reg3}"), "mulR6");
-}
-
-TEST_F(AssemblerRISCV64Test, DivR6) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::DivR6, "div ${reg1}, ${reg2}, ${reg3}"), "divR6");
-}
-
-TEST_F(AssemblerRISCV64Test, ModR6) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::ModR6, "mod ${reg1}, ${reg2}, ${reg3}"), "modR6");
-}
-
-TEST_F(AssemblerRISCV64Test, DivuR6) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::DivuR6, "divu ${reg1}, ${reg2}, ${reg3}"),
-            "divuR6");
-}
-
-TEST_F(AssemblerRISCV64Test, ModuR6) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::ModuR6, "modu ${reg1}, ${reg2}, ${reg3}"),
-            "moduR6");
-}
-
-TEST_F(AssemblerRISCV64Test, Dmul) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dmul, "dmul ${reg1}, ${reg2}, ${reg3}"), "dmul");
-}
-
-TEST_F(AssemblerRISCV64Test, Ddiv) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Ddiv, "ddiv ${reg1}, ${reg2}, ${reg3}"), "ddiv");
-}
-
-TEST_F(AssemblerRISCV64Test, Dmod) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dmod, "dmod ${reg1}, ${reg2}, ${reg3}"), "dmod");
-}
-
-TEST_F(AssemblerRISCV64Test, Ddivu) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Ddivu, "ddivu ${reg1}, ${reg2}, ${reg3}"), "ddivu");
-}
-
-TEST_F(AssemblerRISCV64Test, Dmodu) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dmodu, "dmodu ${reg1}, ${reg2}, ${reg3}"), "dmodu");
 }
 
 TEST_F(AssemblerRISCV64Test, And) {
@@ -1349,7 +1205,7 @@ TEST_F(AssemblerRISCV64Test, Daui) {
   for (riscv64::GpuRegister* reg1 : reg1_registers) {
     for (riscv64::GpuRegister* reg2 : reg2_registers) {
       for (int64_t imm : imms) {
-        __ Daui(*reg1, *reg2, imm);
+        __ Aui(*reg1, *reg2, imm);
         expected << "daui $" << *reg1 << ", $" << *reg2 << ", " << imm << "\n";
       }
     }
@@ -1435,63 +1291,6 @@ TEST_F(AssemblerRISCV64Test, Dshd) {
   DriverStr(RepeatRR(&riscv64::Riscv64Assembler::Dshd, "dshd ${reg1}, ${reg2}"), "dshd");
 }
 
-TEST_F(AssemblerRISCV64Test, Dext) {
-  std::vector<riscv64::GpuRegister*> reg1_registers = GetRegisters();
-  std::vector<riscv64::GpuRegister*> reg2_registers = GetRegisters();
-  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 33 * 16);
-  std::ostringstream expected;
-  for (riscv64::GpuRegister* reg1 : reg1_registers) {
-    for (riscv64::GpuRegister* reg2 : reg2_registers) {
-      for (int32_t pos = 0; pos < 32; pos++) {
-        for (int32_t size = 1; size <= 32; size++) {
-          __ Dext(*reg1, *reg2, pos, size);
-          expected << "dext $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
-        }
-      }
-    }
-  }
-
-  DriverStr(expected.str(), "Dext");
-}
-
-TEST_F(AssemblerRISCV64Test, Ins) {
-  std::vector<riscv64::GpuRegister*> regs = GetRegisters();
-  WarnOnCombinations(regs.size() * regs.size() * 33 * 16);
-  std::string expected;
-  for (riscv64::GpuRegister* reg1 : regs) {
-    for (riscv64::GpuRegister* reg2 : regs) {
-      for (int32_t pos = 0; pos < 32; pos++) {
-        for (int32_t size = 1; pos + size <= 32; size++) {
-          __ Ins(*reg1, *reg2, pos, size);
-          std::ostringstream instr;
-          instr << "ins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
-          expected += instr.str();
-        }
-      }
-    }
-  }
-  DriverStr(expected, "Ins");
-}
-
-TEST_F(AssemblerRISCV64Test, DblIns) {
-  std::vector<riscv64::GpuRegister*> reg1_registers = GetRegisters();
-  std::vector<riscv64::GpuRegister*> reg2_registers = GetRegisters();
-  WarnOnCombinations(reg1_registers.size() * reg2_registers.size() * 65 * 32);
-  std::ostringstream expected;
-  for (riscv64::GpuRegister* reg1 : reg1_registers) {
-    for (riscv64::GpuRegister* reg2 : reg2_registers) {
-      for (int32_t pos = 0; pos < 64; pos++) {
-        for (int32_t size = 1; pos + size <= 64; size++) {
-          __ DblIns(*reg1, *reg2, pos, size);
-          expected << "dins $" << *reg1 << ", $" << *reg2 << ", " << pos << ", " << size << "\n";
-        }
-      }
-    }
-  }
-
-  DriverStr(expected.str(), "DblIns");
-}
-
 TEST_F(AssemblerRISCV64Test, Lsa) {
   DriverStr(RepeatRRRIb(&riscv64::Riscv64Assembler::Lsa,
                         2,
@@ -1544,14 +1343,6 @@ TEST_F(AssemblerRISCV64Test, Srav) {
   DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Srav, "srav ${reg1}, ${reg2}, ${reg3}"), "srav");
 }
 
-TEST_F(AssemblerRISCV64Test, Dsll) {
-  DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsll, 5, "dsll ${reg1}, ${reg2}, {imm}"), "dsll");
-}
-
-TEST_F(AssemblerRISCV64Test, Dsrl) {
-  DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsrl, 5, "dsrl ${reg1}, ${reg2}, {imm}"), "dsrl");
-}
-
 TEST_F(AssemblerRISCV64Test, Drotr) {
   DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Drotr, 5, "drotr ${reg1}, ${reg2}, {imm}"),
             "drotr");
@@ -1561,15 +1352,6 @@ TEST_F(AssemblerRISCV64Test, Dsra) {
   DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsra, 5, "dsra ${reg1}, ${reg2}, {imm}"), "dsra");
 }
 
-TEST_F(AssemblerRISCV64Test, Dsll32) {
-  DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsll32, 5, "dsll32 ${reg1}, ${reg2}, {imm}"),
-            "dsll32");
-}
-
-TEST_F(AssemblerRISCV64Test, Dsrl32) {
-  DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsrl32, 5, "dsrl32 ${reg1}, ${reg2}, {imm}"),
-            "dsrl32");
-}
 
 TEST_F(AssemblerRISCV64Test, Drotr32) {
   DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Drotr32, 5, "drotr32 ${reg1}, ${reg2}, {imm}"),
@@ -1579,14 +1361,6 @@ TEST_F(AssemblerRISCV64Test, Drotr32) {
 TEST_F(AssemblerRISCV64Test, Dsra32) {
   DriverStr(RepeatRRIb(&riscv64::Riscv64Assembler::Dsra32, 5, "dsra32 ${reg1}, ${reg2}, {imm}"),
             "dsra32");
-}
-
-TEST_F(AssemblerRISCV64Test, Dsllv) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dsllv, "dsllv ${reg1}, ${reg2}, ${reg3}"), "dsllv");
-}
-
-TEST_F(AssemblerRISCV64Test, Dsrlv) {
-  DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Dsrlv, "dsrlv ${reg1}, ${reg2}, ${reg3}"), "dsrlv");
 }
 
 TEST_F(AssemblerRISCV64Test, Dsrav) {
@@ -1617,22 +1391,6 @@ TEST_F(AssemblerRISCV64Test, Seleqz) {
 TEST_F(AssemblerRISCV64Test, Selnez) {
   DriverStr(RepeatRRR(&riscv64::Riscv64Assembler::Selnez, "selnez ${reg1}, ${reg2}, ${reg3}"),
             "selnez");
-}
-
-TEST_F(AssemblerRISCV64Test, Clz) {
-  DriverStr(RepeatRR(&riscv64::Riscv64Assembler::Clz, "clz ${reg1}, ${reg2}"), "clz");
-}
-
-TEST_F(AssemblerRISCV64Test, Clo) {
-  DriverStr(RepeatRR(&riscv64::Riscv64Assembler::Clo, "clo ${reg1}, ${reg2}"), "clo");
-}
-
-TEST_F(AssemblerRISCV64Test, Dclz) {
-  DriverStr(RepeatRR(&riscv64::Riscv64Assembler::Dclz, "dclz ${reg1}, ${reg2}"), "dclz");
-}
-
-TEST_F(AssemblerRISCV64Test, Dclo) {
-  DriverStr(RepeatRR(&riscv64::Riscv64Assembler::Dclo, "dclo ${reg1}, ${reg2}"), "dclo");
 }
 
 TEST_F(AssemblerRISCV64Test, LoadFromOffset) {
@@ -2629,15 +2387,15 @@ TEST_F(AssemblerRISCV64Test, LoadConst32) {
   DriverStr(expected, "LoadConst32");
 }
 
-TEST_F(AssemblerRISCV64Test, Addiu32) {
-  __ Addiu32(riscv64::A1, riscv64::A2, -0x8000);
-  __ Addiu32(riscv64::A1, riscv64::A2, +0);
-  __ Addiu32(riscv64::A1, riscv64::A2, +0x7FFF);
-  __ Addiu32(riscv64::A1, riscv64::A2, -0x8001);
-  __ Addiu32(riscv64::A1, riscv64::A2, +0x8000);
-  __ Addiu32(riscv64::A1, riscv64::A2, -0x10000);
-  __ Addiu32(riscv64::A1, riscv64::A2, +0x10000);
-  __ Addiu32(riscv64::A1, riscv64::A2, +0x12345678);
+TEST_F(AssemblerRISCV64Test, Addiuw32) {
+  __ Addiuw32(riscv64::A1, riscv64::A2, -0x8000);
+  __ Addiuw32(riscv64::A1, riscv64::A2, +0);
+  __ Addiuw32(riscv64::A1, riscv64::A2, +0x7FFF);
+  __ Addiuw32(riscv64::A1, riscv64::A2, -0x8001);
+  __ Addiuw32(riscv64::A1, riscv64::A2, +0x8000);
+  __ Addiuw32(riscv64::A1, riscv64::A2, -0x10000);
+  __ Addiuw32(riscv64::A1, riscv64::A2, +0x10000);
+  __ Addiuw32(riscv64::A1, riscv64::A2, +0x12345678);
 
   const char* expected =
       "addiu $a1, $a2, -0x8000\n"
@@ -2677,16 +2435,16 @@ struct LoadConst64Tester {
     // Clear all of the path flags.
     loadconst64_paths_ = art::riscv64::kLoadConst64PathZero;
   }
-  void Addiu(riscv64::GpuRegister rd, riscv64::GpuRegister rs, uint16_t c) {
+  void Addiuw(riscv64::GpuRegister rd, riscv64::GpuRegister rs, uint16_t c) {
     regs_[rd] = static_cast<int32_t>(regs_[rs] + SignExtend16To64(c));
   }
-  void Daddiu(riscv64::GpuRegister rd, riscv64::GpuRegister rs, uint16_t c) {
+  void Addiu(riscv64::GpuRegister rd, riscv64::GpuRegister rs, uint16_t c) {
     regs_[rd] = regs_[rs] + SignExtend16To64(c);
   }
-  void Dahi(riscv64::GpuRegister rd, uint16_t c) {
+  void Ahi(riscv64::GpuRegister rd, uint16_t c) {
     regs_[rd] += SignExtend16To64(c) << 32;
   }
-  void Dati(riscv64::GpuRegister rd, uint16_t c) {
+  void Ati(riscv64::GpuRegister rd, uint16_t c) {
     regs_[rd] += SignExtend16To64(c) << 48;
   }
   void Dinsu(riscv64::GpuRegister rt, riscv64::GpuRegister rs, int pos, int size) {
@@ -2698,33 +2456,11 @@ struct LoadConst64Tester {
 
     regs_[rt] = (regs_[rt] & dsk_mask) | ((regs_[rs] & src_mask) << pos);
   }
-  void Dsll(riscv64::GpuRegister rd, riscv64::GpuRegister rt, int shamt) {
-    regs_[rd] = regs_[rt] << (shamt & 0x1f);
-  }
-  void Dsll32(riscv64::GpuRegister rd, riscv64::GpuRegister rt, int shamt) {
-    regs_[rd] = regs_[rt] << (32 + (shamt & 0x1f));
-  }
-  void Dsrl(riscv64::GpuRegister rd, riscv64::GpuRegister rt, int shamt) {
-    regs_[rd] = regs_[rt] >> (shamt & 0x1f);
-  }
-  void Dsrl32(riscv64::GpuRegister rd, riscv64::GpuRegister rt, int shamt) {
-    regs_[rd] = regs_[rt] >> (32 + (shamt & 0x1f));
-  }
   void Lui(riscv64::GpuRegister rd, uint16_t c) {
     regs_[rd] = SignExtend16To64(c) << 16;
   }
   void Ori(riscv64::GpuRegister rd, riscv64::GpuRegister rs, uint16_t c) {
     regs_[rd] = regs_[rs] | c;
-  }
-  void LoadConst32(riscv64::GpuRegister rd, int32_t c) {
-    CHECK_NE(rd, 0);
-    riscv64::TemplateLoadConst32<LoadConst64Tester>(this, rd, c);
-    CHECK_EQ(regs_[rd], static_cast<uint64_t>(c));
-  }
-  void LoadConst64(riscv64::GpuRegister rd, int64_t c) {
-    CHECK_NE(rd, 0);
-    riscv64::TemplateLoadConst64<LoadConst64Tester>(this, rd, c);
-    CHECK_EQ(regs_[rd], static_cast<uint64_t>(c));
   }
   uint64_t regs_[32];
 
@@ -2785,7 +2521,7 @@ TEST_F(AssemblerRISCV64Test, LoadFarthestNearLabelAddress) {
   __ LoadLabelAddress(riscv64::V0, &label);
   constexpr uint32_t kAdduCount = 0x3FFDE;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
   __ Bind(&label);
 
@@ -2802,7 +2538,7 @@ TEST_F(AssemblerRISCV64Test, LoadNearestFarLabelAddress) {
   __ LoadLabelAddress(riscv64::V0, &label);
   constexpr uint32_t kAdduCount = 0x3FFDF;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
   __ Bind(&label);
 
@@ -2821,7 +2557,7 @@ TEST_F(AssemblerRISCV64Test, LoadFarthestNearLiteral) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadWord, literal);
   constexpr uint32_t kAdduCount = 0x3FFDE;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2838,7 +2574,7 @@ TEST_F(AssemblerRISCV64Test, LoadNearestFarLiteral) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadWord, literal);
   constexpr uint32_t kAdduCount = 0x3FFDF;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2857,7 +2593,7 @@ TEST_F(AssemblerRISCV64Test, LoadFarthestNearLiteralUnsigned) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadUnsignedWord, literal);
   constexpr uint32_t kAdduCount = 0x3FFDE;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2874,7 +2610,7 @@ TEST_F(AssemblerRISCV64Test, LoadNearestFarLiteralUnsigned) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadUnsignedWord, literal);
   constexpr uint32_t kAdduCount = 0x3FFDF;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2893,7 +2629,7 @@ TEST_F(AssemblerRISCV64Test, LoadFarthestNearLiteralLong) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadDoubleword, literal);
   constexpr uint32_t kAdduCount = 0x3FFDD;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2910,7 +2646,7 @@ TEST_F(AssemblerRISCV64Test, LoadNearestFarLiteralLong) {
   __ LoadLiteral(riscv64::V0, riscv64::kLoadDoubleword, literal);
   constexpr uint32_t kAdduCount = 0x3FFDE;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
 
   std::string expected =
@@ -2938,8 +2674,7 @@ TEST_F(AssemblerRISCV64Test, LongLiteralAlignmentNop) {
   std::string expected =
       "ldpc $a1, 1f\n"
       // The GNU assembler incorrectly requires the ldpc instruction to be located
-      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
-      // the assembler is fixed.
+      // at an address that's a multiple of 8.
       // "ldpc $a2, 2f\n"
       ".word 0xECD80004\n"
       "ldpc $a3, 3f\n"
@@ -2969,8 +2704,7 @@ TEST_F(AssemblerRISCV64Test, LongLiteralAlignmentNoNop) {
   std::string expected =
       "ldpc $a1, 1f\n"
       // The GNU assembler incorrectly requires the ldpc instruction to be located
-      // at an address that's a multiple of 8. TODO: Remove this workaround if/when
-      // the assembler is fixed.
+      // at an address that's a multiple of 8.
       // "ldpc $a2, 2f\n"
       ".word 0xECD80003\n"
       "lapc $v0, 1f\n"
@@ -2990,7 +2724,7 @@ TEST_F(AssemblerRISCV64Test, FarLongLiteralAlignmentNop) {
   __ LoadLabelAddress(riscv64::V1, literal->GetLabel());
   constexpr uint32_t kAdduCount = 0x3FFDF;
   for (uint32_t i = 0; i != kAdduCount; ++i) {
-    __ Addu(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
+    __ Addw(riscv64::ZERO, riscv64::ZERO, riscv64::ZERO);
   }
   // A nop will be inserted here before the 64-bit literal.
 

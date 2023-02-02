@@ -19,19 +19,6 @@
 #define AT   t6
 
 /*
- * It looks like the GNU assembler currently does not support the blec and bgtc
- * idioms, which should translate into bgec and bltc respectively with swapped
- * left and right register operands.
- * TODO: remove these macros when the assembler is fixed.
- */
-/*.macro blec lreg, rreg, target
-    bgec    \rreg, \lreg, \target
-.endm
-.macro bgtc lreg, rreg, target
-    bltc    \rreg, \lreg, \target
-.endm
-*/
-/*
 Mterp and MIPS64 notes:
 
 The following registers have fixed assignments:
@@ -170,13 +157,12 @@ The following registers have fixed assignments:
 
 
 /*
- * MIPS64 dlsa rd,rs,rt,sa
- * GPR[rd] <- (GPR[rs] << (sa+1)) + GPR[rt]
+ * MIPS64 dlsa rd,rs,rt,sa; thead ADDSL
+ * GPR[rd] <- (GPR[s1] << imm2) + GPR[s1]
  */
- // zhengxing: For riscv, Needn't add 1 to 'sa' as it's included in input 'sa' when invoking DLSA.
-.macro DLSA reg, sreg, treg, sa
-    slli  AT, \sreg, \sa
-    add   \reg, AT, \treg
+.macro ADDSL reg, s2, s1, imm2
+    slli  AT, \s2, \imm2
+    add   \reg, AT, \s1
 .endm
 
 /*
@@ -254,33 +240,33 @@ The following registers have fixed assignments:
  * useful for storing the result value as 64-bit.
  */
 .macro GET_VREG reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     lw      \reg, 0(AT)
 .endm
 .macro GET_VREG_U reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     lwu     \reg, 0(AT)
 .endm
 .macro GET_VREG_FLOAT reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     flw     \reg, 0(AT)
 .endm
 .macro SET_VREG reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     sw      \reg, 0(AT)
-    DLSA    AT, \vreg, rREFS, 2
+    ADDSL   AT, \vreg, rREFS, 2
     sw      zero, 0(AT)
 .endm
 .macro SET_VREG_OBJECT reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     sw      \reg, 0(AT)
-    DLSA    AT, \vreg, rREFS, 2
+    ADDSL   AT, \vreg, rREFS, 2
     sw      \reg, 0(AT)
 .endm
 .macro SET_VREG_FLOAT reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     fsw    \reg, 0(AT)
-    DLSA    AT, \vreg, rREFS, 2
+    ADDSL   AT, \vreg, rREFS, 2
     sw      zero, 0(AT)
 .endm
 
@@ -291,25 +277,25 @@ The following registers have fixed assignments:
  * Note, SET_VREG_DOUBLE clobbers the register containing the Dalvik register number.
  */
 .macro GET_VREG_WIDE reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     ld      \reg, 0(AT)
 .endm
 .macro GET_VREG_DOUBLE reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     fld    \reg, 0(AT)
 .endm
 .macro SET_VREG_WIDE reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     sd      \reg, 0(AT)
 
-    DLSA    AT, \vreg, rREFS, 2
+    ADDSL   AT, \vreg, rREFS, 2
     sd      zero, 0(AT)
 .endm
 .macro SET_VREG_DOUBLE reg, vreg
-    DLSA    AT, \vreg, rFP, 2
+    ADDSL   AT, \vreg, rFP, 2
     fsd    \reg, 0(AT)
     
-    DLSA    AT, \vreg, rREFS, 2
+    ADDSL   AT, \vreg, rREFS, 2
     sd      zero, 0(AT)
 .endm
 
@@ -439,10 +425,10 @@ ENTRY ExecuteMterpImpl
     /* set up "named" registers */
     move    rSELF, a0
     addi    rFP, a2, SHADOWFRAME_VREGS_OFFSET
-    lw      t4, SHADOWFRAME_NUMBER_OF_VREGS_OFFSET(a2)
-    DLSA    rREFS, t4, rFP, 2
-    lw      t4, SHADOWFRAME_DEX_PC_OFFSET(a2)
-    DLSA    rPC, t4, a1, 1
+    lwu     t4, SHADOWFRAME_NUMBER_OF_VREGS_OFFSET(a2)
+    ADDSL   rREFS, t4, rFP, 2
+    lwu     t4, SHADOWFRAME_DEX_PC_OFFSET(a2)
+    ADDSL   rPC, t4, a1, 1
     CFI_DEFINE_DEX_PC_WITH_OFFSET(CFI_TMP, CFI_DEX, 0)
     EXPORT_PC
 
@@ -477,7 +463,7 @@ ENTRY ExecuteMterpImpl
 %  add_helper(dchecks_before_helper, "mterp_dchecks_before_helper")
 #if 0
     move    rPROFILE, zero
-    lw      a0, 0(rPC)
+    lwu     a0, 0(rPC)
     andi    a0, a0, 0xFF
     slli    a0, a0, 2
     .extern instruction_configs
@@ -561,9 +547,9 @@ MterpException:
     ld      a0, OFF_FP_DEX_INSTRUCTIONS(rFP)
     lwu     a1, OFF_FP_DEX_PC(rFP)
     REFRESH_IBASE
-    DLSA    rPC, a1, a0, 1                          # generate new dex_pc_ptr
+    ADDSL   rPC, a1, a0, 1                          # generate new dex_pc_ptr
     /* Do we need to switch interpreters? */
-    lw      a0, THREAD_USE_MTERP_OFFSET(rSELF)
+    lwu     a0, THREAD_USE_MTERP_OFFSET(rSELF)      # boolean
     beqz    a0, MterpFallback
     /* resume execution at catch block */
     EXPORT_PC

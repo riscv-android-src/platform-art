@@ -43,12 +43,12 @@ TEST(Riscv64ManagedRegister, GpuRegister) {
   EXPECT_FALSE(reg.IsVectorRegister());
   EXPECT_EQ(AT, reg.AsGpuRegister());
 
-  reg = Riscv64ManagedRegister::FromGpuRegister(V0);
+  reg = Riscv64ManagedRegister::FromGpuRegister(A0);
   EXPECT_FALSE(reg.IsNoRegister());
   EXPECT_TRUE(reg.IsGpuRegister());
   EXPECT_FALSE(reg.IsFpuRegister());
   EXPECT_FALSE(reg.IsVectorRegister());
-  EXPECT_EQ(V0, reg.AsGpuRegister());
+  EXPECT_EQ(A0, reg.AsGpuRegister());
 
   reg = Riscv64ManagedRegister::FromGpuRegister(A0);
   EXPECT_FALSE(reg.IsNoRegister());

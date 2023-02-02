@@ -47,7 +47,9 @@ class Reg {
     return Reg(num < 8 ? map[num] : num);
   }
   static Reg X86_64Fp(int num) { return Reg(17 + num); }
-  static Reg Riscv64Core(int num) { return Reg(num); }  // zhengxing TBD.
+
+  static Reg Riscv64Core(int num) { return Reg(num); }
+  // According to: https://github.com/riscv-non-isa/riscv-elf-psabi-doc/blob/master/riscv-dwarf.adoc
   static Reg Riscv64Fp(int num) { return Reg(32 + num); }
 
  private:

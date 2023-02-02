@@ -79,7 +79,7 @@ art_module_cc_defaults {
             relative_install_path: "art/x86_64",
         },
         android_riscv64: {
-	    relative_install_path: "art/riscv64",
+	        relative_install_path: "art/riscv64",
         },
     },
     // Tests aren't generally included in any APEX, but this is necessary to

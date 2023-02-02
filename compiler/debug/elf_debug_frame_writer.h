@@ -141,11 +141,10 @@ static void WriteCIE(InstructionSet isa, /*inout*/ std::vector<uint8_t>* buffer)
       return;
     }
     case InstructionSet::kRiscv64: {
-      // XC-ART-TODO: Need to double check.
       dwarf::DebugFrameOpCodeWriter<> opcodes;
       opcodes.DefCFA(Reg::Riscv64Core(2), 0);  // R2(SP).
       // core registers.
-      for (int reg = 5; reg < 32; reg++) {
+      for (int reg = 3; reg < 32; reg++) {
         if (((reg > 9) && (reg < 18)) || reg == 30 || reg == 31) {  // A*, T5/T6 reserved.
           opcodes.Undefined(Reg::Riscv64Core(reg));
         } else {

@@ -32,7 +32,7 @@ Riscv64FeaturesUniquePtr Riscv64InstructionSetFeatures::FromVariant(
   if (variant != "generic") {
     LOG(WARNING) << "Unexpected CPU variant for Riscv64 using defaults: " << variant;
   }
-  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield;
+  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield | kCBitfield;
   return Riscv64FeaturesUniquePtr(new Riscv64InstructionSetFeatures(bits));
 }
 
@@ -41,7 +41,7 @@ Riscv64FeaturesUniquePtr Riscv64InstructionSetFeatures::FromBitmap(uint32_t bitm
 }
 
 Riscv64FeaturesUniquePtr Riscv64InstructionSetFeatures::FromCppDefines() {
-  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield;
+  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield | kCBitfield;
   return Riscv64FeaturesUniquePtr(new Riscv64InstructionSetFeatures(bits));
 }
 
@@ -49,14 +49,30 @@ Riscv64FeaturesUniquePtr Riscv64InstructionSetFeatures::FromCpuInfo() {
   // Look in /proc/cpuinfo for features we need.  Only use this when we can guarantee that
   // the kernel puts the appropriate feature flags in here.  Sometimes it doesn't.
   uint32_t bits = 0;
+  bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield | kCBitfield;  // basic implmentation for RV64
+  // XC-TODO
+  #if 0
   std::ifstream in("/proc/cpuinfo");
   if (!in.fail()) {
-    // TODO(wendong) analysis string like 'rv64imafdcu'
+    while (!in.eof()) {
+      std::string line;
+      std::getline(in, line);
+      if (!in.eof()) {
+        LOG(INFO) << "cpuinfo line: " << line;
+        if (line.find("isa") != std::string::npos) {
+          LOG(INFO) << "found isa line: " << line;
+          if (line.find("imafdcv") != std::string::npos) {
+            bits = bits | kVBitfield;
+          }
+          break;
+        }
+      }
+    }
     in.close();
-    bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield;
   } else {
     LOG(ERROR) << "Failed to open /proc/cpuinfo";
   }
+  #endif
   return Riscv64FeaturesUniquePtr(new Riscv64InstructionSetFeatures(bits));
 }
 
@@ -84,17 +100,19 @@ bool Riscv64InstructionSetFeatures::Equals(const InstructionSetFeatures* other) 
 }
 
 uint32_t Riscv64InstructionSetFeatures::AsBitmap() const {
-  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield;
-  return bits;
+  return bits_;
 }
 
 std::string Riscv64InstructionSetFeatures::GetFeatureString() const {
   std::string result = "rv64imaf";
-  if (bits_ & kMBitfield) {
+  if (bits_ & kDBitfield) {
     result += "d";
   }
   if (bits_ & kCBitfield) {
     result += "c";
+  }
+  if (bits_ & kVBitfield) {
+    result += "v";
   }
   return result;
 }
@@ -102,7 +120,7 @@ std::string Riscv64InstructionSetFeatures::GetFeatureString() const {
 std::unique_ptr<const InstructionSetFeatures>
 Riscv64InstructionSetFeatures::AddFeaturesFromSplitString(
     const std::vector<std::string>& features ATTRIBUTE_UNUSED, std::string* error_msg ATTRIBUTE_UNUSED) const {
-  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield;
+  uint32_t bits = kIBitfield | kMBitfield | kABitfield | kFBitfield | kDBitfield | kCBitfield;
   return std::unique_ptr<const InstructionSetFeatures>(new Riscv64InstructionSetFeatures(bits));
 }
 

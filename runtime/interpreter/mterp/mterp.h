@@ -45,8 +45,8 @@ constexpr uintptr_t kExportPCPoison = 0xdead00ff;
 // Set true to enable poison testing of ExportPC.  Uses Alt interpreter.
 constexpr bool kTestExportPC = false;
 
-#if defined(__riscv)
-// Riscv MterpHandlerSize exceeds 128 bytes.
+#if defined(__riscv) && (__riscv_xlen == 64)
+// XC-TODO: Riscv MterpHandlerSize exceeds 128 bytes.
 constexpr size_t kMterpHandlerSize = 256;
 #else
 constexpr size_t kMterpHandlerSize = 128;

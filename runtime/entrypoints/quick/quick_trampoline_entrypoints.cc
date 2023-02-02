@@ -354,7 +354,6 @@ class QuickArgumentVisitor {
   }
 
   uint8_t* GetParamAddress() const {
-    // zhengxing: Riscv64 get the param value from stack directly.
     #if defined(__riscv) && (__riscv_xlen == 64)
     Primitive::Type type = GetParamPrimitiveType();
     if (UNLIKELY((type == Primitive::kPrimDouble) || (type == Primitive::kPrimFloat))) {
@@ -362,16 +361,10 @@ class QuickArgumentVisitor {
         return fpr_args_ + (fpr_index_ * GetBytesPerFprSpillLocation(kRuntimeISA));
       }
 
-      // [Workaround]:
-      // zhengxing: The optimizing compiler and runtime code can guarantee the >8 float/double values
+      // The optimizing compiler and runtime code can guarantee the >8 float/double values
       //            stored on its stack slot. it's safe to get them on stack.
       return stack_args_ + (stack_index_ * kBytesStackArgLocation);
     }
-
-    if (gpr_index_ < kNumQuickGprArgs) {
-      return gpr_args_ + GprIndexToGprOffset(gpr_index_);
-    }
-    return stack_args_ + (stack_index_ * kBytesStackArgLocation);
     #else
     if (!kQuickSoftFloatAbi) {
       Primitive::Type type = GetParamPrimitiveType();
@@ -386,11 +379,11 @@ class QuickArgumentVisitor {
         return stack_args_ + (stack_index_ * kBytesStackArgLocation);
       }
     }
+    #endif
     if (gpr_index_ < kNumQuickGprArgs) {
       return gpr_args_ + GprIndexToGprOffset(gpr_index_);
     }
     return stack_args_ + (stack_index_ * kBytesStackArgLocation);
-    #endif
   }
 
   bool IsSplitLongOrDouble() const {
@@ -488,8 +481,8 @@ class QuickArgumentVisitor {
               } else if (kQuickSkipOddFpRegisters) {
                 IncFprIndex();
               }
-            #if defined(__riscv)
-            // zhengxing: Riscv64 will try GPR when out of FPR. Need update Gpr index here.
+            #if defined(__riscv) && (__riscv_xlen == 64)
+            // XC-TODO: Riscv64 will try GPR when out of FPR. Need update Gpr index here.
             } else if (gpr_index_ < kNumQuickGprArgs) {
               IncGprIndex();
             }
@@ -555,8 +548,8 @@ class QuickArgumentVisitor {
                   IncFprIndex();
                 }
               }
-            #if defined(__riscv)
-            // zhengxing: Riscv64 will try GPR when out of FPR. Need update Gpr index here.
+            #if defined(__riscv) && (__riscv_xlen == 64)
+            // XC-TODO: Riscv64 will try GPR when out of FPR. Need update Gpr index here.
             } else if (gpr_index_ < kNumQuickGprArgs) {
               IncGprIndex();
             }
@@ -822,7 +815,7 @@ extern "C" uint64_t artQuickToInterpreterBridge(ArtMethod* method, Thread* self,
 
   // No need to restore the args since the method has already been run by the interpreter.
   #if defined(__riscv) && (__riscv_xlen == 64)
-  // Riscv64: Have to NaN-Boxing float return
+  // Riscv64 need NaN-Boxing
   if (shorty[0] == 'F') {
     return result.GetJ() | 0xffffffff00000000;
   }
@@ -965,7 +958,7 @@ extern "C" uint64_t artQuickProxyInvokeHandler(
   }
 
   #if defined(__riscv) && (__riscv_xlen == 64)
-  // Riscv64: Have to NaN-Boxing float return
+  // Riscv64 need NaN-Boxing
   if (shorty[0] == 'F') {
     return result.GetJ() | 0xffffffff00000000;
   }
@@ -1588,7 +1581,6 @@ template<class T> class BuildNativeCallFrameStateMachine {
   static constexpr bool kAlignLongOnStack = false;
   static constexpr bool kAlignDoubleOnStack = false;
 #else
-
 #error "Unsupported architecture"
 #endif
 
@@ -1707,7 +1699,7 @@ template<class T> class BuildNativeCallFrameStateMachine {
             PushFpr8(bit_cast<uint64_t, double>(val));
           } else {
             // No widening, just use the bits.
-            // zhengxing: Riscv64 use NaN-Boxing for float value
+            // Riscv64 need NaN-Boxing
             #if defined(__riscv) && (__riscv_xlen == 64)
             PushFpr8(((bit_cast<uint32_t, float>(val)) | (0xffffffff00000000)));
             #else
@@ -1718,9 +1710,9 @@ template<class T> class BuildNativeCallFrameStateMachine {
           PushFpr4(val);
         }
       } else {
-        // zhengxing: Riscv64 will try GPR
+        // XC-TODO: Riscv64 will try GPR
         #if defined(__riscv) && (__riscv_xlen == 64)
-        // Risv64: NaN-Boxing val here. It might be too conservative. optimize it in future.
+        // Riscv64 need NaN-Boxing
         AdvanceLong(((bit_cast<uint32_t, float>(val)) | (0xffffffff00000000)));
         #else
         stack_entries_++;
@@ -1766,7 +1758,7 @@ template<class T> class BuildNativeCallFrameStateMachine {
         PushFpr8(val);
         fpr_index_ -= kRegistersNeededForDouble;
       } else {
-        // zhengxing: Riscv64 will try GPR
+        // XC-TODO: Riscv64 will try GPR
         #if defined(__riscv) && (__riscv_xlen == 64)
           AdvanceLong(val);
         #else
@@ -2157,7 +2149,7 @@ void BuildGenericJniFrameVisitor::Visit() {
     case Primitive::kPrimChar:     // Fall-through.
     case Primitive::kPrimShort:    // Fall-through.
     case Primitive::kPrimInt:      // Fall-through.
-      // zhengxing: Riscv64 will sign-extend to 64 bits.
+      // XC-TODO: Riscv64 will sign-extend to 64 bits.
       #if defined(__riscv) && (__riscv_xlen == 64)
       {
         int64_t val = *reinterpret_cast<jint*>(GetParamAddress());
@@ -2650,7 +2642,7 @@ extern "C" uint64_t artInvokePolymorphic(mirror::Object* raw_receiver, Thread* s
   self->PopManagedStackFragment(fragment);
 
   #if defined(__riscv) && (__riscv_xlen == 64)
-  // Riscv64: Have to NaN-Boxing float return
+  // Riscv64 need NaN-Boxing
   if (shorty[0] == 'F') {
     return result.GetJ() | 0xffffffff00000000;
   }
@@ -2715,7 +2707,7 @@ extern "C" uint64_t artInvokeCustom(uint32_t call_site_idx, Thread* self, ArtMet
   self->PopManagedStackFragment(fragment);
 
   #if defined(__riscv) && (__riscv_xlen == 64)
-  // Riscv64: Have to NaN-Boxing float return
+  // Riscv64 need NaN-Boxing
   if (shorty[0] == 'F') {
     return result.GetJ() | 0xffffffff00000000;
   }

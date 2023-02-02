@@ -11,13 +11,13 @@
     lbu     a2, 2(rPC)                  # a2 <- BB
     lbu     a3, 3(rPC)                  # a3 <- CC
     srli     a4, rINST, 8                # a4 <- AA
-    GET_VREG a0, a2                     # a0 <- vBB (array object)
+    GET_VREG_U a0, a2                     # a0 <- vBB (array object)
     GET_VREG a1, a3                     # a1 <- vCC (requested index)
     beqz    a0, common_errNullObject    # bail if null array object
-    lw      a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
+    lwu     a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
     .if $shift
     # [d]lsa does not support shift count of 0.
-    DLSA    a0, a1, a0, $shift          # a0 <- arrayObj + index*width
+    ADDSL   a0, a1, a0, $shift          # a0 <- arrayObj + index*width
     .else
     add   a0, a1, a0                  # a0 <- arrayObj + index*width
     .endif
@@ -48,7 +48,7 @@
     lbu     a2, 2(rPC)                  # a2 <- BB
     lbu     a3, 3(rPC)                  # a3 <- CC
     EXPORT_PC
-    GET_VREG a0, a2                   # a0 <- vBB (array object)
+    GET_VREG_U a0, a2                   # a0 <- vBB (array object)
     GET_VREG a1, a3                     # a1 <- vCC (requested index)
     jal     artAGetObjectFromMterp      # (array, index)
 
@@ -76,12 +76,12 @@
     GET_VREG_U a0, a2                   # a0 <- vBB (array object)
     GET_VREG a1, a3                     # a1 <- vCC (requested index)
     beqz    a0, common_errNullObject    # bail if null array object
-    lw      a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
-    DLSA    a0, a1, a0, 3               # a0 <- arrayObj + index*width
+    lwu     a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
+    ADDSL   a0, a1, a0, 3               # a0 <- arrayObj + index*width
     bgeu    a1, a3, common_errArrayIndex  # unsigned compare: index >= length, bail
     FETCH_ADVANCE_INST 2                # advance rPC, load rINST
-    lw      a2, MIRROR_WIDE_ARRAY_DATA_OFFSET(a0)
-    lw      a3, (MIRROR_WIDE_ARRAY_DATA_OFFSET+4)(a0)
+    lwu     a2, MIRROR_WIDE_ARRAY_DATA_OFFSET(a0)
+    lwu     a3, (MIRROR_WIDE_ARRAY_DATA_OFFSET+4)(a0)
     DINSU   a2, a3, 32, 32              # a2 <- vBB[vCC]
     GET_INST_OPCODE t4                  # extract opcode from rINST
     SET_VREG_WIDE a2, a4                # vAA <- a2
@@ -100,13 +100,13 @@
     lbu     a2, 2(rPC)                  # a2 <- BB
     lbu     a3, 3(rPC)                  # a3 <- CC
     srli     a4, rINST, 8                # a4 <- AA
-    GET_VREG a0, a2                   # a0 <- vBB (array object)
+    GET_VREG_U a0, a2                   # a0 <- vBB (array object)
     GET_VREG a1, a3                     # a1 <- vCC (requested index)
     beqz    a0, common_errNullObject    # bail if null array object
-    lw      a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
+    lwu     a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
     .if $shift
     # [d]lsa does not support shift count of 0.
-    DLSA    a0, a1, a0, $shift          # a0 <- arrayObj + index*width
+    ADDSL   a0, a1, a0, $shift          # a0 <- arrayObj + index*width
     .else
     add     a0, a1, a0                  # a0 <- arrayObj + index*width
     .endif
@@ -154,11 +154,11 @@
     lbu     a2, 2(rPC)                  # a2 <- BB
     lbu     a3, 3(rPC)                  # a3 <- CC
     srli    a4, rINST, 8                # a4 <- AA
-    GET_VREG a0, a2                   # a0 <- vBB (array object)
+    GET_VREG_U a0, a2                   # a0 <- vBB (array object)
     GET_VREG a1, a3                     # a1 <- vCC (requested index)
     beqz    a0, common_errNullObject    # bail if null array object
-    lw      a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
-    DLSA    a0, a1, a0, 3               # a0 <- arrayObj + index*width
+    lwu     a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- arrayObj->length
+    ADDSL   a0, a1, a0, 3               # a0 <- arrayObj + index*width
     bgeu    a1, a3, common_errArrayIndex  # unsigned compare: index >= length, bail
     GET_VREG_WIDE a2, a4                # a2 <- vAA
     FETCH_ADVANCE_INST 2                # advance rPC, load rINST
@@ -171,11 +171,11 @@
      * Return the length of an array.
      */
     srli    a1, rINST, 12               # a1 <- B
-    GET_VREG a0, a1                   # a0 <- vB (object ref)
+    GET_VREG_U a0, a1                   # a0 <- vB (object ref)
     EXT     a2, rINST, 8, 4             # a2 <- A
     beqz    a0, common_errNullObject    # yup, fail
     FETCH_ADVANCE_INST 1                # advance rPC, load rINST
-    lw      a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- array length
+    lwu     a3, MIRROR_ARRAY_LENGTH_OFFSET(a0)  # a3 <- array length
     GET_INST_OPCODE t4                  # extract opcode from rINST
     SET_VREG a3, a2                     # vB <- length
     GOTO_OPCODE t4                      # jump to next instruction
@@ -189,8 +189,8 @@
     srli    a3, rINST, 8                # a3 <- AA
     slli    a0, a0, 16
     or      a1, a0, a1                  # a1 <- ssssssssBBBBbbbb
-    GET_VREG a0, a3                    # a0 <- vAA (array object)
-    DLSA    a1, a1, rPC, 1              # a1 <- PC + BBBBbbbb*2 (array data off.)
+    GET_VREG_U a0, a3                    # a0 <- vAA (array object)
+    ADDSL   a1, a1, rPC, 1              # a1 <- PC + BBBBbbbb*2 (array data off.)
     jal     MterpFillArrayData          # (obj, payload)
     beqz    a0, MterpPossibleException  # exception?
     FETCH_ADVANCE_INST 3                # advance rPC, load rINST

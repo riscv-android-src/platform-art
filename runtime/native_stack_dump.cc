@@ -333,10 +333,8 @@ void DumpNativeStack(std::ostream& os,
   std::unique_ptr<Backtrace> backtrace(Backtrace::Create(BACKTRACE_CURRENT_PROCESS, tid, map));
   backtrace->SetSkipFrames(skip_frames);
 
-  // TBD: comment out for compilation. fix it in the future.
-  UNUSED(ucontext_ptr);
-  /*
-  if (!backtrace->Unwind(0, reinterpret_cast<ucontext*>(ucontext_ptr))) {
+  // XC-TODO: should use 'struct ucontext' only for riscv?
+  if (!backtrace->Unwind(0, reinterpret_cast<struct ucontext*>(ucontext_ptr))) {
     os << prefix << "(backtrace::Unwind failed for thread " << tid
        << ": " <<  backtrace->GetErrorString(backtrace->GetError()) << ")" << std::endl;
     return;
@@ -344,7 +342,6 @@ void DumpNativeStack(std::ostream& os,
     os << prefix << "(no native stack frames for thread " << tid << ")" << std::endl;
     return;
   }
-  */
 
   // Check whether we have and should use addr2line.
   bool use_addr2line;

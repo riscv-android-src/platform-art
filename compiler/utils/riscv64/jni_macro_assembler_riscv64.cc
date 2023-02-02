@@ -210,12 +210,12 @@ void Riscv64JNIMacroAssembler::CopyRef(FrameOffset dest,
                                      MemberOffset offs,
                                      bool unpoison_reference) {
   GpuRegister scratch = TMP;
-  __ Daddiu64(scratch, base.AsRiscv64().AsGpuRegister(), offs.Int32Value());
+  __ Addiu64(scratch, base.AsRiscv64().AsGpuRegister(), offs.Int32Value());
   __ Ld(scratch, scratch, 0);
   if (unpoison_reference) {
     asm_.MaybeUnpoisonHeapReference(scratch);
   }
-  __ Daddiu64(T6, SP, dest.Int32Value());
+  __ Addiu64(T6, SP, dest.Int32Value());
   __ Sd(scratch, T6, 0);
 }
 
@@ -280,12 +280,12 @@ void Riscv64JNIMacroAssembler::ZeroExtend(ManagedRegister mreg, size_t size) {
 }
 
 void Riscv64JNIMacroAssembler::VerifyObject(ManagedRegister m_src, bool could_be_null) {
-  // TODO: not validating references.
+  // not validating references?
   __ VerifyObject(m_src, could_be_null);
 }
 
 void Riscv64JNIMacroAssembler::VerifyObject(FrameOffset src, bool could_be_null) {
-  // TODO: not validating references.
+  // not validating references?
   __ VerifyObject(src, could_be_null);
 }
 
@@ -334,7 +334,7 @@ void Riscv64JNIMacroAssembler::CreateJObject(ManagedRegister m_out_reg,
     // the address of the spilled reference.
     // e.g. out_reg = (in == 0) ? 0 : (SP+spilled_reference_offset)
     if (in_reg.IsNoRegister()) {
-      __ Daddiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
+      __ Addiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
       __ Lw(out_reg.AsGpuRegister(), out_reg.AsGpuRegister(), 0);
 
       in_reg = out_reg;
@@ -349,11 +349,11 @@ void Riscv64JNIMacroAssembler::CreateJObject(ManagedRegister m_out_reg,
     // AddConstant(out_reg.AsXRegister(), SP, spilled_reference_offset.Int32Value(), ne);
     riscv64::Riscv64Label null_arg;
     __ Beqzc(in_reg.AsGpuRegister(), &null_arg);
-    __ Daddiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
+    __ Addiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
     __ Bind(&null_arg);
   } else {
     // AddConstant(out_reg.AsXRegister(), SP, spilled_reference_offset.Int32Value(), al);
-    __ Daddiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
+    __ Addiu64(out_reg.AsGpuRegister(), SP, spilled_reference_offset.Int32Value());
   }
 }
 
@@ -366,15 +366,15 @@ void Riscv64JNIMacroAssembler::CreateJObject(FrameOffset out_off,
     // the address of the spilled reference.
     // e.g. scratch = (scratch == 0) ? 0 : (SP+spilled_reference_offset)
     riscv64::Riscv64Label null_arg;
-    __ Daddiu64(scratch, SP, spilled_reference_offset.Int32Value());
+    __ Addiu64(scratch, SP, spilled_reference_offset.Int32Value());
     __ Lw(scratch, scratch, 0);
     __ Beqzc(scratch, &null_arg);
-    __ Daddiu64(scratch, SP, spilled_reference_offset.Int32Value());
+    __ Addiu64(scratch, SP, spilled_reference_offset.Int32Value());
     __ Bind(&null_arg);
   } else {
-    __ Daddiu64(scratch, SP, spilled_reference_offset.Int32Value());
+    __ Addiu64(scratch, SP, spilled_reference_offset.Int32Value());
   }
-  __ Daddiu64(T6, SP, out_off.Int32Value());
+  __ Addiu64(T6, SP, out_off.Int32Value());
   __ Sd(scratch, T6, 0);
 }
 
@@ -395,7 +395,7 @@ void Riscv64JNIMacroAssembler::Jump(ManagedRegister m_base, Offset offs) {
   Riscv64ManagedRegister base = m_base.AsRiscv64();
   CHECK(base.IsGpuRegister()) << base;
   GpuRegister scratch = TMP;
-  __ Daddiu64(scratch, base.AsGpuRegister(), offs.Int32Value());
+  __ Addiu64(scratch, base.AsGpuRegister(), offs.Int32Value());
   __ Ld(scratch, scratch, 0);
   __ Jr(scratch);
 }
@@ -426,7 +426,7 @@ void Riscv64JNIMacroAssembler::TestGcMarking(JNIMacroLabel* label, JNIMacroUnary
   GpuRegister test_reg = TMP;
 
   int32_t is_gc_marking_offset = Thread::IsGcMarkingOffset<kArm64PointerSize>().Int32Value();
-  __ Daddiu64(test_reg, TR, is_gc_marking_offset);
+  __ Addiu64(test_reg, TR, is_gc_marking_offset);
   __ Ld(test_reg, test_reg, 0);
 
   switch (cond) {

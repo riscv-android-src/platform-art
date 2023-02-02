@@ -33,7 +33,7 @@
 #ifdef ART_ENABLE_CODEGEN_x86_64
 #include "instruction_simplifier_x86_64.h"
 #endif
-// XC-ART-WORKAROUND
+// XC-TODO simplifier for riscv64
 #ifdef ART_ENABLE_CODEGEN_riscv64
 #endif
 

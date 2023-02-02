@@ -244,8 +244,7 @@ class SignalChain {
     kernel_supported_flags_ = SA_NOCLDSTOP | SA_NOCLDWAIT | SA_SIGINFO |
                               SA_ONSTACK | SA_RESTART | SA_NODEFER |
                               SA_RESETHAND;
-    // XC-ART-STUB
-    // riscv dont have SA_RESTORER defined
+    // XC-TODO: riscv dont have SA_RESTORER defined
 #ifdef SA_RESTORER
     kernel_supported_flags_ |= SA_RESTORER;
 #endif

@@ -57,6 +57,7 @@ inline mirror::Object* RegionSpace::AllocNonvirtual(size_t num_bytes,
   if (LIKELY(num_bytes <= kRegionSize)) {
     // Non-large object.
     #ifndef __riscv
+	// XC-TODO: mutex error?
     obj = (kForEvac ? evac_region_ : current_region_)->Alloc(num_bytes,
                                                              bytes_allocated,
                                                              usable_size,

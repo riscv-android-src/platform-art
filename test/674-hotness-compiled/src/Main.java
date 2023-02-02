@@ -43,7 +43,7 @@ public class Main {
     counter = newCounter;
 
     $noinline$hotnessCountWithLoop(65500);
-    newCounter = getHotnessCounter(Main.class, "$noinline$hotnessCountWithLoop"); // Expect 65535
+    newCounter = getHotnessCounter(Main.class, "$noinline$hotnessCountWithLoop");
     if (newCounter <= counter) {
       throw new Error("Expected counter " + newCounter + " to be larger than " + counter);
     }

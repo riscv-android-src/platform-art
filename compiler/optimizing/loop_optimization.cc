@@ -33,7 +33,7 @@ namespace art {
 #ifndef ART_ENABLE_CODEGEN_riscv64
 static constexpr bool kEnableVectorization = true;
 #else
-// XC-ART-TODO: Current Riscv64 doesn't support SIMD.
+// XC-TODO: SIMD for riscv64
 static constexpr bool kEnableVectorization = false;
 #endif
 

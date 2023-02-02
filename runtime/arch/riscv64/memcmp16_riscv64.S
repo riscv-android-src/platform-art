@@ -21,7 +21,6 @@
 
 .set noreorder
 
-// Wendong: TBD, align？
 // u4 __memcmp16(const u2*, const u2*, size_t);
 ENTRY_NO_GP __memcmp16
   move  $t0, $zero

@@ -69,7 +69,7 @@ struct ElfTypes64 {
 
 #define EM_AARCH64 183
 
-#define EM_RISCV        243     /* RISC-V */
+#define EM_RISCV   243     /* RISC-V */
 
 #define DT_BIND_NOW 24
 #define DT_INIT_ARRAY 25
